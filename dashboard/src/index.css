@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Scrollbars — terminal style ────────────────────────────────────────── */
+::-webkit-scrollbar              { width: 6px; height: 6px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        { background: #1c2e4a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover  { background: #243650; }
+
+/* ── Base resets ────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: #080d18;
+  color: #dce8f5;
+}
+
+/* ── Tabular numerics everywhere inside font-mono ───────────────────────── */
+.font-mono { font-variant-numeric: tabular-nums; }
+
+/* ── Lightweight-charts canvas fix ─────────────────────────────────────── */
+canvas { display: block; }

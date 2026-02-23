@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl:*)",
+      "Bash(find /c/Users/segev/sdvesdaW/trading/backend -name \"requirements.txt\" -o -name \"package.json\" | xargs ls -la 2>/dev/null)",
+      "Bash(cd:*)",
+      "Bash(netstat:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd:*)",
+      "Bash(powershell:*)",
+      "Bash(tail:*)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport yfinance as yf\nt = yf.Tickers\\('AAPL BTC-USD'\\)\nfor sym in ['AAPL', 'BTC-USD']:\n    fi = t.tickers[sym].fast_info\n    print\\(sym, 'price:', getattr\\(fi, 'last_price', 'MISSING'\\), 'prev:', getattr\\(fi, 'previous_close', 'MISSING'\\)\\)\n\" 2>&1)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport yfinance as yf, time\nt = time.time\\(\\)\nsyms = 'BTC-USD,ETH-USD,AAPL,TSLA,SPY,QQQ,NVDA'\nfrom concurrent.futures import ThreadPoolExecutor\ndef fetch\\(sym\\):\n    fi = yf.Ticker\\(sym\\).fast_info\n    return sym, getattr\\(fi,'last_price',None\\), getattr\\(fi,'previous_close',None\\)\nwith ThreadPoolExecutor\\(max_workers=7\\) as ex:\n    results = list\\(ex.map\\(fetch, syms.split\\(','\\)\\)\\)\nfor r in results: print\\(r\\)\nprint\\('elapsed', round\\(time.time\\(\\)-t,2\\),'s'\\)\n\" 2>&1)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport asyncio, sys\nsys.path.insert\\(0, '.'\\)\n\nasync def test\\(\\):\n    from main import _yf_quotes\n    result = await _yf_quotes\\('BTC-USD,ETH-USD,AAPL'\\)\n    for r in result:\n        print\\(r\\)\n\nasyncio.run\\(test\\(\\)\\)\n\" 2>&1)",
+      "Bash(npm show:*)",
+      "Bash(head:*)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"import ast, sys; files=['main.py','simulation.py','mock_data.py','ibkr_client.py','config.py','models.py']; [print\\(f'OK: {f}'\\) or None for f in files if ast.parse\\(open\\(f\\).read\\(\\)\\) is not None]\" 2>&1)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport sys\nsys.path.insert\\(0, '.'\\)\ntry:\n    from config import cfg\n    print\\('config OK, SIM_MODE=', cfg.SIM_MODE, 'MOCK_MODE=', cfg.MOCK_MODE\\)\nexcept Exception as e:\n    print\\('config FAIL:', e\\)\ntry:\n    from models import AccountSummary, SimAccountState, SimPositionState, SimOrderRecord, PlaybackState\n    print\\('models OK'\\)\nexcept Exception as e:\n    print\\('models FAIL:', e\\)\ntry:\n    from mock_data import get_mock_price, get_mock_ohlcv, get_mock_quotes, get_mock_account_summary\n    print\\('mock_data OK, AAPL=', get_mock_price\\('AAPL'\\)\\)\nexcept Exception as e:\n    print\\('mock_data FAIL:', e\\)\n\" 2>&1)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport asyncio, sys\nsys.path.insert\\(0, '.'\\)\nasync def test\\(\\):\n    try:\n        from database import init_db\n        await init_db\\(\\)\n        print\\('init_db OK'\\)\n    except Exception as e:\n        print\\('init_db FAIL:', e\\)\n    try:\n        from simulation import sim_engine\n        await sim_engine.initialize\\(\\)\n        print\\('sim_engine.initialize OK'\\)\n    except Exception as e:\n        print\\('sim_engine FAIL:', e\\)\nasyncio.run\\(test\\(\\)\\)\n\" 2>&1)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/dashboard && npm run build 2>&1)",
+      "Bash(echo === POSITIONS \\(count\\) ===:*)"
+    ]
+  }
+}
