@@ -2,8 +2,18 @@
  * RulesPage — Automation Rules engine.
  *
  * Two views:
- *  1. List view   — shows all rules with enable/disable toggle, edit, delete
- *  2. Builder view — create or edit a rule (conditions, logic, action, cooldown)
+ *  1. List view   — all rules, enable/disable toggle, edit, delete
+ *  2. Builder view — create or edit a rule
+ *
+ * Design decisions:
+ *  - UICondition keeps rawValue: string so inputs are predictable; coercion
+ *    and validation happen once, at submit time.
+ *  - Each indicator has an explicit param-key mapping and an allowed operator
+ *    set; changing indicator auto-resets incompatible operator/source/period.
+ *  - Multi-output indicators (MACD, BBANDS, STOCH) expose a source selector.
+ *  - Toggle uses an optimistic update with rollback on API failure.
+ *  - Delete button is disabled while the DELETE request is in-flight; HTTP 404
+ *    is treated as success (rule was already gone).
  */
 import React, { useEffect, useState } from 'react'
 import clsx from 'clsx'
@@ -15,76 +25,262 @@ import {
   deleteRule,
   toggleRule,
 } from '@/services/api'
-import type { Rule, Condition, RuleCreate } from '@/types'
+import type { Rule, Condition, RuleCreate, Indicator, IndicatorSource } from '@/types'
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants — indicator metadata
+// ─────────────────────────────────────────────────────────────────────────────
 
-const INDICATORS = ['RSI', 'SMA', 'EMA', 'MACD', 'BBANDS', 'ATR', 'STOCH', 'PRICE'] as const
-const OPERATORS  = ['crosses_above', 'crosses_below', '>', '<', '>=', '<=', '=='] as const
+const ALL_INDICATORS: Indicator[] = [
+  'RSI', 'SMA', 'EMA', 'MACD', 'BBANDS', 'ATR', 'STOCH', 'PRICE',
+]
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+const ALL_OPERATORS = [
+  'crosses_above', 'crosses_below', '>', '<', '>=', '<=', '==',
+] as const
 
-function defaultCondition(): Condition {
-  return { indicator: 'RSI', params: { length: 14 }, operator: 'crosses_below', value: 30 }
+/**
+ * Subset of operators that are meaningful per indicator.
+ * ATR is always positive and directional — crossing semantics don't apply.
+ * Everything else supports the full operator set.
+ */
+const INDICATOR_OPERATORS: Record<Indicator, readonly string[]> = {
+  RSI:    ALL_OPERATORS,
+  SMA:    ALL_OPERATORS,
+  EMA:    ALL_OPERATORS,
+  MACD:   ALL_OPERATORS,
+  BBANDS: ALL_OPERATORS,
+  STOCH:  ALL_OPERATORS,
+  PRICE:  ALL_OPERATORS,
+  ATR:    ['>', '<', '>=', '<=', '=='],
 }
 
-// ── Condition Row (used inside RuleBuilder) ───────────────────────────────────
+/**
+ * Available source series for multi-output indicators.
+ * Undefined means the indicator is single-output and needs no source.
+ */
+const INDICATOR_SOURCES: Partial<Record<Indicator, readonly IndicatorSource[]>> = {
+  MACD:   ['LINE', 'SIGNAL', 'HISTOGRAM'],
+  BBANDS: ['UPPER', 'MIDDLE', 'LOWER'],
+  STOCH:  ['K', 'D'],
+}
+
+const DEFAULT_SOURCE: Partial<Record<Indicator, IndicatorSource>> = {
+  MACD:   'LINE',
+  BBANDS: 'UPPER',
+  STOCH:  'K',
+}
+
+/**
+ * Backend param key for each indicator.
+ * MACD exposes the fast period; slow/signal use backend defaults.
+ * PRICE needs no period.
+ *
+ * Kept explicit here so any mismatch with the backend is immediately visible.
+ */
+const PARAM_KEY: Record<Indicator, string | null> = {
+  RSI:    'length',
+  SMA:    'length',
+  EMA:    'length',
+  ATR:    'length',
+  STOCH:  'length',
+  MACD:   'fast',    // exposes fast period only; slow=26/signal=9 are backend defaults
+  BBANDS: 'length',
+  PRICE:  null,      // no period parameter
+}
+
+/** Input placeholder hint per indicator, shown in the Value field. */
+const VALUE_HINT: Partial<Record<Indicator, string>> = {
+  RSI:    '0 – 100',
+  STOCH:  '0 – 100',
+  SMA:    'price',
+  EMA:    'price',
+  ATR:    'e.g. 1.5',
+  MACD:   'e.g. 0',
+  BBANDS: 'e.g. 0',
+  PRICE:  'price or AAPL',
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UICondition — local state type with string value for predictable input
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * While editing, we keep the value as a raw string so the input is never
+ * disrupted by mid-type coercions (e.g. "30." losing the dot).
+ * toCondition() coerces and validates only at submit time.
+ */
+interface UICondition {
+  indicator: Indicator
+  source?:   IndicatorSource
+  params:    Record<string, number>
+  operator:  string
+  rawValue:  string
+}
+
+function fromCondition(c: Condition): UICondition {
+  const paramKey = PARAM_KEY[c.indicator]
+  const paramVal = paramKey ? Number(c.params[paramKey] ?? 14) : 0
+  return {
+    indicator: c.indicator,
+    source:    c.source,
+    params:    paramKey ? { [paramKey]: paramVal } : {},
+    operator:  c.operator,
+    rawValue:  String(c.value),
+  }
+}
+
+function toCondition(ui: UICondition): Condition {
+  const coerced: number | string =
+    ui.rawValue !== '' && !isNaN(Number(ui.rawValue))
+      ? Number(ui.rawValue)
+      : ui.rawValue
+  return {
+    indicator: ui.indicator,
+    source:    ui.source,
+    params:    ui.params,
+    operator:  ui.operator,
+    value:     coerced,
+  }
+}
+
+function defaultUICondition(): UICondition {
+  return {
+    indicator: 'RSI',
+    params:    { length: 14 },
+    operator:  'crosses_below',
+    rawValue:  '30',
+  }
+}
+
+/**
+ * Per-indicator value validation run at submit time (not on each keystroke).
+ * Returns an error string, or null if all conditions are valid.
+ */
+function validateConditions(conditions: UICondition[]): string | null {
+  for (let i = 0; i < conditions.length; i++) {
+    const c = conditions[i]
+    const label = `Condition ${i + 1}`
+    const n = Number(c.rawValue)
+
+    // RSI and STOCH are bounded 0–100
+    if (c.indicator === 'RSI' || c.indicator === 'STOCH') {
+      if (c.rawValue === '' || isNaN(n) || n < 0 || n > 100)
+        return `${label}: ${c.indicator} value must be a number between 0 and 100`
+    }
+
+    // Purely numeric indicators
+    if (['SMA', 'EMA', 'ATR', 'MACD', 'BBANDS'].includes(c.indicator)) {
+      if (c.rawValue === '' || isNaN(n))
+        return `${label}: ${c.indicator} value must be numeric`
+    }
+
+    // PRICE accepts a number or a ticker string — no strict numeric check
+
+    // Source required for multi-output indicators
+    if (INDICATOR_SOURCES[c.indicator] && !c.source)
+      return `${label}: ${c.indicator} requires a source (${INDICATOR_SOURCES[c.indicator]!.join(' / ')})`
+
+    // Operator must be in the allowed set for this indicator
+    if (!INDICATOR_OPERATORS[c.indicator].includes(c.operator))
+      return `${label}: operator "${c.operator}" is not valid for ${c.indicator}`
+  }
+  return null
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ConditionRow
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface CondRowProps {
-  cond:     Condition
+  cond:     UICondition
   idx:      number
   total:    number
-  onChange: (idx: number, c: Condition) => void
+  onChange: (idx: number, c: UICondition) => void
   onRemove: (idx: number) => void
 }
 
 function ConditionRow({ cond, idx, total, onChange, onRemove }: CondRowProps) {
-  const paramVal = Object.values(cond.params)[0] ?? ''
+  const sources    = INDICATOR_SOURCES[cond.indicator]
+  const validOps   = INDICATOR_OPERATORS[cond.indicator]
+  const paramKey   = PARAM_KEY[cond.indicator]
+  const paramVal   = paramKey ? (cond.params[paramKey] ?? 14) : ''
+  const showLabels = idx === 0
 
-  const update = (patch: Partial<Condition>) => onChange(idx, { ...cond, ...patch })
+  const update = (patch: Partial<UICondition>) => onChange(idx, { ...cond, ...patch })
+
+  const handleIndicatorChange = (newInd: Indicator) => {
+    const newSources    = INDICATOR_SOURCES[newInd]
+    const newSource     = newSources ? DEFAULT_SOURCE[newInd] : undefined
+    const newValidOps   = INDICATOR_OPERATORS[newInd]
+    const newOperator   = newValidOps.includes(cond.operator) ? cond.operator : newValidOps[0]
+    const newParamKey   = PARAM_KEY[newInd]
+    const prevParamVal  = paramKey ? (cond.params[paramKey] ?? 14) : 14
+    const newParams     = newParamKey ? { [newParamKey]: prevParamVal as number } : {}
+    update({ indicator: newInd, source: newSource, operator: newOperator, params: newParams })
+  }
+
+  const handlePeriodChange = (raw: string) => {
+    if (!paramKey) return
+    const v = parseInt(raw)
+    update({ params: raw && !isNaN(v) ? { [paramKey]: v } : {} })
+  }
 
   return (
     <div className="grid gap-2 items-end" style={{ gridTemplateColumns: '1fr 72px 1fr 1fr 32px' }}>
-      {/* Indicator */}
+      {/* ── Indicator (+ optional source stacked below) ── */}
       <div className="flex flex-col gap-1">
-        {idx === 0 && (
+        {showLabels && (
           <label className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">
             Indicator
           </label>
         )}
         <select
           value={cond.indicator}
-          onChange={(e) => update({ indicator: e.target.value as Condition['indicator'] })}
+          onChange={(e) => handleIndicatorChange(e.target.value as Indicator)}
           className="text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none"
         >
-          {INDICATORS.map((i) => <option key={i}>{i}</option>)}
+          {ALL_INDICATORS.map((i) => <option key={i}>{i}</option>)}
         </select>
+
+        {/* Source — only for MACD / BBANDS / STOCH */}
+        {sources && (
+          <select
+            value={cond.source ?? sources[0]}
+            onChange={(e) => update({ source: e.target.value as IndicatorSource })}
+            className="text-[11px] font-mono bg-terminal-input border border-terminal-blue/30 rounded px-2 py-1 text-terminal-blue focus:outline-none"
+            title="Select series source"
+          >
+            {sources.map((s) => <option key={s}>{s}</option>)}
+          </select>
+        )}
       </div>
 
-      {/* Period / param */}
+      {/* ── Period ── */}
       <div className="flex flex-col gap-1">
-        {idx === 0 && (
+        {showLabels && (
           <label className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">
             Period
           </label>
         )}
         <input
           type="number"
-          value={String(paramVal)}
-          onChange={(e) => {
-            const key = ['RSI', 'SMA', 'EMA', 'ATR', 'STOCH'].includes(cond.indicator)
-              ? 'length'
-              : 'period'
-            update({ params: e.target.value ? { [key]: parseInt(e.target.value) } : {} })
-          }}
-          placeholder="14"
-          className="text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none"
+          min={1}
+          value={paramKey ? String(paramVal) : ''}
+          onChange={(e) => handlePeriodChange(e.target.value)}
+          disabled={!paramKey}
+          placeholder={paramKey ? '14' : '—'}
+          title={cond.indicator === 'MACD' ? 'Fast period (slow/signal use backend defaults)' : undefined}
+          className={clsx(
+            'text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none',
+            !paramKey && 'opacity-30 cursor-not-allowed',
+          )}
         />
       </div>
 
-      {/* Operator */}
+      {/* ── Operator (filtered per indicator) ── */}
       <div className="flex flex-col gap-1">
-        {idx === 0 && (
+        {showLabels && (
           <label className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">
             Operator
           </label>
@@ -94,36 +290,35 @@ function ConditionRow({ cond, idx, total, onChange, onRemove }: CondRowProps) {
           onChange={(e) => update({ operator: e.target.value })}
           className="text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none"
         >
-          {OPERATORS.map((o) => <option key={o}>{o}</option>)}
+          {validOps.map((o) => <option key={o}>{o}</option>)}
         </select>
       </div>
 
-      {/* Value */}
+      {/* ── Value (raw string — coerced at submit) ── */}
       <div className="flex flex-col gap-1">
-        {idx === 0 && (
+        {showLabels && (
           <label className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">
             Value
           </label>
         )}
         <input
           type="text"
-          value={String(cond.value)}
-          onChange={(e) => {
-            const v = e.target.value
-            update({ value: v !== '' && !isNaN(Number(v)) ? Number(v) : v })
-          }}
-          placeholder="30"
+          inputMode="decimal"
+          value={cond.rawValue}
+          onChange={(e) => update({ rawValue: e.target.value })}
+          placeholder={VALUE_HINT[cond.indicator] ?? '—'}
           className="text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none"
         />
       </div>
 
-      {/* Remove */}
-      <div className={idx === 0 ? 'mt-5' : ''}>
+      {/* ── Remove ── */}
+      <div className={showLabels ? 'mt-5' : ''}>
         <button
           type="button"
           onClick={() => onRemove(idx)}
           disabled={total <= 1}
-          title="Remove condition"
+          title={total <= 1 ? 'At least one condition is required' : 'Remove condition'}
+          aria-disabled={total <= 1}
           className="w-8 h-8 flex items-center justify-center text-xl leading-none text-terminal-dim hover:text-terminal-red disabled:opacity-30 disabled:cursor-not-allowed transition-colors rounded"
         >
           ×
@@ -133,7 +328,9 @@ function ConditionRow({ cond, idx, total, onChange, onRemove }: CondRowProps) {
   )
 }
 
-// ── Rule Builder ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// RuleBuilder
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface BuilderProps {
   existing: Rule | null
@@ -145,8 +342,10 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
   const [name,        setName]        = useState(existing?.name ?? '')
   const [symbol,      setSymbol]      = useState(existing?.symbol ?? 'AAPL')
   const [logic,       setLogic]       = useState<'AND' | 'OR'>(existing?.logic ?? 'AND')
-  const [conditions,  setConditions]  = useState<Condition[]>(
-    existing?.conditions.length ? existing.conditions : [defaultCondition()],
+  const [conditions,  setConditions]  = useState<UICondition[]>(
+    existing?.conditions.length
+      ? existing.conditions.map(fromCondition)
+      : [defaultUICondition()],
   )
   const [actionType,  setActionType]  = useState<'BUY' | 'SELL'>(existing?.action.type ?? 'BUY')
   const [assetType,   setAssetType]   = useState<'STK' | 'OPT' | 'FUT'>(existing?.action.asset_type ?? 'STK')
@@ -157,18 +356,29 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
   const [busy,        setBusy]        = useState(false)
   const [error,       setError]       = useState('')
 
-  const updateCondition = (idx: number, c: Condition) =>
+  const updateCondition = (idx: number, c: UICondition) =>
     setConditions((prev) => prev.map((x, i) => (i === idx ? c : x)))
 
   const removeCondition = (idx: number) =>
     setConditions((prev) => prev.filter((_, i) => i !== idx))
 
   const addCondition = () =>
-    setConditions((prev) => [...prev, defaultCondition()])
+    setConditions((prev) => [...prev, defaultUICondition()])
+
+  // Clear stale limit price whenever switching back to MKT order type
+  const handleOrderTypeChange = (t: 'MKT' | 'LMT') => {
+    setOrderType(t)
+    if (t === 'MKT') setLimitPrice('')
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim() || !symbol.trim()) return
+
+    // ── Validate conditions before touching the API ──────────────────────
+    const condError = validateConditions(conditions)
+    if (condError) { setError(condError); return }
+
     setBusy(true)
     setError('')
     try {
@@ -176,7 +386,8 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
         name:    name.trim(),
         symbol:  symbol.trim().toUpperCase(),
         enabled: existing?.enabled ?? false,
-        conditions,
+        // Coerce rawValue → number | string here, once
+        conditions: conditions.map(toCondition),
         logic,
         action: {
           type:        actionType,
@@ -200,7 +411,6 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
 
   return (
     <div className="bg-terminal-surface border border-terminal-border rounded-lg p-5 max-w-2xl">
-      {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-sm font-mono font-semibold text-terminal-text">
           {existing ? 'Edit Rule' : 'New Rule'}
@@ -303,7 +513,6 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
             Action
           </span>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-terminal-elevated rounded-lg p-3">
-            {/* Side */}
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-mono text-terminal-ghost uppercase">Side</label>
               <div className="flex">
@@ -327,7 +536,6 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
               </div>
             </div>
 
-            {/* Asset type */}
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-mono text-terminal-ghost uppercase">Asset</label>
               <select
@@ -339,7 +547,6 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
               </select>
             </div>
 
-            {/* Quantity */}
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-mono text-terminal-ghost uppercase">Qty</label>
               <input
@@ -351,12 +558,13 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
               />
             </div>
 
-            {/* Order type */}
             <div className="flex flex-col gap-1">
-              <label className="text-[10px] font-mono text-terminal-ghost uppercase">Order Type</label>
+              <label className="text-[10px] font-mono text-terminal-ghost uppercase">
+                Order Type
+              </label>
               <select
                 value={orderType}
-                onChange={(e) => setOrderType(e.target.value as 'MKT' | 'LMT')}
+                onChange={(e) => handleOrderTypeChange(e.target.value as 'MKT' | 'LMT')}
                 className="text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none"
               >
                 <option>MKT</option>
@@ -364,13 +572,15 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
               </select>
             </div>
 
-            {/* Limit price (conditional) */}
             {orderType === 'LMT' && (
               <div className="flex flex-col gap-1 col-span-2 md:col-span-4">
-                <label className="text-[10px] font-mono text-terminal-ghost uppercase">Limit Price</label>
+                <label className="text-[10px] font-mono text-terminal-ghost uppercase">
+                  Limit Price
+                </label>
                 <input
                   type="number"
                   step="0.01"
+                  min="0"
                   value={limitPrice}
                   onChange={(e) => setLimitPrice(e.target.value)}
                   placeholder="0.00"
@@ -398,12 +608,8 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
           </p>
         </div>
 
-        {/* Error */}
-        {error && (
-          <p className="text-xs font-mono text-terminal-red">{error}</p>
-        )}
+        {error && <p className="text-xs font-mono text-terminal-red">{error}</p>}
 
-        {/* Submit / Cancel */}
         <div className="flex gap-3 pt-1">
           <button
             type="submit"
@@ -425,7 +631,9 @@ function RuleBuilder({ existing, onSaved, onCancel }: BuilderProps) {
   )
 }
 
-// ── Rule Card ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// RuleCard
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface CardProps {
   rule:     Rule
@@ -438,18 +646,13 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: CardProps) {
   return (
     <div className="bg-terminal-surface border border-terminal-border rounded-lg p-4 flex gap-4 hover:border-terminal-muted transition-colors">
       <div className="flex-1 min-w-0">
-        {/* Name + meta */}
         <div className="mb-2">
           <span className="font-mono font-semibold text-sm text-terminal-text">{rule.name}</span>
           <div className="flex items-center flex-wrap gap-1.5 mt-1">
             <span className="text-xs font-mono font-semibold text-terminal-text">{rule.symbol}</span>
             <span className="text-terminal-ghost text-xs">·</span>
-            <span
-              className={clsx(
-                'text-xs font-mono font-semibold',
-                rule.action.type === 'BUY' ? 'text-terminal-green' : 'text-terminal-red',
-              )}
-            >
+            <span className={clsx('text-xs font-mono font-semibold',
+              rule.action.type === 'BUY' ? 'text-terminal-green' : 'text-terminal-red')}>
               {rule.action.type}
             </span>
             <span className="text-terminal-ghost text-xs">·</span>
@@ -473,6 +676,7 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: CardProps) {
             <React.Fragment key={i}>
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-terminal-elevated text-terminal-dim border border-terminal-border">
                 {c.indicator}
+                {c.source ? `[${c.source}]` : ''}
                 {Object.values(c.params)[0] != null ? `(${Object.values(c.params)[0]})` : ''}
                 {' '}{c.operator}{' '}{c.value}
               </span>
@@ -485,14 +689,12 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: CardProps) {
           ))}
         </div>
 
-        {/* Last triggered */}
         {rule.last_triggered && (
           <p className="text-[10px] font-mono text-terminal-ghost mb-2">
             Last triggered: {new Date(rule.last_triggered).toLocaleString()}
           </p>
         )}
 
-        {/* Action buttons */}
         <div className="flex items-center gap-2">
           <button
             onClick={() => onEdit(rule)}
@@ -506,20 +708,18 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: CardProps) {
           >
             Delete
           </button>
-          <span
-            className={clsx(
-              'ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded',
-              rule.enabled
-                ? 'bg-terminal-green/10 text-terminal-green'
-                : 'bg-terminal-muted text-terminal-ghost',
-            )}
-          >
+          <span className={clsx(
+            'ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded',
+            rule.enabled
+              ? 'bg-terminal-green/10 text-terminal-green'
+              : 'bg-terminal-muted text-terminal-ghost',
+          )}>
             {rule.enabled ? 'ENABLED' : 'DISABLED'}
           </span>
         </div>
       </div>
 
-      {/* Enable/disable toggle */}
+      {/* Toggle */}
       <div className="flex items-start pt-0.5 shrink-0">
         <button
           onClick={() => onToggle(rule)}
@@ -531,27 +731,28 @@ function RuleCard({ rule, onEdit, onDelete, onToggle }: CardProps) {
               : 'bg-terminal-muted border-terminal-border',
           )}
         >
-          <span
-            className={clsx(
-              'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200',
-              rule.enabled ? 'translate-x-5' : 'translate-x-0.5',
-            )}
-          />
+          <span className={clsx(
+            'absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200',
+            rule.enabled ? 'translate-x-5' : 'translate-x-0.5',
+          )} />
         </button>
       </div>
     </div>
   )
 }
 
-// ── Delete confirm dialog ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// DeleteConfirm
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface DeleteConfirmProps {
-  rule:      Rule
-  onConfirm: () => void
-  onCancel:  () => void
+  rule:       Rule
+  inFlight:   boolean
+  onConfirm:  () => void
+  onCancel:   () => void
 }
 
-function DeleteConfirm({ rule, onConfirm, onCancel }: DeleteConfirmProps) {
+function DeleteConfirm({ rule, inFlight, onConfirm, onCancel }: DeleteConfirmProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="bg-terminal-elevated border border-terminal-border rounded-xl p-6 w-full max-w-sm shadow-terminal">
@@ -562,15 +763,17 @@ function DeleteConfirm({ rule, onConfirm, onCancel }: DeleteConfirmProps) {
         <div className="flex gap-3">
           <button
             onClick={onCancel}
-            className="flex-1 text-sm font-mono py-2 rounded border border-terminal-border text-terminal-dim hover:text-terminal-text transition-colors"
+            disabled={inFlight}
+            className="flex-1 text-sm font-mono py-2 rounded border border-terminal-border text-terminal-dim hover:text-terminal-text disabled:opacity-40 transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            className="flex-1 text-sm font-mono py-2 rounded bg-terminal-red/15 border border-terminal-red/30 text-terminal-red hover:bg-terminal-red/25 transition-colors"
+            disabled={inFlight}
+            className="flex-1 text-sm font-mono py-2 rounded bg-terminal-red/15 border border-terminal-red/30 text-terminal-red hover:bg-terminal-red/25 disabled:opacity-40 transition-colors"
           >
-            Delete
+            {inFlight ? 'Deleting…' : 'Delete'}
           </button>
         </div>
       </div>
@@ -578,7 +781,9 @@ function DeleteConfirm({ rule, onConfirm, onCancel }: DeleteConfirmProps) {
   )
 }
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Toast
+// ─────────────────────────────────────────────────────────────────────────────
 
 function Toast({ message }: { message: string }) {
   if (!message) return null
@@ -589,19 +794,21 @@ function Toast({ message }: { message: string }) {
   )
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// RulesPage
+// ─────────────────────────────────────────────────────────────────────────────
 
 type ViewMode = 'list' | 'builder'
 
 export default function RulesPage() {
-  const { rules, setRules, updateRule } = useBotStore()
-  const [view,     setView]     = useState<ViewMode>('list')
-  const [editing,  setEditing]  = useState<Rule | null>(null)
-  const [deleting, setDeleting] = useState<Rule | null>(null)
-  const [loading,  setLoading]  = useState(false)
-  const [toast,    setToast]    = useState('')
+  const { rules, setRules, addRule, updateRule, removeRule } = useBotStore()
 
-  // ── Toast helper ─────────────────────────────────────────────────────────
+  const [view,          setView]          = useState<ViewMode>('list')
+  const [editing,       setEditing]       = useState<Rule | null>(null)
+  const [deleting,      setDeleting]      = useState<Rule | null>(null)
+  const [deleteInFlight, setDeleteInFlight] = useState(false)
+  const [loading,       setLoading]       = useState(false)
+  const [toast,         setToast]         = useState('')
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -613,96 +820,86 @@ export default function RulesPage() {
   useEffect(() => {
     const load = async () => {
       setLoading(true)
-      try {
-        const fetched = await fetchRules()
-        setRules(fetched)
-      } catch {
-        // Backend offline — use whatever is already in store
-      } finally {
-        setLoading(false)
-      }
+      try { setRules(await fetchRules()) }
+      catch { /* backend offline — use whatever is already in store */ }
+      finally { setLoading(false) }
     }
     load()
   }, [setRules])
 
-  // ── Handlers ─────────────────────────────────────────────────────────────
+  // ── Navigation ────────────────────────────────────────────────────────────
 
-  const handleNewRule = () => {
-    setEditing(null)
-    setView('builder')
-  }
-
-  const handleEdit = (rule: Rule) => {
-    setEditing(rule)
-    setView('builder')
-  }
+  const handleNewRule = () => { setEditing(null); setView('builder') }
+  const handleEdit    = (rule: Rule) => { setEditing(rule); setView('builder') }
+  const handleCancel  = () => { setEditing(null); setView('list') }
 
   const handleSaved = (savedRule: Rule) => {
     if (editing) {
-      updateRule(savedRule)
+      updateRule(savedRule)       // functional set(s => ...) inside store
       showToast('Rule updated')
     } else {
-      // Use current snapshot from store to avoid stale closure
-      const latest = useBotStore.getState().rules
-      setRules([...latest, savedRule])
+      addRule(savedRule)          // functional set(s => ...) — no stale closure
       showToast('Rule created')
     }
     setEditing(null)
     setView('list')
   }
 
-  const handleCancel = () => {
-    setEditing(null)
-    setView('list')
-  }
+  // ── Toggle — optimistic update with rollback on failure ───────────────────
 
   const handleToggle = async (rule: Rule) => {
+    const optimistic = { ...rule, enabled: !rule.enabled }
+    updateRule(optimistic)                       // immediate UI feedback
     try {
       const res = await toggleRule(rule.id)
-      updateRule({ ...rule, enabled: res.enabled })
+      updateRule({ ...rule, enabled: res.enabled })   // confirm with server value
       showToast(res.enabled ? 'Rule enabled' : 'Rule disabled')
     } catch (err: unknown) {
+      updateRule(rule)                           // rollback to original state
       showToast(err instanceof Error ? err.message : 'Error toggling rule')
     }
   }
 
-  const handleDeleteRequest = (rule: Rule) => {
-    setDeleting(rule)
-  }
+  // ── Delete — in-flight guard, 404 treated as success ─────────────────────
+
+  const handleDeleteRequest = (rule: Rule) => setDeleting(rule)
 
   const handleDeleteConfirm = async () => {
-    if (!deleting) return
+    if (!deleting || deleteInFlight) return
     const target = deleting
-    setDeleting(null)
+    setDeleteInFlight(true)
     try {
       await deleteRule(target.id)
-      setRules(useBotStore.getState().rules.filter((r) => r.id !== target.id))
+      removeRule(target.id)        // functional set(s => ...) inside store
       showToast('Rule deleted')
     } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : 'Error deleting rule')
+      const msg = err instanceof Error ? err.message : ''
+      if (msg.includes('404')) {
+        // Already gone on the server — mirror that in the UI
+        removeRule(target.id)
+        showToast('Rule deleted')
+      } else {
+        showToast(msg || 'Error deleting rule')
+      }
+    } finally {
+      setDeleteInFlight(false)
+      setDeleting(null)
     }
   }
 
-  // ── Builder view ──────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
   if (view === 'builder') {
     return (
       <div className="max-w-2xl">
-        <RuleBuilder
-          existing={editing}
-          onSaved={handleSaved}
-          onCancel={handleCancel}
-        />
+        <RuleBuilder existing={editing} onSaved={handleSaved} onCancel={handleCancel} />
         <Toast message={toast} />
       </div>
     )
   }
 
-  // ── List view ─────────────────────────────────────────────────────────────
-
   return (
     <div className="flex flex-col gap-4 pb-8">
-      {/* Page header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-sm font-mono font-semibold text-terminal-text">
@@ -720,14 +917,10 @@ export default function RulesPage() {
         </button>
       </div>
 
-      {/* Rules list / states */}
       {loading ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => (
-            <div
-              key={i}
-              className="h-28 bg-terminal-surface border border-terminal-border rounded-lg animate-pulse"
-            />
+            <div key={i} className="h-28 bg-terminal-surface border border-terminal-border rounded-lg animate-pulse" />
           ))}
         </div>
       ) : rules.length === 0 ? (
@@ -760,16 +953,15 @@ export default function RulesPage() {
         </div>
       )}
 
-      {/* Delete confirmation */}
       {deleting && (
         <DeleteConfirm
           rule={deleting}
+          inFlight={deleteInFlight}
           onConfirm={handleDeleteConfirm}
-          onCancel={() => setDeleting(null)}
+          onCancel={() => { if (!deleteInFlight) setDeleting(null) }}
         />
       )}
 
-      {/* Toast */}
       <Toast message={toast} />
     </div>
   )

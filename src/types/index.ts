@@ -104,11 +104,25 @@ export interface SimOrderRecord {
 
 export type Indicator = 'RSI' | 'SMA' | 'EMA' | 'MACD' | 'BBANDS' | 'ATR' | 'STOCH' | 'PRICE'
 
+/**
+ * Source selects which output series of a multi-output indicator is used:
+ *   MACD  → LINE | SIGNAL | HISTOGRAM
+ *   BBANDS→ UPPER | MIDDLE | LOWER
+ *   STOCH → K | D
+ * Single-output indicators (RSI, SMA, EMA, ATR, PRICE) leave source undefined.
+ */
+export type IndicatorSource =
+  | 'LINE' | 'SIGNAL' | 'HISTOGRAM'   // MACD
+  | 'UPPER' | 'MIDDLE' | 'LOWER'      // BBANDS
+  | 'K' | 'D'                         // STOCH
+
 export interface Condition {
   indicator: Indicator
-  params: Record<string, number | string>
-  operator: string
-  value: number | string
+  /** Required for MACD, BBANDS, and STOCH; undefined for all others. */
+  source?:   IndicatorSource
+  params:    Record<string, number | string>
+  operator:  string
+  value:     number | string
 }
 
 export interface TradeAction {

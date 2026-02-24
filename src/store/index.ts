@@ -191,7 +191,9 @@ interface BotState {
   setStatus:     (s: SystemStatus) => void
   setBotStatus:  (s: BotStatus) => void
   setRules:      (r: Rule[]) => void
+  addRule:       (r: Rule) => void
   updateRule:    (r: Rule) => void
+  removeRule:    (id: string) => void
   setIBKR:       (v: boolean) => void
   setBotRunning: (v: boolean) => void
 }
@@ -214,10 +216,11 @@ export const useBotStore = create<BotState>((set) => ({
       botRunning:    s.bot_running,
     }),
   setBotStatus:  (s) => set({ botStatus: s, botRunning: s.running }),
-  setRules:      (r) => set({ rules: r }),
-  updateRule:    (r) =>
-    set((s) => ({ rules: s.rules.map((x) => (x.id === r.id ? r : x)) })),
-  setIBKR:       (v) => set({ ibkrConnected: v }),
+  setRules:   (r) => set({ rules: r }),
+  addRule:    (r) => set((s) => ({ rules: [...s.rules, r] })),
+  updateRule: (r) => set((s) => ({ rules: s.rules.map((x) => (x.id === r.id ? r : x)) })),
+  removeRule: (id) => set((s) => ({ rules: s.rules.filter((r) => r.id !== id) })),
+  setIBKR:    (v) => set({ ibkrConnected: v }),
   setBotRunning: (v) => set({ botRunning: v }),
 }))
 
