@@ -17,6 +17,195 @@ We develop in a **relay race method**:
 
 ---
 
+## Stage Planner
+
+**Single-use prompt. Copy, fill in, paste into NEW Claude conversation, get your stage breakdown, close.**
+
+Used by the **master session** (step 1 of the relay race) to break a feature into ordered, waterfall stages that each become their own isolated session.
+
+### How to Use
+
+1. Copy the prompt below (from START to END)
+2. Fill in YOUR feature information
+3. Paste into a NEW Claude conversation
+4. Get your stage breakdown
+5. Use each stage to generate a session prompt via `@session-prompt-generator`
+
+### THE PROMPT (COPY FROM HERE)
+
+```
+Break down a feature into sequential development stages for a relay race workflow.
+
+Each stage will be built in its own isolated session, so stages must:
+- Be self-contained (completable in one session)
+- Have clear inputs and outputs
+- Build on previous stages without requiring future ones
+- Be testable independently
+
+PROJECT: [Your project name - e.g., "TradeBot Dashboard"]
+TECH: [Your stack - e.g., "React 18, TypeScript, Vite, Zustand, Tailwind, lightweight-charts"]
+
+FEATURE: [What you're building - e.g., "Real-time trading dashboard with live charts and order management"]
+
+DESCRIPTION:
+[2-5 sentences describing the full feature end-to-end]
+
+EXISTING CODE:
+- [What already exists - e.g., "Basic React app with routing"]
+- [Existing infrastructure - e.g., "FastAPI backend at :8000"]
+- [Available services - e.g., "WebSocket endpoint for market data"]
+
+CONSTRAINTS:
+- [Constraint 1 - e.g., "Must work without backend initially (mock data)"]
+- [Constraint 2 - e.g., "Mobile-responsive required"]
+
+---
+
+Generate a stage breakdown with:
+- Numbered stages in dependency order (build order)
+- Each stage has: name, type (frontend-component/backend-endpoint/integration/etc.), scope, deliverables, and dependencies
+- First stage should have ZERO dependencies on other stages
+- Each stage lists exactly what the next stage needs from it
+- Keep to 3-6 stages (merge small tasks, split large ones)
+- Include a final integration/polish stage if needed
+
+Format as a clear, actionable stage plan ready to feed into session prompts.
+```
+
+### (COPY TO HERE)
+
+### Example Usage
+
+**Input:**
+
+```
+PROJECT: TradeBot Dashboard
+TECH: React 18, TypeScript, Vite, Zustand, Tailwind, lightweight-charts
+
+FEATURE: Real-time portfolio dashboard with live P&L tracking
+
+DESCRIPTION:
+Dashboard page showing the user's open positions, real-time P&L calculations, and a portfolio value chart that updates live via WebSocket. Includes a positions table with sortable columns and a summary card row showing total value, daily P&L, and win rate.
+
+EXISTING CODE:
+- React app with Vite, Tailwind, and routing set up
+- Zustand store exists but empty
+- FastAPI backend at :8000 with /api/positions and /ws/portfolio endpoints
+- lightweight-charts library installed
+
+CONSTRAINTS:
+- Must work with mock data first (backend may not be ready)
+- Dark theme only (trading UI)
+```
+
+**Output:**
+
+```
+# Stage Plan: Real-time Portfolio Dashboard
+
+## Stage 1: Data Layer & State Management
+**Type:** frontend-component
+**Dependencies:** None
+**Scope:**
+- Define TypeScript types for Position, PortfolioSummary, PnLData
+- Create Zustand store with portfolio state (positions, summary, chart data)
+- Build mock data generators matching backend API shape
+- Create data service layer with functions that return mock data
+
+**Deliverables:**
+- `types/portfolio.types.ts` — all data types
+- `store/portfolioStore.ts` — Zustand store with actions
+- `services/mockData.ts` — realistic mock data
+- `services/portfolioService.ts` — service interface (mock impl)
+
+**Hands off to Stage 2:** Types, store, and service layer ready to consume
+
+---
+
+## Stage 2: UI Components (Static)
+**Type:** frontend-component
+**Dependencies:** Stage 1 (types + mock data)
+**Scope:**
+- Summary cards row (Total Value, Daily P&L, Win Rate)
+- Positions table with columns: symbol, side, size, entry, current, P&L, P&L%
+- Portfolio chart container (placeholder for lightweight-charts)
+- All components consume Zustand store, render mock data
+- Tailwind dark theme styling
+
+**Deliverables:**
+- `components/SummaryCards.tsx` — top-row metric cards
+- `components/PositionsTable.tsx` — sortable positions table
+- `components/PortfolioChart.tsx` — chart wrapper
+- `pages/Dashboard.tsx` — page layout composing all components
+
+**Hands off to Stage 3:** Fully styled, static UI rendering mock data
+
+---
+
+## Stage 3: Chart Integration
+**Type:** frontend-component
+**Dependencies:** Stage 2 (chart container component)
+**Scope:**
+- Initialize lightweight-charts in PortfolioChart
+- Area chart for portfolio value over time
+- Proper resize handling and cleanup
+- Feed mock historical data into chart
+- Dark theme chart config
+
+**Deliverables:**
+- `components/PortfolioChart.tsx` — updated with live chart
+- `hooks/useChart.ts` — chart lifecycle hook
+
+**Hands off to Stage 4:** Working chart that accepts data updates
+
+---
+
+## Stage 4: Live Data Integration
+**Type:** integration
+**Dependencies:** Stages 1-3 (full UI + store + service layer)
+**Scope:**
+- Replace mock service with real API calls (GET /api/positions)
+- WebSocket connection to /ws/portfolio for live updates
+- Update Zustand store on each WS message
+- Reconnection logic for dropped connections
+- Loading and error states
+
+**Deliverables:**
+- `services/portfolioService.ts` — real API implementation
+- `services/websocket.ts` — WS client with reconnect
+- `hooks/usePortfolioStream.ts` — hook managing WS lifecycle
+- Error/loading states in all components
+
+**Hands off to Stage 5:** Fully functional dashboard with live data
+
+---
+
+## Stage 5: Polish & Edge Cases
+**Type:** refactoring
+**Dependencies:** Stage 4 (working integration)
+**Scope:**
+- Table sorting (click column headers)
+- Number formatting (currency, percentages, color-coded P&L)
+- Empty states (no positions)
+- Connection status indicator
+- Performance check (memo expensive renders)
+
+**Deliverables:**
+- Updated components with sorting, formatting, empty states
+- `components/ConnectionStatus.tsx` — WS status indicator
+- Final review pass on all files
+```
+
+### Tips
+
+1. **Start with data, end with integration** — Types and state first, then UI, then wire it all together
+2. **Each stage should be demo-able** — Even with mock data, you should be able to see something working
+3. **Don't over-split** — 3-6 stages is the sweet spot. Fewer means sessions are too large; more means too much handoff overhead
+4. **Name your deliverables** — Specific file names make session prompts much easier to write
+5. **The "hands off to" line is critical** — It's the contract between stages
+
+---
+
 ## Handoff Document Generator
 
 **Single-use prompt. Copy, fill in, paste into NEW Claude conversation, get output, close.**
