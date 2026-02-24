@@ -56,10 +56,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+import time as _time
+
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from config import cfg
 from database import (
@@ -79,6 +81,8 @@ from models import (
 )
 from order_executor import cancel_order, get_open_orders, on_fill, place_order
 from simulation import replay_engine, sim_engine
+from auth import create_token, get_current_user
+from settings import get_settings, update_settings
 import bot_runner
 
 logging.basicConfig(
@@ -184,6 +188,48 @@ if os.path.isdir(_FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="static")
 
 _DASHBOARD_DIR = os.path.join(os.path.dirname(__file__), cfg.DASHBOARD_BUILD_DIR)
+
+
+# ---------------------------------------------------------------------------
+# Global error handlers — all errors return {error, detail} JSON format
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": "HTTPException", "detail": str(exc.detail)},
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_exception_handler(request: Request, exc: ValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"error": "ValidationError", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    log.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error": type(exc).__name__, "detail": str(exc)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Request logging middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = _time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (_time.perf_counter() - start) * 1000
+    log.info("%s %s → %d (%.0fms)", request.method, request.url.path, response.status_code, duration_ms)
+    return response
 
 
 @app.get("/trading", response_class=FileResponse)
@@ -806,6 +852,37 @@ async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
         return get_mock_ohlcv(symbol.upper(), num_bars=num, bar_seconds=sec)
 
     raise HTTPException(404, f"No data for {symbol}")
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/auth/me")
+async def auth_me(user=Depends(get_current_user)):
+    return {"id": user.id, "email": user.email, "settings": user.settings}
+
+
+@app.post("/api/auth/token")
+async def auth_token():
+    """Issue a demo token (for frontend bootstrap). Full login in Stage 8."""
+    token = create_token("demo")
+    return {"access_token": token, "token_type": "bearer"}
+
+
+# ---------------------------------------------------------------------------
+# Settings endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings")
+async def get_user_settings(user=Depends(get_current_user)):
+    return await get_settings(user.id)
+
+
+@app.put("/api/settings")
+async def update_user_settings(request: Request, user=Depends(get_current_user)):
+    body = await request.json()
+    return await update_settings(user.id, body)
 
 
 # ---------------------------------------------------------------------------

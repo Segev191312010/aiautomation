@@ -2,10 +2,12 @@
  * SimulationPage — combines the Replay controller, a live-updating chart,
  * the sim account KPIs, and order history.
  */
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import SimController from '@/components/simulation/SimController'
 import TradingChart from '@/components/chart/TradingChart'
 import KPICard from '@/components/tradebot/KPICard'
+import { SkeletonCard } from '@/components/ui/Skeleton'
+import { useToast } from '@/components/ui/ToastProvider'
 import { useSimStore, useMarketStore } from '@/store'
 import { fetchSimAccount, fetchSimPositions, fetchSimOrders, resetSimAccount } from '@/services/api'
 
@@ -14,8 +16,10 @@ function fmtUSD(v: number) {
 }
 
 export default function SimulationPage() {
+  const toast = useToast()
   const { simAccount, simPositions, simOrders, playback, setSimAccount, setSimPositions, setSimOrders } = useSimStore()
   const replaySymbol = playback.symbol || 'AAPL'
+  const [initialLoad, setInitialLoad] = useState(true)
 
   useEffect(() => {
     const load = async () => {
@@ -29,6 +33,7 @@ export default function SimulationPage() {
         setSimPositions(pos)
         setSimOrders(orders)
       } catch { /* ignore */ }
+      setInitialLoad(false)
     }
     load()
     const t = setInterval(load, 5_000)
@@ -43,7 +48,9 @@ export default function SimulationPage() {
       setSimAccount(acc)
       setSimPositions(pos)
       setSimOrders([])
+      toast.success('Simulation account reset')
     } catch (e) {
+      toast.error('Failed to reset simulation')
       console.error(e)
     }
   }
@@ -63,30 +70,36 @@ export default function SimulationPage() {
             Reset Account
           </button>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <KPICard
-            label="Net Liquidation"
-            value={simAccount ? fmtUSD(simAccount.net_liquidation) : '—'}
-            highlight
-          />
-          <KPICard label="Cash" value={simAccount ? fmtUSD(simAccount.cash) : '—'} />
-          <KPICard
-            label="Unrealized P&L"
-            value={simAccount ? fmtUSD(simAccount.unrealized_pnl) : '—'}
-            positive={simAccount ? simAccount.unrealized_pnl >= 0 : undefined}
-          />
-          <KPICard
-            label="Realized P&L"
-            value={simAccount ? fmtUSD(simAccount.realized_pnl) : '—'}
-            positive={simAccount ? simAccount.realized_pnl >= 0 : undefined}
-          />
-          <KPICard
-            label="Total Return"
-            value={simAccount ? simAccount.total_return_pct.toFixed(2) : '—'}
-            suffix="%"
-            positive={simAccount ? simAccount.total_return_pct >= 0 : undefined}
-          />
-        </div>
+        {initialLoad && !simAccount ? (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <KPICard
+              label="Net Liquidation"
+              value={simAccount ? fmtUSD(simAccount.net_liquidation) : '—'}
+              highlight
+            />
+            <KPICard label="Cash" value={simAccount ? fmtUSD(simAccount.cash) : '—'} />
+            <KPICard
+              label="Unrealized P&L"
+              value={simAccount ? fmtUSD(simAccount.unrealized_pnl) : '—'}
+              positive={simAccount ? simAccount.unrealized_pnl >= 0 : undefined}
+            />
+            <KPICard
+              label="Realized P&L"
+              value={simAccount ? fmtUSD(simAccount.realized_pnl) : '—'}
+              positive={simAccount ? simAccount.realized_pnl >= 0 : undefined}
+            />
+            <KPICard
+              label="Total Return"
+              value={simAccount ? simAccount.total_return_pct.toFixed(2) : '—'}
+              suffix="%"
+              positive={simAccount ? simAccount.total_return_pct >= 0 : undefined}
+            />
+          </div>
+        )}
       </section>
 
       {/* ── Chart (replay symbol) ──────────────────────────────── */}

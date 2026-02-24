@@ -17,6 +17,8 @@ import type {
   SimPosition,
   SystemStatus,
   Trade,
+  User,
+  UserSettings,
 } from '@/types'
 
 // Not exported from types/index.ts yet — define locally
@@ -32,12 +34,27 @@ interface RuleCreate_ {
 
 const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
+// Auth token storage — demo token bootstrapped on app init
+let _authToken: string | null = null
+export function setAuthToken(token: string | null) { _authToken = token }
+export function getAuthToken() { return _authToken }
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {}
+  if (body) headers['Content-Type'] = 'application/json'
+  if (_authToken) headers['Authorization'] = `Bearer ${_authToken}`
+
   const resp = await fetch(`${BASE}${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   })
+
+  // 401 → clear token (prep for Stage 8 login redirect)
+  if (resp.status === 401) {
+    _authToken = null
+  }
+
   if (!resp.ok) {
     const text = await resp.text().catch(() => resp.statusText)
     throw new Error(`${method} ${path} → ${resp.status}: ${text}`)
@@ -128,3 +145,13 @@ export const toggleRule    = (id: string) => post<{ id: string; enabled: boolean
 
 export const startBot = () => post<{ running: boolean }>('/api/bot/start')
 export const stopBot  = () => post<{ running: boolean }>('/api/bot/stop')
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+
+export const fetchAuthToken = () => post<{ access_token: string; token_type: string }>('/api/auth/token')
+export const fetchAuthMe    = () => get<User>('/api/auth/me')
+
+// ── Settings ──────────────────────────────────────────────────────────────
+
+export const fetchSettings  = () => get<UserSettings>('/api/settings')
+export const updateSettings = (partial: Partial<UserSettings>) => put<UserSettings>('/api/settings', partial)

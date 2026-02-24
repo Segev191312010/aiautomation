@@ -12,6 +12,8 @@ import clsx from 'clsx'
 import KPICard from '@/components/tradebot/KPICard'
 import BotToggle from '@/components/tradebot/BotToggle'
 import PositionsTable from '@/components/tradebot/PositionsTable'
+import { SkeletonCard, SkeletonTable } from '@/components/ui/Skeleton'
+import { useToast } from '@/components/ui/ToastProvider'
 import { useAccountStore, useBotStore, useSimStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, placeManualOrder } from '@/services/api'
 import type { Trade, SimAccountState, AccountSummary } from '@/types'
@@ -27,6 +29,7 @@ function isSimAccount(a: AccountSummary | SimAccountState): a is SimAccountState
 // ── Quick Order form ──────────────────────────────────────────────────────────
 
 function QuickOrderForm() {
+  const toast = useToast()
   const [sym,   setSym]   = useState('')
   const [qty,   setQty]   = useState(1)
   const [action, setAction] = useState<'BUY' | 'SELL'>('BUY')
@@ -40,9 +43,13 @@ function QuickOrderForm() {
     setStatus('')
     try {
       const r = await placeManualOrder({ symbol: sym.toUpperCase(), action, quantity: qty })
-      setStatus(r.message ?? 'Order placed')
+      const msg = r.message ?? 'Order placed'
+      setStatus(msg)
+      toast.success(msg)
     } catch (e: unknown) {
-      setStatus(e instanceof Error ? e.message : 'Error')
+      const msg = e instanceof Error ? e.message : 'Order failed'
+      setStatus(msg)
+      toast.error(msg)
     } finally {
       setBusy(false)
     }
@@ -139,6 +146,7 @@ export default function TradeBotPage() {
   const { account, positions, setTrades, trades } = useAccountStore()
   const { simMode } = useBotStore()
   const { simAccount, simPositions, setSimAccount, setSimPositions } = useSimStore()
+  const [initialLoad, setInitialLoad] = useState(true)
 
   const displayAccount = simMode ? simAccount : account
 
@@ -161,6 +169,7 @@ export default function TradeBotPage() {
           setSimPositions(pos)
         } catch { /* ignore */ }
       }
+      setInitialLoad(false)
     }
     load()
     const t = setInterval(load, 15_000)
@@ -174,27 +183,33 @@ export default function TradeBotPage() {
         <h2 className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest mb-3">
           Account KPIs {simMode ? '(Simulation)' : ''}
         </h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <KPICard
-            label="Net Liquidation"
-            value={netLiq != null ? fmtUSD(netLiq) : '—'}
-            highlight
-          />
-          <KPICard
-            label="Cash"
-            value={cash != null ? fmtUSD(cash) : '—'}
-          />
-          <KPICard
-            label="Unrealized P&L"
-            value={unrealPnl != null ? fmtUSD(unrealPnl) : '—'}
-            positive={unrealPnl != null ? unrealPnl >= 0 : undefined}
-          />
-          <KPICard
-            label="Realized P&L"
-            value={realPnl != null ? fmtUSD(realPnl) : '—'}
-            positive={realPnl != null ? realPnl >= 0 : undefined}
-          />
-        </div>
+        {initialLoad && !displayAccount ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <KPICard
+              label="Net Liquidation"
+              value={netLiq != null ? fmtUSD(netLiq) : '—'}
+              highlight
+            />
+            <KPICard
+              label="Cash"
+              value={cash != null ? fmtUSD(cash) : '—'}
+            />
+            <KPICard
+              label="Unrealized P&L"
+              value={unrealPnl != null ? fmtUSD(unrealPnl) : '—'}
+              positive={unrealPnl != null ? unrealPnl >= 0 : undefined}
+            />
+            <KPICard
+              label="Realized P&L"
+              value={realPnl != null ? fmtUSD(realPnl) : '—'}
+              positive={realPnl != null ? realPnl >= 0 : undefined}
+            />
+          </div>
+        )}
       </section>
 
       {/* ── Master toggle ───────────────────────────────────────────── */}
@@ -223,7 +238,9 @@ export default function TradeBotPage() {
         <h2 className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest mb-3">
           Recent Trades
         </h2>
-        {trades.length === 0 ? (
+        {initialLoad ? (
+          <SkeletonTable rows={4} cols={6} />
+        ) : trades.length === 0 ? (
           <p className="text-sm font-mono text-terminal-ghost py-4 text-center">No trades yet</p>
         ) : (
           <div className="overflow-x-auto">

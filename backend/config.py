@@ -44,6 +44,11 @@ class Config:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
 
+    # ── JWT / Auth ─────────────────────────────────────────────────────────
+    JWT_SECRET: str = os.getenv("JWT_SECRET", "trading-dev-secret-change-in-prod")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    JWT_ACCESS_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "1440"))
+
     # ── React dashboard build directory ──────────────────────────────────────
     # After `npm run build` in dashboard/, serve the SPA from /app
     DASHBOARD_BUILD_DIR: str = os.getenv("DASHBOARD_BUILD_DIR", "../dashboard/dist")

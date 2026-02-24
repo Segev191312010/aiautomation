@@ -208,3 +208,19 @@ class PlaybackState(BaseModel):
     current_ts: Optional[int] = None
     end_ts: Optional[int] = None
     progress: float = 0.0   # 0.0 – 1.0
+
+
+# ---------------------------------------------------------------------------
+# Auth / User models
+# ---------------------------------------------------------------------------
+
+class User(BaseModel):
+    id: str
+    email: str
+    created_at: str
+    settings: dict = Field(default_factory=dict)
+
+
+class AuthToken(BaseModel):
+    access_token: str
+    token_type: str = "bearer"

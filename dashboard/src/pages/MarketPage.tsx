@@ -11,6 +11,8 @@ import TradingChart from '@/components/chart/TradingChart'
 import IndicatorPanel from '@/components/chart/IndicatorPanel'
 import IndicatorSelector from '@/components/indicators/IndicatorSelector'
 import TickerCard from '@/components/ticker/TickerCard'
+import Skeleton from '@/components/ui/Skeleton'
+import { useToast } from '@/components/ui/ToastProvider'
 import { useMarketStore } from '@/store'
 import { fetchYahooBars } from '@/services/api'
 import { getMockBars } from '@/services/mockService'
@@ -42,6 +44,7 @@ const AUTO_REFRESH_MS: Record<string, number> = {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function MarketPage() {
+  const toast = useToast()
   const {
     selectedSymbol,
     setSelectedSymbol,
@@ -122,6 +125,7 @@ export default function MarketPage() {
     if (sym) {
       setSelectedSymbol(sym)
       setSearch(sym)
+      toast.info(`Loading ${sym}`)
     }
   }
 
@@ -251,8 +255,11 @@ export default function MarketPage() {
           {quote ? (
             <TickerCard quote={quote} />
           ) : (
-            <div className="bg-terminal-surface border border-terminal-border rounded-lg p-4 text-xs font-mono text-terminal-ghost">
-              No quote data for {selectedSymbol}
+            <div className="bg-terminal-surface border border-terminal-border rounded-lg p-4 space-y-3">
+              <Skeleton className="h-4 w-20" />
+              <Skeleton className="h-8 w-28" />
+              <Skeleton className="h-3 w-16" />
+              <Skeleton className="h-3 w-24" />
             </div>
           )}
 

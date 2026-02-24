@@ -234,3 +234,20 @@ export interface WatchlistSort {
 }
 
 export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'simulation' | 'rules' | 'settings'
+
+// ── Auth / Settings ──────────────────────────────────────────────────────
+
+export interface User {
+  id: string
+  email: string
+  settings: UserSettings
+}
+
+export interface UserSettings {
+  theme: string
+  default_symbol: string
+  default_bar_size: string
+  bot_interval: number
+  watchlist: string[]
+  [key: string]: unknown
+}

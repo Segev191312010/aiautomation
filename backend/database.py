@@ -2,22 +2,35 @@
 SQLite persistence layer using aiosqlite.
 
 Tables:
+  - users  : user accounts + settings JSON blob
   - rules  : automation rules stored as JSON blobs
   - trades : trade execution log
 """
 from __future__ import annotations
 import json
+import logging
 import aiosqlite
 from datetime import datetime, timezone
 from config import cfg
 from models import Rule, Trade
 
+log = logging.getLogger(__name__)
 
 DB_PATH = cfg.DB_PATH
 
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+
+_CREATE_USERS = """
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    email         TEXT UNIQUE,
+    password_hash TEXT,
+    created_at    TEXT,
+    settings      TEXT DEFAULT '{}'
+);
+"""
 
 _CREATE_RULES = """
 CREATE TABLE IF NOT EXISTS rules (
@@ -38,12 +51,37 @@ CREATE TABLE IF NOT EXISTS trades (
 """
 
 
+async def _safe_add_column(db: aiosqlite.Connection, table: str, column: str, col_type: str, default: str) -> None:
+    """Add a column if it doesn't already exist (ALTER TABLE is not idempotent in SQLite)."""
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type} DEFAULT {default}")
+        log.info("Added column %s.%s", table, column)
+    except Exception:
+        pass  # column already exists
+
+
 async def init_db() -> None:
-    """Create tables and seed starter rules on first run."""
+    """Create tables, migrate schema, and seed starter data on first run."""
     async with aiosqlite.connect(DB_PATH) as db:
+        # Create tables
+        await db.execute(_CREATE_USERS)
         await db.execute(_CREATE_RULES)
         await db.execute(_CREATE_TRADES)
         await db.commit()
+
+        # Migrate: add user_id column to existing tables
+        await _safe_add_column(db, "rules",         "user_id", "TEXT", "'demo'")
+        await _safe_add_column(db, "trades",        "user_id", "TEXT", "'demo'")
+        await _safe_add_column(db, "sim_account",   "user_id", "TEXT", "'demo'")
+        await _safe_add_column(db, "sim_positions", "user_id", "TEXT", "'demo'")
+        await _safe_add_column(db, "sim_orders",    "user_id", "TEXT", "'demo'")
+        await db.commit()
+
+        # Seed demo user
+        from auth import seed_demo_user
+        await seed_demo_user(db)
+
+        # Seed starter rules
         await _seed_starter_rules(db)
 
 
@@ -51,32 +89,38 @@ async def init_db() -> None:
 # Rules CRUD
 # ---------------------------------------------------------------------------
 
-async def get_rules() -> list[Rule]:
+async def get_rules(user_id: str = "demo") -> list[Rule]:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT data FROM rules") as cursor:
+        async with db.execute(
+            "SELECT data FROM rules WHERE user_id=?", (user_id,)
+        ) as cursor:
             rows = await cursor.fetchall()
     return [Rule.model_validate(json.loads(r[0])) for r in rows]
 
 
-async def get_rule(rule_id: str) -> Rule | None:
+async def get_rule(rule_id: str, user_id: str = "demo") -> Rule | None:
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT data FROM rules WHERE id=?", (rule_id,)) as cur:
+        async with db.execute(
+            "SELECT data FROM rules WHERE id=? AND user_id=?", (rule_id, user_id)
+        ) as cur:
             row = await cur.fetchone()
     return Rule.model_validate(json.loads(row[0])) if row else None
 
 
-async def save_rule(rule: Rule) -> None:
+async def save_rule(rule: Rule, user_id: str = "demo") -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO rules (id, data) VALUES (?, ?)",
-            (rule.id, rule.model_dump_json()),
+            "INSERT OR REPLACE INTO rules (id, data, user_id) VALUES (?, ?, ?)",
+            (rule.id, rule.model_dump_json(), user_id),
         )
         await db.commit()
 
 
-async def delete_rule(rule_id: str) -> bool:
+async def delete_rule(rule_id: str, user_id: str = "demo") -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("DELETE FROM rules WHERE id=?", (rule_id,))
+        cur = await db.execute(
+            "DELETE FROM rules WHERE id=? AND user_id=?", (rule_id, user_id)
+        )
         await db.commit()
         return cur.rowcount > 0
 
@@ -85,21 +129,22 @@ async def delete_rule(rule_id: str) -> bool:
 # Trades CRUD
 # ---------------------------------------------------------------------------
 
-async def save_trade(trade: Trade) -> None:
+async def save_trade(trade: Trade, user_id: str = "demo") -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO trades (id, rule_id, symbol, action, timestamp, data) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO trades (id, rule_id, symbol, action, timestamp, data, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (trade.id, trade.rule_id, trade.symbol, trade.action,
-             trade.timestamp, trade.model_dump_json()),
+             trade.timestamp, trade.model_dump_json(), user_id),
         )
         await db.commit()
 
 
-async def get_trades(limit: int = 200) -> list[Trade]:
+async def get_trades(limit: int = 200, user_id: str = "demo") -> list[Trade]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT data FROM trades ORDER BY timestamp DESC LIMIT ?", (limit,)
+            "SELECT data FROM trades WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
+            (user_id, limit),
         ) as cur:
             rows = await cur.fetchall()
     return [Trade.model_validate(json.loads(r[0])) for r in rows]
@@ -171,7 +216,7 @@ async def _seed_starter_rules(db: aiosqlite.Connection) -> None:
         for raw in _STARTER_RULES:
             rule = Rule.model_validate(raw)
             await db.execute(
-                "INSERT INTO rules (id, data) VALUES (?, ?)",
-                (rule.id, rule.model_dump_json()),
+                "INSERT INTO rules (id, data, user_id) VALUES (?, ?, ?)",
+                (rule.id, rule.model_dump_json(), "demo"),
             )
         await db.commit()

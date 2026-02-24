@@ -26,6 +26,7 @@ import type {
   SortField,
   SystemStatus,
   Trade,
+  UserSettings,
   Watchlist,
 } from '@/types'
 import type { IndicatorId } from '@/utils/indicators'
@@ -287,4 +288,22 @@ export const useUIStore = create<UIState>((set) => ({
   setRoute:            (r) => set({ activeRoute: r }),
   openOrderModal:      (symbol = '') => set({ showOrderModal: true, orderModalSymbol: symbol }),
   closeOrderModal:     () => set({ showOrderModal: false }),
+}))
+
+// ── Settings store ───────────────────────────────────────────────────────
+
+interface SettingsState {
+  settings:    UserSettings | null
+  loading:     boolean
+
+  setSettings: (s: UserSettings) => void
+  setLoading:  (v: boolean) => void
+}
+
+export const useSettingsStore = create<SettingsState>((set) => ({
+  settings: null,
+  loading:  false,
+
+  setSettings: (s) => set({ settings: s }),
+  setLoading:  (v) => set({ loading: v }),
 }))

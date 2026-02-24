@@ -6,6 +6,7 @@ import React from 'react'
 import WatchlistGrid from '@/components/ticker/WatchlistGrid'
 import TradingChart from '@/components/chart/TradingChart'
 import KPICard from '@/components/tradebot/KPICard'
+import { SkeletonCard } from '@/components/ui/Skeleton'
 import { useMarketStore, useAccountStore, useBotStore } from '@/store'
 import type { AccountSummary, SimAccountState } from '@/types'
 
@@ -76,39 +77,47 @@ export default function Dashboard() {
 
         {/* KPI rail */}
         <aside className="w-52 shrink-0 flex flex-col gap-3">
-          <KPICard
-            label={simMode ? 'Net Liq (SIM)' : 'Net Liquidation'}
-            value={netLiq != null ? fmtUSD(netLiq) : '—'}
-            highlight
-          />
-          <KPICard
-            label="Cash"
-            value={cash != null ? fmtUSD(cash) : '—'}
-          />
-          <KPICard
-            label="Unrealized P&L"
-            value={unrealPnl != null ? fmtUSD(unrealPnl) : '—'}
-            positive={unrealPnl != null ? unrealPnl >= 0 : undefined}
-          />
-          <KPICard
-            label="Realized P&L"
-            value={realPnl != null ? fmtUSD(realPnl) : '—'}
-            positive={realPnl != null ? realPnl >= 0 : undefined}
-          />
+          {!account ? (
+            <>
+              <SkeletonCard /><SkeletonCard /><SkeletonCard /><SkeletonCard />
+            </>
+          ) : (
+            <>
+              <KPICard
+                label={simMode ? 'Net Liq (SIM)' : 'Net Liquidation'}
+                value={netLiq != null ? fmtUSD(netLiq) : '—'}
+                highlight
+              />
+              <KPICard
+                label="Cash"
+                value={cash != null ? fmtUSD(cash) : '—'}
+              />
+              <KPICard
+                label="Unrealized P&L"
+                value={unrealPnl != null ? fmtUSD(unrealPnl) : '—'}
+                positive={unrealPnl != null ? unrealPnl >= 0 : undefined}
+              />
+              <KPICard
+                label="Realized P&L"
+                value={realPnl != null ? fmtUSD(realPnl) : '—'}
+                positive={realPnl != null ? realPnl >= 0 : undefined}
+              />
 
-          {account && isSimAccount(account) && (
-            <KPICard
-              label="Total Return"
-              value={account.total_return_pct.toFixed(2)}
-              suffix="%"
-              positive={account.total_return_pct >= 0}
-            />
-          )}
+              {isSimAccount(account) && (
+                <KPICard
+                  label="Total Return"
+                  value={account.total_return_pct.toFixed(2)}
+                  suffix="%"
+                  positive={account.total_return_pct >= 0}
+                />
+              )}
 
-          {account && 'is_mock' in account && account.is_mock && (
-            <div className="text-[9px] font-mono text-terminal-ghost text-center">
-              [ mock data ]
-            </div>
+              {'is_mock' in account && account.is_mock && (
+                <div className="text-[9px] font-mono text-terminal-ghost text-center">
+                  [ mock data ]
+                </div>
+              )}
+            </>
           )}
         </aside>
       </section>
