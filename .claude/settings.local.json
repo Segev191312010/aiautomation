@@ -18,7 +18,18 @@
       "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport sys\nsys.path.insert\\(0, '.'\\)\ntry:\n    from config import cfg\n    print\\('config OK, SIM_MODE=', cfg.SIM_MODE, 'MOCK_MODE=', cfg.MOCK_MODE\\)\nexcept Exception as e:\n    print\\('config FAIL:', e\\)\ntry:\n    from models import AccountSummary, SimAccountState, SimPositionState, SimOrderRecord, PlaybackState\n    print\\('models OK'\\)\nexcept Exception as e:\n    print\\('models FAIL:', e\\)\ntry:\n    from mock_data import get_mock_price, get_mock_ohlcv, get_mock_quotes, get_mock_account_summary\n    print\\('mock_data OK, AAPL=', get_mock_price\\('AAPL'\\)\\)\nexcept Exception as e:\n    print\\('mock_data FAIL:', e\\)\n\" 2>&1)",
       "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -c \"\nimport asyncio, sys\nsys.path.insert\\(0, '.'\\)\nasync def test\\(\\):\n    try:\n        from database import init_db\n        await init_db\\(\\)\n        print\\('init_db OK'\\)\n    except Exception as e:\n        print\\('init_db FAIL:', e\\)\n    try:\n        from simulation import sim_engine\n        await sim_engine.initialize\\(\\)\n        print\\('sim_engine.initialize OK'\\)\n    except Exception as e:\n        print\\('sim_engine FAIL:', e\\)\nasyncio.run\\(test\\(\\)\\)\n\" 2>&1)",
       "Bash(cd /c/Users/segev/sdvesdaW/trading/dashboard && npm run build 2>&1)",
-      "Bash(echo === POSITIONS \\(count\\) ===:*)"
+      "Bash(echo === POSITIONS \\(count\\) ===:*)",
+      "Bash(ls -la /c/Users/segev/sdvesdaW/trading/backend/*.py)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading/backend && python -m pytest tests/ -v 2>&1)",
+      "Bash(grep Version:*)",
+      "Bash(cd /c/Users/segev/sdvesdaW/trading && git push origin master 2>&1)",
+      "Bash(gh auth:*)",
+      "Bash(git credential-manager github list 2>&1 || git config --global credential.helper 2>&1)",
+      "Bash(git config:*)",
+      "Bash(grep:*)",
+      "Bash(cmdkey.exe:*)",
+      "Bash(printf 'protocol=https\\\\nhost=github.com\\\\n' | git credential-manager get 2>&1)",
+      "Bash(printf 'protocol=https\\\\nhost=github.com\\\\n' | git credential-manager erase 2>&1)"
     ]
   }
 }
