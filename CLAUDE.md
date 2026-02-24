@@ -345,6 +345,152 @@ Then paste these notes into the handoff generator and it'll structure them prope
 
 ---
 
+## Session Prompt Generator
+
+**Single-use, disposable prompt generator. Copy, fill in, paste into NEW Claude conversation, get output, close.**
+
+### How to Use
+
+1. Copy the prompt below (from START to END)
+2. Fill in YOUR information in the brackets [like this]
+3. Paste entire thing into a NEW Claude conversation
+4. Get your session prompt
+5. Close that conversation (you're done with it)
+6. Use the generated prompt in your work session
+
+### THE PROMPT (COPY FROM HERE)
+
+```
+Generate a focused development session prompt.
+
+PROJECT: [Your project name - e.g., "Evoke Labs Platform"]
+TECH: [Your stack - e.g., "React, Next.js, Supabase, Hume AI"]
+
+BUILDING: [Specific feature/component - e.g., "Video upload API endpoint that validates and stores videos"]
+
+SESSION TYPE: [Pick one: frontend-component, backend-endpoint, integration, external-service, database-schema, refactoring]
+
+ALREADY DONE:
+- [Thing 1 that already exists - e.g., "Frontend VideoRecorder outputs Blob"]
+- [Thing 2 that already exists - e.g., "Supabase storage bucket configured"]
+- [Thing 3 - or delete this line if not needed]
+
+REQUIREMENTS:
+- [Requirement 1 - e.g., "Max file size 100MB"]
+- [Requirement 2 - e.g., "Only mp4/webm formats"]
+- [Requirement 3 - or delete this line]
+
+---
+
+Generate a session start prompt with:
+- Clear SCOPE (what we're building)
+- Explicit OUT OF SCOPE (what to ignore)
+- Minimal CONTEXT (just enough)
+- Specific FILES to focus on
+- Clear CURRENT TASK
+- Appropriate boundaries
+
+Format as ready-to-paste prompt for immediate use.
+```
+
+### (COPY TO HERE)
+
+### Example Usage
+
+**Input to Generator:**
+
+```
+PROJECT CONTEXT:
+Project Name: Evoke Labs Platform
+Tech Stack: React + TypeScript, Next.js, Supabase, Hume AI
+Current Phase: MVP, video upload flow
+
+ARCHITECTURE SUMMARY:
+Users record vertical videos (TikTok-style), upload them, we analyze emotions with Hume AI, show results on dashboard.
+
+WHAT I WANT TO BUILD:
+Backend API endpoint for video upload. Receives video file, validates format and size, uploads to Supabase storage, saves metadata to database.
+
+SESSION TYPE:
+backend-endpoint
+
+DEPENDENCIES/CONTEXT:
+- Frontend VideoRecorder component done (outputs Blob, duration, timestamp)
+- Supabase storage bucket "user-videos" exists
+- Database has "users" table
+- Need to create "video_uploads" table
+
+SPECIFIC CONCERNS:
+- Max 100MB file size
+- Only mp4 or webm formats
+- Must validate video duration < 60 seconds
+- Need to return videoId to frontend for tracking
+```
+
+**Output from Generator:**
+
+```
+We're working on the Evoke Labs emotion analysis platform. This is a BACKEND-ONLY session.
+
+SCOPE OF THIS SESSION:
+- Video upload API endpoint (POST /api/videos/upload)
+- File validation (size, format, duration)
+- Supabase storage integration
+- Database metadata storage (video_uploads table)
+- Response with videoId and storage URL
+
+OUT OF SCOPE (don't worry about these):
+- Frontend upload UI (already built)
+- Hume AI analysis (separate session)
+- Results display
+- User authentication (already working)
+- Video compression/processing
+
+CONTEXT YOU NEED:
+- Frontend sends FormData with: videoBlob (File), userId (string), duration (number), timestamp (number)
+- Videos store in Supabase bucket: "user-videos"
+- Max file size: 100MB
+- Accepted formats: .mp4, .webm only
+- Max duration: 60 seconds
+- Need to return: videoId, storageUrl, status
+
+FILES TO FOCUS ON:
+- app/api/videos/upload/route.ts (create new)
+- lib/supabase.ts (existing helper)
+- types/video.types.ts (add types if needed)
+
+CURRENT TASK:
+Build the POST /api/videos/upload endpoint that:
+1. Validates video file (format, size, duration)
+2. Uploads to Supabase storage with proper naming
+3. Creates database entry in video_uploads table with metadata
+4. Returns success response with videoId and storageUrl
+5. Handles errors appropriately (413 for too large, 400 for invalid format, 500 for failures)
+
+Let's focus ONLY on making this endpoint work. Don't suggest frontend changes or analysis features - those are separate sessions.
+```
+
+### Tips for Better Prompts
+
+1. **Be specific about what you want to build** - "video upload endpoint" is better than "backend stuff"
+2. **Mention what's already done** - Helps Claude understand what NOT to rebuild
+3. **State constraints clearly** - File size limits, format requirements, etc.
+4. **Choose the right session type** - Frontend/backend/integration have different needs
+5. **Keep it focused** - If you find yourself listing 5+ different things, break it into multiple sessions
+
+### Session Types Reference
+
+| Type | Use For |
+|------|---------|
+| **frontend-component** | Building UI components, React/TypeScript work, user interactions, client-side validation |
+| **backend-endpoint** | API routes, database operations, server-side validation, external API calls |
+| **integration** | Connecting frontend to backend, wire up API calls, error handling, end-to-end testing |
+| **external-service** | Third-party API integration (Stripe, Hume, etc.), service wrappers, auth with services |
+| **database-schema** | Table design, migrations, indexes, relationships |
+| **refactoring** | Code cleanup, performance optimization, restructuring without adding features, tech debt |
+
+---
+
 ## Project Info
 
 - **Name:** TradeBot Dashboard (`trading-dashboard` v2.0.0)
