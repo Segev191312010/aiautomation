@@ -31,3 +31,11 @@ canvas { display: block; }
   to   { transform: translateX(0);    opacity: 1; }
 }
 .animate-slide-in { animation: slide-in 0.2s ease-out; }
+
+/* ── Chart fullscreen CSS fallback ───────────────────────────────────────── */
+.chart-fullscreen {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 50 !important;
+  background: #080d18;
+}

@@ -1,15 +1,17 @@
 /**
- * MarketPage — full-screen chart with symbol selector, timeframe picker,
- * comparison overlay, and technical indicators.
+ * MarketPage — full-screen chart with symbol selector, toolbar (timeframe,
+ * chart type, indicators), comparison overlay, volume pane, and oscillator panels.
  *
  * Bars auto-refresh on an interval (faster for intraday, slower for daily+).
  * Live candle updates arrive via /ws/market-data WebSocket.
  */
-import React, { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import type { IChartApi } from 'lightweight-charts'
 import clsx from 'clsx'
 import TradingChart from '@/components/chart/TradingChart'
+import VolumePanel from '@/components/chart/VolumePanel'
 import IndicatorPanel from '@/components/chart/IndicatorPanel'
-import IndicatorSelector from '@/components/indicators/IndicatorSelector'
+import ChartToolbar, { TOOLBAR_TIMEFRAMES } from '@/components/chart/ChartToolbar'
 import TickerCard from '@/components/ticker/TickerCard'
 import Skeleton from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/ToastProvider'
@@ -18,25 +20,15 @@ import { fetchYahooBars } from '@/services/api'
 import { getMockBars } from '@/services/mockService'
 import { intervalToSeconds } from '@/utils/indicators'
 
-// ── Timeframes ────────────────────────────────────────────────────────────────
+// ── Auto-refresh intervals ──────────────────────────────────────────────────
 
-const TIMEFRAMES = [
-  { label: '1D',  period: '5d',   interval: '5m'   },
-  { label: '1W',  period: '5d',   interval: '30m'  },
-  { label: '1M',  period: '1mo',  interval: '1h'   },
-  { label: '3M',  period: '3mo',  interval: '1d'   },
-  { label: '6M',  period: '6mo',  interval: '1d'   },
-  { label: '1Y',  period: '1y',   interval: '1d'   },
-  { label: '2Y',  period: '2y',   interval: '1wk'  },
-  { label: 'ALL', period: '5y',   interval: '1mo'  },
-]
-
-/** Bar auto-refresh intervals (ms) by Yahoo Finance interval string */
 const AUTO_REFRESH_MS: Record<string, number> = {
-  '5m':  60_000,       // 1 min  — intraday
-  '30m': 300_000,      // 5 min
+  '1m':  30_000,       // 30s
+  '5m':  60_000,       // 1 min
+  '15m': 60_000,       // 1 min
+  '30m': 120_000,      // 2 min
   '1h':  600_000,      // 10 min
-  '1d':  1_800_000,    // 30 min — daily
+  '1d':  1_800_000,    // 30 min
   '1wk': 3_600_000,    // 1 hr
   '1mo': 7_200_000,    // 2 hr
 }
@@ -57,24 +49,31 @@ export default function MarketPage() {
     toggleCompMode,
   } = useMarketStore()
 
-  const [tfIdx, setTfIdx]        = useState(5)   // default 1Y
-  const [searchInput, setSearch] = useState(selectedSymbol)
-  const [loading, setLoading]    = useState(false)
-  const refreshTimerRef          = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [tfIdx, setTfIdx]         = useState(6)   // default 1D
+  const [searchInput, setSearch]   = useState(selectedSymbol)
+  const [loading, setLoading]      = useState(false)
+  const refreshTimerRef            = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [mainChartApi, setMainChartApi] = useState<IChartApi | null>(null)
+  const chartContainerRef          = useRef<HTMLDivElement>(null)
 
   const quote      = quotes[selectedSymbol]
-  const currentTF  = TIMEFRAMES[tfIdx]
+  const currentTF  = TOOLBAR_TIMEFRAMES[tfIdx]
   const barSeconds = intervalToSeconds(currentTF.interval)
 
   // ── Bar loading ───────────────────────────────────────────────────────────
 
   const loadBars = async (sym: string, idx: number) => {
     setLoading(true)
-    const tf = TIMEFRAMES[idx]
+    const tf = TOOLBAR_TIMEFRAMES[idx]
     try {
       const bars = await fetchYahooBars(sym, tf.period, tf.interval)
       setBars(sym, bars)
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load bars'
+      // Show toast for validation errors (e.g., invalid interval/period combo)
+      if (msg.includes('400') || msg.includes('interval')) {
+        toast.error(msg)
+      }
       setBars(sym, getMockBars(sym, 120, tf.interval === '1d' ? 86_400 : 300))
     } finally {
       setLoading(false)
@@ -82,7 +81,7 @@ export default function MarketPage() {
   }
 
   const loadCompBars = async (sym: string, idx: number) => {
-    const tf = TIMEFRAMES[idx]
+    const tf = TOOLBAR_TIMEFRAMES[idx]
     try {
       const bars = await fetchYahooBars(sym, tf.period, tf.interval)
       setCompBars(sym, bars)
@@ -131,7 +130,7 @@ export default function MarketPage() {
 
   return (
     <div className="flex flex-col h-full gap-2">
-      {/* ── Toolbar row 1: symbol + timeframe + compare ────────────── */}
+      {/* ── Row 1: symbol search + compare ─────────────────────────── */}
       <div className="flex items-center gap-3 flex-wrap">
         {/* Symbol search */}
         <form onSubmit={handleSearch} className="flex items-center gap-2">
@@ -149,25 +148,7 @@ export default function MarketPage() {
           </button>
         </form>
 
-        {/* Timeframe selector */}
-        <div className="flex gap-0.5">
-          {TIMEFRAMES.map((tf, i) => (
-            <button
-              key={tf.label}
-              onClick={() => setTfIdx(i)}
-              className={clsx(
-                'text-[11px] font-mono px-2 py-1 rounded border transition-colors',
-                tfIdx === i
-                  ? 'border-terminal-blue/50 text-terminal-blue bg-terminal-blue/10'
-                  : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim hover:border-terminal-muted',
-              )}
-            >
-              {tf.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Compare */}
+        {/* Compare controls */}
         <div className="ml-auto flex items-center gap-2">
           {compMode && (
             <form
@@ -207,16 +188,20 @@ export default function MarketPage() {
         </div>
       </div>
 
-      {/* ── Toolbar row 2: indicator selector ─────────────────────── */}
-      <div className="flex items-center gap-2 px-1">
-        <IndicatorSelector />
-      </div>
+      {/* ── Row 2: chart toolbar ───────────────────────────────────── */}
+      <ChartToolbar
+        activeTfIdx={tfIdx}
+        onTfChange={setTfIdx}
+        chartContainer={chartContainerRef.current}
+        chartRef={mainChartApi}
+        isLoading={loading}
+      />
 
-      {/* ── Chart + quote card ────────────────────────────────────── */}
+      {/* ── Chart + quote card ──────────────────────────────────────── */}
       <div className="flex gap-4 flex-1 min-h-0">
-        {/* Main chart + oscillator panels stacked */}
-        <div className="flex-1 min-w-0 flex flex-col gap-2 min-h-0">
-          {/* Main candlestick chart */}
+        {/* Main chart + volume + oscillator panels stacked */}
+        <div className="flex-1 min-w-0 flex flex-col gap-1 min-h-0" ref={chartContainerRef}>
+          {/* Main chart */}
           <div className="flex-1 min-h-0 bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden relative">
             {loading && (
               <div className="absolute inset-0 bg-terminal-bg/50 flex items-center justify-center z-10">
@@ -239,8 +224,22 @@ export default function MarketPage() {
               </span>
             </div>
             <div className="h-[calc(100%-44px)]">
-              <TradingChart symbol={selectedSymbol} barSeconds={barSeconds} className="h-full" />
+              <TradingChart
+                symbol={selectedSymbol}
+                barSeconds={barSeconds}
+                className="h-full"
+                onChartReady={setMainChartApi}
+              />
             </div>
+          </div>
+
+          {/* Volume pane */}
+          <div className="h-[70px] shrink-0 bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden">
+            <VolumePanel
+              symbol={selectedSymbol}
+              mainChart={mainChartApi}
+              className="h-full"
+            />
           </div>
 
           {/* Oscillator sub-panels (RSI / MACD) */}

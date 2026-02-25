@@ -82,6 +82,7 @@ from models import (
 from order_executor import cancel_order, get_open_orders, on_fill, place_order
 from simulation import replay_engine, sim_engine
 from auth import create_token, get_current_user
+from indicators import calculate as ind_calculate, series_to_json
 from settings import get_settings, update_settings
 import bot_runner
 
@@ -837,8 +838,50 @@ async def get_watchlist_quotes(symbols: str = _DEFAULT_WATCHLIST):
     raise HTTPException(503, "No market data available")
 
 
+# ── Yahoo Finance interval validation ──────────────────────────────────────
+
+_VALID_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
+_UNSUPPORTED_INTERVALS = {"4h", "2h"}  # yfinance does not support these natively
+
+# period string → approximate days
+def _period_to_days(p: str) -> int:
+    p = p.lower()
+    if p.endswith("d"):   return int(p[:-1])
+    if p.endswith("mo"):  return int(p[:-2]) * 30
+    if p.endswith("y"):   return int(p[:-1]) * 365
+    return 9999  # "max" or unknown → unlimited
+
+# max period (in days) per interval
+_INTERVAL_MAX_DAYS = {
+    "1m":  7,
+    "2m":  60,
+    "5m":  60,
+    "15m": 60,
+    "30m": 60,
+    "60m": 730,
+    "90m": 60,
+    "1h":  730,
+}
+
+
 @app.get("/api/yahoo/{symbol}/bars")
 async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
+    # Validate interval
+    if interval in _UNSUPPORTED_INTERVALS:
+        raise HTTPException(400, f"Interval '{interval}' is not supported by Yahoo Finance. Use 1h instead.")
+    if interval not in _VALID_INTERVALS:
+        raise HTTPException(400, f"Invalid interval '{interval}'. Valid: {sorted(_VALID_INTERVALS)}")
+
+    # Validate period vs interval limits
+    max_days = _INTERVAL_MAX_DAYS.get(interval)
+    if max_days is not None:
+        req_days = _period_to_days(period)
+        if req_days > max_days:
+            raise HTTPException(
+                400,
+                f"{interval} interval requires period <= {max_days}d, but '{period}' ≈ {req_days}d",
+            )
+
     try:
         bars = await _yf_bars(symbol, period, interval)
         if bars:
@@ -852,6 +895,54 @@ async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
         return get_mock_ohlcv(symbol.upper(), num_bars=num, bar_seconds=sec)
 
     raise HTTPException(404, f"No data for {symbol}")
+
+
+# ── Server-side indicator endpoint ─────────────────────────────────────────
+
+@app.get("/api/market/{symbol}/indicators")
+async def get_indicators(
+    symbol: str,
+    indicator: str,
+    length: int = 0,
+    period: str = "1y",
+    interval: str = "1d",
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+    band: str = "mid",
+):
+    """Calculate a technical indicator server-side and return [{time, value}, ...]."""
+    import pandas as pd
+
+    bars = await _yf_bars(symbol.upper(), period, interval)
+    if not bars:
+        if cfg.MOCK_MODE:
+            num = 200 if "d" in interval else 300
+            sec = 86_400 if interval.endswith("d") else 300
+            bars = get_mock_ohlcv(symbol.upper(), num_bars=num, bar_seconds=sec)
+        if not bars:
+            raise HTTPException(404, f"No bar data for {symbol}")
+
+    df = pd.DataFrame(bars)
+
+    # Build params dict
+    params: dict[str, Any] = {}
+    ind = indicator.upper()
+    if length > 0:
+        params["length"] = length
+    if ind == "MACD":
+        params["fast"] = fast
+        params["slow"] = slow
+        params["signal"] = signal
+    if ind == "BBANDS":
+        params["band"] = band
+
+    try:
+        series = ind_calculate(df, ind, params)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    return series_to_json(series, df)
 
 
 # ---------------------------------------------------------------------------

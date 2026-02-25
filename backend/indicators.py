@@ -237,3 +237,22 @@ def resolve_value(
 
     log.warning("Unrecognised condition value '%s'", value)
     return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Serialization helper
+# ---------------------------------------------------------------------------
+
+def series_to_json(series: pd.Series, df: pd.DataFrame) -> list[dict]:
+    """
+    Convert a pandas Series to [{time, value}, ...] for JSON response.
+
+    Uses the 'time' column from df for timestamps.
+    Drops NaN values (indicator warmup period).
+    """
+    result = []
+    for idx, val in series.items():
+        if pd.notna(val):
+            t = df.at[idx, "time"] if "time" in df.columns else int(idx)
+            result.append({"time": int(t), "value": round(float(val), 6)})
+    return result

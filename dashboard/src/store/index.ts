@@ -13,6 +13,7 @@ import type {
   AnyAccount,
   AppRoute,
   BotStatus,
+  ChartType,
   MarketQuote,
   OHLCVBar,
   OpenOrder,
@@ -48,6 +49,7 @@ interface MarketState {
   lastUpdated:      number | null
 
   selectedIndicators: IndicatorId[]
+  chartType:          ChartType
 
   setQuotes:          (quotes: MarketQuote[]) => void
   updateQuote:        (q: MarketQuote) => void
@@ -58,6 +60,7 @@ interface MarketState {
   setCompSymbol:      (symbol: string) => void
   toggleCompMode:     () => void
   toggleIndicator:    (id: IndicatorId) => void
+  setChartType:       (ct: ChartType) => void
   addWatchlist:       (name: string) => void
   removeWatchlist:    (id: string) => void
   addToWatchlist:     (listId: string, symbol: string) => void
@@ -85,6 +88,7 @@ export const useMarketStore = create<MarketState>((set, get) => ({
   loading:            false,
   lastUpdated:        null,
   selectedIndicators: [],
+  chartType:          'candlestick',
 
   setQuotes: (quotes) => {
     const map: Record<string, MarketQuote> = {}
@@ -117,6 +121,7 @@ export const useMarketStore = create<MarketState>((set, get) => ({
         ? s.selectedIndicators.filter((x) => x !== id)
         : [...s.selectedIndicators, id],
     })),
+  setChartType: (ct) => set({ chartType: ct }),
 
   addWatchlist: (name) =>
     set((s) => ({

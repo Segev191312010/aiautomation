@@ -155,3 +155,21 @@ export const fetchAuthMe    = () => get<User>('/api/auth/me')
 
 export const fetchSettings  = () => get<UserSettings>('/api/settings')
 export const updateSettings = (partial: Partial<UserSettings>) => put<UserSettings>('/api/settings', partial)
+
+// ── Indicators ──────────────────────────────────────────────────────────
+
+export const fetchIndicatorData = (
+  symbol: string,
+  indicator: string,
+  params: { length?: number; period?: string; interval?: string; fast?: number; slow?: number; signal?: number; band?: string } = {},
+) => {
+  const qs = new URLSearchParams({ indicator })
+  if (params.length)   qs.set('length',   String(params.length))
+  if (params.period)   qs.set('period',   params.period)
+  if (params.interval) qs.set('interval', params.interval)
+  if (params.fast)     qs.set('fast',     String(params.fast))
+  if (params.slow)     qs.set('slow',     String(params.slow))
+  if (params.signal)   qs.set('signal',   String(params.signal))
+  if (params.band)     qs.set('band',     params.band)
+  return get<Array<{ time: number; value: number }>>(`/api/market/${symbol}/indicators?${qs}`)
+}

@@ -235,6 +235,17 @@ export interface WatchlistSort {
 
 export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'simulation' | 'rules' | 'settings'
 
+// ── Chart types ─────────────────────────────────────────────────────────────
+
+export type ChartType = 'candlestick' | 'ohlc' | 'line' | 'area' | 'baseline' | 'heikin-ashi'
+
+export interface TradeMarker {
+  time:    number          // Unix seconds
+  action:  'BUY' | 'SELL'
+  price:   number
+  label?:  string          // e.g., "RSI < 30"
+}
+
 // ── Auth / Settings ──────────────────────────────────────────────────────
 
 export interface User {

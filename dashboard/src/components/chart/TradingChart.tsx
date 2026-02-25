@@ -2,26 +2,28 @@
  * TradingChart — wraps TradingView lightweight-charts.
  *
  * Features:
- *  • Candlestick + volume histogram
+ *  • Multiple chart types: Candlestick, OHLC, Line, Area, Baseline, Heikin-Ashi
  *  • Live candle updates via /ws/market-data WebSocket
  *  • Overlay indicators: SMA 20/50, EMA 12/26, Bollinger Bands, VWAP
  *  • Optional comparison overlay (normalized %)
  *  • Replay bar injection (live bars from WebSocket during simulation)
- *  • Responsive resize via ResizeObserver
+ *  • Responsive resize via useChart hook
+ *
+ * Volume is rendered separately by VolumePanel (removed from this component).
  */
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
 import {
-  createChart,
   type IChartApi,
   type ISeriesApi,
   type CandlestickSeriesOptions,
-  type HistogramSeriesOptions,
+  type BarSeriesOptions,
   type LineSeriesOptions,
-  ColorType,
-  CrosshairMode,
+  type AreaSeriesOptions,
+  type BaselineSeriesOptions,
   LineStyle,
 } from 'lightweight-charts'
 import clsx from 'clsx'
+import { useChart, CHART_THEME } from '@/hooks/useChart'
 import { useMarketStore, useSimStore } from '@/store'
 import { wsMdService } from '@/services/ws'
 import {
@@ -30,29 +32,11 @@ import {
   type IndicatorId,
   type LinePoint,
 } from '@/utils/indicators'
-import type { OHLCVBar } from '@/types'
+import { toHeikinAshi } from '@/utils/heikinAshi'
+import type { OHLCVBar, ChartType } from '@/types'
 
-// ── Chart theme ───────────────────────────────────────────────────────────────
-
-const CHART_OPTS = {
-  layout: {
-    background:  { type: ColorType.Solid, color: '#080d18' },
-    textColor:   '#5f7a9d',
-    fontFamily:  '"JetBrains Mono", ui-monospace, monospace',
-    fontSize:    11,
-  },
-  grid: {
-    vertLines: { color: '#111f35' },
-    horzLines: { color: '#111f35' },
-  },
-  crosshair: {
-    mode:     CrosshairMode.Normal,
-    vertLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
-    horzLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
-  },
-  rightPriceScale: { borderColor: '#1c2e4a' },
-  timeScale:       { borderColor: '#1c2e4a', timeVisible: true, secondsVisible: false },
-} as const
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyData = any
 
 // ── Normalization for comparison overlay ──────────────────────────────────────
 
@@ -92,13 +76,108 @@ function makeLineSeries(
   } as Partial<LineSeriesOptions>)
 }
 
+// ── Series creation per chart type ──────────────────────────────────────────
+
+function createMainSeries(chart: IChartApi, chartType: ChartType): ISeriesApi<AnyData> {
+  switch (chartType) {
+    case 'candlestick':
+    case 'heikin-ashi':
+      return chart.addCandlestickSeries({
+        upColor:         '#00e07a',
+        downColor:       '#ff3d5a',
+        borderUpColor:   '#00e07a',
+        borderDownColor: '#ff3d5a',
+        wickUpColor:     '#00874a',
+        wickDownColor:   '#992438',
+      } as Partial<CandlestickSeriesOptions>)
+
+    case 'ohlc':
+      return chart.addBarSeries({
+        upColor:   '#00e07a',
+        downColor: '#ff3d5a',
+      } as Partial<BarSeriesOptions>)
+
+    case 'line':
+      return chart.addLineSeries({
+        color:            '#4f91ff',
+        lineWidth:        2,
+        priceLineVisible: true,
+      } as Partial<LineSeriesOptions>)
+
+    case 'area':
+      return chart.addAreaSeries({
+        topColor:    '#4f91ff33',
+        bottomColor: '#4f91ff05',
+        lineColor:   '#4f91ff',
+        lineWidth:   2,
+      } as Partial<AreaSeriesOptions>)
+
+    case 'baseline':
+      return chart.addBaselineSeries({
+        topFillColor1:    '#00e07a33',
+        topFillColor2:    '#00e07a05',
+        topLineColor:     '#00e07a',
+        bottomFillColor1: '#ff3d5a05',
+        bottomFillColor2: '#ff3d5a33',
+        bottomLineColor:  '#ff3d5a',
+        baseValue:        { type: 'price', price: 0 },
+      } as Partial<BaselineSeriesOptions>)
+
+    default:
+      return chart.addCandlestickSeries({
+        upColor:         '#00e07a',
+        downColor:       '#ff3d5a',
+        borderUpColor:   '#00e07a',
+        borderDownColor: '#ff3d5a',
+        wickUpColor:     '#00874a',
+        wickDownColor:   '#992438',
+      } as Partial<CandlestickSeriesOptions>)
+  }
+}
+
+// ── Data loading per chart type ─────────────────────────────────────────────
+
+function loadDataIntoSeries(
+  series: ISeriesApi<AnyData>,
+  bars: OHLCVBar[],
+  chartType: ChartType,
+): void {
+  const limited = bars.slice(-5000)
+  const barsToUse = chartType === 'heikin-ashi' ? toHeikinAshi(limited) : limited
+
+  if (chartType === 'line' || chartType === 'area') {
+    const data = barsToUse.map((b) => ({ time: b.time as unknown, value: b.close }))
+    try { series.setData(data as AnyData) } catch { /* stale */ }
+  } else if (chartType === 'baseline') {
+    const data = barsToUse.map((b) => ({ time: b.time as unknown, value: b.close }))
+    try {
+      series.applyOptions({
+        baseValue: { type: 'price', price: barsToUse[0]?.close ?? 0 },
+      } as AnyData)
+      series.setData(data as AnyData)
+    } catch { /* stale */ }
+  } else {
+    // OHLC data: candlestick, ohlc, heikin-ashi
+    const data = barsToUse.map((b) => ({
+      time: b.time as unknown, open: b.open, high: b.high, low: b.low, close: b.close,
+    }))
+    try { series.setData(data as AnyData) } catch { /* stale */ }
+  }
+}
+
+// ── Is this chart type single-value (line/area/baseline)? ───────────────────
+
+function isSingleValue(ct: ChartType): boolean {
+  return ct === 'line' || ct === 'area' || ct === 'baseline'
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 interface Props {
-  symbol:      string
-  className?:  string
-  /** Seconds per bar — used to slot live WS quotes into the correct candle. Default 86400 (1 day). */
-  barSeconds?: number
+  symbol:       string
+  className?:   string
+  barSeconds?:  number
+  onChartReady?: (chart: IChartApi) => void
 }
 
 interface LiveBar {
@@ -109,113 +188,104 @@ interface LiveBar {
   close: number
 }
 
-export default function TradingChart({ symbol, className, barSeconds = 86_400 }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const chartRef     = useRef<IChartApi | null>(null)
-  const candleRef    = useRef<ISeriesApi<'Candlestick'> | null>(null)
-  const volumeRef    = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const compRef      = useRef<ISeriesApi<'Line'> | null>(null)
-  const liveBarRef   = useRef<LiveBar | null>(null)
+export default function TradingChart({ symbol, className, barSeconds = 86_400, onChartReady }: Props) {
+  const { containerRef, chartRef } = useChart({ options: CHART_THEME })
 
-  // Map: indicatorId → array of series (BB has 3, others have 1)
-  const indSeriesRef = useRef<Map<string, ISeriesApi<'Line'>[]>>(new Map())
+  const mainSeriesRef = useRef<ISeriesApi<AnyData> | null>(null)
+  const compRef       = useRef<ISeriesApi<'Line'> | null>(null)
+  const liveBarRef    = useRef<LiveBar | null>(null)
+  const indSeriesRef  = useRef<Map<string, ISeriesApi<'Line'>[]>>(new Map())
+  const chartTypeRef  = useRef<ChartType>('candlestick')
 
-  const bars              = useMarketStore((s) => s.bars[symbol] ?? [])
-  const compSymbol        = useMarketStore((s) => s.compSymbol)
-  const compBars          = useMarketStore((s) => s.compBars[compSymbol] ?? [])
-  const compMode          = useMarketStore((s) => s.compMode)
-  const selectedIndicators= useMarketStore((s) => s.selectedIndicators)
-  const replayBars        = useSimStore((s) => s.replayBars)
+  const bars               = useMarketStore((s) => s.bars[symbol] ?? [])
+  const chartType          = useMarketStore((s) => s.chartType)
+  const compSymbol         = useMarketStore((s) => s.compSymbol)
+  const compBars           = useMarketStore((s) => s.compBars[compSymbol] ?? [])
+  const compMode           = useMarketStore((s) => s.compMode)
+  const selectedIndicators = useMarketStore((s) => s.selectedIndicators)
+  const replayBars         = useSimStore((s) => s.replayBars)
 
-  // ── Init chart ────────────────────────────────────────────────────────────
+  // Keep ref in sync for use in callbacks
+  chartTypeRef.current = chartType
+
+  // ── Notify parent of chart instance ─────────────────────────────────────
+
+  const onChartReadyRef = useRef(onChartReady)
+  onChartReadyRef.current = onChartReady
 
   useEffect(() => {
-    if (!containerRef.current) return
-
-    const chart = createChart(containerRef.current, {
-      ...CHART_OPTS,
-      width:  containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight,
-    })
-    chartRef.current = chart
-
-    // Candlestick series
-    const candle = chart.addCandlestickSeries({
-      upColor:         '#00e07a',
-      downColor:       '#ff3d5a',
-      borderUpColor:   '#00e07a',
-      borderDownColor: '#ff3d5a',
-      wickUpColor:     '#00874a',
-      wickDownColor:   '#992438',
-    } as Partial<CandlestickSeriesOptions>)
-    candleRef.current = candle
-
-    // Volume histogram
-    const volume = chart.addHistogramSeries({
-      color:        '#1c2e4a',
-      priceFormat:  { type: 'volume' },
-      priceScaleId: 'volume',
-    } as Partial<HistogramSeriesOptions>)
-    volume.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
-    volumeRef.current = volume
-
-    // ResizeObserver
-    const ro = new ResizeObserver(() => {
-      if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width:  containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        })
-      }
-    })
-    ro.observe(containerRef.current)
-
-    return () => {
-      ro.disconnect()
-      indSeriesRef.current.clear()
-      chart.remove()
-      chartRef.current    = null
-      candleRef.current   = null
-      volumeRef.current   = null
-      compRef.current     = null
-      liveBarRef.current  = null
+    if (chartRef.current && onChartReadyRef.current) {
+      onChartReadyRef.current(chartRef.current)
     }
-  }, [])
+  }, [chartRef])
 
-  // ── Load bars ─────────────────────────────────────────────────────────────
+  // ── Create initial main series ──────────────────────────────────────────
 
   useEffect(() => {
-    if (!candleRef.current || !volumeRef.current || !bars.length) return
+    const chart = chartRef.current
+    if (!chart) return
 
-    const candleData = bars.map((b) => ({
-      time: b.time as unknown, open: b.open, high: b.high, low: b.low, close: b.close,
-    }))
-    const volumeData = bars.map((b) => ({
-      time:  b.time as unknown,
-      value: b.volume,
-      color: b.close >= b.open ? '#00874a33' : '#99243833',
-    }))
+    mainSeriesRef.current = createMainSeries(chart, chartType)
 
-    try {
-      candleRef.current.setData(candleData as Parameters<typeof candleRef.current.setData>[0])
-      volumeRef.current.setData(volumeData as Parameters<typeof volumeRef.current.setData>[0])
-      chartRef.current?.timeScale().fitContent()
-    } catch { /* ignore stale */ }
+    if (bars.length) {
+      loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
+      chart.timeScale().fitContent()
+    }
+
+    // Notify parent after series creation
+    if (onChartReadyRef.current) {
+      onChartReadyRef.current(chart)
+    }
+  }, [chartRef]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Recreate main series when chartType changes ─────────────────────────
+
+  const prevChartType = useRef(chartType)
+  useEffect(() => {
+    if (prevChartType.current === chartType) return
+    prevChartType.current = chartType
+
+    const chart = chartRef.current
+    if (!chart) return
+
+    // Remove old series
+    if (mainSeriesRef.current) {
+      try { chart.removeSeries(mainSeriesRef.current) } catch { /* */ }
+      mainSeriesRef.current = null
+    }
+
+    // Create new series
+    mainSeriesRef.current = createMainSeries(chart, chartType)
+
+    // Reload data
+    if (bars.length) {
+      loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
+      chart.timeScale().fitContent()
+    }
+  }, [chartType, bars, chartRef])
+
+  // ── Load bars ───────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!mainSeriesRef.current || !bars.length) return
+
+    loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
+    chartRef.current?.timeScale().fitContent()
 
     // Seed live bar from last loaded bar
     const last = bars[bars.length - 1]
     liveBarRef.current = {
       time: last.time, open: last.open, high: last.high, low: last.low, close: last.close,
     }
-  }, [bars])
+  }, [bars]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Live candle via WebSocket ─────────────────────────────────────────────
+  // ── Live candle via WebSocket ───────────────────────────────────────────
 
   useEffect(() => {
     if (!bars.length) return
 
     const unsub = wsMdService.subscribe(symbol, (msg) => {
-      if (!candleRef.current) return
+      if (!mainSeriesRef.current) return
       const price   = msg.price
       const nowSecs = msg.time ?? Math.floor(Date.now() / 1000)
       const barTime = Math.floor(nowSecs / barSeconds) * barSeconds
@@ -230,32 +300,45 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400 }:
       }
 
       try {
-        candleRef.current.update({
-          time:  liveBarRef.current!.time  as unknown,
-          open:  liveBarRef.current!.open,
-          high:  liveBarRef.current!.high,
-          low:   liveBarRef.current!.low,
-          close: liveBarRef.current!.close,
-        } as Parameters<typeof candleRef.current.update>[0])
+        if (isSingleValue(chartTypeRef.current)) {
+          mainSeriesRef.current!.update({
+            time:  liveBarRef.current!.time as unknown,
+            value: liveBarRef.current!.close,
+          } as AnyData)
+        } else {
+          mainSeriesRef.current!.update({
+            time:  liveBarRef.current!.time  as unknown,
+            open:  liveBarRef.current!.open,
+            high:  liveBarRef.current!.high,
+            low:   liveBarRef.current!.low,
+            close: liveBarRef.current!.close,
+          } as AnyData)
+        }
       } catch { /* ignore */ }
     })
 
     return unsub
   }, [symbol, barSeconds, bars.length])
 
-  // ── Replay bars (injected live) ───────────────────────────────────────────
+  // ── Replay bars (injected live) ─────────────────────────────────────────
 
   useEffect(() => {
-    if (!candleRef.current || !replayBars.length) return
+    if (!mainSeriesRef.current || !replayBars.length) return
     const last = replayBars[replayBars.length - 1]
     try {
-      candleRef.current.update({
-        time: last.time as unknown, open: last.open, high: last.high, low: last.low, close: last.close,
-      } as Parameters<typeof candleRef.current.update>[0])
+      if (isSingleValue(chartTypeRef.current)) {
+        mainSeriesRef.current.update({
+          time: last.time as unknown, value: last.close,
+        } as AnyData)
+      } else {
+        mainSeriesRef.current.update({
+          time: last.time as unknown, open: last.open, high: last.high, low: last.low, close: last.close,
+        } as AnyData)
+      }
     } catch { /* ignore */ }
   }, [replayBars])
 
-  // ── Overlay indicators ────────────────────────────────────────────────────
+  // ── Overlay indicators ──────────────────────────────────────────────────
 
   useEffect(() => {
     const chart = chartRef.current
@@ -283,9 +366,9 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400 }:
       // Always update data when bars change
       _setOverlayData(id, indSeriesRef.current.get(id)!, bars)
     }
-  }, [bars, selectedIndicators, compMode])
+  }, [bars, selectedIndicators, compMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Comparison overlay ────────────────────────────────────────────────────
+  // ── Comparison overlay ──────────────────────────────────────────────────
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -307,20 +390,25 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400 }:
     const normComp = normalizeBars(compBars)
     const data = normComp.map((b) => ({ time: b.time as unknown, value: b.close }))
     try {
-      comp.setData(data as Parameters<typeof comp.setData>[0])
+      comp.setData(data as AnyData)
     } catch { /* */ }
 
     const normMain = normalizeBars(bars)
-    const mainData = normMain.map((b) => ({
-      time: b.time as unknown, open: b.open, high: b.high, low: b.low, close: b.close,
-    }))
-    try {
-      candleRef.current?.setData(mainData as Parameters<typeof candleRef.current.setData>[0])
-    } catch { /* */ }
-  }, [compMode, compBars, bars])
+    if (mainSeriesRef.current) {
+      if (isSingleValue(chartTypeRef.current)) {
+        const mainData = normMain.map((b) => ({ time: b.time as unknown, value: b.close }))
+        try { mainSeriesRef.current.setData(mainData as AnyData) } catch { /* */ }
+      } else {
+        const mainData = normMain.map((b) => ({
+          time: b.time as unknown, open: b.open, high: b.high, low: b.low, close: b.close,
+        }))
+        try { mainSeriesRef.current.setData(mainData as AnyData) } catch { /* */ }
+      }
+    }
+  }, [compMode, compBars, bars]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className={clsx('relative w-full h-full', className)}>
+    <div className={clsx('relative w-full h-full', className)} style={{ touchAction: 'none' }}>
       <div ref={containerRef} className="w-full h-full" />
     </div>
   )
@@ -342,9 +430,6 @@ function _createOverlaySeries(
   }
   return [makeLineSeries(chart, color, id.startsWith('sma') ? 1 : 2)]
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyData = any
 
 function _setOverlayData(
   id: string,

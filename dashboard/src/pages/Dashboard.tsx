@@ -46,7 +46,7 @@ export default function Dashboard() {
           {/* Chart header */}
           <div className="flex items-center gap-3 px-4 py-2.5 border-b border-terminal-border">
             <span className="font-mono font-bold text-terminal-text">{selectedSymbol}</span>
-            <span className="text-[10px] font-mono text-terminal-ghost uppercase">Candlestick · 1D</span>
+            <span className="text-[10px] font-mono text-terminal-ghost uppercase">{useMarketStore.getState().chartType} · 1D</span>
 
             {/* Comparison toggle */}
             <div className="ml-auto flex items-center gap-2">
