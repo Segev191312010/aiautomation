@@ -11,7 +11,7 @@
  *
  * Volume is rendered separately by VolumePanel (removed from this component).
  */
-import { useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useCallback, useState } from 'react'
 import {
   type IChartApi,
   type ISeriesApi,
@@ -33,6 +33,7 @@ import {
   type LinePoint,
 } from '@/utils/indicators'
 import { toHeikinAshi } from '@/utils/heikinAshi'
+import DrawingCanvas from '@/components/chart/DrawingCanvas'
 import type { OHLCVBar, ChartType } from '@/types'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -177,7 +178,8 @@ interface Props {
   symbol:       string
   className?:   string
   barSeconds?:  number
-  onChartReady?: (chart: IChartApi) => void
+  timeframe?:   string
+  onChartReady?: (chart: IChartApi, series: ISeriesApi<AnyData>) => void
 }
 
 interface LiveBar {
@@ -188,8 +190,9 @@ interface LiveBar {
   close: number
 }
 
-export default function TradingChart({ symbol, className, barSeconds = 86_400, onChartReady }: Props) {
+export default function TradingChart({ symbol, className, barSeconds = 86_400, timeframe = '1d', onChartReady }: Props) {
   const { containerRef, chartRef } = useChart({ options: CHART_THEME })
+  const [chartReady, setChartReady] = useState(false)
 
   const mainSeriesRef = useRef<ISeriesApi<AnyData> | null>(null)
   const compRef       = useRef<ISeriesApi<'Line'> | null>(null)
@@ -214,8 +217,8 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, o
   onChartReadyRef.current = onChartReady
 
   useEffect(() => {
-    if (chartRef.current && onChartReadyRef.current) {
-      onChartReadyRef.current(chartRef.current)
+    if (chartRef.current && mainSeriesRef.current && onChartReadyRef.current) {
+      onChartReadyRef.current(chartRef.current, mainSeriesRef.current)
     }
   }, [chartRef])
 
@@ -233,8 +236,9 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, o
     }
 
     // Notify parent after series creation
-    if (onChartReadyRef.current) {
-      onChartReadyRef.current(chart)
+    setChartReady(true)
+    if (onChartReadyRef.current && mainSeriesRef.current) {
+      onChartReadyRef.current(chart, mainSeriesRef.current)
     }
   }, [chartRef]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -410,6 +414,15 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, o
   return (
     <div className={clsx('relative w-full h-full', className)} style={{ touchAction: 'none' }}>
       <div ref={containerRef} className="w-full h-full" />
+      {chartReady && chartRef.current && mainSeriesRef.current && (
+        <DrawingCanvas
+          key={`${symbol}_${timeframe}_${chartType}`}
+          chart={chartRef.current}
+          series={mainSeriesRef.current}
+          symbol={symbol}
+          timeframe={timeframe}
+        />
+      )}
     </div>
   )
 }

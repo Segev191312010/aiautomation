@@ -246,6 +246,17 @@ export interface TradeMarker {
   label?:  string          // e.g., "RSI < 30"
 }
 
+// ── Drawing types ───────────────────────────────────────────────────────
+
+export type {
+  DrawingType,
+  DrawingPoint,
+  DrawingOptions,
+  Drawing,
+  DrawingToolState,
+  HitTestResult,
+} from './drawing'
+
 // ── Auth / Settings ──────────────────────────────────────────────────────
 
 export interface User {
