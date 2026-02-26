@@ -52,7 +52,7 @@ export const PANEL_THEME: DeepPartial<ChartOptions> = {
   crosshair: {
     mode:     CrosshairMode.Normal,
     vertLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
-    horzLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
+    horzLine: { visible: false },
   },
   rightPriceScale: { borderColor: '#1c2e4a' },
   timeScale:       { borderColor: '#1c2e4a', timeVisible: true, secondsVisible: false, visible: false },

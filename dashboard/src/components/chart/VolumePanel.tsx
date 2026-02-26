@@ -15,12 +15,13 @@ import type { OHLCVBar } from '@/types'
 type AnyData = any
 
 interface Props {
-  symbol:     string
-  mainChart?: IChartApi | null
-  className?: string
+  symbol:       string
+  mainChart?:   IChartApi | null
+  className?:   string
+  onChartReady?: (chart: IChartApi, series: ISeriesApi<'Histogram'>) => void
 }
 
-export default function VolumePanel({ symbol, mainChart, className }: Props) {
+export default function VolumePanel({ symbol, mainChart, className, onChartReady }: Props) {
   const { containerRef, chartRef } = useChart({
     options: {
       ...PANEL_THEME,
@@ -31,6 +32,8 @@ export default function VolumePanel({ symbol, mainChart, className }: Props) {
     },
   })
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const onChartReadyRef = useRef(onChartReady)
+  onChartReadyRef.current = onChartReady
   const bars = useMarketStore((s) => s.bars[symbol] ?? [])
 
   // Create volume series once
@@ -43,6 +46,7 @@ export default function VolumePanel({ symbol, mainChart, className }: Props) {
       priceFormat: { type: 'volume' },
     } as AnyData)
     volumeRef.current = vol
+    onChartReadyRef.current?.(chart, vol)
 
     return () => {
       volumeRef.current = null

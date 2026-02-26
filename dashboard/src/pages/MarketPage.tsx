@@ -5,20 +5,23 @@
  * Bars auto-refresh on an interval (faster for intraday, slower for daily+).
  * Live candle updates arrive via /ws/market-data WebSocket.
  */
-import { useState, useEffect, useRef } from 'react'
-import type { IChartApi } from 'lightweight-charts'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import type { IChartApi, ISeriesApi } from 'lightweight-charts'
 import clsx from 'clsx'
 import TradingChart from '@/components/chart/TradingChart'
 import VolumePanel from '@/components/chart/VolumePanel'
 import IndicatorPanel from '@/components/chart/IndicatorPanel'
 import ChartToolbar, { TOOLBAR_TIMEFRAMES } from '@/components/chart/ChartToolbar'
+import DrawingTools from '@/components/chart/DrawingTools'
+import ResizeHandle from '@/components/chart/ResizeHandle'
 import TickerCard from '@/components/ticker/TickerCard'
 import Skeleton from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/ToastProvider'
-import { useMarketStore } from '@/store'
-import { fetchYahooBars } from '@/services/api'
+import { useMarketStore, useDrawingStore } from '@/store'
+import { fetchYahooBars, fetchSettings } from '@/services/api'
 import { getMockBars } from '@/services/mockService'
-import { intervalToSeconds } from '@/utils/indicators'
+import { intervalToSeconds, calcRSI, calcMACD } from '@/utils/indicators'
+import { useCrosshairSync, type ChartPane } from '@/hooks/useCrosshairSync'
 
 // ── Auto-refresh intervals ──────────────────────────────────────────────────
 
@@ -56,9 +59,117 @@ export default function MarketPage() {
   const [mainChartApi, setMainChartApi] = useState<IChartApi | null>(null)
   const chartContainerRef          = useRef<HTMLDivElement>(null)
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type AnySeries = ISeriesApi<any>
+
+  // Pane refs for crosshair sync
+  const [mainSeries, setMainSeries]   = useState<AnySeries | null>(null)
+  const [volChart, setVolChart]       = useState<IChartApi | null>(null)
+  const [volSeries, setVolSeries]     = useState<AnySeries | null>(null)
+  const [rsiChart, setRsiChart]       = useState<IChartApi | null>(null)
+  const [rsiSeries, setRsiSeries]     = useState<AnySeries | null>(null)
+  const [macdChart, setMacdChart]     = useState<IChartApi | null>(null)
+  const [macdSeries, setMacdSeries]   = useState<AnySeries | null>(null)
+
+  const loadDrawings = useDrawingStore((s) => s.loadDrawings)
+
   const quote      = quotes[selectedSymbol]
   const currentTF  = TOOLBAR_TIMEFRAMES[tfIdx]
   const barSeconds = intervalToSeconds(currentTF.interval)
+  const bars       = useMarketStore((s) => s.bars[selectedSymbol] ?? [])
+
+  // Build time→price data maps for crosshair sync
+  const mainDataMap = useMemo(() => {
+    const m = new Map<number, number>()
+    for (const b of bars) m.set(b.time, b.close)
+    return m
+  }, [bars])
+
+  const volDataMap = useMemo(() => {
+    const m = new Map<number, number>()
+    for (const b of bars) m.set(b.time, b.volume)
+    return m
+  }, [bars])
+
+  const rsiDataMap = useMemo(() => {
+    const m = new Map<number, number>()
+    if (!bars.length) return m
+    for (const pt of calcRSI(bars, 14)) m.set(pt.time, pt.value)
+    return m
+  }, [bars])
+
+  const macdDataMap = useMemo(() => {
+    const m = new Map<number, number>()
+    if (!bars.length) return m
+    for (const pt of calcMACD(bars).macd) m.set(pt.time, pt.value)
+    return m
+  }, [bars])
+
+  // Assemble panes for crosshair sync
+  const mainPane: ChartPane | null = mainChartApi && mainSeries
+    ? { chart: mainChartApi, series: mainSeries, data: mainDataMap } : null
+  const volPane: ChartPane | null = volChart && volSeries
+    ? { chart: volChart, series: volSeries, data: volDataMap } : null
+  const rsiPane: ChartPane | null = rsiChart && rsiSeries
+    ? { chart: rsiChart, series: rsiSeries, data: rsiDataMap } : null
+  const macdPane: ChartPane | null = macdChart && macdSeries
+    ? { chart: macdChart, series: macdSeries, data: macdDataMap } : null
+
+  // Clear stale chart refs when indicators are toggled off
+  const selectedIndicators = useMarketStore((s) => s.selectedIndicators)
+  useEffect(() => {
+    if (!selectedIndicators.includes('rsi')) {
+      setRsiChart(null)
+      setRsiSeries(null)
+    }
+    if (!selectedIndicators.includes('macd')) {
+      setMacdChart(null)
+      setMacdSeries(null)
+    }
+  }, [selectedIndicators])
+
+  useCrosshairSync([mainPane, volPane, rsiPane, macdPane])
+
+  // Callbacks for pane chart-ready events
+  const handleMainChartReady = useCallback((chart: IChartApi, series: AnySeries) => {
+    setMainChartApi(chart)
+    setMainSeries(series)
+  }, [])
+
+  const handleVolReady = useCallback((chart: IChartApi, series: AnySeries) => {
+    setVolChart(chart)
+    setVolSeries(series)
+  }, [])
+
+  const handleRsiReady = useCallback((chart: IChartApi, series: AnySeries) => {
+    setRsiChart(chart)
+    setRsiSeries(series)
+  }, [])
+
+  const handleMacdReady = useCallback((chart: IChartApi, series: AnySeries) => {
+    setMacdChart(chart)
+    setMacdSeries(series)
+  }, [])
+
+  // ── Resizable pane heights ──────────────────────────────────────────────
+
+  const DEFAULT_VOL_HEIGHT = 70
+  const DEFAULT_IND_HEIGHT = 144
+  const [volumeHeight, setVolumeHeight]       = useState(DEFAULT_VOL_HEIGHT)
+  const [indicatorHeight, setIndicatorHeight] = useState(DEFAULT_IND_HEIGHT)
+
+  const handleVolResize = useCallback((dy: number) => {
+    // Drag down → handle moves down → pane below (volume) shrinks → subtract dy
+    setVolumeHeight((h) => Math.min(150, Math.max(40, h - dy)))
+  }, [])
+
+  const handleIndResize = useCallback((dy: number) => {
+    // Drag down → handle moves down → pane below (indicators) shrinks → subtract dy
+    setIndicatorHeight((h) => Math.min(300, Math.max(80, h - dy)))
+  }, [])
+
+  const resetVolHeight = useCallback(() => setVolumeHeight(DEFAULT_VOL_HEIGHT), [])
+  const resetIndHeight = useCallback(() => setIndicatorHeight(DEFAULT_IND_HEIGHT), [])
 
   // ── Bar loading ───────────────────────────────────────────────────────────
 
@@ -115,6 +226,17 @@ export default function MarketPage() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol, tfIdx])
+
+  // ── Load saved drawings from settings ─────────────────────────────────────
+
+  useEffect(() => {
+    fetchSettings()
+      .then((s) => {
+        if (s.drawings) loadDrawings(s.drawings as Record<string, import('@/types/drawing').Drawing[]>)
+      })
+      .catch(() => { /* drawings failed to load — non-critical */ })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -197,6 +319,9 @@ export default function MarketPage() {
         isLoading={loading}
       />
 
+      {/* ── Row 2b: drawing tools ──────────────────────────────────── */}
+      <DrawingTools symbol={selectedSymbol} timeframe={currentTF.interval} />
+
       {/* ── Chart + quote card ──────────────────────────────────────── */}
       <div className="flex gap-4 flex-1 min-h-0">
         {/* Main chart + volume + oscillator panels stacked */}
@@ -227,25 +352,40 @@ export default function MarketPage() {
               <TradingChart
                 symbol={selectedSymbol}
                 barSeconds={barSeconds}
+                timeframe={currentTF.interval}
                 className="h-full"
-                onChartReady={setMainChartApi}
+                onChartReady={handleMainChartReady}
               />
             </div>
           </div>
 
+          {/* Resize handle: main ↔ volume */}
+          <ResizeHandle onDelta={handleVolResize} onDoubleClick={resetVolHeight} />
+
           {/* Volume pane */}
-          <div className="h-[70px] shrink-0 bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden">
+          <div
+            className="shrink-0 bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden"
+            style={{ height: volumeHeight }}
+          >
             <VolumePanel
               symbol={selectedSymbol}
               mainChart={mainChartApi}
+              onChartReady={handleVolReady}
               className="h-full"
             />
           </div>
 
+          {/* Resize handle: volume ↔ indicators */}
+          <ResizeHandle onDelta={handleIndResize} onDoubleClick={resetIndHeight} />
+
           {/* Oscillator sub-panels (RSI / MACD) */}
           <IndicatorPanel
             symbol={selectedSymbol}
-            className="h-36 shrink-0"
+            mainChart={mainChartApi}
+            onRSIReady={handleRsiReady}
+            onMACDReady={handleMacdReady}
+            className="shrink-0"
+            style={{ height: indicatorHeight }}
           />
         </div>
 

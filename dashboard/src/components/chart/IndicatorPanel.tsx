@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef } from 'react'
 import {
+  type IChartApi,
   type ISeriesApi,
   type LineSeriesOptions,
   type HistogramSeriesOptions,
@@ -24,13 +25,20 @@ function toTV(pts: LinePoint[]): AnyData {
 
 // ── RSI Sub-chart ─────────────────────────────────────────────────────────────
 
-interface RSIPanelProps { symbol: string; className?: string }
+interface RSIPanelProps {
+  symbol:        string
+  mainChart?:    IChartApi | null
+  className?:    string
+  onChartReady?: (chart: IChartApi, series: ISeriesApi<'Line'>) => void
+}
 
-export function RSIPanel({ symbol, className }: RSIPanelProps) {
+export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPanelProps) {
   const { containerRef, chartRef } = useChart({ options: PANEL_THEME })
   const rsiRef  = useRef<ISeriesApi<'Line'> | null>(null)
   const ob70Ref = useRef<ISeriesApi<'Line'> | null>(null)
   const os30Ref = useRef<ISeriesApi<'Line'> | null>(null)
+  const onChartReadyRef = useRef(onChartReady)
+  onChartReadyRef.current = onChartReady
 
   const bars = useMarketStore((s) => s.bars[symbol] ?? [])
 
@@ -55,6 +63,8 @@ export function RSIPanel({ symbol, className }: RSIPanelProps) {
     ob70Ref.current = chart.addLineSeries({ ...refOpts, color: '#ff3d5a44' })
     os30Ref.current = chart.addLineSeries({ ...refOpts, color: '#00e07a44' })
 
+    onChartReadyRef.current?.(chart, rsiRef.current)
+
     return () => {
       rsiRef.current = ob70Ref.current = os30Ref.current = null
     }
@@ -74,6 +84,41 @@ export function RSIPanel({ symbol, className }: RSIPanelProps) {
     } catch { /* ignore */ }
   }, [bars, chartRef])
 
+  // Sync time axis with main chart (bidirectional)
+  useEffect(() => {
+    if (!mainChart || !chartRef.current) return
+    const panelChart = chartRef.current
+    const syncingRef = { current: false }
+
+    const onMainRangeChange = (range: AnyData) => {
+      if (syncingRef.current || !range) return
+      syncingRef.current = true
+      setTimeout(() => {
+        try { panelChart.timeScale().setVisibleLogicalRange(range) } catch { /* */ }
+        syncingRef.current = false
+      }, 0)
+    }
+
+    const onPanelRangeChange = (range: AnyData) => {
+      if (syncingRef.current || !range) return
+      syncingRef.current = true
+      setTimeout(() => {
+        try { mainChart.timeScale().setVisibleLogicalRange(range) } catch { /* */ }
+        syncingRef.current = false
+      }, 0)
+    }
+
+    mainChart.timeScale().subscribeVisibleLogicalRangeChange(onMainRangeChange)
+    panelChart.timeScale().subscribeVisibleLogicalRangeChange(onPanelRangeChange)
+
+    return () => {
+      try {
+        mainChart.timeScale().unsubscribeVisibleLogicalRangeChange(onMainRangeChange)
+        panelChart.timeScale().unsubscribeVisibleLogicalRangeChange(onPanelRangeChange)
+      } catch { /* chart may be removed */ }
+    }
+  }, [mainChart, chartRef])
+
   return (
     <div className={clsx('w-full', className)}>
       <div className="flex items-center gap-2 px-3 py-1 border-b border-terminal-border">
@@ -91,13 +136,20 @@ export function RSIPanel({ symbol, className }: RSIPanelProps) {
 
 // ── MACD Sub-chart ────────────────────────────────────────────────────────────
 
-interface MACDPanelProps { symbol: string; className?: string }
+interface MACDPanelProps {
+  symbol:        string
+  mainChart?:    IChartApi | null
+  className?:    string
+  onChartReady?: (chart: IChartApi, series: ISeriesApi<'Line'>) => void
+}
 
-export function MACDPanel({ symbol, className }: MACDPanelProps) {
+export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPanelProps) {
   const { containerRef, chartRef } = useChart({ options: PANEL_THEME })
   const macdRef = useRef<ISeriesApi<'Line'> | null>(null)
   const sigRef  = useRef<ISeriesApi<'Line'> | null>(null)
   const histRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const onChartReadyRef = useRef(onChartReady)
+  onChartReadyRef.current = onChartReady
 
   const bars = useMarketStore((s) => s.bars[symbol] ?? [])
 
@@ -118,6 +170,8 @@ export function MACDPanel({ symbol, className }: MACDPanelProps) {
       priceFormat:  { type: 'price' },
       priceScaleId: 'right',
     } as Partial<HistogramSeriesOptions>)
+
+    onChartReadyRef.current?.(chart, macdRef.current)
 
     return () => {
       macdRef.current = sigRef.current = histRef.current = null
@@ -142,6 +196,41 @@ export function MACDPanel({ symbol, className }: MACDPanelProps) {
     } catch { /* ignore */ }
   }, [bars, chartRef])
 
+  // Sync time axis with main chart (bidirectional)
+  useEffect(() => {
+    if (!mainChart || !chartRef.current) return
+    const panelChart = chartRef.current
+    const syncingRef = { current: false }
+
+    const onMainRangeChange = (range: AnyData) => {
+      if (syncingRef.current || !range) return
+      syncingRef.current = true
+      setTimeout(() => {
+        try { panelChart.timeScale().setVisibleLogicalRange(range) } catch { /* */ }
+        syncingRef.current = false
+      }, 0)
+    }
+
+    const onPanelRangeChange = (range: AnyData) => {
+      if (syncingRef.current || !range) return
+      syncingRef.current = true
+      setTimeout(() => {
+        try { mainChart.timeScale().setVisibleLogicalRange(range) } catch { /* */ }
+        syncingRef.current = false
+      }, 0)
+    }
+
+    mainChart.timeScale().subscribeVisibleLogicalRangeChange(onMainRangeChange)
+    panelChart.timeScale().subscribeVisibleLogicalRangeChange(onPanelRangeChange)
+
+    return () => {
+      try {
+        mainChart.timeScale().unsubscribeVisibleLogicalRangeChange(onMainRangeChange)
+        panelChart.timeScale().unsubscribeVisibleLogicalRangeChange(onPanelRangeChange)
+      } catch { /* chart may be removed */ }
+    }
+  }, [mainChart, chartRef])
+
   return (
     <div className={clsx('w-full', className)}>
       <div className="flex items-center gap-3 px-3 py-1 border-b border-terminal-border">
@@ -161,11 +250,15 @@ export function MACDPanel({ symbol, className }: MACDPanelProps) {
 // ── Combined panel (renders whichever oscillators are selected) ───────────────
 
 interface IndicatorPanelProps {
-  symbol:    string
-  className?: string
+  symbol:          string
+  mainChart?:      IChartApi | null
+  className?:      string
+  style?:          React.CSSProperties
+  onRSIReady?:     (chart: IChartApi, series: ISeriesApi<'Line'>) => void
+  onMACDReady?:    (chart: IChartApi, series: ISeriesApi<'Line'>) => void
 }
 
-export default function IndicatorPanel({ symbol, className }: IndicatorPanelProps) {
+export default function IndicatorPanel({ symbol, mainChart, className, style, onRSIReady, onMACDReady }: IndicatorPanelProps) {
   const selectedIndicators = useMarketStore((s) => s.selectedIndicators)
   const showRSI  = selectedIndicators.includes('rsi')
   const showMACD = selectedIndicators.includes('macd')
@@ -175,7 +268,7 @@ export default function IndicatorPanel({ symbol, className }: IndicatorPanelProp
   const both = showRSI && showMACD
 
   return (
-    <div className={clsx('flex gap-2', className)}>
+    <div className={clsx('flex gap-2', className)} style={style}>
       {showRSI && (
         <div
           className={clsx(
@@ -183,7 +276,7 @@ export default function IndicatorPanel({ symbol, className }: IndicatorPanelProp
             both ? 'flex-1' : 'w-full',
           )}
         >
-          <RSIPanel symbol={symbol} className="flex-1 min-h-0" />
+          <RSIPanel symbol={symbol} mainChart={mainChart} onChartReady={onRSIReady} className="flex-1 min-h-0" />
         </div>
       )}
       {showMACD && (
@@ -193,7 +286,7 @@ export default function IndicatorPanel({ symbol, className }: IndicatorPanelProp
             both ? 'flex-1' : 'w-full',
           )}
         >
-          <MACDPanel symbol={symbol} className="flex-1 min-h-0" />
+          <MACDPanel symbol={symbol} mainChart={mainChart} onChartReady={onMACDReady} className="flex-1 min-h-0" />
         </div>
       )}
     </div>
