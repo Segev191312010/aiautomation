@@ -1,0 +1,12 @@
+node_modules/
+.venv/
+__pycache__/
+dist/
+.git/
+.pytest_cache/
+*.db
+*.pyc
+dashboard/package-lock.json
+frontend/trading.js
+frontend/trading.css
+frontend/trading.html
