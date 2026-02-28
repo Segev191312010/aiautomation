@@ -9,7 +9,7 @@ load_dotenv()
 
 class Config:
     # ── IBKR connection ──────────────────────────────────────────────────────
-    # Port guide: TWS live=7496, TWS paper=7497, IB Gateway live=4001, paper=4002
+    # Port guide: TWS live=7496, TWS paper=7497, Gateway live=4001, Gateway paper=4002
     IBKR_HOST: str = os.getenv("IBKR_HOST", "127.0.0.1")
     IBKR_PORT: int = int(os.getenv("IBKR_PORT", "7497"))
     IBKR_CLIENT_ID: int = int(os.getenv("IBKR_CLIENT_ID", "1"))
@@ -49,9 +49,33 @@ class Config:
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "1440"))
 
+    # ── Strict config validation ──────────────────────────────────────────────
+    STRICT_CONFIG: bool = os.getenv("STRICT_CONFIG", "true").lower() == "true"
+
     # ── React dashboard build directory ──────────────────────────────────────
     # After `npm run build` in dashboard/, serve the SPA from /app
     DASHBOARD_BUILD_DIR: str = os.getenv("DASHBOARD_BUILD_DIR", "../dashboard/dist")
 
 
 cfg = Config()
+
+
+def _validate_config(c: Config) -> None:
+    """Validate port/paper consistency at startup."""
+    # Port guide: 7496=TWS live, 7497=TWS paper, 4001=GW live, 4002=GW paper
+    paper_ports = {7497, 4002}
+    live_ports = {7496, 4001}
+    if c.STRICT_CONFIG:
+        if c.IS_PAPER and c.IBKR_PORT in live_ports:
+            raise ValueError(f"IS_PAPER=true cannot use live port {c.IBKR_PORT}")
+        if not c.IS_PAPER and c.IBKR_PORT in paper_ports:
+            raise ValueError(f"IS_PAPER=false cannot use paper port {c.IBKR_PORT}")
+    else:
+        import warnings
+        if c.IS_PAPER and c.IBKR_PORT in live_ports:
+            warnings.warn(f"IS_PAPER=true but port={c.IBKR_PORT} (live)", stacklevel=2)
+        if not c.IS_PAPER and c.IBKR_PORT in paper_ports:
+            warnings.warn(f"IS_PAPER=false but port={c.IBKR_PORT} (paper)", stacklevel=2)
+
+
+_validate_config(cfg)

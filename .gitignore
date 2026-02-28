@@ -3,3 +3,12 @@ __pycache__/
 *.pyc
 nul
 node_modules/
+
+# Secrets & local config
+.env
+backend/.env
+
+# Database files
+*.db
+*.db-wal
+*.db-shm

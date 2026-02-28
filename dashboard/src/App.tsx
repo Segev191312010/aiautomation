@@ -5,6 +5,7 @@ import Dashboard from '@/pages/Dashboard'
 import TradeBotPage from '@/pages/TradeBotPage'
 import MarketPage from '@/pages/MarketPage'
 import SimulationPage from '@/pages/SimulationPage'
+import ScreenerPage from '@/pages/ScreenerPage'
 import SettingsPage from '@/pages/SettingsPage'
 import { useUIStore, useBotStore } from '@/store'
 import { fetchStatus, fetchAuthToken, setAuthToken } from '@/services/api'
@@ -28,6 +29,7 @@ function PageSwitch() {
     case 'dashboard':  return <Dashboard />
     case 'tradebot':   return <TradeBotPage />
     case 'market':     return <MarketPage />
+    case 'screener':   return <ScreenerPage />
     case 'simulation': return <SimulationPage />
     case 'rules':      return <RulesPage />
     case 'settings':   return <SettingsPage />

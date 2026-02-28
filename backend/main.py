@@ -59,6 +59,8 @@ from typing import Any, Literal
 import time as _time
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -66,6 +68,7 @@ from pydantic import BaseModel, Field, ValidationError
 from config import cfg
 from database import (
     delete_rule, get_rule, get_rules, get_trades, init_db, save_rule, save_trade,
+    get_screener_presets, save_screener_preset, delete_screener_preset,
 )
 from ibkr_client import ibkr
 from market_data import (
@@ -77,13 +80,16 @@ from mock_data import (
 )
 from models import (
     AccountSummary, PlaybackState, Rule, RuleCreate, RuleUpdate,
-    Trade, TradeAction,
+    Trade, TradeAction, ScanRequest, ScanFilter, ScreenerPreset, EnrichRequest,
 )
 from order_executor import cancel_order, get_open_orders, on_fill, place_order
 from simulation import replay_engine, sim_engine
 from auth import create_token, get_current_user
 from indicators import calculate as ind_calculate, series_to_json
 from settings import get_settings, update_settings
+from screener import (
+    run_scan, list_universes, validate_timeframe, enrich_symbols,
+)
 import bot_runner
 
 logging.basicConfig(
@@ -182,6 +188,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading Dashboard", version="2.0.0", lifespan=lifespan)
 
+# ── CORS ──────────────────────────────────────────────────────────────────
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",   # Vite dev server
+        "http://localhost:8000",   # Same-origin
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ── Static assets ─────────────────────────────────────────────────────────
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -200,6 +221,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": "HTTPException", "detail": str(exc.detail)},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    log.warning("Validation error on %s %s: %s", request.method, request.url, exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"error": "ValidationError", "detail": exc.errors()},
     )
 
 
@@ -267,11 +297,29 @@ async def serve_react_app(path: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# WebSocket origin validation
+# ---------------------------------------------------------------------------
+
+_ALLOWED_WS_ORIGINS = {
+    "http://localhost:5173", "http://localhost:8000",
+    "http://127.0.0.1:5173", "http://127.0.0.1:8000",
+}
+
+
+def _check_ws_origin(ws: WebSocket) -> bool:
+    origin = ws.headers.get("origin", "")
+    return origin in _ALLOWED_WS_ORIGINS or not origin  # allow non-browser
+
+
+# ---------------------------------------------------------------------------
 # General WebSocket
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws")
 async def ws_general(ws: WebSocket):
+    if not _check_ws_origin(ws):
+        await ws.close(code=4003)
+        return
     await manager.connect(ws)
     try:
         while True:
@@ -291,6 +339,9 @@ async def ws_general(ws: WebSocket):
 
 @app.websocket("/ws/market-data")
 async def ws_market_data(ws: WebSocket):
+    if not _check_ws_origin(ws):
+        await ws.close(code=4003)
+        return
     await ws.accept()
     subscribed: set[str] = set()
     push_task: asyncio.Task | None = None
@@ -327,8 +378,10 @@ async def ws_market_data(ws: WebSocket):
                 subscribed.update(symbols)
             elif action == "unsubscribe":
                 subscribed.difference_update(symbols)
-    except (WebSocketDisconnect, Exception):
+    except WebSocketDisconnect:
         pass
+    except Exception as e:
+        log.error("Unexpected WS error in market-data handler: %s", e, exc_info=True)
     finally:
         if push_task:
             push_task.cancel()
@@ -768,6 +821,8 @@ async def _yf_quotes(symbols_str: str) -> list[dict]:
     from concurrent.futures import ThreadPoolExecutor
 
     syms = [s.strip() for s in symbols_str.split(",") if s.strip()]
+    if not syms:
+        return []
 
     def _one(sym: str):
         try:
@@ -805,6 +860,10 @@ async def _yf_bars(symbol: str, period: str, interval: str) -> list[dict]:
         df = yf.Ticker(symbol).history(period=period, interval=interval)
         if df.empty:
             return []
+        df = df.dropna(subset=["Close"])
+        df = df.fillna(0)  # fill remaining NaN (Volume etc.)
+        if df.empty:
+            return []
         return [
             {
                 "time":   int(ts.timestamp()),
@@ -812,7 +871,7 @@ async def _yf_bars(symbol: str, period: str, interval: str) -> list[dict]:
                 "high":   round(float(row["High"]),  4),
                 "low":    round(float(row["Low"]),   4),
                 "close":  round(float(row["Close"]), 4),
-                "volume": int(row["Volume"]),
+                "volume": int(row["Volume"] or 0),
             }
             for ts, row in df.iterrows()
         ]
@@ -943,6 +1002,73 @@ async def get_indicators(
         raise HTTPException(400, str(e))
 
     return series_to_json(series, df)
+
+
+# ---------------------------------------------------------------------------
+# Screener endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/screener/scan")
+async def screener_scan(body: ScanRequest):
+    # Validate filters count
+    if len(body.filters) > 15:
+        raise HTTPException(400, "Maximum 15 filters allowed")
+
+    # Validate symbol count
+    if body.symbols and len(body.symbols) > 600:
+        raise HTTPException(400, "Maximum 600 symbols allowed")
+
+    # Validate timeframe combo
+    if not validate_timeframe(body.interval, body.period):
+        raise HTTPException(
+            400,
+            f"Invalid interval/period combination: {body.interval}/{body.period}",
+        )
+
+    response = await run_scan(body)
+    return response.model_dump()
+
+
+@app.get("/api/screener/universes")
+async def screener_universes():
+    return list_universes()
+
+
+@app.get("/api/screener/presets")
+async def screener_list_presets():
+    presets = await get_screener_presets()
+    return [p.model_dump() for p in presets]
+
+
+class SavePresetRequest(BaseModel):
+    name: str
+    filters: list[ScanFilter]
+
+
+@app.post("/api/screener/presets", status_code=201)
+async def screener_save_preset(body: SavePresetRequest):
+    preset = ScreenerPreset(
+        name=body.name,
+        filters=body.filters,
+        built_in=False,
+        user_id="demo",
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    await save_screener_preset(preset)
+    return preset.model_dump()
+
+
+@app.delete("/api/screener/presets/{preset_id}")
+async def screener_delete_preset(preset_id: str):
+    if not await delete_screener_preset(preset_id):
+        raise HTTPException(404, "Preset not found or is built-in")
+    return {"deleted": True}
+
+
+@app.post("/api/screener/enrich")
+async def screener_enrich(body: EnrichRequest):
+    results = await enrich_symbols(body.symbols)
+    return [r.model_dump() for r in results]
 
 
 # ---------------------------------------------------------------------------

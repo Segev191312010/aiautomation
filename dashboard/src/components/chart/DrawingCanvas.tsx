@@ -595,7 +595,7 @@ export default function DrawingCanvas({ chart, series, symbol, timeframe }: Prop
   useEffect(() => {
     const st = stateRef.current
     if (activeTool) {
-      st.phase = activeTool === 'horizontal_line' ? 'placing_first' : 'placing_first'
+      st.phase = 'placing_first'
       st.drawingType = activeTool
     } else {
       if (st.phase === 'placing_first' || st.phase === 'placing_second') {

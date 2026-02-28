@@ -33,6 +33,7 @@ class IBKRClient:
         # IB() is created lazily in connect() so it binds to the correct loop.
         self._ib: Optional[IB] = None
         self._connected: bool = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Auto-reconnect
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -55,6 +56,23 @@ class IBKRClient:
                 await self._broadcast(payload)
             except Exception:
                 pass
+
+    def _schedule_emit(self, payload: dict) -> None:
+        if not self._broadcast:
+            return
+        coro = self._emit(payload)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        target_loop = self._loop or running_loop
+        if target_loop and target_loop.is_running():
+            if running_loop is target_loop:
+                target_loop.create_task(coro)
+            else:
+                asyncio.run_coroutine_threadsafe(coro, target_loop)
+            return
+        log.debug("No running event loop available to emit IBKR state")
 
     # ------------------------------------------------------------------
     # Internal: lazy IB factory + callback wiring
@@ -129,9 +147,7 @@ class IBKRClient:
         """Called by ib_insync when the TWS connection drops unexpectedly."""
         self._connected = False
         log.warning("IBKR disconnected — will attempt auto-reconnect")
-        asyncio.create_task(
-            self._emit({"type": "ibkr_state", "connected": False})
-        )
+        self._schedule_emit({"type": "ibkr_state", "connected": False})
 
     # ------------------------------------------------------------------
     # Connection
@@ -146,6 +162,7 @@ class IBKRClient:
         asyncio.TimeoutError rather than ConnectionRefusedError).
         """
         asyncio.set_event_loop(asyncio.get_running_loop())
+        self._loop = asyncio.get_running_loop()
 
         ib = self._get_or_create_ib()
         if self._connected and ib.isConnected():

@@ -3,7 +3,7 @@ Pydantic data models for the trading bot API.
 """
 from __future__ import annotations
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import uuid as _uuid
 
 
@@ -224,3 +224,82 @@ class User(BaseModel):
 class AuthToken(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+# ---------------------------------------------------------------------------
+# Screener models
+# ---------------------------------------------------------------------------
+
+ScreenerIndicator = Literal[
+    "RSI", "SMA", "EMA", "MACD", "BBANDS", "ATR", "STOCH",
+    "PRICE", "VOLUME", "CHANGE_PCT",
+]
+
+ScreenerOperator = Literal[
+    "GT", "LT", "GTE", "LTE", "CROSSES_ABOVE", "CROSSES_BELOW",
+]
+
+
+class FilterValue(BaseModel):
+    type: Literal["number", "indicator"]
+    number: float | None = None
+    indicator: ScreenerIndicator | None = None  # type: ignore[assignment]
+    params: dict[str, Any] = Field(default_factory=dict)
+    multiplier: float = 1.0
+
+    @model_validator(mode="after")
+    def check_type_match(self):
+        if self.type == "number" and self.number is None:
+            raise ValueError("number required when type is number")
+        if self.type == "indicator" and self.indicator is None:
+            raise ValueError("indicator required when type is indicator")
+        return self
+
+
+class ScanFilter(BaseModel):
+    indicator: ScreenerIndicator  # type: ignore[assignment]
+    params: dict[str, Any] = Field(default_factory=dict)
+    operator: ScreenerOperator  # type: ignore[assignment]
+    value: FilterValue
+
+
+class ScanRequest(BaseModel):
+    universe: str
+    symbols: list[str] | None = None
+    filters: list[ScanFilter] = Field(min_length=1)
+    interval: str = "1d"
+    period: str = "1y"
+    limit: int = Field(default=100, le=500)
+
+
+class ScanResultRow(BaseModel):
+    symbol: str
+    price: float
+    change_pct: float
+    volume: int
+    indicators: dict[str, float]
+
+
+class ScanResponse(BaseModel):
+    results: list[ScanResultRow]
+    skipped_symbols: list[str]
+
+
+class EnrichRequest(BaseModel):
+    symbols: list[str]
+
+
+class EnrichResult(BaseModel):
+    symbol: str
+    name: str
+    sector: str | None = None
+    market_cap: float | None = None
+
+
+class ScreenerPreset(BaseModel):
+    id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
+    name: str
+    filters: list[ScanFilter]
+    built_in: bool = False
+    user_id: str = "demo"
+    created_at: str = ""

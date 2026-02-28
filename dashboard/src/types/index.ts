@@ -233,7 +233,7 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'simulation' | 'rules' | 'settings'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'screener' | 'simulation' | 'rules' | 'settings'
 
 // ── Chart types ─────────────────────────────────────────────────────────────
 
@@ -256,6 +256,71 @@ export type {
   DrawingToolState,
   HitTestResult,
 } from './drawing'
+
+// ── Screener ─────────────────────────────────────────────────────────────
+
+export type ScreenerIndicator = 'RSI' | 'SMA' | 'EMA' | 'MACD' | 'BBANDS' | 'ATR' | 'STOCH' | 'PRICE' | 'VOLUME' | 'CHANGE_PCT'
+export type ScreenerOperator = 'GT' | 'LT' | 'GTE' | 'LTE' | 'CROSSES_ABOVE' | 'CROSSES_BELOW'
+
+export interface FilterValue {
+  type: 'number' | 'indicator'
+  number?: number
+  indicator?: ScreenerIndicator
+  // Keep in sync with backend: FilterValue.params = dict[str, Any]
+  params?: Record<string, number | string>
+  multiplier?: number
+}
+
+export interface ScanFilter {
+  indicator: ScreenerIndicator
+  // Keep in sync with backend: ScanFilter.params = dict[str, Any]
+  params: Record<string, number | string>
+  operator: ScreenerOperator
+  value: FilterValue
+}
+
+export interface ScanRequest {
+  universe: string
+  symbols?: string[]
+  filters: ScanFilter[]
+  interval: string
+  period: string
+  limit: number
+}
+
+export interface ScanResultRow {
+  symbol: string
+  price: number
+  change_pct: number
+  volume: number
+  indicators: Record<string, number>
+}
+
+export interface ScanResponse {
+  results: ScanResultRow[]
+  skipped_symbols: string[]
+}
+
+export interface EnrichResult {
+  symbol: string
+  name: string
+  sector?: string
+  market_cap?: number
+}
+
+export interface ScreenerPreset {
+  id: string
+  name: string
+  filters: ScanFilter[]
+  built_in: boolean
+  created_at: string
+}
+
+export interface UniverseInfo {
+  id: string
+  name: string
+  count: number
+}
 
 // ── Auth / Settings ──────────────────────────────────────────────────────
 

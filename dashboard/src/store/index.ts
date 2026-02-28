@@ -16,12 +16,16 @@ import type {
   ChartType,
   Drawing,
   DrawingType,
+  EnrichResult,
   MarketQuote,
   OHLCVBar,
   OpenOrder,
   PlaybackState,
   Position,
   Rule,
+  ScanFilter,
+  ScanResultRow,
+  ScreenerPreset,
   SimAccountState,
   SimOrderRecord,
   SimPosition,
@@ -29,6 +33,7 @@ import type {
   SortField,
   SystemStatus,
   Trade,
+  UniverseInfo,
   UserSettings,
   Watchlist,
 } from '@/types'
@@ -97,7 +102,7 @@ export const useMarketStore = create<MarketState>((set, get) => ({
   setQuotes: (quotes) => {
     const map: Record<string, MarketQuote> = {}
     quotes.forEach((q) => { map[q.symbol] = q })
-    set({ quotes: { ...get().quotes, ...map }, lastUpdated: Date.now() })
+    set((s) => ({ quotes: { ...s.quotes, ...map }, lastUpdated: Date.now() }))
   },
   updateQuote: (q) =>
     set((s) => ({ quotes: { ...s.quotes, [q.symbol]: q } })),
@@ -317,6 +322,169 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   setLoading:  (v) => set({ loading: v }),
 }))
 
+// ── Screener store ──────────────────────────────────────────────────────────
+
+interface ScreenerState {
+  results:          ScanResultRow[]
+  skippedSymbols:   string[]
+  enriched:         Record<string, EnrichResult>
+  presets:          ScreenerPreset[]
+  universes:        UniverseInfo[]
+  filters:          ScanFilter[]
+  selectedUniverse: string
+  customSymbols:    string
+  interval:         string
+  period:           string
+  scanning:         boolean
+  enriching:        boolean
+  presetsLoaded:    boolean
+
+  addFilter:        () => void
+  removeFilter:     (index: number) => void
+  updateFilter:     (index: number, filter: ScanFilter) => void
+  setFilters:       (filters: ScanFilter[]) => void
+  setUniverse:      (universe: string) => void
+  setCustomSymbols: (symbols: string) => void
+  setInterval:      (interval: string) => void
+  setPeriod:        (period: string) => void
+
+  loadPresets:      () => Promise<void>
+  loadUniverses:    () => Promise<void>
+  applyPreset:      (preset: ScreenerPreset) => void
+  savePreset:       (name: string) => Promise<void>
+  deletePreset:     (id: string) => Promise<void>
+
+  runScan:          () => Promise<void>
+  enrichResults:    () => Promise<void>
+}
+
+const DEFAULT_FILTER: ScanFilter = {
+  indicator: 'RSI',
+  params: { length: 14 },
+  operator: 'LT',
+  value: { type: 'number', number: 30 },
+}
+
+export const useScreenerStore = create<ScreenerState>((set, get) => ({
+  results:          [],
+  skippedSymbols:   [],
+  enriched:         {},
+  presets:          [],
+  universes:        [],
+  filters:          [{ ...DEFAULT_FILTER }],
+  selectedUniverse: 'sp500',
+  customSymbols:    '',
+  interval:         '1d',
+  period:           '1y',
+  scanning:         false,
+  enriching:        false,
+  presetsLoaded:    false,
+
+  addFilter: () =>
+    set((s) => ({ filters: [...s.filters, { ...DEFAULT_FILTER }] })),
+
+  removeFilter: (index) =>
+    set((s) => ({
+      filters: s.filters.length > 1
+        ? s.filters.filter((_, i) => i !== index)
+        : s.filters,
+    })),
+
+  updateFilter: (index, filter) =>
+    set((s) => ({
+      filters: s.filters.map((f, i) => (i === index ? filter : f)),
+    })),
+
+  setFilters: (filters) => set({ filters }),
+
+  setUniverse: (universe) => set({ selectedUniverse: universe }),
+
+  setCustomSymbols: (symbols) => set({ customSymbols: symbols }),
+
+  setInterval: (interval) => set({ interval }),
+
+  setPeriod: (period) => set({ period }),
+
+  loadPresets: async () => {
+    try {
+      const { fetchScreenerPresets } = await import('@/services/api')
+      const presets = await fetchScreenerPresets()
+      set({ presets, presetsLoaded: true })
+    } catch {
+      // backend offline
+    }
+  },
+
+  loadUniverses: async () => {
+    try {
+      const { fetchUniverses } = await import('@/services/api')
+      const universes = await fetchUniverses()
+      set({ universes })
+    } catch {
+      // backend offline
+    }
+  },
+
+  applyPreset: (preset) =>
+    set({ filters: preset.filters.map((f) => ({ ...f })) }),
+
+  savePreset: async (name) => {
+    const { saveScreenerPreset } = await import('@/services/api')
+    const preset = await saveScreenerPreset(name, get().filters)
+    set((s) => ({ presets: [...s.presets, preset] }))
+  },
+
+  deletePreset: async (id) => {
+    const { deleteScreenerPreset } = await import('@/services/api')
+    await deleteScreenerPreset(id)
+    set((s) => ({ presets: s.presets.filter((p) => p.id !== id) }))
+  },
+
+  runScan: async () => {
+    const { filters, selectedUniverse, customSymbols, interval, period } = get()
+    set({ scanning: true, results: [], skippedSymbols: [], enriched: {} })
+    try {
+      const { runScan: apiRunScan } = await import('@/services/api')
+      const symbols = selectedUniverse === 'custom'
+        ? customSymbols.split(',').map((s) => s.trim()).filter(Boolean)
+        : undefined
+      const resp = await apiRunScan({
+        universe: selectedUniverse,
+        symbols,
+        filters,
+        interval,
+        period,
+        limit: 100,
+      })
+      set({ results: resp.results, skippedSymbols: resp.skipped_symbols })
+      // Auto-enrich
+      if (resp.results.length > 0) {
+        get().enrichResults()
+      }
+    } finally {
+      set({ scanning: false })
+    }
+  },
+
+  enrichResults: async () => {
+    const { results } = get()
+    if (results.length === 0) return
+    set({ enriching: true })
+    try {
+      const { enrichSymbols } = await import('@/services/api')
+      const symbols = results.map((r) => r.symbol)
+      const enriched = await enrichSymbols(symbols)
+      const map: Record<string, EnrichResult> = {}
+      enriched.forEach((e) => { map[e.symbol] = e })
+      set({ enriched: map })
+    } catch {
+      // error
+    } finally {
+      set({ enriching: false })
+    }
+  },
+}))
+
 // ── Drawing store ───────────────────────────────────────────────────────────
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
@@ -473,29 +641,31 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
   },
 
   undo: () => {
-    const { _undoStack, drawings } = get()
-    if (_undoStack.length === 0) return
-    const prev = _undoStack[_undoStack.length - 1]
-    const currentSnapshot = JSON.parse(JSON.stringify(drawings)) as Record<string, Drawing[]>
-    set({
-      drawings: prev,
-      _undoStack: _undoStack.slice(0, -1),
-      _redoStack: [...get()._redoStack, currentSnapshot],
-      selectedDrawingId: null,
+    set((s) => {
+      if (s._undoStack.length === 0) return {}
+      const prev = s._undoStack[s._undoStack.length - 1]
+      const snapshot = JSON.parse(JSON.stringify(s.drawings))
+      return {
+        drawings: prev,
+        _undoStack: s._undoStack.slice(0, -1),
+        _redoStack: [...s._redoStack, snapshot],
+        selectedDrawingId: null,
+      }
     })
     get()._scheduleSave()
   },
 
   redo: () => {
-    const { _redoStack, drawings } = get()
-    if (_redoStack.length === 0) return
-    const next = _redoStack[_redoStack.length - 1]
-    const currentSnapshot = JSON.parse(JSON.stringify(drawings)) as Record<string, Drawing[]>
-    set({
-      drawings: next,
-      _redoStack: _redoStack.slice(0, -1),
-      _undoStack: [...get()._undoStack, currentSnapshot],
-      selectedDrawingId: null,
+    set((s) => {
+      if (s._redoStack.length === 0) return {}
+      const next = s._redoStack[s._redoStack.length - 1]
+      const snapshot = JSON.parse(JSON.stringify(s.drawings))
+      return {
+        drawings: next,
+        _redoStack: s._redoStack.slice(0, -1),
+        _undoStack: [...s._undoStack, snapshot],
+        selectedDrawingId: null,
+      }
     })
     get()._scheduleSave()
   },
@@ -605,7 +775,10 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
     // Synchronous-ish save via sendBeacon for beforeunload
     try {
       const body = JSON.stringify({ drawings: s.drawings })
-      navigator.sendBeacon('/api/settings', body)
+      const blob = new Blob([body], { type: 'application/json' })
+      if (!navigator.sendBeacon('/api/settings', blob)) {
+        console.warn('sendBeacon failed')
+      }
     } catch {
       // Best effort
     }

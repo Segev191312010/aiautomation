@@ -4,6 +4,7 @@ Order executor — places orders via IBKR and logs them to SQLite.
 from __future__ import annotations
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 from ib_insync import MarketOrder, LimitOrder, Trade as IBTrade
@@ -13,6 +14,41 @@ from models import Rule, Trade
 from config import cfg
 
 log = logging.getLogger(__name__)
+
+# ── Pre-flight order validation ──────────────────────────────────────────────
+MAX_ORDER_QTY = 10_000
+MIN_PRICE = 0.01
+MAX_PRICE = 1_000_000
+MIN_ORDER_VALUE = 100  # minimum notional value
+DEDUP_WINDOW = 5  # seconds
+_recent_orders: dict[str, float] = {}  # "symbol:action" -> timestamp
+
+
+def _pre_flight_check(rule: Rule, price_estimate: float | None = None) -> str | None:
+    """Return error message if order fails pre-flight, else None."""
+    qty = rule.action.quantity
+    if qty < 1 or qty > MAX_ORDER_QTY:
+        return f"Quantity {qty} outside bounds [1, {MAX_ORDER_QTY}]"
+
+    if rule.action.limit_price is not None:
+        if not (MIN_PRICE <= rule.action.limit_price <= MAX_PRICE):
+            return f"Limit price {rule.action.limit_price} outside [{MIN_PRICE}, {MAX_PRICE}]"
+
+    # Min order value check
+    if price_estimate and rule.action.limit_price:
+        order_cost = qty * rule.action.limit_price
+        if order_cost < MIN_ORDER_VALUE:
+            return f"Order value {order_cost:.2f} below minimum {MIN_ORDER_VALUE}"
+
+    # Dedup: reject same symbol+action within DEDUP_WINDOW
+    key = f"{rule.symbol}:{rule.action.type}"
+    now = time.time()
+    last = _recent_orders.get(key)
+    if last and (now - last) < DEDUP_WINDOW:
+        return f"Duplicate order for {key} within {DEDUP_WINDOW}s"
+    _recent_orders[key] = now
+
+    return None
 
 # Callback: called when an order is filled → used to broadcast WS events
 _fill_callbacks: list[Callable[[Trade], None]] = []
@@ -32,9 +68,15 @@ async def place_order(rule: Rule) -> Optional[Trade]:
 
     Returns the Trade record (status PENDING), or None on failure.
     """
-    if cfg.IS_PAPER:
-        log.info("[PAPER] Would place %s %d %s for rule '%s'",
-                 rule.action.type, rule.action.quantity, rule.symbol, rule.name)
+    if cfg.IS_PAPER and not cfg.SIM_MODE:
+        log.error("[PAPER] IS_PAPER=true but SIM_MODE=False — aborting order placement")
+        raise RuntimeError("IS_PAPER=true requires SIM_MODE=True for virtual trading")
+
+    # Pre-flight validation
+    err = _pre_flight_check(rule)
+    if err:
+        log.error("Pre-flight check failed: %s", err)
+        return None
 
     if not ibkr.is_connected():
         log.error("Cannot place order — IBKR not connected")
@@ -49,6 +91,10 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         return None
 
     await ibkr.ib.qualifyContractsAsync(contract)
+
+    if not contract.conId:
+        log.error("Contract qualification failed for %s — conId=0", rule.symbol)
+        return None
 
     # Build IBKR order object
     action_str = rule.action.type  # "BUY" or "SELL"

@@ -108,13 +108,20 @@ async def _run_cycle() -> None:
     # Fetch bars (clear cache first to get fresh data)
     clear_bar_cache()
     bars_by_symbol: dict = {}
-    for symbol in symbols:
-        try:
-            df = await get_historical_bars(symbol, duration="60 D", bar_size="1D")
-            bars_by_symbol[symbol] = df
-            log.debug("Fetched %d bars for %s", len(df), symbol)
-        except Exception as exc:
-            log.error("Failed to fetch bars for %s: %s", symbol, exc)
+    sem = asyncio.Semaphore(10)
+
+    async def _fetch_one(sym: str):
+        async with sem:
+            try:
+                return sym, await get_historical_bars(sym, duration="60 D", bar_size="1D")
+            except Exception as exc:
+                log.error("Failed to fetch bars for %s: %s", sym, exc)
+                return sym, None
+
+    results = await asyncio.gather(*[_fetch_one(s) for s in symbols])
+    for sym, df in results:
+        if df is not None:
+            bars_by_symbol[sym] = df
 
     # Evaluate rules
     triggered = evaluate_all(enabled, bars_by_symbol)

@@ -24,6 +24,7 @@ export default function Dashboard() {
   const compSymbol     = useMarketStore((s) => s.compSymbol)
   const toggleCompMode = useMarketStore((s) => s.toggleCompMode)
   const setCompSymbol  = useMarketStore((s) => s.setCompSymbol)
+  const chartType      = useMarketStore((s) => s.chartType)
   const account        = useAccountStore((s) => s.account)
   const simMode        = useBotStore((s) => s.simMode)
 
@@ -46,7 +47,7 @@ export default function Dashboard() {
           {/* Chart header */}
           <div className="flex items-center gap-3 px-4 py-2.5 border-b border-terminal-border">
             <span className="font-mono font-bold text-terminal-text">{selectedSymbol}</span>
-            <span className="text-[10px] font-mono text-terminal-ghost uppercase">{useMarketStore.getState().chartType} · 1D</span>
+            <span className="text-[10px] font-mono text-terminal-ghost uppercase">{chartType} · 1D</span>
 
             {/* Comparison toggle */}
             <div className="ml-auto flex items-center gap-2">
