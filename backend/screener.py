@@ -17,6 +17,7 @@ from typing import Any
 
 import pandas as pd
 import numpy as np
+import yfinance as yf
 
 from models import (
     FilterValue, ScanFilter, ScanRequest, ScanResponse, ScanResultRow,
@@ -93,7 +94,14 @@ class CacheEntry:
 
 
 _bar_cache: dict[CacheKey, CacheEntry] = {}
-_cache_lock = asyncio.Lock()
+_cache_lock: asyncio.Lock | None = None
+
+
+def _get_cache_lock() -> asyncio.Lock:
+    global _cache_lock
+    if _cache_lock is None:
+        _cache_lock = asyncio.Lock()
+    return _cache_lock
 
 
 def _evict_if_full() -> None:
@@ -131,10 +139,16 @@ def _extract_symbol(raw_df: pd.DataFrame, sym: str, total_symbols: int) -> pd.Da
             df = raw_df.copy()
         else:
             if isinstance(raw_df.columns, pd.MultiIndex):
-                if sym in raw_df.columns.get_level_values(0):
-                    df = raw_df[sym].copy()
-                elif sym.upper() in raw_df.columns.get_level_values(0):
-                    df = raw_df[sym.upper()].copy()
+                level_vals = raw_df.columns.get_level_values(0)
+                # yfinance normalizes BRK-B → BRK.B; try both forms
+                candidates = [sym, sym.upper(), sym.replace("-", "."), sym.upper().replace("-", ".")]
+                matched = None
+                for candidate in candidates:
+                    if candidate in level_vals:
+                        matched = candidate
+                        break
+                if matched is not None:
+                    df = raw_df[matched].copy()
                 else:
                     return None
             else:
@@ -173,8 +187,6 @@ async def _fetch_batch(
     loop: asyncio.AbstractEventLoop,
 ) -> list[str]:
     """Fetch a batch of symbols via yfinance. Returns list of skipped symbols."""
-    import yfinance as yf
-
     skipped: list[str] = []
 
     async with sem:
@@ -198,7 +210,7 @@ async def _fetch_batch(
                 )
 
                 now = time.time()
-                async with _cache_lock:
+                async with _get_cache_lock():
                     _evict_if_full()
                     for sym in symbols:
                         df_sym = _extract_symbol(raw_df, sym, len(symbols))
@@ -224,13 +236,14 @@ async def refresh_cache(
     period: str,
 ) -> list[str]:
     """Fetch bar data for symbols not in cache (or stale). Returns skipped symbols."""
-    # Determine which symbols need fetching
+    # Determine which symbols need fetching (hold lock to avoid TOCTOU race)
     to_fetch: list[str] = []
-    for sym in symbols:
-        key = (sym, interval, period)
-        entry = _bar_cache.get(key)
-        if entry is None or _is_stale(entry):
-            to_fetch.append(sym)
+    async with _get_cache_lock():
+        for sym in symbols:
+            key = (sym, interval, period)
+            entry = _bar_cache.get(key)
+            if entry is None or _is_stale(entry):
+                to_fetch.append(sym)
 
     if not to_fetch:
         return []
@@ -309,10 +322,12 @@ def _compute_indicator_series(df: pd.DataFrame, indicator: str, params: dict[str
 def compute_filter_value(df: pd.DataFrame, fv: FilterValue) -> float | pd.Series:
     """Resolve a FilterValue to a number or indicator series, with multiplier."""
     if fv.type == "number":
-        return fv.number * fv.multiplier  # type: ignore[operator]
+        assert fv.number is not None
+        return fv.number * fv.multiplier
 
     # indicator type
-    series = _compute_indicator_series(df, fv.indicator, fv.params)  # type: ignore[arg-type]
+    assert fv.indicator is not None
+    series = _compute_indicator_series(df, fv.indicator, fv.params)
     return series * fv.multiplier
 
 
@@ -334,7 +349,8 @@ def evaluate_symbol(
             lhs_key = make_indicator_key(filt.indicator, filt.params)
 
             # Get the last value of LHS for result output
-            lhs_last = lhs_series.dropna().iloc[-1] if not lhs_series.dropna().empty else None
+            lhs_clean = lhs_series.dropna()
+            lhs_last = lhs_clean.iloc[-1] if not lhs_clean.empty else None
             if lhs_last is None:
                 return None
 
@@ -342,9 +358,11 @@ def evaluate_symbol(
 
             # Also record RHS if it's an indicator
             if filt.value.type == "indicator":
-                rhs_key = make_indicator_key(filt.value.indicator, filt.value.params)  # type: ignore[arg-type]
+                assert filt.value.indicator is not None
+                rhs_key = make_indicator_key(filt.value.indicator, filt.value.params)
                 if isinstance(rhs, pd.Series):
-                    rhs_last = rhs.dropna().iloc[-1] if not rhs.dropna().empty else None
+                    rhs_clean = rhs.dropna()
+                    rhs_last = rhs_clean.iloc[-1] if not rhs_clean.empty else None
                     if rhs_last is not None:
                         indicator_values[rhs_key] = round(float(rhs_last), 4)
 
@@ -390,7 +408,14 @@ def evaluate_symbol(
 
 
 async def run_scan(request: ScanRequest) -> ScanResponse:
-    """Execute a full scan: resolve universe, fetch data, evaluate filters."""
+    """Execute a full scan: resolve universe, fetch data, evaluate filters.
+
+    Universe + symbols interaction:
+    - universe="custom" → uses only the provided symbols list.
+    - universe="sp500"|"nasdaq100"|"etfs" → loads that universe;
+      if symbols is also provided, the result is the *intersection*
+      (only universe members that also appear in the symbols list).
+    """
     # Resolve symbols
     if request.universe == "custom":
         symbols = [s.upper() for s in (request.symbols or [])]
@@ -430,7 +455,8 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
         last_price = float(close.iloc[-1])
         prev_price = float(close.iloc[-2]) if len(close) >= 2 else last_price
         change_pct = ((last_price - prev_price) / prev_price * 100) if prev_price else 0.0
-        volume = int(df["volume"].iloc[-1])
+        raw_vol = df["volume"].iloc[-1]
+        volume = int(raw_vol) if pd.notna(raw_vol) else 0
 
         results.append(ScanResultRow(
             symbol=sym,
@@ -452,7 +478,6 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
 
 async def enrich_symbols(symbols: list[str]) -> list[EnrichResult]:
     """Fetch name, sector, market_cap for a list of symbols via yfinance."""
-    import yfinance as yf
 
     def _fetch_one(sym: str) -> EnrichResult | None:
         try:

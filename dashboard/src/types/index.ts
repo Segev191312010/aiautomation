@@ -13,6 +13,9 @@ export interface MarketQuote {
   bid?: number
   ask?: number
   last_update: string
+  live_source?: 'ibkr' | 'yahoo'
+  market_state?: 'open' | 'extended' | 'closed' | 'unknown'
+  stale_s?: number
   is_mock?: boolean
 }
 
@@ -233,7 +236,7 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'screener' | 'simulation' | 'rules' | 'settings'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'settings'
 
 // ── Chart types ─────────────────────────────────────────────────────────────
 
@@ -272,6 +275,7 @@ export interface FilterValue {
 }
 
 export interface ScanFilter {
+  id?: string
   indicator: ScreenerIndicator
   // Keep in sync with backend: ScanFilter.params = dict[str, Any]
   params: Record<string, number | string>
@@ -320,6 +324,83 @@ export interface UniverseInfo {
   id: string
   name: string
   count: number
+}
+
+// ── Backtesting ─────────────────────────────────────────────────────────
+
+export interface BacktestRequest {
+  symbol: string
+  period: string
+  interval: string
+  entry_conditions: Condition[]
+  exit_conditions: Condition[]
+  condition_logic: 'AND' | 'OR'
+  initial_capital: number
+  position_size_pct: number
+  stop_loss_pct: number
+  take_profit_pct: number
+}
+
+export interface BacktestTrade {
+  entry_date: string
+  exit_date: string
+  entry_price: number
+  exit_price: number
+  qty: number
+  pnl: number
+  pnl_pct: number
+  duration_bars: number
+  duration_days: number
+  exit_reason: string
+}
+
+export interface BacktestMetrics {
+  total_return_pct: number
+  cagr: number
+  sharpe_ratio: number
+  sortino_ratio: number
+  calmar_ratio: number
+  max_drawdown_pct: number
+  win_rate: number
+  profit_factor: number
+  num_trades: number
+  avg_win: number
+  avg_loss: number
+  longest_win_streak: number
+  longest_lose_streak: number
+  avg_trade_duration_days: number
+}
+
+export interface BacktestResult {
+  id: string
+  symbol: string
+  period: string
+  interval: string
+  initial_capital: number
+  final_equity: number
+  equity_curve: { time: number; equity: number; drawdown_pct: number }[]
+  buy_hold_curve: { time: number; equity: number }[]
+  trades: BacktestTrade[]
+  metrics: BacktestMetrics
+  warmup_period: number
+  total_bars: number
+  entry_conditions: Condition[]
+  exit_conditions: Condition[]
+  condition_logic: string
+  position_size_pct: number
+  stop_loss_pct: number
+  take_profit_pct: number
+  created_at?: string
+}
+
+export interface BacktestHistoryItem {
+  id: string
+  name: string
+  symbol: string
+  created_at: string
+  total_return_pct: number
+  num_trades: number
+  sharpe_ratio: number
 }
 
 // ── Auth / Settings ──────────────────────────────────────────────────────

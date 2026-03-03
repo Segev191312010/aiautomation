@@ -30,6 +30,7 @@ _bar_cache: dict[str, pd.DataFrame] = {}
 # Real-time tick callbacks: symbol → list of callbacks
 _tick_callbacks: dict[str, list[Callable]] = {}
 _ticker_map: dict[str, Ticker] = {}
+_pending_ticker_handlers: dict[str, Callable] = {}
 
 # Real-time 5-second bars: symbol → RealTimeBarList
 _rt_bars_map: dict[str, RealTimeBarList] = {}
@@ -110,14 +111,17 @@ async def get_latest_price(symbol: str) -> Optional[float]:
     return price
 
 
-async def subscribe_realtime(symbol: str, on_tick: Callable[[str, float], None]) -> None:
+async def subscribe_realtime(symbol: str, on_tick: Callable[[str, float], None]) -> bool:
     """Subscribe to real-time ticks for a symbol, calling on_tick(symbol, price) on each update."""
+    symbol = symbol.upper()
     if symbol in _ticker_map:
-        _tick_callbacks.setdefault(symbol, []).append(on_tick)
-        return
+        callbacks = _tick_callbacks.setdefault(symbol, [])
+        if on_tick not in callbacks:
+            callbacks.append(on_tick)
+        return True
 
     if not ibkr.is_connected():
-        return
+        return False
 
     contract = ibkr.make_stock_contract(symbol)
     await ibkr.ib.qualifyContractsAsync(contract)
@@ -134,13 +138,25 @@ async def subscribe_realtime(symbol: str, on_tick: Callable[[str, float], None])
                         cb(symbol, price)
 
     ibkr.ib.pendingTickersEvent += _on_pending_tickers
+    _pending_ticker_handlers[symbol] = _on_pending_tickers
     log.info("Subscribed to real-time ticks for %s", symbol)
+    return True
 
 
 def unsubscribe_realtime(symbol: str) -> None:
+    symbol = symbol.upper()
+    handler = _pending_ticker_handlers.pop(symbol, None)
+    if handler is not None:
+        try:
+            ibkr.ib.pendingTickersEvent -= handler
+        except Exception:
+            pass
     ticker = _ticker_map.pop(symbol, None)
     if ticker:
-        ibkr.ib.cancelMktData(ticker.contract)
+        try:
+            ibkr.ib.cancelMktData(ticker.contract)
+        except Exception:
+            pass
     _tick_callbacks.pop(symbol, None)
 
 

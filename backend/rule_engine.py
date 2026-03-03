@@ -116,6 +116,36 @@ def evaluate_rule(rule: Rule, df: pd.DataFrame) -> bool:
 # Evaluate all rules
 # ---------------------------------------------------------------------------
 
+def evaluate_conditions(
+    conditions: list[Condition],
+    df: pd.DataFrame,
+    logic: str = "AND",
+) -> bool:
+    """
+    Evaluate a list of conditions against a DataFrame slice.
+    Used by backtester — no cooldown, no enabled check.
+
+    Args:
+        conditions: List of Condition objects.
+        df:         DataFrame slice (e.g., df[:i+1] for bar-by-bar).
+        logic:      "AND" or "OR".
+
+    Returns:
+        True if conditions are met per the logic operator.
+    """
+    if df.empty or len(df) < 2:
+        return False
+    cache: dict = {}
+    results = [_evaluate_condition(c, df, cache) for c in conditions]
+    if logic == "AND":
+        return all(results)
+    return any(results)  # OR
+
+
+# ---------------------------------------------------------------------------
+# Evaluate all rules
+# ---------------------------------------------------------------------------
+
 def evaluate_all(
     rules: list[Rule],
     bars_by_symbol: dict[str, pd.DataFrame],

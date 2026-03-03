@@ -61,6 +61,17 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 """
 
+_CREATE_BACKTESTS = """
+CREATE TABLE IF NOT EXISTS backtests (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL DEFAULT 'demo',
+    name       TEXT NOT NULL,
+    strategy_data TEXT NOT NULL,
+    result_data   TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"""
+
 _CREATE_SCREENER_PRESETS = """
 CREATE TABLE IF NOT EXISTS screener_presets (
     id         TEXT PRIMARY KEY,
@@ -73,8 +84,20 @@ CREATE TABLE IF NOT EXISTS screener_presets (
 """
 
 
+_ALLOWED_COLUMNS: set[tuple[str, str]] = {
+    ("rules", "user_id"),
+    ("trades", "user_id"),
+    ("sim_account", "user_id"),
+    ("sim_positions", "user_id"),
+    ("sim_orders", "user_id"),
+}
+
+
 async def _safe_add_column(db: aiosqlite.Connection, table: str, column: str, col_type: str, default: str) -> None:
     """Add a column if table exists and column doesn't."""
+    if (table, column) not in _ALLOWED_COLUMNS:
+        log.warning("Blocked ALTER on non-allowlisted column %s.%s", table, column)
+        return
     async with db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ) as cur:
@@ -99,6 +122,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_USERS)
         await db.execute(_CREATE_RULES)
         await db.execute(_CREATE_TRADES)
+        await db.execute(_CREATE_BACKTESTS)
         await db.execute(_CREATE_SCREENER_PRESETS)
         await db.commit()
 
@@ -115,6 +139,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol_ts ON trades(symbol, timestamp DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_rules_user ON rules(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_presets_user ON screener_presets(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_backtests_user ON backtests(user_id, created_at DESC)")
         await db.commit()
 
         # Seed demo user
@@ -350,6 +375,85 @@ _BUILT_IN_PRESETS = [
         ],
     },
 ]
+
+
+# ---------------------------------------------------------------------------
+# Backtests CRUD
+# ---------------------------------------------------------------------------
+
+async def save_backtest(
+    backtest_id: str,
+    user_id: str,
+    name: str,
+    strategy_data: str,
+    result_data: str,
+    created_at: str,
+) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO backtests (id, user_id, name, strategy_data, result_data, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (backtest_id, user_id, name, strategy_data, result_data, created_at),
+        )
+        await db.commit()
+
+
+async def get_backtests(user_id: str = "demo", limit: int = 50) -> list[dict]:
+    """Return list of saved backtests with summary info."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT id, name, result_data, created_at FROM backtests "
+            "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+            (user_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    results = []
+    for row in rows:
+        try:
+            result = json.loads(row[2])
+            metrics = result.get("metrics", {})
+            results.append({
+                "id": row[0],
+                "name": row[1],
+                "symbol": result.get("symbol", ""),
+                "created_at": row[3],
+                "total_return_pct": metrics.get("total_return_pct", 0),
+                "num_trades": metrics.get("num_trades", 0),
+                "sharpe_ratio": metrics.get("sharpe_ratio", 0),
+            })
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return results
+
+
+async def get_backtest(backtest_id: str) -> dict | None:
+    """Return full backtest with strategy_data and result_data."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT id, name, strategy_data, result_data, created_at FROM backtests WHERE id=?",
+            (backtest_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "name": row[1],
+        "strategy_data": json.loads(row[2]),
+        "result_data": json.loads(row[3]),
+        "created_at": row[4],
+    }
+
+
+async def delete_backtest(backtest_id: str, user_id: str = "demo") -> bool:
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM backtests WHERE id=? AND user_id=?",
+            (backtest_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def _seed_screener_presets(db: aiosqlite.Connection) -> None:

@@ -125,8 +125,9 @@ export default function WatchlistGrid() {
     try {
       const newQuotes = await fetchWatchlist(newSymbols.join(','))
       setQuotes(newQuotes)
-    } catch {
-      setQuotes(getMockQuotes(newSymbols))
+    } catch (err) {
+      console.warn('[WatchlistGrid] Quote fetch failed:', err)
+      // Don't inject mock data — keep stale data instead
     } finally {
       setAddLoading(false)
     }

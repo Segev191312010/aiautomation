@@ -28,7 +28,7 @@ class Config:
     # ── Mock mode ────────────────────────────────────────────────────────────
     # MOCK_MODE=true → generate realistic GBM price data when IBKR is offline.
     # Automatically activates for endpoints that need market data but lack IBKR.
-    MOCK_MODE: bool = os.getenv("MOCK_MODE", "true").lower() == "true"
+    MOCK_MODE: bool = os.getenv("MOCK_MODE", "false").lower() == "true"
 
     # ── Auto-reconnect ───────────────────────────────────────────────────────
     # Seconds between reconnect attempts when IBKR connection drops. 0 = disabled.
@@ -39,6 +39,10 @@ class Config:
 
     # ── Database ─────────────────────────────────────────────────────────────
     DB_PATH: str = os.getenv("DB_PATH", "trading_bot.db")
+    WS_PUSH_INTERVAL_SECONDS: float = float(os.getenv("WS_PUSH_INTERVAL_SECONDS", "1.0"))
+    WS_CACHE_TTL_SECONDS: float = float(os.getenv("WS_CACHE_TTL_SECONDS", "1.0"))
+    WS_STALE_WARN_SECONDS: int = int(os.getenv("WS_STALE_WARN_SECONDS", "10"))
+    WS_STALE_CRITICAL_SECONDS: int = int(os.getenv("WS_STALE_CRITICAL_SECONDS", "30"))
 
     # ── API server ───────────────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")

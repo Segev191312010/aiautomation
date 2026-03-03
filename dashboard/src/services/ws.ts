@@ -140,9 +140,27 @@ export interface QuoteMsg {
   symbol:  string
   price:   number
   time?:   number
+  source?: 'ibkr' | 'yahoo'
+  market_state?: 'open' | 'extended' | 'closed' | 'unknown'
+  stale_s?: number
 }
 
+interface MarketHeartbeatMsg {
+  type: 'heartbeat'
+  time?: number
+}
+
+interface MarketPongMsg {
+  type: 'pong'
+  time?: number
+}
+
+type MarketWsMsg = QuoteMsg | MarketHeartbeatMsg | MarketPongMsg
+
 type QuoteHandler = (msg: QuoteMsg) => void
+
+const WS_STALE_WARN_MS = 10_000
+const WS_STALE_CRITICAL_MS = 30_000
 
 class MarketDataWsService {
   private ws:          WebSocket | null = null
@@ -152,6 +170,8 @@ class MarketDataWsService {
   private stopped      = false
   private reconnTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer:   ReturnType<typeof setInterval> | null = null
+  private staleTimer:  ReturnType<typeof setInterval> | null = null
+  private lastMsgMs    = 0
 
   connect(): void {
     if (
@@ -169,24 +189,32 @@ class MarketDataWsService {
     this._clearTimers()
     this.ws?.close()
     this.ws = null
+    this.lastMsgMs = 0
   }
 
   subscribe(symbol: string, handler: QuoteHandler): () => void {
+    const normalized = symbol.trim().toUpperCase()
+    if (!normalized) return () => {}
     // Lazy connect
     this.connect()
-    if (!this.handlers.has(symbol)) this.handlers.set(symbol, new Set())
-    this.handlers.get(symbol)!.add(handler)
-    if (!this.subscribed.has(symbol)) {
-      this.subscribed.add(symbol)
-      this._send({ action: 'subscribe', symbols: [symbol] })
+    if (!this.handlers.has(normalized)) this.handlers.set(normalized, new Set())
+    this.handlers.get(normalized)!.add(handler)
+    if (!this.subscribed.has(normalized)) {
+      this.subscribed.add(normalized)
+      this._send({ action: 'subscribe', symbols: [normalized] })
     }
     return () => {
-      this.handlers.get(symbol)?.delete(handler)
-      if (!this.handlers.get(symbol)?.size) {
-        this.subscribed.delete(symbol)
-        this._send({ action: 'unsubscribe', symbols: [symbol] })
+      this.handlers.get(normalized)?.delete(handler)
+      if (!this.handlers.get(normalized)?.size) {
+        this.subscribed.delete(normalized)
+        this._send({ action: 'unsubscribe', symbols: [normalized] })
       }
     }
+  }
+
+  getStaleAgeMs(): number {
+    if (!this.lastMsgMs) return Infinity
+    return Date.now() - this.lastMsgMs
   }
 
   private _send(data: Record<string, unknown>): void {
@@ -204,17 +232,20 @@ class MarketDataWsService {
     }
 
     this.ws.onopen = () => {
+      this.lastMsgMs = Date.now()
       if (this.subscribed.size > 0) {
         this._send({ action: 'subscribe', symbols: [...this.subscribed] })
       }
       this._startPing()
+      this._startStaleWatchdog()
     }
 
     this.ws.onmessage = (ev: MessageEvent) => {
       try {
-        const msg = JSON.parse(ev.data as string) as QuoteMsg
+        const msg = JSON.parse(ev.data as string) as MarketWsMsg
+        this.lastMsgMs = Date.now()
         if (msg.type === 'quote') {
-          this.handlers.get(msg.symbol)?.forEach((h) => h(msg))
+          this.handlers.get(msg.symbol.toUpperCase())?.forEach((h) => h(msg))
         }
       } catch { /* ignore malformed */ }
     }
@@ -228,18 +259,39 @@ class MarketDataWsService {
   }
 
   private _startPing(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer)
     this.pingTimer = setInterval(() => {
       this._send({ action: 'ping' })
     }, 25_000)
   }
 
+  private _startStaleWatchdog(): void {
+    if (this.staleTimer) clearInterval(this.staleTimer)
+    this.staleTimer = setInterval(() => {
+      const ws = this.ws
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      if (this.subscribed.size === 0) return
+      const staleAge = Date.now() - this.lastMsgMs
+      // Keep the connection warm aggressively when updates are delayed.
+      if (staleAge > WS_STALE_WARN_MS) {
+        this._send({ action: 'ping' })
+      }
+      // Recover half-open sockets that remain "OPEN" but stop delivering messages.
+      if (staleAge > WS_STALE_CRITICAL_MS) {
+        ws.close()
+      }
+    }, 5_000)
+  }
+
   private _scheduleReconnect(delay = 3_000): void {
+    if (this.reconnTimer) clearTimeout(this.reconnTimer)
     this.reconnTimer = setTimeout(() => this._connect(), delay)
   }
 
   private _clearTimers(): void {
     if (this.pingTimer)   { clearInterval(this.pingTimer);   this.pingTimer   = null }
     if (this.reconnTimer) { clearTimeout(this.reconnTimer);  this.reconnTimer = null }
+    if (this.staleTimer)  { clearInterval(this.staleTimer);  this.staleTimer  = null }
   }
 }
 

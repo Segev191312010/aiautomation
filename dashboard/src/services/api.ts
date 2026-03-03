@@ -4,6 +4,9 @@
  */
 import type {
   AccountSummary,
+  BacktestHistoryItem,
+  BacktestRequest,
+  BacktestResult,
   BotStatus,
   EnrichResult,
   MarketQuote,
@@ -91,7 +94,7 @@ export const placeManualOrder = (body: {
 // ── Market data ───────────────────────────────────────────────────────────────
 
 export const fetchWatchlist = (symbols?: string) =>
-  get<MarketQuote[]>(`/api/watchlist${symbols ? `?symbols=${symbols}` : ''}`)
+  get<MarketQuote[]>(`/api/watchlist${symbols ? `?symbols=${encodeURIComponent(symbols)}` : ''}`)
 
 export const fetchYahooBars = (symbol: string, period = '5d', interval = '5m') =>
   get<OHLCVBar[]>(`/api/yahoo/${symbol}/bars?period=${period}&interval=${interval}`)
@@ -173,6 +176,23 @@ export const deleteScreenerPreset = (id: string) =>
 
 export const enrichSymbols = (symbols: string[]) =>
   post<EnrichResult[]>('/api/screener/enrich', { symbols })
+
+// ── Backtesting ─────────────────────────────────────────────────────────
+
+export const runBacktest = (body: BacktestRequest) =>
+  post<BacktestResult>('/api/backtest/run', body)
+
+export const saveBacktest = (name: string, result: BacktestResult) =>
+  post<{ id: string; saved: boolean }>('/api/backtest/save', { name, result })
+
+export const fetchBacktestHistory = () =>
+  get<BacktestHistoryItem[]>('/api/backtest/history')
+
+export const fetchBacktest = (id: string) =>
+  get<BacktestResult>(`/api/backtest/${id}`)
+
+export const deleteBacktest = (id: string) =>
+  del<{ deleted: boolean }>(`/api/backtest/${id}`)
 
 // ── Indicators ──────────────────────────────────────────────────────────
 

@@ -1,13 +1,13 @@
 /**
- * TradingChart — wraps TradingView lightweight-charts.
+ * TradingChart â€” wraps TradingView lightweight-charts.
  *
  * Features:
- *  • Multiple chart types: Candlestick, OHLC, Line, Area, Baseline, Heikin-Ashi
- *  • Live candle updates via /ws/market-data WebSocket
- *  • Overlay indicators: SMA 20/50, EMA 12/26, Bollinger Bands, VWAP
- *  • Optional comparison overlay (normalized %)
- *  • Replay bar injection (live bars from WebSocket during simulation)
- *  • Responsive resize via useChart hook
+ *  â€¢ Multiple chart types: Candlestick, OHLC, Line, Area, Baseline, Heikin-Ashi
+ *  â€¢ Live candle updates via /ws/market-data WebSocket
+ *  â€¢ Overlay indicators: SMA 20/50, EMA 12/26, Bollinger Bands, VWAP
+ *  â€¢ Optional comparison overlay (normalized %)
+ *  â€¢ Replay bar injection (live bars from WebSocket during simulation)
+ *  â€¢ Responsive resize via useChart hook
  *
  * Volume is rendered separately by VolumePanel (removed from this component).
  */
@@ -25,7 +25,6 @@ import {
 import clsx from 'clsx'
 import { useChart, CHART_THEME } from '@/hooks/useChart'
 import { useMarketStore, useSimStore } from '@/store'
-import { wsMdService } from '@/services/ws'
 import {
   calcSMA, calcEMA, calcBB, calcVWAP,
   INDICATOR_DEFS,
@@ -39,7 +38,7 @@ import type { OHLCVBar, ChartType } from '@/types'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyData = any
 
-// ── Normalization for comparison overlay ──────────────────────────────────────
+// â”€â”€ Normalization for comparison overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function normalizeBars(bars: OHLCVBar[]): OHLCVBar[] {
   if (!bars.length) return []
@@ -53,13 +52,13 @@ function normalizeBars(bars: OHLCVBar[]): OHLCVBar[] {
   }))
 }
 
-// ── Helper: convert LinePoint to lightweight-charts time format ───────────────
+// â”€â”€ Helper: convert LinePoint to lightweight-charts time format â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function toTV(pts: LinePoint[]) {
   return pts.map((p) => ({ time: p.time as unknown, value: p.value }))
 }
 
-// ── Indicator series helpers ──────────────────────────────────────────────────
+// â”€â”€ Indicator series helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function makeLineSeries(
   chart: IChartApi,
@@ -77,7 +76,7 @@ function makeLineSeries(
   } as Partial<LineSeriesOptions>)
 }
 
-// ── Series creation per chart type ──────────────────────────────────────────
+// â”€â”€ Series creation per chart type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function createMainSeries(chart: IChartApi, chartType: ChartType): ISeriesApi<AnyData> {
   switch (chartType) {
@@ -136,7 +135,7 @@ function createMainSeries(chart: IChartApi, chartType: ChartType): ISeriesApi<An
   }
 }
 
-// ── Data loading per chart type ─────────────────────────────────────────────
+// â”€â”€ Data loading per chart type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function loadDataIntoSeries(
   series: ISeriesApi<AnyData>,
@@ -166,37 +165,36 @@ function loadDataIntoSeries(
   }
 }
 
-// ── Is this chart type single-value (line/area/baseline)? ───────────────────
+// â”€â”€ Is this chart type single-value (line/area/baseline)? â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function isSingleValue(ct: ChartType): boolean {
   return ct === 'line' || ct === 'area' || ct === 'baseline'
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface Props {
   symbol:       string
   className?:   string
-  barSeconds?:  number
   timeframe?:   string
   onChartReady?: (chart: IChartApi, series: ISeriesApi<AnyData>) => void
+  onStale?:      () => void
 }
 
-interface LiveBar {
-  time:  number
-  open:  number
-  high:  number
-  low:   number
-  close: number
-}
-
-export default function TradingChart({ symbol, className, barSeconds = 86_400, timeframe = '1d', onChartReady }: Props) {
+export default function TradingChart({
+  symbol,
+  className,
+  timeframe = '1d',
+  onChartReady,
+  onStale,
+}: Props) {
   const { containerRef, chartRef } = useChart({ options: CHART_THEME })
   const [chartReady, setChartReady] = useState(false)
 
   const mainSeriesRef = useRef<ISeriesApi<AnyData> | null>(null)
   const compRef       = useRef<ISeriesApi<'Line'> | null>(null)
-  const liveBarRef    = useRef<LiveBar | null>(null)
+  const prevBarsRef   = useRef<OHLCVBar[]>([])
+  const lastQuoteMsRef = useRef<number>(Date.now())
   const indSeriesRef  = useRef<Map<string, ISeriesApi<'Line'>[]>>(new Map())
   const chartTypeRef  = useRef<ChartType>('candlestick')
 
@@ -211,10 +209,12 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
   // Keep ref in sync for use in callbacks
   chartTypeRef.current = chartType
 
-  // ── Notify parent of chart instance ─────────────────────────────────────
+  // â”€â”€ Notify parent of chart instance â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
+  const onStaleRef = useRef(onStale)
+  onStaleRef.current = onStale
 
   useEffect(() => {
     if (chartRef.current && mainSeriesRef.current && onChartReadyRef.current) {
@@ -222,7 +222,7 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
     }
   }, [chartRef])
 
-  // ── Create initial main series ──────────────────────────────────────────
+  // â”€â”€ Create initial main series â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   useEffect(() => {
     const chart = chartRef.current
@@ -242,7 +242,7 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
     }
   }, [chartRef]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Recreate main series when chartType changes ─────────────────────────
+  // â”€â”€ Recreate main series when chartType changes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   const prevChartType = useRef(chartType)
   useEffect(() => {
@@ -268,63 +268,71 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
     }
   }, [chartType, bars, chartRef])
 
-  // ── Load bars ───────────────────────────────────────────────────────────
+  // â”€â”€ Load bars â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   useEffect(() => {
     if (!mainSeriesRef.current || !bars.length) return
 
-    loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
-    chartRef.current?.timeScale().fitContent()
-
-    // Seed live bar from last loaded bar
+    const prevBars = prevBarsRef.current
     const last = bars[bars.length - 1]
-    liveBarRef.current = {
-      time: last.time, open: last.open, high: last.high, low: last.low, close: last.close,
-    }
-  }, [bars]) // eslint-disable-line react-hooks/exhaustive-deps
+    const prevLast = prevBars[prevBars.length - 1]
+    const replaceAll =
+      prevBars.length === 0 ||
+      bars.length < prevBars.length ||
+      bars.length - prevBars.length > 1 ||
+      (prevLast && last.time < prevLast.time)
 
-  // ── Live candle via WebSocket ───────────────────────────────────────────
-
-  useEffect(() => {
-    if (!bars.length) return
-
-    const unsub = wsMdService.subscribe(symbol, (msg) => {
-      if (!mainSeriesRef.current) return
-      const price   = msg.price
-      const nowSecs = msg.time ?? Math.floor(Date.now() / 1000)
-      const barTime = Math.floor(nowSecs / barSeconds) * barSeconds
-
-      const lb = liveBarRef.current
-      if (lb && lb.time === barTime) {
-        lb.high  = Math.max(lb.high, price)
-        lb.low   = Math.min(lb.low, price)
-        lb.close = price
-      } else {
-        liveBarRef.current = { time: barTime, open: price, high: price, low: price, close: price }
-      }
-
+    if (replaceAll) {
+      loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
+      if (prevBars.length === 0) chartRef.current?.timeScale().fitContent()
+    } else {
       try {
         if (isSingleValue(chartTypeRef.current)) {
-          mainSeriesRef.current!.update({
-            time:  liveBarRef.current!.time as unknown,
-            value: liveBarRef.current!.close,
+          mainSeriesRef.current.update({
+            time: last.time as unknown,
+            value: last.close,
           } as AnyData)
         } else {
-          mainSeriesRef.current!.update({
-            time:  liveBarRef.current!.time  as unknown,
-            open:  liveBarRef.current!.open,
-            high:  liveBarRef.current!.high,
-            low:   liveBarRef.current!.low,
-            close: liveBarRef.current!.close,
+          mainSeriesRef.current.update({
+            time: last.time as unknown,
+            open: last.open,
+            high: last.high,
+            low: last.low,
+            close: last.close,
           } as AnyData)
         }
       } catch { /* ignore */ }
-    })
+    }
 
-    return unsub
-  }, [symbol, barSeconds, bars.length])
+    prevBarsRef.current = bars
+    lastQuoteMsRef.current = Date.now()
+  }, [bars, chartType]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Replay bars (injected live) ─────────────────────────────────────────
+  useEffect(() => {
+    prevBarsRef.current = []
+  }, [symbol, timeframe, chartType])
+
+  // WS can become stale without fully closing; fallback to REST refresh via parent callback.
+  useEffect(() => {
+    const STALE_MS = 30_000
+    const CHECK_MS = 10_000
+    const COOLDOWN_MS = 60_000
+    let lastRecoveryMs = 0
+
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return
+      const now = Date.now()
+      const stale = now - lastQuoteMsRef.current > STALE_MS
+      if (stale && now - lastRecoveryMs > COOLDOWN_MS) {
+        lastRecoveryMs = now
+        onStaleRef.current?.()
+      }
+    }, CHECK_MS)
+
+    return () => clearInterval(timer)
+  }, [symbol, timeframe])
+
+  // â”€â”€ Replay bars (injected live) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   useEffect(() => {
     if (!mainSeriesRef.current || !replayBars.length) return
@@ -342,7 +350,7 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
     } catch { /* ignore */ }
   }, [replayBars])
 
-  // ── Overlay indicators ──────────────────────────────────────────────────
+  // â”€â”€ Overlay indicators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   useEffect(() => {
     const chart = chartRef.current
@@ -372,7 +380,7 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
     }
   }, [bars, selectedIndicators, compMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Comparison overlay ──────────────────────────────────────────────────
+  // â”€â”€ Comparison overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   useEffect(() => {
     if (!chartRef.current) return
@@ -427,7 +435,7 @@ export default function TradingChart({ symbol, className, barSeconds = 86_400, t
   )
 }
 
-// ── Private helpers ───────────────────────────────────────────────────────────
+// â”€â”€ Private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function _createOverlaySeries(
   chart: IChartApi,

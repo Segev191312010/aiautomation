@@ -17,23 +17,23 @@ import ResizeHandle from '@/components/chart/ResizeHandle'
 import TickerCard from '@/components/ticker/TickerCard'
 import Skeleton from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/ToastProvider'
-import { useMarketStore, useDrawingStore } from '@/store'
+import { useMarketStore, useDrawingStore, useBotStore } from '@/store'
 import { fetchYahooBars, fetchSettings } from '@/services/api'
 import { getMockBars } from '@/services/mockService'
-import { intervalToSeconds, calcRSI, calcMACD } from '@/utils/indicators'
+import { calcRSI, calcMACD } from '@/utils/indicators'
 import { useCrosshairSync, type ChartPane } from '@/hooks/useCrosshairSync'
 
 // ── Auto-refresh intervals ──────────────────────────────────────────────────
 
 const AUTO_REFRESH_MS: Record<string, number> = {
-  '1m':  30_000,       // 30s
-  '5m':  60_000,       // 1 min
-  '15m': 60_000,       // 1 min
-  '30m': 120_000,      // 2 min
-  '1h':  600_000,      // 10 min
-  '1d':  1_800_000,    // 30 min
-  '1wk': 3_600_000,    // 1 hr
-  '1mo': 7_200_000,    // 2 hr
+  '1m':  10_000,       // 10s
+  '5m':  20_000,       // 20s
+  '15m': 30_000,       // 30s
+  '30m': 60_000,       // 1 min
+  '1h':  120_000,      // 2 min
+  '1d':  300_000,      // 5 min
+  '1wk': 600_000,      // 10 min
+  '1mo': 1_800_000,    // 30 min
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -75,8 +75,38 @@ export default function MarketPage() {
 
   const quote      = quotes[selectedSymbol]
   const currentTF  = TOOLBAR_TIMEFRAMES[tfIdx]
-  const barSeconds = intervalToSeconds(currentTF.interval)
   const bars       = useMarketStore((s) => s.bars[selectedSymbol] ?? [])
+  const staleAgeS = (() => {
+    if (quote?.stale_s != null) return quote.stale_s
+    if (!quote?.last_update) return Number.POSITIVE_INFINITY
+    const age = (Date.now() - new Date(quote.last_update).getTime()) / 1000
+    return Number.isFinite(age) ? Math.max(0, age) : Number.POSITIVE_INFINITY
+  })()
+  const badge = (() => {
+    const marketState = quote?.market_state ?? 'unknown'
+    if (marketState === 'open' && staleAgeS <= 10) {
+      return {
+        label: 'LIVE',
+        age: '',
+        dotClass: 'bg-terminal-green animate-pulse',
+        textClass: 'text-terminal-green',
+      }
+    }
+    if (marketState === 'extended' && staleAgeS <= 10) {
+      return {
+        label: 'EXTENDED',
+        age: '',
+        dotClass: 'bg-terminal-blue animate-pulse',
+        textClass: 'text-terminal-blue',
+      }
+    }
+    return {
+      label: 'CLOSED / STALE',
+      age: Number.isFinite(staleAgeS) ? `${Math.floor(staleAgeS)}s` : '--',
+      dotClass: staleAgeS > 30 ? 'bg-terminal-red' : 'bg-terminal-amber',
+      textClass: staleAgeS > 30 ? 'text-terminal-red' : 'text-terminal-amber',
+    }
+  })()
 
   // Build time→price data maps for crosshair sync
   const mainDataMap = useMemo(() => {
@@ -181,11 +211,14 @@ export default function MarketPage() {
       setBars(sym, bars)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load bars'
-      // Show toast for validation errors (e.g., invalid interval/period combo)
+      console.warn('[MarketPage] Bar load failed:', msg)
       if (msg.includes('400') || msg.includes('interval')) {
         toast.error(msg)
       }
-      setBars(sym, getMockBars(sym, 120, tf.interval === '1d' ? 86_400 : 300))
+      // Only use mock data if backend is in mock mode
+      if (useBotStore.getState().mockMode) {
+        setBars(sym, getMockBars(sym, 120, tf.interval === '1d' ? 86_400 : 300))
+      }
     } finally {
       setLoading(false)
     }
@@ -196,10 +229,19 @@ export default function MarketPage() {
     try {
       const bars = await fetchYahooBars(sym, tf.period, tf.interval)
       setCompBars(sym, bars)
-    } catch {
-      setCompBars(sym, getMockBars(sym, 120))
+    } catch (err) {
+      console.warn('[MarketPage] Comp bar load failed:', err)
+      if (useBotStore.getState().mockMode) {
+        setCompBars(sym, getMockBars(sym, 120))
+      }
     }
   }
+
+  const refreshActiveCharts = useCallback(() => {
+    loadBars(selectedSymbol, tfIdx)
+    if (compMode && compSymbol) loadCompBars(compSymbol, tfIdx)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSymbol, tfIdx, compMode, compSymbol])
 
   // ── Initial + symbol/timeframe-change load ────────────────────────────────
 
@@ -219,13 +261,27 @@ export default function MarketPage() {
     if (refreshTimerRef.current) clearInterval(refreshTimerRef.current)
     const interval = AUTO_REFRESH_MS[currentTF.interval] ?? 300_000
     refreshTimerRef.current = setInterval(() => {
-      loadBars(selectedSymbol, tfIdx)
+      refreshActiveCharts()
     }, interval)
     return () => {
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSymbol, tfIdx])
+  }, [selectedSymbol, tfIdx, compMode, compSymbol, refreshActiveCharts])
+
+  // Catch up immediately when user returns to tab/network comes back.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshActiveCharts()
+    }
+    const onOnline = () => refreshActiveCharts()
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('online', onOnline)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('online', onOnline)
+    }
+  }, [refreshActiveCharts])
 
   // ── Load saved drawings from settings ─────────────────────────────────────
 
@@ -343,18 +399,19 @@ export default function MarketPage() {
                 </>
               )}
               {/* Live pulse indicator */}
-              <span className="ml-auto flex items-center gap-1.5 text-[10px] font-mono text-terminal-ghost">
-                <span className="w-1.5 h-1.5 rounded-full bg-terminal-green animate-pulse" />
-                LIVE
+              <span className={clsx('ml-auto flex items-center gap-1.5 text-[10px] font-mono', badge.textClass)}>
+                <span className={clsx('w-1.5 h-1.5 rounded-full', badge.dotClass)} />
+                {badge.label}
+                {badge.age && <span className="text-terminal-ghost">({badge.age})</span>}
               </span>
             </div>
             <div className="h-[calc(100%-44px)]">
               <TradingChart
                 symbol={selectedSymbol}
-                barSeconds={barSeconds}
                 timeframe={currentTF.interval}
                 className="h-full"
                 onChartReady={handleMainChartReady}
+                onStale={refreshActiveCharts}
               />
             </div>
           </div>

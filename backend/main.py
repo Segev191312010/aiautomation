@@ -1,50 +1,50 @@
 """
-FastAPI application — REST API, WebSocket, and static frontend serving.
+FastAPI application â€” REST API, WebSocket, and static frontend serving.
 
 Run:
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Endpoints overview
 ------------------
-GET  /api/status                        — system health
-POST /api/ibkr/connect|disconnect       — IBKR connection control
+GET  /api/status                        â€” system health
+POST /api/ibkr/connect|disconnect       â€” IBKR connection control
 
-GET  /api/account/summary               — normalised account KPIs (IBKR | sim | mock)
-GET  /api/positions                     — live IBKR positions (or mock)
+GET  /api/account/summary               â€” normalised account KPIs (IBKR | sim | mock)
+GET  /api/positions                     â€” live IBKR positions (or mock)
 
-GET  /api/simulation/account            — virtual sim account
-GET  /api/simulation/positions          — virtual sim positions
-POST /api/simulation/order              — place a virtual order
-POST /api/simulation/reset              — wipe virtual account
+GET  /api/simulation/account            â€” virtual sim account
+GET  /api/simulation/positions          â€” virtual sim positions
+POST /api/simulation/order              â€” place a virtual order
+POST /api/simulation/reset              â€” wipe virtual account
 
-GET  /api/simulation/playback           — replay state
-POST /api/simulation/playback/load      — load symbol + bars for replay
-POST /api/simulation/playback/play      — start/resume replay
-POST /api/simulation/playback/pause     — pause
-POST /api/simulation/playback/stop      — reset to beginning
-POST /api/simulation/playback/speed     — set replay speed
+GET  /api/simulation/playback           â€” replay state
+POST /api/simulation/playback/load      â€” load symbol + bars for replay
+POST /api/simulation/playback/play      â€” start/resume replay
+POST /api/simulation/playback/pause     â€” pause
+POST /api/simulation/playback/stop      â€” reset to beginning
+POST /api/simulation/playback/speed     â€” set replay speed
 
-GET  /api/watchlist                     — quote cards for default watchlist symbols
-GET  /api/yahoo/{symbol}/bars           — OHLCV bars via Yahoo Finance
-GET  /api/market/{symbol}/price         — single price (IBKR or mock)
-GET  /api/market/{symbol}/bars          — IBKR historical bars
-POST /api/market/{symbol}/subscribe     — subscribe to 5-s real-time bars
-POST /api/market/{symbol}/unsubscribe   — unsubscribe
+GET  /api/watchlist                     â€” quote cards for default watchlist symbols
+GET  /api/yahoo/{symbol}/bars           â€” OHLCV bars via Yahoo Finance
+GET  /api/market/{symbol}/price         â€” single price (IBKR or mock)
+GET  /api/market/{symbol}/bars          â€” IBKR historical bars
+POST /api/market/{symbol}/subscribe     â€” subscribe to 5-s real-time bars
+POST /api/market/{symbol}/unsubscribe   â€” unsubscribe
 
-GET  /api/orders                        — open IBKR orders
-DELETE /api/orders/{id}                 — cancel IBKR order
-POST /api/orders/manual                 — place manual IBKR order
+GET  /api/orders                        â€” open IBKR orders
+DELETE /api/orders/{id}                 â€” cancel IBKR order
+POST /api/orders/manual                 â€” place manual IBKR order
 
-GET|POST|PUT|DELETE /api/rules/*        — automation rules CRUD
-POST /api/rules/{id}/toggle             — enable / disable rule
+GET|POST|PUT|DELETE /api/rules/*        â€” automation rules CRUD
+POST /api/rules/{id}/toggle             â€” enable / disable rule
 
-POST /api/bot/start|stop                — start / stop rule-evaluation loop
+POST /api/bot/start|stop                â€” start / stop rule-evaluation loop
 GET  /api/bot/status
 
-GET  /api/trades                        — trade execution log
+GET  /api/trades                        â€” trade execution log
 
-WS   /ws                                — general events (bot, fills, IBKR state)
-WS   /ws/market-data                    — streaming price updates for a symbol list
+WS   /ws                                â€” general events (bot, fills, IBKR state)
+WS   /ws/market-data                    â€” streaming price updates for a symbol list
 """
 from __future__ import annotations
 
@@ -52,9 +52,14 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import urllib.request
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import time as _time
 
@@ -69,10 +74,12 @@ from config import cfg
 from database import (
     delete_rule, get_rule, get_rules, get_trades, init_db, save_rule, save_trade,
     get_screener_presets, save_screener_preset, delete_screener_preset,
+    save_backtest, get_backtests, get_backtest, delete_backtest,
 )
 from ibkr_client import ibkr
 from market_data import (
     get_historical_bars, get_latest_price,
+    subscribe_realtime, unsubscribe_realtime,
     subscribe_realtime_bars, unsubscribe_realtime_bars,
 )
 from mock_data import (
@@ -81,12 +88,14 @@ from mock_data import (
 from models import (
     AccountSummary, PlaybackState, Rule, RuleCreate, RuleUpdate,
     Trade, TradeAction, ScanRequest, ScanFilter, ScreenerPreset, EnrichRequest,
+    BacktestRequest, BacktestSaveRequest,
 )
 from order_executor import cancel_order, get_open_orders, on_fill, place_order
 from simulation import replay_engine, sim_engine
 from auth import create_token, get_current_user
 from indicators import calculate as ind_calculate, series_to_json
 from settings import get_settings, update_settings
+from data_health import DataFreshnessMonitor
 from screener import (
     run_scan, list_universes, validate_timeframe, enrich_symbols,
 )
@@ -94,9 +103,29 @@ import bot_runner
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s â€” %(message)s",
 )
 log = logging.getLogger(__name__)
+
+
+_data_health = DataFreshnessMonitor(
+    {
+        "watchlist_quotes": 30.0,
+        "ws_quotes": float(cfg.WS_STALE_WARN_SECONDS),
+        "ws_ibkr_quotes": float(cfg.WS_STALE_WARN_SECONDS),
+        "ws_yahoo_quotes": float(cfg.WS_STALE_WARN_SECONDS),
+        "yahoo_bars": 300.0,
+        "heartbeat_quotes": 45.0,
+    }
+)
+
+
+def _record_data_success(source: str, *, count: int = 0, duration_ms: float | None = None) -> None:
+    _data_health.record_success(source, count=count, duration_ms=duration_ms)
+
+
+def _record_data_failure(source: str, error: str, *, duration_ms: float | None = None) -> None:
+    _data_health.record_failure(source, error, duration_ms=duration_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +170,7 @@ async def _broadcast(payload: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Startup ────────────────────────────────────────────────────────────
+    # â”€â”€ Startup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     await init_db()
     await sim_engine.initialize()
 
@@ -150,7 +179,7 @@ async def lifespan(app: FastAPI):
     replay_engine.set_broadcast(_broadcast)
     ibkr.set_broadcast(_broadcast)
 
-    # Register order-fill → WS broadcast
+    # Register order-fill â†’ WS broadcast
     async def _on_trade_fill(trade: Trade) -> None:
         await _broadcast(
             {
@@ -171,12 +200,15 @@ async def lifespan(app: FastAPI):
         log.info("IBKR connected on startup")
         await ibkr.start_reconnect_loop()
     else:
-        log.warning("IBKR not connected — auto-reconnect running in background")
+        log.warning("IBKR not connected â€” auto-reconnect running in background")
         await ibkr.start_reconnect_loop()
+
+    await _start_market_heartbeat()
 
     yield
 
-    # ── Shutdown ────────────────────────────────────────────────────────────
+    # â”€â”€ Shutdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    await _stop_market_heartbeat()
     await bot_runner.stop()
     await replay_engine.stop()
     await ibkr.disconnect()
@@ -188,14 +220,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading Dashboard", version="2.0.0", lifespan=lifespan)
 
-# ── CORS ──────────────────────────────────────────────────────────────────
+# â”€â”€ CORS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",   # Vite dev server
+        "http://localhost:5174",   # Vite dev server (fallback port)
         "http://localhost:8000",   # Same-origin
         "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
         "http://127.0.0.1:8000",
     ],
     allow_credentials=True,
@@ -203,17 +237,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Static assets ─────────────────────────────────────────────────────────
+# â”€â”€ Static assets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(_FRONTEND_DIR):
     app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="static")
 
 _DASHBOARD_DIR = os.path.join(os.path.dirname(__file__), cfg.DASHBOARD_BUILD_DIR)
+_ASSETS_DIR = Path(os.path.join(_DASHBOARD_DIR, "assets")).resolve()
 
 
 # ---------------------------------------------------------------------------
-# Global error handlers — all errors return {error, detail} JSON format
+# Global error handlers â€” all errors return {error, detail} JSON format
 # ---------------------------------------------------------------------------
 
 @app.exception_handler(HTTPException)
@@ -259,7 +294,7 @@ async def log_requests(request: Request, call_next):
     start = _time.perf_counter()
     response = await call_next(request)
     duration_ms = (_time.perf_counter() - start) * 1000
-    log.info("%s %s → %d (%.0fms)", request.method, request.url.path, response.status_code, duration_ms)
+    log.info("%s %s â†’ %d (%.0fms)", request.method, request.url.path, response.status_code, duration_ms)
     return response
 
 
@@ -276,9 +311,11 @@ async def serve_spa_assets(file_path: str):
     Vite emits absolute /assets/... URLs (base='/'), so we intercept them here.
     This route works even when the server was started before `npm run build`.
     """
-    full = os.path.join(_DASHBOARD_DIR, "assets", file_path)
-    if os.path.isfile(full):
-        return FileResponse(full)
+    full = (_ASSETS_DIR / file_path).resolve()
+    if not str(full).startswith(str(_ASSETS_DIR)):
+        raise HTTPException(400, "Invalid asset path")
+    if full.is_file():
+        return FileResponse(str(full))
     raise HTTPException(404, f"Asset not found: {file_path}")
 
 
@@ -301,8 +338,10 @@ async def serve_react_app(path: str = ""):
 # ---------------------------------------------------------------------------
 
 _ALLOWED_WS_ORIGINS = {
-    "http://localhost:5173", "http://localhost:8000",
-    "http://127.0.0.1:5173", "http://127.0.0.1:8000",
+    "http://localhost:5173", "http://localhost:5174",
+    "http://localhost:8000",
+    "http://127.0.0.1:5173", "http://127.0.0.1:5174",
+    "http://127.0.0.1:8000",
 }
 
 
@@ -318,6 +357,7 @@ def _check_ws_origin(ws: WebSocket) -> bool:
 @app.websocket("/ws")
 async def ws_general(ws: WebSocket):
     if not _check_ws_origin(ws):
+        await ws.accept()
         await ws.close(code=4003)
         return
     await manager.connect(ws)
@@ -331,15 +371,402 @@ async def ws_general(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------
+# Shared live quote fanout cache/state for WebSocket streaming
+# ---------------------------------------------------------------------------
+
+_ws_price_cache: dict[str, tuple[float, float, int, str]] = {}  # symbol -> (price, fetch_ts, quote_ts, market_state)
+_ws_ibkr_quotes: dict[str, tuple[float, int, str]] = {}         # symbol -> (price, quote_ts, market_state)
+_ws_symbol_ref_counts: dict[str, int] = {}                      # symbol -> subscriber count
+_ws_ibkr_subscribed_symbols: set[str] = set()
+_ws_lock = threading.Lock()
+
+_ws_last_ibkr_quote_ts: float = 0.0
+_ws_last_yahoo_quote_ts: float = 0.0
+
+_WS_CACHE_TTL = max(0.5, float(cfg.WS_CACHE_TTL_SECONDS))
+_WS_PUSH_INTERVAL = max(0.5, float(cfg.WS_PUSH_INTERVAL_SECONDS))
+_WS_STALE_WARN_SECONDS = max(1.0, float(cfg.WS_STALE_WARN_SECONDS))
+_WS_STALE_CRITICAL_SECONDS = max(_WS_STALE_WARN_SECONDS, float(cfg.WS_STALE_CRITICAL_SECONDS))
+_WS_HEARTBEAT_INTERVAL_SECONDS = 5.0
+
+_US_EASTERN = ZoneInfo("America/New_York")
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper()
+
+
+def _ws_symbol_variants(symbol: str) -> list[str]:
+    base = _normalize_symbol(symbol)
+    variants = [base]
+    dash = base.replace(".", "-")
+    dot = base.replace("-", ".")
+    for candidate in (dash, dot):
+        if candidate and candidate not in variants:
+            variants.append(candidate)
+    return variants
+
+
+def _market_state_from_schedule(symbol: str, quote_ts: int | None = None) -> str:
+    # Crypto pairs are effectively always open.
+    if symbol.endswith("-USD"):
+        return "open"
+    ts = quote_ts or int(_time.time())
+    dt = datetime.fromtimestamp(ts, tz=_US_EASTERN)
+    if dt.weekday() >= 5:
+        return "closed"
+    minutes = dt.hour * 60 + dt.minute
+    if 9 * 60 + 30 <= minutes < 16 * 60:
+        return "open"
+    if 4 * 60 <= minutes < 9 * 60 + 30 or 16 * 60 <= minutes < 20 * 60:
+        return "extended"
+    return "closed"
+
+
+def _normalize_market_state(state: str | None, symbol: str, quote_ts: int | None = None) -> str:
+    if state:
+        candidate = str(state).strip().lower()
+        if candidate in {"open", "extended", "closed", "unknown"}:
+            return candidate
+    return _market_state_from_schedule(symbol, quote_ts)
+
+
+def _build_ws_quote(
+    symbol: str,
+    price: float,
+    quote_ts: int,
+    source: str,
+    market_state: str | None = None,
+) -> dict[str, Any]:
+    now_ts = _time.time()
+    safe_ts = int(quote_ts or now_ts)
+    stale_s = round(max(0.0, now_ts - safe_ts), 3)
+    return {
+        "type": "quote",
+        "symbol": symbol,
+        "price": round(float(price), 4),
+        "time": safe_ts,
+        "source": source,
+        "market_state": _normalize_market_state(market_state, symbol, safe_ts),
+        "stale_s": stale_s,
+    }
+
+
+def _on_ibkr_tick(symbol: str, price: float) -> None:
+    global _ws_last_ibkr_quote_ts
+    try:
+        value = float(price)
+    except (TypeError, ValueError):
+        return
+    if value <= 0:
+        return
+    sym = _normalize_symbol(symbol)
+    ts = int(_time.time())
+    state = _market_state_from_schedule(sym, ts)
+    with _ws_lock:
+        _ws_ibkr_quotes[sym] = (round(value, 4), ts, state)
+        _ws_last_ibkr_quote_ts = _time.time()
+    _record_data_success("ws_ibkr_quotes", count=1)
+
+
+async def _ws_sync_ibkr_subscriptions() -> None:
+    with _ws_lock:
+        tracked = [sym for sym, count in _ws_symbol_ref_counts.items() if count > 0]
+        if not ibkr.is_connected():
+            _ws_ibkr_subscribed_symbols.clear()
+            return
+        missing = [sym for sym in tracked if sym not in _ws_ibkr_subscribed_symbols]
+        _ws_ibkr_subscribed_symbols.update(missing)
+
+    for sym in missing:
+        try:
+            ok = await subscribe_realtime(sym, _on_ibkr_tick)
+        except Exception as exc:
+            _record_data_failure("ws_ibkr_quotes", str(exc))
+            log.debug("IBKR realtime subscribe failed for %s: %s", sym, exc)
+            with _ws_lock:
+                _ws_ibkr_subscribed_symbols.discard(sym)
+            continue
+        if not ok:
+            with _ws_lock:
+                _ws_ibkr_subscribed_symbols.discard(sym)
+
+
+async def _ws_add_symbol_refs(symbols: list[str]) -> None:
+    added: list[str] = []
+    with _ws_lock:
+        for raw in symbols:
+            sym = _normalize_symbol(raw)
+            if not sym:
+                continue
+            prev = _ws_symbol_ref_counts.get(sym, 0)
+            _ws_symbol_ref_counts[sym] = prev + 1
+            if prev == 0:
+                added.append(sym)
+    if added:
+        _track_heartbeat_symbols(added)
+    await _ws_sync_ibkr_subscriptions()
+
+
+async def _ws_remove_symbol_refs(symbols: list[str]) -> None:
+    removed: list[str] = []
+    with _ws_lock:
+        for raw in symbols:
+            sym = _normalize_symbol(raw)
+            if not sym:
+                continue
+            prev = _ws_symbol_ref_counts.get(sym, 0)
+            if prev <= 1:
+                _ws_symbol_ref_counts.pop(sym, None)
+                removed.append(sym)
+                _ws_ibkr_subscribed_symbols.discard(sym)
+            else:
+                _ws_symbol_ref_counts[sym] = prev - 1
+    for sym in removed:
+        unsubscribe_realtime(sym)
+    if removed:
+        _untrack_heartbeat_symbols(removed)
+
+
+def _ws_get_ibkr_quote(symbol: str) -> tuple[float, int, str] | None:
+    with _ws_lock:
+        return _ws_ibkr_quotes.get(symbol)
+
+
+def _is_crypto_usd_symbol(symbol: str) -> bool:
+    sym = _normalize_symbol(symbol)
+    if not sym.endswith("-USD"):
+        return False
+    base = sym[:-4]
+    return bool(base) and base.replace("-", "").isalnum()
+
+
+def _fetch_coinbase_spot(symbol: str) -> tuple[float, int, str] | None:
+    """
+    Fetch spot price from Coinbase for crypto USD pairs.
+
+    Returns (price, unix_ts, market_state) or None on any failure.
+    """
+    sym = _normalize_symbol(symbol)
+    if not _is_crypto_usd_symbol(sym):
+        return None
+    url = f"https://api.coinbase.com/v2/prices/{sym}/spot"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "trading-dashboard/1.0"})
+        with urllib.request.urlopen(req, timeout=2.5) as resp:  # nosec B310
+            payload = json.loads(resp.read().decode("utf-8"))
+        amount = payload.get("data", {}).get("amount")
+        price = float(amount)
+        if price <= 0:
+            return None
+        ts = int(_time.time())
+        return (round(price, 4), ts, "open")
+    except Exception:
+        return None
+
+
+async def _ws_batch_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """
+    Resolve live-ish quotes from Yahoo with 1-second TTL cache.
+
+    Strategy:
+    1) Ticker.fast_info price fields (best effort)
+    2) 1m pre/post close fallback when fast_info is missing
+    """
+    import pandas as pd
+    import yfinance as yf
+
+    global _ws_last_yahoo_quote_ts
+    started = _time.perf_counter()
+    now = _time.time()
+    results: dict[str, dict[str, Any]] = {}
+    stale: list[str] = []
+
+    for raw in symbols:
+        sym = _normalize_symbol(raw)
+        if not sym:
+            continue
+        cached = _ws_price_cache.get(sym)
+        if cached and (now - cached[1]) < _WS_CACHE_TTL:
+            price, _fetch_ts, quote_ts, state = cached
+            results[sym] = _build_ws_quote(sym, price, quote_ts, "yahoo", state)
+        else:
+            stale.append(sym)
+
+    fetch_failed = False
+    fetched: dict[str, tuple[float, int, str]] = {}
+
+    if stale:
+        def _from_fast_info(sym: str) -> tuple[float, int, str] | None:
+            for candidate in _ws_symbol_variants(sym):
+                try:
+                    fi = yf.Ticker(candidate).fast_info
+                except Exception:
+                    continue
+                raw_price = (
+                    getattr(fi, "last_price", None)
+                    or getattr(fi, "regular_market_price", None)
+                    or getattr(fi, "post_market_price", None)
+                    or getattr(fi, "pre_market_price", None)
+                )
+                try:
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                ts = int(_time.time())
+                state = _normalize_market_state(getattr(fi, "market_state", None), sym, ts)
+                return (round(price, 4), ts, state)
+            return None
+
+        def _resolve_df_for_symbol(raw_df: Any, sym: str) -> Any:
+            if raw_df is None:
+                return None
+            if not isinstance(getattr(raw_df, "columns", None), pd.MultiIndex):
+                return raw_df
+            col0 = {str(c).upper() for c in raw_df.columns.get_level_values(0)}
+            for candidate in _ws_symbol_variants(sym):
+                if candidate in col0:
+                    return raw_df[candidate]
+            return None
+
+        def _fetch_batch() -> dict[str, tuple[float, int, str]]:
+            out: dict[str, tuple[float, int, str]] = {}
+            unresolved: list[str] = []
+
+            crypto_symbols = [sym for sym in stale if _is_crypto_usd_symbol(sym)]
+            non_crypto_symbols = [sym for sym in stale if sym not in crypto_symbols]
+
+            # For crypto, prefer Coinbase spot (more responsive than Yahoo fallback).
+            if crypto_symbols:
+                worker_count = max(1, min(len(crypto_symbols), 6))
+                with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                    for sym, resolved in zip(crypto_symbols, ex.map(_fetch_coinbase_spot, crypto_symbols)):
+                        if resolved:
+                            out[sym] = resolved
+                        else:
+                            unresolved.append(sym)
+
+            if non_crypto_symbols:
+                worker_count = max(1, min(len(non_crypto_symbols), 8))
+                with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                    for sym, resolved in zip(non_crypto_symbols, ex.map(_from_fast_info, non_crypto_symbols)):
+                        if resolved:
+                            out[sym] = resolved
+                        else:
+                            unresolved.append(sym)
+
+            if unresolved:
+                raw_df = yf.download(
+                    tickers=" ".join(unresolved),
+                    period="1d",
+                    interval="1m",
+                    group_by="ticker",
+                    auto_adjust=False,
+                    threads=False,
+                    progress=False,
+                    prepost=True,
+                )
+                if raw_df is None or raw_df.empty:
+                    return out
+                for sym in unresolved:
+                    try:
+                        df_sym = _resolve_df_for_symbol(raw_df, sym)
+                        if df_sym is None or "Close" not in df_sym.columns:
+                            continue
+                        close = df_sym["Close"].dropna()
+                        if close.empty:
+                            continue
+                        price = float(close.iloc[-1])
+                        if price <= 0:
+                            continue
+                        idx = close.index[-1]
+                        quote_ts = int(pd.Timestamp(idx).timestamp())
+                        state = _market_state_from_schedule(sym, quote_ts)
+                        out[sym] = (round(price, 4), quote_ts, state)
+                    except Exception:
+                        continue
+            return out
+
+        try:
+            fetched = await asyncio.to_thread(_fetch_batch)
+            fetch_ts = _time.time()
+            if fetched:
+                _ws_last_yahoo_quote_ts = fetch_ts
+            for sym, (price, quote_ts, state) in fetched.items():
+                _ws_price_cache[sym] = (price, fetch_ts, quote_ts, state)
+                results[sym] = _build_ws_quote(sym, price, quote_ts, "yahoo", state)
+        except Exception as exc:
+            log.warning("WS batch Yahoo fetch failed: %s", exc)
+            _record_data_failure("ws_yahoo_quotes", str(exc))
+            fetch_failed = True
+
+    # Keep stale cache visible if Yahoo is slow/rate-limited.
+    for raw in symbols:
+        sym = _normalize_symbol(raw)
+        if sym in results:
+            continue
+        cached = _ws_price_cache.get(sym)
+        if cached:
+            price, _fetch_ts, quote_ts, state = cached
+            results[sym] = _build_ws_quote(sym, price, quote_ts, "yahoo", state)
+
+    duration_ms = (_time.perf_counter() - started) * 1000.0
+    if results:
+        _record_data_success("ws_quotes", count=len(results), duration_ms=duration_ms)
+        _record_data_success("ws_yahoo_quotes", count=len(fetched), duration_ms=duration_ms)
+    elif symbols and not fetch_failed:
+        _record_data_failure("ws_quotes", "no prices resolved", duration_ms=duration_ms)
+
+    return results
+
+
+async def _ws_collect_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    await _ws_sync_ibkr_subscriptions()
+    now = _time.time()
+    resolved: dict[str, dict[str, Any]] = {}
+    fallback_syms: list[str] = []
+
+    for raw in symbols:
+        sym = _normalize_symbol(raw)
+        if not sym:
+            continue
+        ibkr_quote = _ws_get_ibkr_quote(sym)
+        if ibkr.is_connected() and ibkr_quote:
+            price, quote_ts, state = ibkr_quote
+            age = now - quote_ts
+            if age <= _WS_STALE_WARN_SECONDS:
+                resolved[sym] = _build_ws_quote(sym, price, quote_ts, "ibkr", state)
+                continue
+        fallback_syms.append(sym)
+
+    if fallback_syms:
+        resolved.update(await _ws_batch_prices(fallback_syms))
+
+    # Keep last known IBKR quote if Yahoo has nothing for the symbol.
+    for sym in fallback_syms:
+        if sym in resolved:
+            continue
+        ibkr_quote = _ws_get_ibkr_quote(sym)
+        if ibkr_quote:
+            price, quote_ts, state = ibkr_quote
+            resolved[sym] = _build_ws_quote(sym, price, quote_ts, "ibkr", state)
+
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Dedicated market-data WebSocket
 # Clients send:  {"action":"subscribe","symbols":["AAPL","BTC-USD"]}
 #                {"action":"unsubscribe","symbols":["AAPL"]}
-# Server pushes: {"type":"quote","symbol":"AAPL","price":220.0,"change_pct":1.2,...}
+# Server pushes: {"type":"quote","symbol":"AAPL","price":220.0,...}
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/market-data")
 async def ws_market_data(ws: WebSocket):
     if not _check_ws_origin(ws):
+        await ws.accept()
         await ws.close(code=4003)
         return
     await ws.accept()
@@ -347,45 +774,57 @@ async def ws_market_data(ws: WebSocket):
     push_task: asyncio.Task | None = None
 
     async def _push_loop() -> None:
+        last_heartbeat = 0.0
         while True:
-            for sym in list(subscribed):
-                price = (
-                    get_mock_price(sym)
-                    if (not ibkr.is_connected() and cfg.MOCK_MODE)
-                    else (await get_latest_price(sym) or get_mock_price(sym))
-                )
+            syms = list(subscribed)
+            if syms:
+                quotes = await _ws_collect_quotes(syms)
+                for payload in quotes.values():
+                    try:
+                        await ws.send_text(json.dumps(payload))
+                    except Exception:
+                        return
+
+            now = _time.time()
+            if now - last_heartbeat >= _WS_HEARTBEAT_INTERVAL_SECONDS:
                 try:
                     await ws.send_text(
-                        json.dumps({
-                            "type":   "quote",
-                            "symbol": sym,
-                            "price":  price,
-                            "time":   int(datetime.now(timezone.utc).timestamp()),
-                        })
+                        json.dumps({"type": "heartbeat", "time": int(now)})
                     )
+                    last_heartbeat = now
                 except Exception:
                     return
-            await asyncio.sleep(1)
+            await asyncio.sleep(_WS_PUSH_INTERVAL)
 
     try:
         push_task = asyncio.create_task(_push_loop())
         while True:
             raw = await ws.receive_text()
             msg = json.loads(raw)
-            action  = msg.get("action", "")
-            symbols = [s.upper() for s in msg.get("symbols", [])]
+            action = msg.get("action", "")
+            symbols = [_normalize_symbol(s) for s in msg.get("symbols", []) if s]
             if action == "subscribe":
-                subscribed.update(symbols)
+                fresh = [sym for sym in symbols if sym and sym not in subscribed]
+                if fresh:
+                    subscribed.update(fresh)
+                    await _ws_add_symbol_refs(fresh)
             elif action == "unsubscribe":
-                subscribed.difference_update(symbols)
+                removed = [sym for sym in symbols if sym in subscribed]
+                if removed:
+                    for sym in removed:
+                        subscribed.discard(sym)
+                    await _ws_remove_symbol_refs(removed)
+            elif action == "ping":
+                await ws.send_text(json.dumps({"type": "pong", "time": int(_time.time())}))
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        log.error("Unexpected WS error in market-data handler: %s", e, exc_info=True)
+    except Exception as exc:
+        log.error("Unexpected WS error in market-data handler: %s", exc, exc_info=True)
     finally:
+        if subscribed:
+            await _ws_remove_symbol_refs(list(subscribed))
         if push_task:
             push_task.cancel()
-
 
 # ---------------------------------------------------------------------------
 # Status
@@ -405,6 +844,29 @@ async def get_status():
         "next_run":             bot_runner.get_next_run(),
         "bot_interval_seconds": cfg.BOT_INTERVAL_SECONDS,
     }
+
+
+@app.get("/api/data/health")
+async def get_data_health():
+    snapshot = _data_health.snapshot()
+    now = _time.time()
+    ibkr_age = None if _ws_last_ibkr_quote_ts <= 0 else round(max(0.0, now - _ws_last_ibkr_quote_ts), 3)
+    yahoo_age = None if _ws_last_yahoo_quote_ts <= 0 else round(max(0.0, now - _ws_last_yahoo_quote_ts), 3)
+    with _ws_lock:
+        active_symbols = sum(1 for count in _ws_symbol_ref_counts.values() if count > 0)
+        ibkr_symbols = len(_ws_ibkr_subscribed_symbols)
+    snapshot["streaming"] = {
+        "push_interval_s": _WS_PUSH_INTERVAL,
+        "cache_ttl_s": _WS_CACHE_TTL,
+        "stale_warn_s": _WS_STALE_WARN_SECONDS,
+        "stale_critical_s": _WS_STALE_CRITICAL_SECONDS,
+        "active_symbols": active_symbols,
+        "ibkr_subscribed_symbols": ibkr_symbols,
+        "ibkr_connected": ibkr.is_connected(),
+        "ibkr_last_quote_age_s": ibkr_age,
+        "yahoo_last_quote_age_s": yahoo_age,
+    }
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -427,16 +889,16 @@ async def disconnect_ibkr():
 
 
 # ---------------------------------------------------------------------------
-# Account summary  (normalised — IBKR live | simulation | mock)
+# Account summary  (normalised â€” IBKR live | simulation | mock)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/account/summary")
 async def get_account_summary():
     """
     Returns a unified account summary regardless of connection mode:
-      - SIM_MODE → virtual sim account
-      - IBKR connected → real account summary
-      - fallback → mock data
+      - SIM_MODE â†’ virtual sim account
+      - IBKR connected â†’ real account summary
+      - fallback â†’ mock data
     """
     if cfg.SIM_MODE:
         account = await sim_engine.get_account()
@@ -447,7 +909,7 @@ async def get_account_summary():
             summary = await ibkr.get_account_summary()
             return summary.model_dump()
         except Exception as exc:
-            log.warning("Account fetch failed: %s — falling back to mock", exc)
+            log.warning("Account fetch failed: %s â€” falling back to mock", exc)
 
     if cfg.MOCK_MODE:
         return get_mock_account_summary()
@@ -555,11 +1017,13 @@ async def playback_load(body: LoadReplayRequest):
     try:
         bars = await _yf_bars(sym, body.period, body.interval)
     except Exception as exc:
-        log.warning("Yahoo bars failed for replay (%s): %s — using mock data", sym, exc)
+        log.warning("Yahoo bars failed for replay (%s): %s â€” using mock data", sym, exc)
 
-    if not bars:
+    if not bars and cfg.MOCK_MODE:
         num = 252 if "d" in body.interval else 100
         bars = get_mock_ohlcv(sym, num_bars=num)
+    if not bars:
+        raise HTTPException(404, f"No replay data for {sym}")
 
     await replay_engine.load(sym, bars)
     return replay_engine.state.model_dump()
@@ -621,7 +1085,7 @@ class ManualOrderRequest(BaseModel):
 
 @app.post("/api/orders/manual", status_code=201)
 async def place_manual_order(body: ManualOrderRequest):
-    """Place a manual order — routes to sim if SIM_MODE, else IBKR."""
+    """Place a manual order â€” routes to sim if SIM_MODE, else IBKR."""
     if cfg.SIM_MODE:
         price = (
             get_mock_price(body.symbol.upper())
@@ -639,7 +1103,7 @@ async def place_manual_order(body: ManualOrderRequest):
         return {"success": True, "message": msg, "sim": True}
 
     if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected — start IB Gateway first")
+        raise HTTPException(503, "IBKR not connected â€” start IB Gateway first")
 
     rule = Rule(
         name="Manual",
@@ -657,7 +1121,7 @@ async def place_manual_order(body: ManualOrderRequest):
     )
     trade = await place_order(rule)
     if not trade:
-        raise HTTPException(502, "Order placement failed — check IBKR logs")
+        raise HTTPException(502, "Order placement failed â€” check IBKR logs")
     return trade.model_dump()
 
 
@@ -813,16 +1277,17 @@ async def unsubscribe_market_bars(symbol: str):
 
 
 # ---------------------------------------------------------------------------
-# Yahoo Finance — watchlist quotes + bars
+# Yahoo Finance â€” watchlist quotes + bars
 # ---------------------------------------------------------------------------
 
-async def _yf_quotes(symbols_str: str) -> list[dict]:
+async def _yf_quotes(symbols_str: str, source: str = "watchlist_quotes") -> list[dict]:
     import yfinance as yf
     from concurrent.futures import ThreadPoolExecutor
 
     syms = [s.strip() for s in symbols_str.split(",") if s.strip()]
     if not syms:
         return []
+    started = _time.perf_counter()
 
     def _one(sym: str):
         try:
@@ -851,13 +1316,28 @@ async def _yf_quotes(symbols_str: str) -> list[dict]:
         with ThreadPoolExecutor(max_workers=min(len(syms), 10)) as ex:
             return [r for r in ex.map(_one, syms) if r is not None]
 
-    return await asyncio.to_thread(_all)
+    try:
+        quotes = await asyncio.to_thread(_all)
+    except Exception as exc:
+        duration_ms = (_time.perf_counter() - started) * 1000.0
+        _record_data_failure(source, str(exc), duration_ms=duration_ms)
+        raise
+
+    duration_ms = (_time.perf_counter() - started) * 1000.0
+    if quotes:
+        _record_data_success(source, count=len(quotes), duration_ms=duration_ms)
+    else:
+        _record_data_failure(source, "empty quote response", duration_ms=duration_ms)
+    return quotes
 
 
 async def _yf_bars(symbol: str, period: str, interval: str) -> list[dict]:
+    started = _time.perf_counter()
+
     def _fetch():
         import yfinance as yf
-        df = yf.Ticker(symbol).history(period=period, interval=interval)
+        intraday = interval.endswith("m") or interval.endswith("h")
+        df = yf.Ticker(symbol).history(period=period, interval=interval, prepost=intraday)
         if df.empty:
             return []
         df = df.dropna(subset=["Close"])
@@ -875,21 +1355,151 @@ async def _yf_bars(symbol: str, period: str, interval: str) -> list[dict]:
             }
             for ts, row in df.iterrows()
         ]
-    return await asyncio.to_thread(_fetch)
+    try:
+        bars = await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        duration_ms = (_time.perf_counter() - started) * 1000.0
+        _record_data_failure("yahoo_bars", str(exc), duration_ms=duration_ms)
+        raise
+
+    duration_ms = (_time.perf_counter() - started) * 1000.0
+    if bars:
+        _record_data_success("yahoo_bars", count=len(bars), duration_ms=duration_ms)
+    else:
+        _record_data_failure(
+            "yahoo_bars",
+            f"no bars for {symbol}:{period}:{interval}",
+            duration_ms=duration_ms,
+        )
+    return bars
 
 
 _DEFAULT_WATCHLIST = "BTC-USD,ETH-USD,AAPL,TSLA,SPY,QQQ,NVDA"
+_market_heartbeat_task: asyncio.Task | None = None
+_market_dynamic_symbols: set[str] = set()
+_MARKET_HEARTBEAT_ENABLED = os.getenv("MARKET_HEARTBEAT_ENABLED", "true").lower() == "true"
+
+
+def _env_int(name: str, fallback: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return fallback
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("Invalid %s=%r. Using %d.", name, raw, fallback)
+        return fallback
+
+
+_MARKET_HEARTBEAT_INTERVAL_SECONDS = max(5, _env_int("MARKET_HEARTBEAT_INTERVAL_SECONDS", 30))
+
+
+def _split_symbols(raw: str) -> list[str]:
+    return [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+
+def _core_heartbeat_symbols() -> list[str]:
+    configured = _split_symbols(os.getenv("MARKET_HEARTBEAT_SYMBOLS", _DEFAULT_WATCHLIST))
+    if configured:
+        return configured
+    return _split_symbols(_DEFAULT_WATCHLIST)
+
+
+def _all_heartbeat_symbols() -> list[str]:
+    merged = set(_core_heartbeat_symbols())
+    merged.update(_market_dynamic_symbols)
+    return sorted(merged)
+
+
+def _track_heartbeat_symbols(symbols: list[str]) -> None:
+    for sym in symbols:
+        if sym:
+            _market_dynamic_symbols.add(sym.upper())
+
+
+def _untrack_heartbeat_symbols(symbols: list[str]) -> None:
+    for sym in symbols:
+        if sym:
+            _market_dynamic_symbols.discard(sym.upper())
+
+
+def _cache_prices_from_quotes(quotes: list[dict]) -> None:
+    global _ws_last_yahoo_quote_ts
+    ts = _time.time()
+    quote_ts = int(ts)
+    updated = False
+    for quote in quotes:
+        sym = str(quote.get("symbol", "")).upper()
+        price = quote.get("price")
+        if not sym:
+            continue
+        if isinstance(price, (int, float)) and price > 0:
+            state = _normalize_market_state(None, sym, quote_ts)
+            _ws_price_cache[sym] = (round(float(price), 4), ts, quote_ts, state)
+            updated = True
+    if updated:
+        _ws_last_yahoo_quote_ts = ts
+
+
+async def _market_heartbeat_loop() -> None:
+    while True:
+        await asyncio.sleep(_MARKET_HEARTBEAT_INTERVAL_SECONDS)
+        symbols = _all_heartbeat_symbols()
+        if not symbols:
+            continue
+        try:
+            quotes = await _yf_quotes(",".join(symbols), source="heartbeat_quotes")
+            if quotes:
+                _cache_prices_from_quotes(quotes)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("Market heartbeat fetch failed: %s", exc)
+
+
+async def _start_market_heartbeat() -> None:
+    global _market_heartbeat_task
+    if not _MARKET_HEARTBEAT_ENABLED:
+        log.info("Market heartbeat disabled via MARKET_HEARTBEAT_ENABLED=false")
+        return
+    if _market_heartbeat_task and not _market_heartbeat_task.done():
+        return
+    _market_heartbeat_task = asyncio.create_task(_market_heartbeat_loop())
+    log.info(
+        "Market heartbeat started (interval=%ds, symbols=%d)",
+        _MARKET_HEARTBEAT_INTERVAL_SECONDS,
+        len(_all_heartbeat_symbols()),
+    )
+
+
+async def _stop_market_heartbeat() -> None:
+    global _market_heartbeat_task
+    if not _market_heartbeat_task:
+        return
+    _market_heartbeat_task.cancel()
+    try:
+        await _market_heartbeat_task
+    except asyncio.CancelledError:
+        pass
+    _market_heartbeat_task = None
+    log.info("Market heartbeat stopped")
 
 
 @app.get("/api/watchlist")
 async def get_watchlist_quotes(symbols: str = _DEFAULT_WATCHLIST):
-    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    syms = _split_symbols(symbols)
+    if not syms:
+        return []
+
+    _track_heartbeat_symbols(syms)
+
     try:
         quotes = await _yf_quotes(",".join(syms))
         if quotes:
+            _cache_prices_from_quotes(quotes)
             return quotes
     except Exception as exc:
-        log.warning("Yahoo Finance failed: %s — using mock data", exc)
+        log.warning("Yahoo Finance failed: %s ï¿½ using mock data", exc)
 
     if cfg.MOCK_MODE:
         return get_mock_quotes(syms)
@@ -897,18 +1507,16 @@ async def get_watchlist_quotes(symbols: str = _DEFAULT_WATCHLIST):
     raise HTTPException(503, "No market data available")
 
 
-# ── Yahoo Finance interval validation ──────────────────────────────────────
-
 _VALID_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
 _UNSUPPORTED_INTERVALS = {"4h", "2h"}  # yfinance does not support these natively
 
-# period string → approximate days
+# period string â†’ approximate days
 def _period_to_days(p: str) -> int:
     p = p.lower()
     if p.endswith("d"):   return int(p[:-1])
     if p.endswith("mo"):  return int(p[:-2]) * 30
     if p.endswith("y"):   return int(p[:-1]) * 365
-    return 9999  # "max" or unknown → unlimited
+    return 9999  # "max" or unknown â†’ unlimited
 
 # max period (in days) per interval
 _INTERVAL_MAX_DAYS = {
@@ -938,7 +1546,7 @@ async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
         if req_days > max_days:
             raise HTTPException(
                 400,
-                f"{interval} interval requires period <= {max_days}d, but '{period}' ≈ {req_days}d",
+                f"{interval} interval requires period <= {max_days}d, but '{period}' â‰ˆ {req_days}d",
             )
 
     try:
@@ -956,7 +1564,7 @@ async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
     raise HTTPException(404, f"No data for {symbol}")
 
 
-# ── Server-side indicator endpoint ─────────────────────────────────────────
+# â”€â”€ Server-side indicator endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @app.get("/api/market/{symbol}/indicators")
 async def get_indicators(
@@ -1072,6 +1680,83 @@ async def screener_enrich(body: EnrichRequest):
 
 
 # ---------------------------------------------------------------------------
+# Backtesting endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/backtest/run")
+async def api_backtest_run(req: BacktestRequest):
+    """Run a backtest and return results. Does NOT save automatically."""
+    from backtester import run_backtest
+    try:
+        result = await run_backtest(
+            entry_conditions=req.entry_conditions,
+            exit_conditions=req.exit_conditions,
+            symbol=req.symbol.upper(),
+            period=req.period,
+            interval=req.interval,
+            initial_capital=req.initial_capital,
+            position_size_pct=req.position_size_pct,
+            stop_loss_pct=req.stop_loss_pct,
+            take_profit_pct=req.take_profit_pct,
+            condition_logic=req.condition_logic,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.error("Backtest failed: %s", e, exc_info=True)
+        raise HTTPException(500, "Internal error during backtest execution")
+
+
+@app.post("/api/backtest/save")
+async def api_backtest_save(req: BacktestSaveRequest):
+    """Save a backtest result for later retrieval."""
+    created_at = datetime.now(timezone.utc).isoformat()
+    strategy_data = json.dumps({
+        "entry_conditions": [c.model_dump() for c in req.result.entry_conditions],
+        "exit_conditions": [c.model_dump() for c in req.result.exit_conditions],
+        "condition_logic": req.result.condition_logic,
+        "position_size_pct": req.result.position_size_pct,
+        "stop_loss_pct": req.result.stop_loss_pct,
+        "take_profit_pct": req.result.take_profit_pct,
+    })
+    result_data = req.result.model_dump_json()
+    import uuid as _uuid_mod
+    backtest_id = str(_uuid_mod.uuid4())
+    await save_backtest(
+        backtest_id=backtest_id,
+        user_id="demo",
+        name=req.name,
+        strategy_data=strategy_data,
+        result_data=result_data,
+        created_at=created_at,
+    )
+    return {"id": backtest_id, "saved": True}
+
+
+@app.get("/api/backtest/history")
+async def api_backtest_history():
+    """List saved backtests."""
+    return await get_backtests(user_id="demo")
+
+
+@app.get("/api/backtest/{backtest_id}")
+async def api_backtest_get(backtest_id: str):
+    """Retrieve a specific saved backtest."""
+    result = await get_backtest(backtest_id)
+    if not result:
+        raise HTTPException(404, "Backtest not found")
+    return result
+
+
+@app.delete("/api/backtest/{backtest_id}")
+async def api_backtest_delete(backtest_id: str):
+    """Delete a saved backtest."""
+    deleted = await delete_backtest(backtest_id)
+    return {"deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
 # Auth endpoints
 # ---------------------------------------------------------------------------
 
@@ -1109,3 +1794,4 @@ async def update_user_settings(request: Request, user=Depends(get_current_user))
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=cfg.HOST, port=cfg.PORT, reload=True)
+

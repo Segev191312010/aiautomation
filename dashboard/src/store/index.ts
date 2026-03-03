@@ -12,8 +12,11 @@ import { create } from 'zustand'
 import type {
   AnyAccount,
   AppRoute,
+  BacktestHistoryItem,
+  BacktestResult,
   BotStatus,
   ChartType,
+  Condition,
   Drawing,
   DrawingType,
   EnrichResult,
@@ -40,6 +43,7 @@ import type {
 import type { IndicatorId } from '@/utils/indicators'
 import { DEFAULT_DRAWING_COLOR } from '@/utils/drawingEngine'
 import { validateDrawingsMap, validateDrawingsExport } from '@/utils/drawingSchema'
+import * as api from '@/services/api'
 
 // ── Market store ─────────────────────────────────────────────────────────────
 
@@ -63,6 +67,15 @@ interface MarketState {
   setQuotes:          (quotes: MarketQuote[]) => void
   updateQuote:        (q: MarketQuote) => void
   updateQuotePrice:   (symbol: string, price: number) => void
+  applyLiveQuote: (
+    symbol: string,
+    price: number,
+    time: number,
+    barSeconds: number,
+    source: 'ibkr' | 'yahoo',
+    staleS: number,
+    marketState?: 'open' | 'extended' | 'closed' | 'unknown',
+  ) => void
   setBars:            (symbol: string, bars: OHLCVBar[]) => void
   setCompBars:        (symbol: string, bars: OHLCVBar[]) => void
   setSelectedSymbol:  (symbol: string) => void
@@ -115,6 +128,73 @@ export const useMarketStore = create<MarketState>((set, get) => ({
           ...s.quotes,
           [symbol]: { ...existing, price, last_update: new Date().toISOString() },
         },
+      }
+    }),
+  applyLiveQuote: (symbol, price, time, barSeconds, source, staleS, marketState) =>
+    set((s) => {
+      const ts = Number.isFinite(time) ? Math.max(1, Math.floor(time)) : Math.floor(Date.now() / 1000)
+      const bucket = Math.max(1, Math.floor(barSeconds))
+      const barTime = Math.floor(ts / bucket) * bucket
+
+      const patchSeries = (series: OHLCVBar[] | undefined): OHLCVBar[] | null => {
+        if (!series?.length) return null
+        const last = series[series.length - 1]
+        if (barTime <= 0) return null
+        if (last.time === barTime) {
+          const updatedLast: OHLCVBar = {
+            ...last,
+            high: Math.max(last.high, price),
+            low: Math.min(last.low, price),
+            close: price,
+          }
+          return [...series.slice(0, -1), updatedLast]
+        }
+        if (barTime > last.time) {
+          const next: OHLCVBar = {
+            time: barTime,
+            open: last.close,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0,
+          }
+          return [...series, next].slice(-5000)
+        }
+        return null
+      }
+
+      const nextBars = patchSeries(s.bars[symbol])
+      const nextCompBars = patchSeries(s.compBars[symbol])
+      const prevQuote = s.quotes[symbol]
+      const quote: MarketQuote = prevQuote
+        ? {
+            ...prevQuote,
+            symbol,
+            price,
+            last_update: new Date(ts * 1000).toISOString(),
+            live_source: source,
+            stale_s: staleS,
+            market_state: marketState ?? prevQuote.market_state,
+          }
+        : {
+            symbol,
+            price,
+            change: 0,
+            change_pct: 0,
+            last_update: new Date(ts * 1000).toISOString(),
+            live_source: source,
+            stale_s: staleS,
+            market_state: marketState ?? 'unknown',
+          }
+
+      return {
+        quotes: {
+          ...s.quotes,
+          [symbol]: quote,
+        },
+        bars: nextBars ? { ...s.bars, [symbol]: nextBars } : s.bars,
+        compBars: nextCompBars ? { ...s.compBars, [symbol]: nextCompBars } : s.compBars,
+        lastUpdated: Date.now(),
       }
     }),
   setBars: (symbol, bars) =>
@@ -217,7 +297,7 @@ export const useBotStore = create<BotState>((set) => ({
   rules:         [],
   ibkrConnected: false,
   simMode:       false,
-  mockMode:      true,
+  mockMode:      false,
   botRunning:    false,
 
   setStatus: (s) =>
@@ -358,11 +438,14 @@ interface ScreenerState {
   enrichResults:    () => Promise<void>
 }
 
-const DEFAULT_FILTER: ScanFilter = {
-  indicator: 'RSI',
-  params: { length: 14 },
-  operator: 'LT',
-  value: { type: 'number', number: 30 },
+function makeDefaultFilter(): ScanFilter {
+  return {
+    id: crypto.randomUUID(),
+    indicator: 'RSI',
+    params: { length: 14 },
+    operator: 'LT',
+    value: { type: 'number', number: 30 },
+  }
 }
 
 export const useScreenerStore = create<ScreenerState>((set, get) => ({
@@ -371,7 +454,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   enriched:         {},
   presets:          [],
   universes:        [],
-  filters:          [{ ...DEFAULT_FILTER }],
+  filters:          [makeDefaultFilter()],
   selectedUniverse: 'sp500',
   customSymbols:    '',
   interval:         '1d',
@@ -381,7 +464,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   presetsLoaded:    false,
 
   addFilter: () =>
-    set((s) => ({ filters: [...s.filters, { ...DEFAULT_FILTER }] })),
+    set((s) => ({ filters: [...s.filters, makeDefaultFilter()] })),
 
   removeFilter: (index) =>
     set((s) => ({
@@ -407,18 +490,16 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
 
   loadPresets: async () => {
     try {
-      const { fetchScreenerPresets } = await import('@/services/api')
-      const presets = await fetchScreenerPresets()
+      const presets = await api.fetchScreenerPresets()
       set({ presets, presetsLoaded: true })
     } catch {
-      // backend offline
+      set({ presetsLoaded: true })
     }
   },
 
   loadUniverses: async () => {
     try {
-      const { fetchUniverses } = await import('@/services/api')
-      const universes = await fetchUniverses()
+      const universes = await api.fetchUniverses()
       set({ universes })
     } catch {
       // backend offline
@@ -426,17 +507,15 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   },
 
   applyPreset: (preset) =>
-    set({ filters: preset.filters.map((f) => ({ ...f })) }),
+    set({ filters: preset.filters.map((f) => ({ ...f, id: crypto.randomUUID() })) }),
 
   savePreset: async (name) => {
-    const { saveScreenerPreset } = await import('@/services/api')
-    const preset = await saveScreenerPreset(name, get().filters)
+    const preset = await api.saveScreenerPreset(name, get().filters)
     set((s) => ({ presets: [...s.presets, preset] }))
   },
 
   deletePreset: async (id) => {
-    const { deleteScreenerPreset } = await import('@/services/api')
-    await deleteScreenerPreset(id)
+    await api.deleteScreenerPreset(id)
     set((s) => ({ presets: s.presets.filter((p) => p.id !== id) }))
   },
 
@@ -444,11 +523,10 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
     const { filters, selectedUniverse, customSymbols, interval, period } = get()
     set({ scanning: true, results: [], skippedSymbols: [], enriched: {} })
     try {
-      const { runScan: apiRunScan } = await import('@/services/api')
       const symbols = selectedUniverse === 'custom'
         ? customSymbols.split(',').map((s) => s.trim()).filter(Boolean)
         : undefined
-      const resp = await apiRunScan({
+      const resp = await api.runScan({
         universe: selectedUniverse,
         symbols,
         filters,
@@ -457,9 +535,9 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
         limit: 100,
       })
       set({ results: resp.results, skippedSymbols: resp.skipped_symbols })
-      // Auto-enrich
+      // Auto-enrich (await so scanning spinner covers enrichment)
       if (resp.results.length > 0) {
-        get().enrichResults()
+        await get().enrichResults()
       }
     } finally {
       set({ scanning: false })
@@ -471,9 +549,8 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
     if (results.length === 0) return
     set({ enriching: true })
     try {
-      const { enrichSymbols } = await import('@/services/api')
       const symbols = results.map((r) => r.symbol)
-      const enriched = await enrichSymbols(symbols)
+      const enriched = await api.enrichSymbols(symbols)
       const map: Record<string, EnrichResult> = {}
       enriched.forEach((e) => { map[e.symbol] = e })
       set({ enriched: map })
@@ -783,4 +860,101 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
       // Best effort
     }
   },
+}))
+
+
+// ── Backtest store ──────────────────────────────────────────────────────────
+
+const DEFAULT_ENTRY: Condition[] = [
+  { indicator: 'RSI', params: { length: 14 }, operator: '<', value: 30 },
+]
+const DEFAULT_EXIT: Condition[] = [
+  { indicator: 'RSI', params: { length: 14 }, operator: '>', value: 70 },
+]
+
+interface BacktestState {
+  // Strategy configuration
+  entryConditions: Condition[]
+  exitConditions: Condition[]
+  conditionLogic: 'AND' | 'OR'
+  symbol: string
+  period: string
+  interval: string
+  initialCapital: number
+  positionSizePct: number
+  stopLossPct: number
+  takeProfitPct: number
+
+  // Results
+  result: BacktestResult | null
+  loading: boolean
+  error: string | null
+
+  // History
+  savedBacktests: BacktestHistoryItem[]
+
+  // Actions
+  setEntryConditions: (c: Condition[]) => void
+  setExitConditions: (c: Condition[]) => void
+  setConditionLogic: (l: 'AND' | 'OR') => void
+  setSymbol: (s: string) => void
+  setPeriod: (p: string) => void
+  setInterval: (i: string) => void
+  setInitialCapital: (v: number) => void
+  setPositionSizePct: (v: number) => void
+  setStopLossPct: (v: number) => void
+  setTakeProfitPct: (v: number) => void
+  setResult: (r: BacktestResult | null) => void
+  setLoading: (v: boolean) => void
+  setError: (e: string | null) => void
+  setSavedBacktests: (b: BacktestHistoryItem[]) => void
+  reset: () => void
+}
+
+export const useBacktestStore = create<BacktestState>((set) => ({
+  entryConditions: DEFAULT_ENTRY,
+  exitConditions: DEFAULT_EXIT,
+  conditionLogic: 'AND',
+  symbol: 'AAPL',
+  period: '2y',
+  interval: '1d',
+  initialCapital: 100_000,
+  positionSizePct: 100,
+  stopLossPct: 0,
+  takeProfitPct: 0,
+
+  result: null,
+  loading: false,
+  error: null,
+
+  savedBacktests: [],
+
+  setEntryConditions: (c) => set({ entryConditions: c }),
+  setExitConditions: (c) => set({ exitConditions: c }),
+  setConditionLogic: (l) => set({ conditionLogic: l }),
+  setSymbol: (s) => set({ symbol: s }),
+  setPeriod: (p) => set({ period: p }),
+  setInterval: (i) => set({ interval: i }),
+  setInitialCapital: (v) => set({ initialCapital: v }),
+  setPositionSizePct: (v) => set({ positionSizePct: v }),
+  setStopLossPct: (v) => set({ stopLossPct: v }),
+  setTakeProfitPct: (v) => set({ takeProfitPct: v }),
+  setResult: (r) => set({ result: r }),
+  setLoading: (v) => set({ loading: v }),
+  setError: (e) => set({ error: e }),
+  setSavedBacktests: (b) => set({ savedBacktests: b }),
+  reset: () => set({
+    entryConditions: DEFAULT_ENTRY,
+    exitConditions: DEFAULT_EXIT,
+    conditionLogic: 'AND',
+    symbol: 'AAPL',
+    period: '2y',
+    interval: '1d',
+    initialCapital: 100_000,
+    positionSizePct: 100,
+    stopLossPct: 0,
+    takeProfitPct: 0,
+    result: null,
+    error: null,
+  }),
 }))

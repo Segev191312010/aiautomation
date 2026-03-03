@@ -264,7 +264,7 @@ class ScanFilter(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    universe: str
+    universe: Literal["sp500", "nasdaq100", "etfs", "custom"]
     symbols: list[str] | None = None
     filters: list[ScanFilter] = Field(min_length=1)
     interval: str = "1d"
@@ -286,7 +286,7 @@ class ScanResponse(BaseModel):
 
 
 class EnrichRequest(BaseModel):
-    symbols: list[str]
+    symbols: list[str] = Field(min_length=1, max_length=200)
 
 
 class EnrichResult(BaseModel):
@@ -303,3 +303,77 @@ class ScreenerPreset(BaseModel):
     built_in: bool = False
     user_id: str = "demo"
     created_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Backtesting models
+# ---------------------------------------------------------------------------
+
+class BacktestRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=10)
+    period: Literal["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"] = "2y"
+    interval: Literal["1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo"] = "1d"
+    entry_conditions: list[Condition] = Field(min_length=1)
+    exit_conditions: list[Condition]
+    condition_logic: Literal["AND", "OR"] = "AND"
+    initial_capital: float = Field(default=100_000.0, gt=0, le=10_000_000)
+    position_size_pct: float = Field(default=100.0, gt=0, le=100)
+    stop_loss_pct: float = Field(default=0.0, ge=0, le=50)
+    take_profit_pct: float = Field(default=0.0, ge=0, le=100)
+
+
+class BacktestTrade(BaseModel):
+    entry_date: str
+    exit_date: str
+    entry_price: float
+    exit_price: float
+    qty: int
+    pnl: float
+    pnl_pct: float
+    duration_bars: int
+    duration_days: float
+    exit_reason: str  # "signal" | "stop_loss" | "take_profit" | "end_of_data"
+
+
+class BacktestMetrics(BaseModel):
+    total_return_pct: float
+    cagr: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    calmar_ratio: float
+    max_drawdown_pct: float
+    win_rate: float
+    profit_factor: float
+    num_trades: int
+    avg_win: float
+    avg_loss: float
+    longest_win_streak: int
+    longest_lose_streak: int
+    avg_trade_duration_days: float
+
+
+class BacktestResult(BaseModel):
+    id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
+    symbol: str
+    period: str
+    interval: str
+    initial_capital: float
+    final_equity: float
+    equity_curve: list[dict]       # [{time, equity, drawdown_pct}]
+    buy_hold_curve: list[dict]     # [{time, equity}]
+    trades: list[BacktestTrade]
+    metrics: BacktestMetrics
+    warmup_period: int
+    total_bars: int
+    entry_conditions: list[Condition]
+    exit_conditions: list[Condition]
+    condition_logic: str
+    position_size_pct: float
+    stop_loss_pct: float
+    take_profit_pct: float
+    created_at: str = ""
+
+
+class BacktestSaveRequest(BaseModel):
+    name: str
+    result: BacktestResult
