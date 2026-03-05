@@ -2,19 +2,24 @@ import React from 'react'
 import clsx from 'clsx'
 import { useBotStore, useUIStore } from '@/store'
 import { connectIBKR, startBot, stopBot } from '@/services/api'
+import AlertBell from '@/components/alerts/AlertBell'
 
 const PAGE_LABELS: Record<string, string> = {
   dashboard:  'Dashboard',
   tradebot:   'TradeBot Command Center',
   market:     'Market Analyzer',
+  screener:   'Stock Screener',
+  stock:      'Stock Intelligence',
+  backtest:   'Backtesting Engine',
   simulation: 'Simulation Engine',
   rules:      'Automation Rules',
+  alerts:     'Alerts & Notifications',
   settings:   'Settings',
 }
 
 export default function Header() {
   const { activeRoute } = useUIStore()
-  const { ibkrConnected, botRunning, simMode, mockMode, setBotRunning, setIBKR } = useBotStore()
+  const { ibkrConnected, botRunning, simMode, setBotRunning, setIBKR } = useBotStore()
 
   const handleConnectIBKR = async () => {
     try {
@@ -40,7 +45,7 @@ export default function Header() {
   }
 
   return (
-    <header className="flex items-center h-14 px-4 border-b border-terminal-border bg-terminal-surface shrink-0 gap-4">
+    <header className="flex items-center h-14 px-4 border-b border-white/[0.06] glass shrink-0 gap-4">
       {/* ── Page title ─────────────────────────────────────────────── */}
       <h1 className="text-sm font-semibold text-terminal-text tracking-wide mr-auto">
         {PAGE_LABELS[activeRoute] ?? 'Dashboard'}
@@ -48,24 +53,22 @@ export default function Header() {
 
       {/* ── Mode badges ────────────────────────────────────────────── */}
       <div className="flex items-center gap-2">
-        {mockMode && (
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-terminal-amber/40 text-terminal-amber">
-            MOCK DATA
-          </span>
-        )}
         {simMode && (
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border border-terminal-amber/40 text-terminal-amber animate-pulse-slow">
+          <span className="text-[10px] font-sans px-2 py-0.5 rounded-lg bg-terminal-amber/10 text-terminal-amber animate-pulse-slow">
             SIMULATION
           </span>
         )}
       </div>
+
+      {/* ── Alert bell ───────────────────────────────────────────────── */}
+      <AlertBell />
 
       {/* ── IBKR connection ────────────────────────────────────────── */}
       <button
         onClick={handleConnectIBKR}
         title={ibkrConnected ? 'IBKR connected (click to reconnect)' : 'Click to connect IBKR'}
         className={clsx(
-          'flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded border transition-colors',
+          'flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1 rounded-full border transition-colors',
           ibkrConnected
             ? 'border-terminal-green/40 text-terminal-green bg-terminal-green/5 hover:bg-terminal-green/10'
             : 'border-terminal-red/40 text-terminal-red bg-terminal-red/5 hover:bg-terminal-red/10',
@@ -85,7 +88,7 @@ export default function Header() {
         onClick={handleBotToggle}
         title={botRunning ? 'Stop bot' : 'Start bot'}
         className={clsx(
-          'flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded border transition-colors',
+          'flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1 rounded-full border transition-colors',
           botRunning
             ? 'border-terminal-green/40 text-terminal-green bg-terminal-green/5 hover:bg-terminal-green/10'
             : 'border-terminal-border text-terminal-dim bg-terminal-muted hover:text-terminal-text',

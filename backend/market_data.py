@@ -53,44 +53,77 @@ async def get_historical_bars(
     if use_cache and cache_key in _bar_cache:
         return _bar_cache[cache_key]
 
-    if not ibkr.is_connected():
-        raise RuntimeError("IBKR not connected")
+    # Try IBKR first
+    if ibkr.is_connected():
+        try:
+            contract = ibkr.make_stock_contract(symbol)
+            await ibkr.ib.qualifyContractsAsync(contract)
 
-    contract = ibkr.make_stock_contract(symbol)
-    await ibkr.ib.qualifyContractsAsync(contract)
+            bars: list[BarData] = await ibkr.ib.reqHistoricalDataAsync(
+                contract,
+                endDateTime="",
+                durationStr=duration,
+                barSizeSetting=_BAR_SIZE_MAP.get(bar_size, bar_size),
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+            )
 
-    bars: list[BarData] = await ibkr.ib.reqHistoricalDataAsync(
-        contract,
-        endDateTime="",
-        durationStr=duration,
-        barSizeSetting=_BAR_SIZE_MAP.get(bar_size, bar_size),
-        whatToShow="TRADES",
-        useRTH=True,
-        formatDate=1,
-    )
+            if bars:
+                df = pd.DataFrame(
+                    [
+                        {
+                            "time": b.date,
+                            "open": b.open,
+                            "high": b.high,
+                            "low": b.low,
+                            "close": b.close,
+                            "volume": b.volume,
+                        }
+                        for b in bars
+                    ]
+                )
+                df["time"] = pd.to_datetime(df["time"])
+                df = df.sort_values("time").reset_index(drop=True)
+                _bar_cache[cache_key] = df
+                return df
+        except Exception as exc:
+            log.warning("IBKR historical bars failed for %s: %s", symbol, exc)
 
-    if not bars:
-        log.warning("No historical bars returned for %s", symbol)
-        return pd.DataFrame()
+    # Fallback: Yahoo Finance
+    try:
+        import yfinance as yf
 
-    df = pd.DataFrame(
-        [
-            {
-                "time": b.date,
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
-            }
-            for b in bars
-        ]
-    )
-    df["time"] = pd.to_datetime(df["time"])
-    df = df.sort_values("time").reset_index(drop=True)
+        # Map IBKR duration to yfinance period
+        _dur_to_period = {"60 D": "3mo", "120 D": "6mo", "365 D": "1y", "730 D": "2y"}
+        yf_period = _dur_to_period.get(duration, "3mo")
+        # Map IBKR bar size to yfinance interval
+        _bar_to_interval = {"1 min": "1m", "5 mins": "5m", "15 mins": "15m", "30 mins": "30m",
+                            "1 hour": "1h", "4 hours": "4h", "1 day": "1d"}
+        yf_interval = _bar_to_interval.get(_BAR_SIZE_MAP.get(bar_size, bar_size), "1d")
 
-    _bar_cache[cache_key] = df
-    return df
+        def _fetch():
+            return yf.Ticker(symbol).history(period=yf_period, interval=yf_interval)
+
+        raw = await asyncio.to_thread(_fetch)
+        if raw is not None and not raw.empty:
+            df = pd.DataFrame({
+                "time": raw.index,
+                "open": raw["Open"].values,
+                "high": raw["High"].values,
+                "low": raw["Low"].values,
+                "close": raw["Close"].values,
+                "volume": raw["Volume"].values,
+            })
+            df["time"] = pd.to_datetime(df["time"])
+            df = df.sort_values("time").reset_index(drop=True)
+            _bar_cache[cache_key] = df
+            return df
+    except Exception as exc:
+        log.warning("Yahoo bars fallback failed for %s: %s", symbol, exc)
+
+    log.warning("No historical bars available for %s", symbol)
+    return pd.DataFrame()
 
 
 def clear_bar_cache() -> None:
@@ -99,16 +132,36 @@ def clear_bar_cache() -> None:
 
 
 async def get_latest_price(symbol: str) -> Optional[float]:
-    """Return the last traded price for a symbol."""
-    if not ibkr.is_connected():
-        return None
-    contract = ibkr.make_stock_contract(symbol)
-    await ibkr.ib.qualifyContractsAsync(contract)
-    ticker = ibkr.ib.reqMktData(contract, "", False, False)
-    await asyncio.sleep(2)  # allow tick to populate
-    price = ticker.last or ticker.close or None
-    ibkr.ib.cancelMktData(contract)
-    return price
+    """Return the last traded price for a symbol (IBKR → Yahoo fallback)."""
+    # Try IBKR first
+    if ibkr.is_connected():
+        try:
+            contract = ibkr.make_stock_contract(symbol)
+            await ibkr.ib.qualifyContractsAsync(contract)
+            ticker = ibkr.ib.reqMktData(contract, "", False, False)
+            await asyncio.sleep(2)  # allow tick to populate
+            price = ticker.last or ticker.close or None
+            ibkr.ib.cancelMktData(contract)
+            if price is not None:
+                return price
+        except Exception as exc:
+            log.warning("IBKR price fetch failed for %s: %s", symbol, exc)
+
+    # Fallback: Yahoo Finance
+    try:
+        import yfinance as yf
+
+        def _fetch():
+            fi = yf.Ticker(symbol).fast_info
+            return fi.get("lastPrice") or fi.get("last_price") or fi.get("previousClose")
+
+        price = await asyncio.to_thread(_fetch)
+        if price is not None and price > 0:
+            return float(price)
+    except Exception as exc:
+        log.warning("Yahoo price fallback failed for %s: %s", symbol, exc)
+
+    return None
 
 
 async def subscribe_realtime(symbol: str, on_tick: Callable[[str, float], None]) -> bool:

@@ -15,7 +15,6 @@ from starlette.websockets import WebSocketDisconnect
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DB_PATH", "test_trading.db")
 os.environ.setdefault("SIM_MODE", "true")
-os.environ.setdefault("MOCK_MODE", "true")
 
 import main
 
@@ -44,6 +43,35 @@ def test_fetch_coinbase_spot_success(monkeypatch: pytest.MonkeyPatch):
     price, quote_ts, market_state = resolved
     assert price == 68300.12
     assert isinstance(quote_ts, int)
+    assert market_state == "open"
+
+
+def test_fetch_coinbase_spot_prefers_exchange_ticker(monkeypatch: pytest.MonkeyPatch):
+    class _Resp:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._payload
+
+    def _urlopen(req, **_kwargs):
+        url = getattr(req, "full_url", str(req))
+        if "api.exchange.coinbase.com" in url:
+            return _Resp(b'{"price":"70123.45","time":"2026-03-04T08:41:30.240155965Z"}')
+        return _Resp(b'{"data":{"amount":"68300.12"}}')
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", _urlopen)
+    resolved = main._fetch_coinbase_spot("BTC-USD")
+    assert resolved is not None
+    price, quote_ts, market_state = resolved
+    assert price == 70123.45
+    assert quote_ts > 0
     assert market_state == "open"
 
 
@@ -177,6 +205,20 @@ async def test_ws_market_data_ping_pong(monkeypatch: pytest.MonkeyPatch):
 
     sent = [json.loads(m) for m in ws.sent]
     assert any(msg.get("type") == "pong" for msg in sent)
+
+
+@pytest.mark.asyncio
+async def test_ws_market_data_subscribe_accepts_type_alias(monkeypatch: pytest.MonkeyPatch):
+    added: list[list[str]] = []
+
+    async def _fake_add_symbol_refs(symbols: list[str]) -> None:
+        added.append(symbols)
+
+    monkeypatch.setattr(main, "_ws_add_symbol_refs", _fake_add_symbol_refs)
+    ws = _FakeWebSocket([json.dumps({"type": "subscribe", "symbols": ["BTC-USD"]})])
+    await main.ws_market_data(ws)
+
+    assert added and "BTC-USD" in added[0]
 
 
 @pytest.mark.asyncio

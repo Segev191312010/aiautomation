@@ -86,12 +86,12 @@ export default function SimController() {
   }
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-30 bg-terminal-elevated border-t border-terminal-border shadow-terminal">
+    <div className="fixed bottom-0 left-0 right-0 z-30 glass-elevated rounded-t-2xl border-t border-white/[0.06] shadow-terminal">
       <div className="max-w-screen-2xl mx-auto px-4 py-2">
         {/* ── Progress bar ────────────────────────────────────── */}
         <div className="relative h-0.5 bg-terminal-muted rounded-full mb-2 overflow-hidden">
           <div
-            className="absolute inset-y-0 left-0 bg-terminal-blue rounded-full transition-all"
+            className="absolute inset-y-0 left-0 bg-indigo-500 rounded-full transition-all"
             style={{ width: `${pctDone}%` }}
           />
         </div>
@@ -103,7 +103,7 @@ export default function SimController() {
               value={sym}
               onChange={(e) => setSym(e.target.value.toUpperCase())}
               placeholder="AAPL"
-              className="w-20 text-xs font-mono bg-terminal-input border border-terminal-border rounded px-2 py-1 text-terminal-text focus:border-terminal-blue focus:outline-none"
+              className="w-20 text-xs font-mono bg-terminal-input border border-white/[0.06] rounded-xl px-2 py-1 text-terminal-text focus:border-indigo-500/50 focus:outline-none"
             />
             <div className="flex gap-0.5">
               {PERIODS.map((p) => (
@@ -111,10 +111,10 @@ export default function SimController() {
                   key={p.value}
                   onClick={() => setPeriod(p)}
                   className={clsx(
-                    'text-[10px] font-mono px-1.5 py-0.5 rounded border transition-colors',
+                    'text-[10px] font-sans px-1.5 py-0.5 rounded-xl border transition-colors',
                     period.value === p.value
-                      ? 'border-terminal-blue/50 text-terminal-blue bg-terminal-blue/10'
-                      : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
+                      ? 'border-indigo-500/50 text-indigo-400 bg-indigo-500/10'
+                      : 'border-white/[0.06] text-terminal-ghost hover:text-terminal-dim',
                   )}
                 >
                   {p.label}
@@ -124,14 +124,14 @@ export default function SimController() {
             <button
               onClick={handleLoad}
               disabled={loading || !sym}
-              className="text-[11px] font-mono px-3 py-1 rounded bg-terminal-blue/20 border border-terminal-blue/40 text-terminal-blue hover:bg-terminal-blue/30 disabled:opacity-40 transition-colors"
+              className="text-[11px] font-sans px-3 py-1 rounded-xl bg-indigo-500/20 border border-indigo-500/40 text-indigo-400 hover:bg-indigo-500/30 disabled:opacity-40 transition-colors"
             >
               {loading ? 'Loading…' : 'Load'}
             </button>
           </div>
 
           {/* ── Separator ───────────────────────────────────── */}
-          <div className="h-5 w-px bg-terminal-border" />
+          <div className="h-5 w-px bg-white/[0.06]" />
 
           {/* ── Play / Pause / Stop ─────────────────────────── */}
           <div className="flex items-center gap-1">
@@ -139,7 +139,7 @@ export default function SimController() {
               onClick={handlePlayPause}
               disabled={playback.total_bars === 0}
               className={clsx(
-                'flex items-center gap-1.5 text-[11px] font-mono px-3 py-1 rounded border transition-colors disabled:opacity-40',
+                'flex items-center gap-1.5 text-[11px] font-sans px-3 py-1 rounded-xl border transition-colors disabled:opacity-40',
                 playback.active
                   ? 'border-terminal-amber/40 text-terminal-amber bg-terminal-amber/5 hover:bg-terminal-amber/10'
                   : 'border-terminal-green/40 text-terminal-green bg-terminal-green/5 hover:bg-terminal-green/10',
@@ -166,7 +166,7 @@ export default function SimController() {
               onClick={handleStop}
               disabled={playback.total_bars === 0}
               title="Reset to beginning"
-              className="p-1.5 rounded border border-terminal-border text-terminal-dim hover:text-terminal-text hover:border-terminal-muted transition-colors disabled:opacity-40"
+              className="p-1.5 rounded-xl border border-white/[0.06] text-terminal-dim hover:text-terminal-text hover:border-white/[0.10] transition-colors disabled:opacity-40"
             >
               <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3">
                 <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z" />
@@ -176,16 +176,16 @@ export default function SimController() {
 
           {/* ── Speed ───────────────────────────────────────── */}
           <div className="flex items-center gap-1">
-            <span className="text-[10px] font-mono text-terminal-ghost">Speed:</span>
+            <span className="text-xs font-sans font-medium text-terminal-dim tracking-wide">Speed:</span>
             {SPEEDS.map((s) => (
               <button
                 key={s}
                 onClick={() => handleSpeed(s)}
                 className={clsx(
-                  'text-[10px] font-mono w-7 py-0.5 rounded border transition-colors',
+                  'text-[10px] font-sans w-7 py-0.5 rounded-xl border transition-colors',
                   playback.speed === s
-                    ? 'border-terminal-blue/50 text-terminal-blue bg-terminal-blue/10'
-                    : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
+                    ? 'border-indigo-500/50 text-indigo-400 bg-indigo-500/10'
+                    : 'border-white/[0.06] text-terminal-ghost hover:text-terminal-dim',
                 )}
               >
                 {s}×
@@ -205,7 +205,7 @@ export default function SimController() {
               </>
             )}
             {playback.symbol && (
-              <div className="text-[10px] font-mono text-terminal-blue">{playback.symbol}</div>
+              <div className="text-[10px] font-mono text-indigo-400">{playback.symbol}</div>
             )}
           </div>
         </div>

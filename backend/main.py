@@ -1,50 +1,50 @@
 """
-FastAPI application â€” REST API, WebSocket, and static frontend serving.
+FastAPI application  --  REST API, WebSocket, and static frontend serving.
 
 Run:
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Endpoints overview
 ------------------
-GET  /api/status                        â€” system health
-POST /api/ibkr/connect|disconnect       â€” IBKR connection control
+GET  /api/status                         --  system health
+POST /api/ibkr/connect|disconnect        --  IBKR connection control
 
-GET  /api/account/summary               â€” normalised account KPIs (IBKR | sim | mock)
-GET  /api/positions                     â€” live IBKR positions (or mock)
+GET  /api/account/summary                --  normalised account KPIs (IBKR | sim)
+GET  /api/positions                      --  live IBKR positions 
 
-GET  /api/simulation/account            â€” virtual sim account
-GET  /api/simulation/positions          â€” virtual sim positions
-POST /api/simulation/order              â€” place a virtual order
-POST /api/simulation/reset              â€” wipe virtual account
+GET  /api/simulation/account             --  virtual sim account
+GET  /api/simulation/positions           --  virtual sim positions
+POST /api/simulation/order               --  place a virtual order
+POST /api/simulation/reset               --  wipe virtual account
 
-GET  /api/simulation/playback           â€” replay state
-POST /api/simulation/playback/load      â€” load symbol + bars for replay
-POST /api/simulation/playback/play      â€” start/resume replay
-POST /api/simulation/playback/pause     â€” pause
-POST /api/simulation/playback/stop      â€” reset to beginning
-POST /api/simulation/playback/speed     â€” set replay speed
+GET  /api/simulation/playback            --  replay state
+POST /api/simulation/playback/load       --  load symbol + bars for replay
+POST /api/simulation/playback/play       --  start/resume replay
+POST /api/simulation/playback/pause      --  pause
+POST /api/simulation/playback/stop       --  reset to beginning
+POST /api/simulation/playback/speed      --  set replay speed
 
-GET  /api/watchlist                     â€” quote cards for default watchlist symbols
-GET  /api/yahoo/{symbol}/bars           â€” OHLCV bars via Yahoo Finance
-GET  /api/market/{symbol}/price         â€” single price (IBKR or mock)
-GET  /api/market/{symbol}/bars          â€” IBKR historical bars
-POST /api/market/{symbol}/subscribe     â€” subscribe to 5-s real-time bars
-POST /api/market/{symbol}/unsubscribe   â€” unsubscribe
+GET  /api/watchlist                      --  quote cards for default watchlist symbols
+GET  /api/yahoo/{symbol}/bars            --  OHLCV bars via Yahoo Finance
+GET  /api/market/{symbol}/price          --  single price (IBKR or Yahoo)
+GET  /api/market/{symbol}/bars           --  IBKR historical bars
+POST /api/market/{symbol}/subscribe      --  subscribe to 5-s real-time bars
+POST /api/market/{symbol}/unsubscribe    --  unsubscribe
 
-GET  /api/orders                        â€” open IBKR orders
-DELETE /api/orders/{id}                 â€” cancel IBKR order
-POST /api/orders/manual                 â€” place manual IBKR order
+GET  /api/orders                         --  open IBKR orders
+DELETE /api/orders/{id}                  --  cancel IBKR order
+POST /api/orders/manual                  --  place manual IBKR order
 
-GET|POST|PUT|DELETE /api/rules/*        â€” automation rules CRUD
-POST /api/rules/{id}/toggle             â€” enable / disable rule
+GET|POST|PUT|DELETE /api/rules/*         --  automation rules CRUD
+POST /api/rules/{id}/toggle              --  enable / disable rule
 
-POST /api/bot/start|stop                â€” start / stop rule-evaluation loop
+POST /api/bot/start|stop                 --  start / stop rule-evaluation loop
 GET  /api/bot/status
 
-GET  /api/trades                        â€” trade execution log
+GET  /api/trades                         --  trade execution log
 
-WS   /ws                                â€” general events (bot, fills, IBKR state)
-WS   /ws/market-data                    â€” streaming price updates for a symbol list
+WS   /ws                                 --  general events (bot, fills, IBKR state)
+WS   /ws/market-data                     --  streaming price updates for a symbol list
 """
 from __future__ import annotations
 
@@ -82,9 +82,6 @@ from market_data import (
     subscribe_realtime, unsubscribe_realtime,
     subscribe_realtime_bars, unsubscribe_realtime_bars,
 )
-from mock_data import (
-    get_mock_account_summary, get_mock_ohlcv, get_mock_price, get_mock_quotes,
-)
 from models import (
     AccountSummary, PlaybackState, Rule, RuleCreate, RuleUpdate,
     Trade, TradeAction, ScanRequest, ScanFilter, ScreenerPreset, EnrichRequest,
@@ -100,10 +97,12 @@ from screener import (
     run_scan, list_universes, validate_timeframe, enrich_symbols,
 )
 import bot_runner
+from stock_profile_service import StockProfileService
+from stock_profile_api import create_stock_profile_router
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s â€” %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s  --  %(message)s",
 )
 log = logging.getLogger(__name__)
 
@@ -170,7 +169,7 @@ async def _broadcast(payload: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # â”€â”€ Startup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Startup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     await init_db()
     await sim_engine.initialize()
 
@@ -200,14 +199,14 @@ async def lifespan(app: FastAPI):
         log.info("IBKR connected on startup")
         await ibkr.start_reconnect_loop()
     else:
-        log.warning("IBKR not connected â€” auto-reconnect running in background")
+        log.warning("IBKR not connected  --  auto-reconnect running in background")
         await ibkr.start_reconnect_loop()
 
     await _start_market_heartbeat()
 
     yield
 
-    # â”€â”€ Shutdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # â"€â"€ Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     await _stop_market_heartbeat()
     await bot_runner.stop()
     await replay_engine.stop()
@@ -220,7 +219,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading Dashboard", version="2.0.0", lifespan=lifespan)
 
-# â”€â”€ CORS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Stock profile router
+app.include_router(create_stock_profile_router(StockProfileService()))
+
+# â"€â"€ CORS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 app.add_middleware(
     CORSMiddleware,
@@ -237,7 +239,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# â”€â”€ Static assets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Static assets â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.isdir(_FRONTEND_DIR):
@@ -248,7 +250,7 @@ _ASSETS_DIR = Path(os.path.join(_DASHBOARD_DIR, "assets")).resolve()
 
 
 # ---------------------------------------------------------------------------
-# Global error handlers â€” all errors return {error, detail} JSON format
+# Global error handlers  --  all errors return {error, detail} JSON format
 # ---------------------------------------------------------------------------
 
 @app.exception_handler(HTTPException)
@@ -838,7 +840,6 @@ async def get_status():
         "ibkr_port":            cfg.IBKR_PORT,
         "is_paper":             cfg.IS_PAPER,
         "sim_mode":             cfg.SIM_MODE,
-        "mock_mode":            cfg.MOCK_MODE,
         "bot_running":          bot_runner.is_running(),
         "last_run":             bot_runner.get_last_run(),
         "next_run":             bot_runner.get_next_run(),
@@ -889,7 +890,7 @@ async def disconnect_ibkr():
 
 
 # ---------------------------------------------------------------------------
-# Account summary  (normalised â€” IBKR live | simulation | mock)
+# Account summary  (IBKR live | simulation)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/account/summary")
@@ -898,7 +899,6 @@ async def get_account_summary():
     Returns a unified account summary regardless of connection mode:
       - SIM_MODE â†’ virtual sim account
       - IBKR connected â†’ real account summary
-      - fallback â†’ mock data
     """
     if cfg.SIM_MODE:
         account = await sim_engine.get_account()
@@ -909,12 +909,9 @@ async def get_account_summary():
             summary = await ibkr.get_account_summary()
             return summary.model_dump()
         except Exception as exc:
-            log.warning("Account fetch failed: %s â€” falling back to mock", exc)
+            log.warning("Account fetch failed: %s", exc)
 
-    if cfg.MOCK_MODE:
-        return get_mock_account_summary()
-
-    raise HTTPException(503, "IBKR not connected and MOCK_MODE is disabled")
+    raise HTTPException(503, "IBKR not connected")
 
 
 # Backwards-compatible alias
@@ -954,9 +951,7 @@ async def sim_account():
 @app.get("/api/simulation/positions")
 async def sim_positions():
     def _price(sym: str) -> float | None:
-        if ibkr.is_connected():
-            return None   # will be resolved asynchronously by get_positions
-        return get_mock_price(sym) if cfg.MOCK_MODE else None
+        return None   # resolved asynchronously by get_positions
 
     positions = await sim_engine.get_positions(price_fn=_price)
     return [p.model_dump() for p in positions]
@@ -1012,16 +1007,13 @@ class LoadReplayRequest(BaseModel):
 @app.post("/api/simulation/playback/load")
 async def playback_load(body: LoadReplayRequest):
     sym = body.symbol.upper()
-    # Try Yahoo Finance first; fall back to mock data
+    # Fetch bars from Yahoo Finance
     bars: list[dict] = []
     try:
         bars = await _yf_bars(sym, body.period, body.interval)
     except Exception as exc:
-        log.warning("Yahoo bars failed for replay (%s): %s â€” using mock data", sym, exc)
+        log.warning("Yahoo bars failed for replay (%s): %s", sym, exc)
 
-    if not bars and cfg.MOCK_MODE:
-        num = 252 if "d" in body.interval else 100
-        bars = get_mock_ohlcv(sym, num_bars=num)
     if not bars:
         raise HTTPException(404, f"No replay data for {sym}")
 
@@ -1085,15 +1077,21 @@ class ManualOrderRequest(BaseModel):
 
 @app.post("/api/orders/manual", status_code=201)
 async def place_manual_order(body: ManualOrderRequest):
-    """Place a manual order â€” routes to sim if SIM_MODE, else IBKR."""
+    """Place a manual order  --  routes to sim if SIM_MODE, else IBKR."""
     if cfg.SIM_MODE:
-        price = (
-            get_mock_price(body.symbol.upper())
-            if not ibkr.is_connected()
-            else (await get_latest_price(body.symbol.upper()) or get_mock_price(body.symbol.upper()))
-        )
+        sym = body.symbol.upper()
+        price = await get_latest_price(sym)
+        if price is None:
+            try:
+                quotes = await _yf_quotes(sym, source="sim_order_price")
+                if quotes and quotes[0].get("price"):
+                    price = quotes[0]["price"]
+            except Exception:
+                pass
+        if price is None:
+            raise HTTPException(503, "No market data available for " + sym)
         ok, msg = await sim_engine.execute_order(
-            symbol=body.symbol.upper(),
+            symbol=sym,
             action=body.action,
             qty=float(body.quantity),
             price=price,
@@ -1103,7 +1101,7 @@ async def place_manual_order(body: ManualOrderRequest):
         return {"success": True, "message": msg, "sim": True}
 
     if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected â€” start IB Gateway first")
+        raise HTTPException(503, "IBKR not connected  --  start IB Gateway first")
 
     rule = Rule(
         name="Manual",
@@ -1121,7 +1119,7 @@ async def place_manual_order(body: ManualOrderRequest):
     )
     trade = await place_order(rule)
     if not trade:
-        raise HTTPException(502, "Order placement failed â€” check IBKR logs")
+        raise HTTPException(502, "Order placement failed  --  check IBKR logs")
     return trade.model_dump()
 
 
@@ -1221,8 +1219,6 @@ _active_rt_subs: set[str] = set()
 @app.get("/api/market/{symbol}/bars")
 async def get_bars(symbol: str, bar_size: str = "1D", duration: str = "60 D"):
     if not ibkr.is_connected():
-        if cfg.MOCK_MODE:
-            return get_mock_ohlcv(symbol.upper(), num_bars=90)
         raise HTTPException(503, "IBKR not connected")
 
     df = await get_historical_bars(symbol.upper(), duration=duration, bar_size=bar_size, use_cache=False)
@@ -1244,13 +1240,17 @@ async def get_bars(symbol: str, bar_size: str = "1D", duration: str = "60 D"):
 
 @app.get("/api/market/{symbol}/price")
 async def get_price(symbol: str):
-    if ibkr.is_connected():
-        price = await get_latest_price(symbol.upper())
-        if price is not None:
-            return {"symbol": symbol.upper(), "price": price, "is_mock": False}
-    if cfg.MOCK_MODE:
-        return {"symbol": symbol.upper(), "price": get_mock_price(symbol.upper()), "is_mock": True}
-    raise HTTPException(503, "IBKR not connected and MOCK_MODE disabled")
+    sym = symbol.upper()
+    price = await get_latest_price(sym)
+    if price is not None:
+        return {"symbol": sym, "price": price}
+    try:
+        quotes = await _yf_quotes(sym, source="price_fallback")
+        if quotes and quotes[0].get("price"):
+            return {"symbol": sym, "price": quotes[0]["price"], "source": "yahoo"}
+    except Exception as exc:
+        log.warning("Yahoo price fallback failed for %s: %s", sym, exc)
+    raise HTTPException(503, "No market data available")
 
 
 @app.post("/api/market/{symbol}/subscribe")
@@ -1277,7 +1277,7 @@ async def unsubscribe_market_bars(symbol: str):
 
 
 # ---------------------------------------------------------------------------
-# Yahoo Finance â€” watchlist quotes + bars
+# Yahoo Finance  --  watchlist quotes + bars
 # ---------------------------------------------------------------------------
 
 async def _yf_quotes(symbols_str: str, source: str = "watchlist_quotes") -> list[dict]:
@@ -1306,7 +1306,6 @@ async def _yf_quotes(symbols_str: str, source: str = "watchlist_quotes") -> list
                 "market_cap": getattr(fi, "market_cap", None),
                 "avg_volume": getattr(fi, "three_month_average_volume", None),
                 "last_update": datetime.now(timezone.utc).isoformat(),
-                "is_mock":    False,
             }
         except Exception as e:
             log.warning("yfinance error %s: %s", sym, e)
@@ -1499,10 +1498,7 @@ async def get_watchlist_quotes(symbols: str = _DEFAULT_WATCHLIST):
             _cache_prices_from_quotes(quotes)
             return quotes
     except Exception as exc:
-        log.warning("Yahoo Finance failed: %s ï¿½ using mock data", exc)
-
-    if cfg.MOCK_MODE:
-        return get_mock_quotes(syms)
+        log.warning("Yahoo Finance failed: %s ï¿½ ", exc)
 
     raise HTTPException(503, "No market data available")
 
@@ -1556,15 +1552,10 @@ async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
     except Exception as exc:
         log.warning("Yahoo bars failed for %s: %s", symbol, exc)
 
-    if cfg.MOCK_MODE:
-        num = 100 if "d" in interval else 200
-        sec = 86_400 if interval.endswith("d") else 300
-        return get_mock_ohlcv(symbol.upper(), num_bars=num, bar_seconds=sec)
-
     raise HTTPException(404, f"No data for {symbol}")
 
 
-# â”€â”€ Server-side indicator endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Server-side indicator endpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 @app.get("/api/market/{symbol}/indicators")
 async def get_indicators(
@@ -1583,12 +1574,7 @@ async def get_indicators(
 
     bars = await _yf_bars(symbol.upper(), period, interval)
     if not bars:
-        if cfg.MOCK_MODE:
-            num = 200 if "d" in interval else 300
-            sec = 86_400 if interval.endswith("d") else 300
-            bars = get_mock_ohlcv(symbol.upper(), num_bars=num, bar_seconds=sec)
-        if not bars:
-            raise HTTPException(404, f"No bar data for {symbol}")
+        raise HTTPException(404, f"No bar data for {symbol}")
 
     df = pd.DataFrame(bars)
 

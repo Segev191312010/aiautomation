@@ -57,7 +57,11 @@
       "WebSearch",
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:agents.md)",
-      "Bash(xargs wc -l)"
+      "Bash(xargs wc -l)",
+      "Bash(npx vitest run)",
+      "Bash(wc -l c:/Users/segev/sdvesdaW/trading/backend/tests/test_*.py)",
+      "WebFetch(domain:www.stocktaper.com)",
+      "Bash(npx vite:*)"
     ]
   }
 }

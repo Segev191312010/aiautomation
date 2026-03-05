@@ -26,6 +26,9 @@ const OPERATORS: { value: ScreenerOperator; label: string }[] = [
 
 const isCrossOperator = (op: string) => op === 'CROSSES_ABOVE' || op === 'CROSSES_BELOW'
 
+const selectClass = 'px-2.5 py-1.5 bg-terminal-input border border-white/[0.06] rounded-xl text-xs font-sans text-terminal-text focus:border-indigo-500/50 focus:outline-none transition-colors'
+const inputClass  = 'px-2 py-1.5 bg-terminal-input border border-white/[0.06] rounded-xl text-xs font-mono text-terminal-text text-center focus:border-indigo-500/50 focus:outline-none transition-colors'
+
 interface FilterRowProps {
   filter: ScanFilter
   index: number
@@ -110,12 +113,12 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
   const forcedIndicator = isCrossOperator(filter.operator)
 
   return (
-    <div className="flex items-center gap-2 flex-wrap">
+    <div className="flex items-center gap-2 flex-wrap p-2 rounded-xl bg-white/[0.02] border border-white/[0.04]">
       {/* Indicator select */}
       <select
         value={filter.indicator}
         onChange={(e) => handleIndicatorChange(e.target.value as ScreenerIndicator)}
-        className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text focus:border-terminal-blue focus:outline-none"
+        className={selectClass}
       >
         {INDICATORS.map((i) => (
           <option key={i.value} value={i.value}>{i.label}</option>
@@ -130,7 +133,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
           value={val}
           onChange={(e) => handleParamChange(key, Number(e.target.value))}
           title={key}
-          className="w-14 px-1.5 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text text-center focus:border-terminal-blue focus:outline-none"
+          className={`w-14 ${inputClass}`}
         />
       ))}
 
@@ -138,7 +141,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
       <select
         value={filter.operator}
         onChange={(e) => handleOperatorChange(e.target.value as ScreenerOperator)}
-        className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text focus:border-terminal-blue focus:outline-none"
+        className={selectClass}
       >
         {OPERATORS.map((o) => (
           <option key={o.value} value={o.value}>{o.label}</option>
@@ -150,7 +153,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
         <select
           value={filter.value.type}
           onChange={(e) => handleValueTypeChange(e.target.value as 'number' | 'indicator')}
-          className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-dim focus:border-terminal-blue focus:outline-none"
+          className={`${selectClass} text-terminal-dim`}
         >
           <option value="number">Value</option>
           <option value="indicator">Indicator</option>
@@ -164,14 +167,14 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
           value={filter.value.number ?? 0}
           onChange={(e) => handleValueNumberChange(Number(e.target.value))}
           step="any"
-          className="w-20 px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text text-center focus:border-terminal-blue focus:outline-none"
+          className={`w-20 ${inputClass}`}
         />
       ) : (
         <>
           <select
             value={filter.value.indicator ?? 'SMA'}
             onChange={(e) => handleValueIndicatorChange(e.target.value as ScreenerIndicator)}
-            className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text focus:border-terminal-blue focus:outline-none"
+            className={selectClass}
           >
             {INDICATORS.map((i) => (
               <option key={i.value} value={i.value}>{i.label}</option>
@@ -184,20 +187,20 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
               value={val}
               onChange={(e) => handleValueParamChange(key, Number(e.target.value))}
               title={key}
-              className="w-14 px-1.5 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text text-center focus:border-terminal-blue focus:outline-none"
+              className={`w-14 ${inputClass}`}
             />
           ))}
           {/* Multiplier */}
           {(filter.value.multiplier ?? 1) !== 1 || filter.value.type === 'indicator' ? (
             <div className="flex items-center gap-1">
-              <span className="text-[10px] font-mono text-terminal-ghost">x</span>
+              <span className="text-xs font-sans text-terminal-ghost">x</span>
               <input
                 type="number"
                 value={filter.value.multiplier ?? 1}
                 onChange={(e) => handleMultiplierChange(Number(e.target.value))}
                 step="0.1"
                 min="0.1"
-                className="w-14 px-1.5 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text text-center focus:border-terminal-blue focus:outline-none"
+                className={`w-14 ${inputClass}`}
               />
             </div>
           ) : null}
@@ -208,7 +211,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
       {canRemove && (
         <button
           onClick={() => removeFilter(index)}
-          className="p-1 rounded text-terminal-dim hover:text-terminal-red hover:bg-terminal-red/10 transition-colors"
+          className="p-1 rounded-lg text-terminal-ghost hover:text-terminal-red hover:bg-terminal-red/10 transition-colors ml-auto"
           title="Remove filter"
         >
           <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
@@ -231,7 +234,7 @@ export default function FilterBuilder() {
       <button
         onClick={addFilter}
         disabled={filters.length >= 15}
-        className="px-3 py-1.5 rounded text-xs font-mono font-semibold text-terminal-blue hover:bg-terminal-blue/10 disabled:opacity-40 transition-colors"
+        className="px-3.5 py-1.5 rounded-xl text-xs font-sans font-medium text-indigo-400 hover:bg-indigo-500/10 disabled:opacity-40 transition-colors"
       >
         + Add Filter
       </button>

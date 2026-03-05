@@ -49,6 +49,16 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    route: 'stock' as AppRoute,
+    label: 'Intelligence',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 16v-4M12 8h.01" />
+      </svg>
+    ),
+  },
+  {
     route: 'simulation',
     label: 'Simulation',
     icon: (
@@ -72,6 +82,15 @@ const NAV_ITEMS: NavItem[] = [
     icon: (
       <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
         <path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z" />
+      </svg>
+    ),
+  },
+  {
+    route: 'alerts',
+    label: 'Alerts',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+        <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
       </svg>
     ),
   },
@@ -108,28 +127,28 @@ export default function Sidebar() {
   return (
     <aside
       className={clsx(
-        'flex flex-col shrink-0 h-screen bg-terminal-surface border-r border-terminal-border',
+        'flex flex-col shrink-0 h-screen glass border-r border-white/[0.06]',
         'transition-all duration-200 overflow-hidden',
         width,
       )}
     >
       {/* ── Logo / collapse toggle ────────────────────────────────── */}
-      <div className="flex items-center h-14 px-3 border-b border-terminal-border shrink-0">
+      <div className="flex items-center h-14 px-3 border-b border-white/[0.06] shrink-0">
         {!sidebarCollapsed && (
           <div className="flex items-center gap-2 mr-auto">
-            <span className="w-7 h-7 rounded bg-terminal-blue/20 flex items-center justify-center">
-              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 text-terminal-blue">
+            <span className="w-7 h-7 rounded bg-gradient-to-br from-indigo-500 to-purple-500 flex items-center justify-center">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 text-white">
                 <path d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z" />
               </svg>
             </span>
-            <span className="font-mono font-semibold text-sm text-terminal-text tracking-wider">
+            <span className="font-sans font-bold text-sm tracking-wider gradient-text">
               TRADEBOT
             </span>
           </div>
         )}
         <button
           onClick={toggleSidebar}
-          className="p-1.5 rounded text-terminal-dim hover:text-terminal-text hover:bg-terminal-muted transition-colors"
+          className="p-1.5 rounded-lg text-terminal-dim hover:text-terminal-text hover:bg-white/[0.06] transition-colors"
           aria-label="Toggle sidebar"
         >
           <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
@@ -144,10 +163,10 @@ export default function Sidebar() {
 
       {/* ── Status pills ──────────────────────────────────────────── */}
       {!sidebarCollapsed && (
-        <div className="flex gap-1.5 px-3 py-2 border-b border-terminal-border">
+        <div className="flex gap-1.5 px-3 py-2 border-b border-white/[0.06]">
           <span
             className={clsx(
-              'text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold',
+              'text-[10px] font-mono px-2 py-1 rounded-lg font-semibold',
               ibkrConnected
                 ? 'bg-terminal-green/15 text-terminal-green'
                 : 'bg-terminal-red/15 text-terminal-red',
@@ -157,7 +176,7 @@ export default function Sidebar() {
           </span>
           <span
             className={clsx(
-              'text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold',
+              'text-[10px] font-mono px-2 py-1 rounded-lg font-semibold',
               botRunning
                 ? 'bg-terminal-green/15 text-terminal-green'
                 : 'bg-terminal-muted text-terminal-dim',
@@ -166,7 +185,7 @@ export default function Sidebar() {
             BOT
           </span>
           {simMode && (
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold bg-terminal-amber/15 text-terminal-amber">
+            <span className="text-[10px] font-mono px-2 py-1 rounded-lg font-semibold bg-terminal-amber/15 text-terminal-amber">
               SIM
             </span>
           )}
@@ -183,15 +202,15 @@ export default function Sidebar() {
               onClick={() => setRoute(item.route)}
               title={sidebarCollapsed ? item.label : undefined}
               className={clsx(
-                'flex items-center gap-3 px-2 py-2 rounded text-sm transition-colors text-left w-full',
+                'flex items-center gap-3 px-2 py-2 rounded-xl text-sm transition-colors text-left w-full',
                 active
-                  ? 'bg-terminal-blue/15 text-terminal-blue'
-                  : 'text-terminal-dim hover:text-terminal-text hover:bg-terminal-muted',
+                  ? 'bg-indigo-500/15 text-indigo-400'
+                  : 'text-terminal-dim hover:text-terminal-text hover:bg-white/[0.06]',
               )}
             >
               <span className="shrink-0">{item.icon}</span>
               {!sidebarCollapsed && (
-                <span className="truncate font-medium">{item.label}</span>
+                <span className="truncate font-sans font-medium">{item.label}</span>
               )}
             </button>
           )
@@ -201,7 +220,7 @@ export default function Sidebar() {
       {/* ── Quick watchlist ───────────────────────────────────────── */}
       {!sidebarCollapsed && watchlist && (
         <div className="mt-4 flex-1 overflow-y-auto px-2 min-h-0">
-          <p className="text-[10px] font-mono text-terminal-ghost px-2 mb-1 uppercase tracking-widest">
+          <p className="text-[10px] font-sans text-terminal-ghost px-2 mb-1 uppercase tracking-widest">
             {watchlist.name}
           </p>
           {watchlist.symbols.map((sym) => {
@@ -214,9 +233,9 @@ export default function Sidebar() {
                   setSelectedSymbol(sym)
                   setRoute('market')
                 }}
-                className="flex items-center justify-between w-full px-2 py-1.5 rounded hover:bg-terminal-muted transition-colors group"
+                className="flex items-center justify-between w-full px-2 py-1.5 rounded-xl hover:bg-white/[0.06] transition-colors group"
               >
-                <span className="text-xs font-mono text-terminal-text group-hover:text-terminal-blue">
+                <span className="text-xs font-sans text-terminal-text group-hover:text-indigo-400">
                   {sym}
                 </span>
                 {q && (

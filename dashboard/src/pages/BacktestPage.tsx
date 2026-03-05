@@ -68,23 +68,23 @@ export default function BacktestPage() {
   }
 
   return (
-    <div className="flex gap-4 h-full min-h-0 p-4">
+    <div className="flex gap-5 h-full min-h-0 p-5">
       {/* Left panel — Strategy config (40%) */}
-      <div className="w-[40%] flex flex-col gap-4 overflow-y-auto pr-2">
-        {/* Top bar */}
-        <div className="flex items-end gap-3">
+      <div className="w-[40%] flex flex-col gap-5 overflow-y-auto pr-2">
+        {/* Top bar — symbol / period / interval / run */}
+        <div className="glass rounded-2xl shadow-glass p-5 flex items-end gap-3 flex-wrap">
           <div>
-            <label className="text-xs text-gray-400 block mb-1">Symbol</label>
+            <label className="text-xs font-sans font-medium text-terminal-dim block mb-1.5">Symbol</label>
             <input
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 w-24 uppercase"
+              className="bg-terminal-input border border-white/[0.06] rounded-xl px-3 py-1.5 text-sm font-mono text-terminal-text w-24 uppercase focus:outline-none focus:border-terminal-blue/40 focus:ring-1 focus:ring-terminal-blue/20 transition-colors"
               value={store.symbol}
               onChange={(e) => store.setSymbol(e.target.value.toUpperCase())}
             />
           </div>
           <div>
-            <label className="text-xs text-gray-400 block mb-1">Period</label>
+            <label className="text-xs font-sans font-medium text-terminal-dim block mb-1.5">Period</label>
             <select
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
+              className="bg-terminal-input border border-white/[0.06] rounded-xl px-3 py-1.5 text-sm font-sans text-terminal-text focus:outline-none focus:border-terminal-blue/40 focus:ring-1 focus:ring-terminal-blue/20 transition-colors"
               value={store.period}
               onChange={(e) => store.setPeriod(e.target.value)}
             >
@@ -92,9 +92,9 @@ export default function BacktestPage() {
             </select>
           </div>
           <div>
-            <label className="text-xs text-gray-400 block mb-1">Interval</label>
+            <label className="text-xs font-sans font-medium text-terminal-dim block mb-1.5">Interval</label>
             <select
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100"
+              className="bg-terminal-input border border-white/[0.06] rounded-xl px-3 py-1.5 text-sm font-sans text-terminal-text focus:outline-none focus:border-terminal-blue/40 focus:ring-1 focus:ring-terminal-blue/20 transition-colors"
               value={store.interval}
               onChange={(e) => store.setInterval(e.target.value)}
             >
@@ -104,7 +104,7 @@ export default function BacktestPage() {
           <button
             onClick={handleRun}
             disabled={store.loading}
-            className="bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:cursor-not-allowed text-white px-4 py-1.5 rounded text-sm font-medium flex items-center gap-2"
+            className="bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-400 hover:to-purple-400 disabled:from-indigo-700 disabled:to-purple-800 disabled:cursor-not-allowed text-white px-5 py-1.5 rounded-xl text-sm font-sans font-medium flex items-center gap-2 transition-all shadow-glow-blue"
           >
             {store.loading && (
               <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
@@ -121,13 +121,13 @@ export default function BacktestPage() {
 
         {/* Saved backtests */}
         {store.savedBacktests.length > 0 && (
-          <div>
-            <h3 className="text-sm font-semibold text-gray-200 mb-2">Saved Backtests</h3>
-            <div className="space-y-1">
+          <div className="glass rounded-2xl shadow-glass p-5">
+            <h3 className="text-sm font-sans font-medium text-terminal-dim mb-3">Saved Backtests</h3>
+            <div className="space-y-1.5">
               {store.savedBacktests.map((bt) => (
-                <div key={bt.id} className="flex items-center justify-between bg-gray-800/50 rounded px-2 py-1 text-xs">
-                  <span className="text-gray-300">{bt.name}</span>
-                  <span className="text-gray-500">{bt.symbol} • {bt.num_trades} trades</span>
+                <div key={bt.id} className="flex items-center justify-between bg-terminal-elevated/50 rounded-xl px-3 py-2 text-xs">
+                  <span className="font-sans text-terminal-text">{bt.name}</span>
+                  <span className="font-mono text-terminal-ghost">{bt.symbol} &bull; {bt.num_trades} trades</span>
                 </div>
               ))}
             </div>
@@ -136,13 +136,13 @@ export default function BacktestPage() {
       </div>
 
       {/* Right panel — Results (60%) */}
-      <div className="w-[60%] flex flex-col gap-4 overflow-y-auto pl-2">
+      <div className="w-[60%] flex flex-col gap-5 overflow-y-auto pl-2">
         {store.error && (
-          <div className="bg-red-900/20 border border-red-700/30 rounded p-3 flex items-center justify-between">
-            <span className="text-sm text-red-400">{store.error}</span>
+          <div className="bg-terminal-red/10 border border-terminal-red/20 rounded-2xl p-4 flex items-center justify-between">
+            <span className="text-sm font-sans text-terminal-red">{store.error}</span>
             <button
               onClick={handleRun}
-              className="text-xs text-red-300 hover:text-red-200 underline ml-2"
+              className="text-xs font-sans text-terminal-red/70 hover:text-terminal-red underline ml-2 transition-colors"
             >
               Retry
             </button>
@@ -150,13 +150,13 @@ export default function BacktestPage() {
         )}
 
         {!store.result && !store.error && !store.loading && (
-          <div className="flex-1 flex items-center justify-center text-gray-600 text-sm">
+          <div className="flex-1 flex items-center justify-center text-terminal-ghost text-sm font-sans">
             Configure a strategy and run a backtest
           </div>
         )}
 
         {store.loading && !store.result && (
-          <div className="flex-1 flex items-center justify-center text-gray-500 text-sm gap-2">
+          <div className="flex-1 flex items-center justify-center text-terminal-dim text-sm font-sans gap-2">
             <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24" fill="none">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
@@ -169,13 +169,13 @@ export default function BacktestPage() {
           <>
             {/* Results header */}
             <div className="flex items-center justify-between">
-              <div className="text-xs text-gray-500">
-                {store.result.symbol} • {store.result.period} • {store.result.total_bars} bars
-                {store.result.created_at && ` • ${new Date(store.result.created_at).toLocaleString()}`}
+              <div className="text-xs font-mono text-terminal-ghost">
+                {store.result.symbol} &bull; {store.result.period} &bull; {store.result.total_bars} bars
+                {store.result.created_at && ` \u2022 ${new Date(store.result.created_at).toLocaleString()}`}
               </div>
               <div className="flex items-center gap-2">
                 <input
-                  className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 w-32"
+                  className="bg-terminal-input border border-white/[0.06] rounded-xl px-3 py-1 text-xs font-sans text-terminal-text w-36 placeholder:text-terminal-ghost focus:outline-none focus:border-terminal-blue/40 focus:ring-1 focus:ring-terminal-blue/20 transition-colors"
                   placeholder="Name to save..."
                   value={saveName}
                   onChange={(e) => setSaveName(e.target.value)}
@@ -183,13 +183,13 @@ export default function BacktestPage() {
                 <button
                   onClick={handleSave}
                   disabled={saving || !saveName.trim()}
-                  className="text-xs bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 px-2 py-1 rounded"
+                  className="text-xs font-sans bg-terminal-elevated hover:bg-terminal-elevated/80 disabled:opacity-40 text-terminal-text px-3 py-1 rounded-xl border border-white/[0.06] transition-colors"
                 >
                   Save
                 </button>
                 <button
                   onClick={handleExport}
-                  className="text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 px-2 py-1 rounded"
+                  className="text-xs font-sans bg-terminal-elevated hover:bg-terminal-elevated/80 text-terminal-text px-3 py-1 rounded-xl border border-white/[0.06] transition-colors"
                   title="Export as JSON"
                 >
                   Export

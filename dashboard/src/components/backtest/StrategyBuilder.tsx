@@ -1,35 +1,6 @@
 import { useBacktestStore } from '@/store'
 import type { Condition, Indicator } from '@/types'
-
-const INDICATORS: Indicator[] = ['RSI', 'SMA', 'EMA', 'MACD', 'BBANDS', 'ATR', 'STOCH', 'PRICE']
-const OPERATORS = ['>', '<', '>=', '<=', '==', 'crosses_above', 'crosses_below']
-
-const INDICATOR_PARAMS: Record<Indicator, { key: string; label: string; def: number }[]> = {
-  RSI:    [{ key: 'length', label: 'Length', def: 14 }],
-  SMA:    [{ key: 'length', label: 'Length', def: 20 }],
-  EMA:    [{ key: 'length', label: 'Length', def: 20 }],
-  MACD:   [{ key: 'fast', label: 'Fast', def: 12 }, { key: 'slow', label: 'Slow', def: 26 }, { key: 'signal', label: 'Signal', def: 9 }],
-  BBANDS: [{ key: 'length', label: 'Length', def: 20 }, { key: 'std', label: 'Std', def: 2 }, { key: 'band', label: 'Band', def: 0 }],
-  ATR:    [{ key: 'length', label: 'Length', def: 14 }],
-  STOCH:  [{ key: 'k', label: 'K', def: 14 }, { key: 'smooth_k', label: 'Smooth', def: 3 }, { key: 'd', label: 'D', def: 3 }],
-  PRICE:  [],
-}
-
-function defaultCondition(): Condition {
-  return { indicator: 'RSI', params: { length: 14 }, operator: '<', value: 30 }
-}
-
-function defaultParams(ind: Indicator): Record<string, number | string> {
-  const result: Record<string, number | string> = {}
-  for (const p of INDICATOR_PARAMS[ind]) {
-    if (p.key === 'band') {
-      result[p.key] = 'mid'
-    } else {
-      result[p.key] = p.def
-    }
-  }
-  return result
-}
+import { INDICATORS, OPERATORS, INDICATOR_PARAMS, defaultCondition, defaultParams } from '@/utils/conditionHelpers'
 
 interface ConditionRowProps {
   cond: Condition
@@ -41,10 +12,10 @@ function ConditionRow({ cond, onChange, onRemove }: ConditionRowProps) {
   const paramDefs = INDICATOR_PARAMS[cond.indicator] || []
 
   return (
-    <div className="flex items-center gap-2 bg-gray-800/50 rounded px-2 py-1.5">
+    <div className="flex items-center gap-2 bg-terminal-elevated/50 rounded-xl px-3 py-2">
       {/* Indicator */}
       <select
-        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-100 w-24"
+        className="bg-terminal-input border border-white/[0.06] rounded-xl px-2 py-1 text-sm font-sans text-terminal-text w-24 focus:outline-none focus:border-terminal-blue/40 transition-colors"
         value={cond.indicator}
         onChange={(e) => {
           const ind = e.target.value as Indicator
@@ -57,10 +28,10 @@ function ConditionRow({ cond, onChange, onRemove }: ConditionRowProps) {
       {/* Params */}
       {paramDefs.map((p) => (
         <div key={p.key} className="flex items-center gap-1">
-          <span className="text-xs text-gray-500">{p.label}</span>
+          <span className="text-xs font-sans text-terminal-ghost">{p.label}</span>
           {p.key === 'band' ? (
             <select
-              className="bg-gray-900 border border-gray-700 rounded px-1 py-1 text-sm text-gray-100 w-16"
+              className="bg-terminal-input border border-white/[0.06] rounded-xl px-1 py-1 text-sm font-sans text-terminal-text w-16 focus:outline-none focus:border-terminal-blue/40 transition-colors"
               value={String(cond.params[p.key] ?? 'mid')}
               onChange={(e) => onChange({ ...cond, params: { ...cond.params, [p.key]: e.target.value } })}
             >
@@ -71,7 +42,7 @@ function ConditionRow({ cond, onChange, onRemove }: ConditionRowProps) {
           ) : (
             <input
               type="number"
-              className="bg-gray-900 border border-gray-700 rounded px-1 py-1 text-sm text-gray-100 w-14"
+              className="bg-terminal-input border border-white/[0.06] rounded-xl px-1 py-1 text-sm font-mono text-terminal-text w-14 focus:outline-none focus:border-terminal-blue/40 transition-colors"
               value={cond.params[p.key] ?? p.def}
               onChange={(e) => onChange({ ...cond, params: { ...cond.params, [p.key]: Number(e.target.value) } })}
             />
@@ -81,7 +52,7 @@ function ConditionRow({ cond, onChange, onRemove }: ConditionRowProps) {
 
       {/* Operator */}
       <select
-        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-100 w-32"
+        className="bg-terminal-input border border-white/[0.06] rounded-xl px-2 py-1 text-sm font-sans text-terminal-text w-32 focus:outline-none focus:border-terminal-blue/40 transition-colors"
         value={cond.operator}
         onChange={(e) => onChange({ ...cond, operator: e.target.value })}
       >
@@ -90,7 +61,7 @@ function ConditionRow({ cond, onChange, onRemove }: ConditionRowProps) {
 
       {/* Value */}
       <input
-        className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-gray-100 w-20"
+        className="bg-terminal-input border border-white/[0.06] rounded-xl px-2 py-1 text-sm font-mono text-terminal-text w-20 focus:outline-none focus:border-terminal-blue/40 transition-colors"
         value={cond.value}
         onChange={(e) => {
           const v = e.target.value
@@ -102,10 +73,10 @@ function ConditionRow({ cond, onChange, onRemove }: ConditionRowProps) {
       {/* Remove */}
       <button
         onClick={onRemove}
-        className="text-red-400 hover:text-red-300 px-1 text-sm font-bold"
+        className="text-terminal-red/60 hover:text-terminal-red px-1 text-sm font-bold transition-colors"
         title="Remove condition"
       >
-        ×
+        &times;
       </button>
     </div>
   )
@@ -132,7 +103,7 @@ function ConditionSection({ label, conditions, onChange }: ConditionSectionProps
 
   return (
     <div>
-      <h4 className="text-xs uppercase tracking-wider text-gray-400 mb-2">{label}</h4>
+      <h4 className="text-xs font-sans font-medium uppercase tracking-wider text-terminal-dim mb-2">{label}</h4>
       <div className="space-y-1.5">
         {conditions.map((c, i) => (
           <ConditionRow key={i} cond={c} onChange={(v) => updateAt(i, v)} onRemove={() => removeAt(i)} />
@@ -140,7 +111,7 @@ function ConditionSection({ label, conditions, onChange }: ConditionSectionProps
       </div>
       <button
         onClick={add}
-        className="mt-2 text-xs text-blue-400 hover:text-blue-300"
+        className="mt-2 text-xs font-sans text-terminal-blue/80 hover:text-terminal-blue transition-colors disabled:opacity-40"
         disabled={conditions.length >= 10}
       >
         + Add Condition
@@ -156,27 +127,36 @@ export function StrategyBuilder() {
   } = useBacktestStore()
 
   return (
-    <div className="space-y-4">
+    <div className="glass rounded-2xl shadow-glass p-5 space-y-5">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-200">Strategy</h3>
+        <h3 className="text-sm font-sans font-medium text-terminal-text">Strategy</h3>
         <div className="flex items-center gap-2">
-          <div className="flex bg-gray-800 rounded overflow-hidden text-xs">
+          {/* AND / OR toggle */}
+          <div className="flex bg-terminal-elevated rounded-xl overflow-hidden text-xs border border-white/[0.06]">
             <button
               onClick={() => setConditionLogic('AND')}
-              className={`px-2 py-1 ${conditionLogic === 'AND' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+              className={`px-3 py-1 font-sans font-medium transition-colors ${
+                conditionLogic === 'AND'
+                  ? 'bg-indigo-500 text-white'
+                  : 'text-terminal-dim hover:text-terminal-text'
+              }`}
             >
               AND
             </button>
             <button
               onClick={() => setConditionLogic('OR')}
-              className={`px-2 py-1 ${conditionLogic === 'OR' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}
+              className={`px-3 py-1 font-sans font-medium transition-colors ${
+                conditionLogic === 'OR'
+                  ? 'bg-indigo-500 text-white'
+                  : 'text-terminal-dim hover:text-terminal-text'
+              }`}
             >
               OR
             </button>
           </div>
           <button
             onClick={reset}
-            className="text-xs text-gray-500 hover:text-gray-300"
+            className="text-xs font-sans text-terminal-ghost hover:text-terminal-dim transition-colors"
             title="Reset to defaults"
           >
             Reset

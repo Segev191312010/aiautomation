@@ -19,13 +19,13 @@ export default function KPICard({ label, value, subLabel, positive, prefix = '',
   return (
     <div
       className={clsx(
-        'bg-terminal-surface border rounded-lg p-4 flex flex-col gap-1',
+        'glass rounded-2xl p-5 flex flex-col gap-1',
         highlight
-          ? 'border-terminal-blue/40 shadow-glow-blue'
-          : 'border-terminal-border',
+          ? 'border-indigo-500/40 shadow-glow-blue'
+          : 'border-white/[0.06]',
       )}
     >
-      <span className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">
+      <span className="text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase">
         {label}
       </span>
       <span className={clsx('text-2xl font-mono font-bold tabular-nums', colorClass)}>

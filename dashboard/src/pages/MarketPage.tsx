@@ -16,10 +16,10 @@ import DrawingTools from '@/components/chart/DrawingTools'
 import ResizeHandle from '@/components/chart/ResizeHandle'
 import TickerCard from '@/components/ticker/TickerCard'
 import Skeleton from '@/components/ui/Skeleton'
+import AlertForm from '@/components/alerts/AlertForm'
 import { useToast } from '@/components/ui/ToastProvider'
 import { useMarketStore, useDrawingStore, useBotStore } from '@/store'
 import { fetchYahooBars, fetchSettings } from '@/services/api'
-import { getMockBars } from '@/services/mockService'
 import { calcRSI, calcMACD } from '@/utils/indicators'
 import { useCrosshairSync, type ChartPane } from '@/hooks/useCrosshairSync'
 
@@ -55,6 +55,7 @@ export default function MarketPage() {
   const [tfIdx, setTfIdx]         = useState(6)   // default 1D
   const [searchInput, setSearch]   = useState(selectedSymbol)
   const [loading, setLoading]      = useState(false)
+  const [showAlertForm, setShowAlertForm] = useState(false)
   const refreshTimerRef            = useRef<ReturnType<typeof setInterval> | null>(null)
   const [mainChartApi, setMainChartApi] = useState<IChartApi | null>(null)
   const chartContainerRef          = useRef<HTMLDivElement>(null)
@@ -215,10 +216,6 @@ export default function MarketPage() {
       if (msg.includes('400') || msg.includes('interval')) {
         toast.error(msg)
       }
-      // Only use mock data if backend is in mock mode
-      if (useBotStore.getState().mockMode) {
-        setBars(sym, getMockBars(sym, 120, tf.interval === '1d' ? 86_400 : 300))
-      }
     } finally {
       setLoading(false)
     }
@@ -231,9 +228,6 @@ export default function MarketPage() {
       setCompBars(sym, bars)
     } catch (err) {
       console.warn('[MarketPage] Comp bar load failed:', err)
-      if (useBotStore.getState().mockMode) {
-        setCompBars(sym, getMockBars(sym, 120))
-      }
     }
   }
 
@@ -316,11 +310,11 @@ export default function MarketPage() {
             value={searchInput}
             onChange={(e) => setSearch(e.target.value.toUpperCase())}
             placeholder="Enter symbol…"
-            className="w-28 text-sm font-mono bg-terminal-input border border-terminal-border rounded-l px-3 py-1.5 text-terminal-text focus:border-terminal-blue focus:outline-none"
+            className="w-28 text-sm font-mono bg-terminal-input border border-terminal-border rounded-l-xl px-3 py-1.5 text-terminal-text focus:border-indigo-500 focus:outline-none"
           />
           <button
             type="submit"
-            className="text-xs font-mono px-3 py-1.5 rounded-r bg-terminal-blue/20 border border-l-0 border-terminal-blue/40 text-terminal-blue hover:bg-terminal-blue/30 transition-colors"
+            className="text-xs font-sans px-3 py-1.5 rounded-r-xl bg-indigo-500/15 border border-l-0 border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/25 transition-colors"
           >
             Go
           </button>
@@ -342,11 +336,11 @@ export default function MarketPage() {
                 name="comp"
                 defaultValue={compSymbol}
                 placeholder="vs. MSFT"
-                className="w-24 text-xs font-mono bg-terminal-input border border-terminal-border rounded-l px-2 py-1 text-terminal-text focus:border-terminal-amber focus:outline-none"
+                className="w-24 text-xs font-mono bg-terminal-input border border-terminal-border rounded-l-xl px-2 py-1 text-terminal-text focus:border-terminal-amber focus:outline-none"
               />
               <button
                 type="submit"
-                className="text-xs font-mono px-2 py-1 rounded-r bg-terminal-amber/10 border border-l-0 border-terminal-amber/40 text-terminal-amber"
+                className="text-xs font-sans px-2 py-1 rounded-r-xl bg-terminal-amber/10 border border-l-0 border-terminal-amber/40 text-terminal-amber"
               >
                 Set
               </button>
@@ -355,7 +349,7 @@ export default function MarketPage() {
           <button
             onClick={toggleCompMode}
             className={clsx(
-              'text-[11px] font-mono px-2.5 py-1 rounded border transition-colors',
+              'text-[11px] font-sans px-2.5 py-1 rounded-xl border transition-colors',
               compMode
                 ? 'border-terminal-amber/40 text-terminal-amber bg-terminal-amber/5'
                 : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
@@ -373,6 +367,7 @@ export default function MarketPage() {
         chartContainer={chartContainerRef.current}
         chartRef={mainChartApi}
         isLoading={loading}
+        onCreateAlert={() => setShowAlertForm(true)}
       />
 
       {/* ── Row 2b: drawing tools ──────────────────────────────────── */}
@@ -383,23 +378,23 @@ export default function MarketPage() {
         {/* Main chart + volume + oscillator panels stacked */}
         <div className="flex-1 min-w-0 flex flex-col gap-1 min-h-0" ref={chartContainerRef}>
           {/* Main chart */}
-          <div className="flex-1 min-h-0 bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden relative">
+          <div className="flex-1 min-h-0 glass rounded-2xl shadow-glass-lg overflow-hidden relative">
             {loading && (
               <div className="absolute inset-0 bg-terminal-bg/50 flex items-center justify-center z-10">
-                <span className="text-xs font-mono text-terminal-dim animate-pulse">Loading…</span>
+                <span className="text-xs font-sans text-terminal-dim animate-pulse">Loading…</span>
               </div>
             )}
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-terminal-border">
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/[0.06]">
               <span className="font-mono font-bold text-terminal-text">{selectedSymbol}</span>
               {compMode && compSymbol && (
                 <>
                   <span className="text-terminal-ghost font-mono text-xs">vs.</span>
                   <span className="font-mono font-bold text-terminal-amber">{compSymbol}</span>
-                  <span className="text-[10px] font-mono text-terminal-ghost ml-1">[normalized %]</span>
+                  <span className="text-[11px] font-sans text-terminal-dim ml-1">[normalized %]</span>
                 </>
               )}
               {/* Live pulse indicator */}
-              <span className={clsx('ml-auto flex items-center gap-1.5 text-[10px] font-mono', badge.textClass)}>
+              <span className={clsx('ml-auto flex items-center gap-1.5 text-[11px] font-sans', badge.textClass)}>
                 <span className={clsx('w-1.5 h-1.5 rounded-full', badge.dotClass)} />
                 {badge.label}
                 {badge.age && <span className="text-terminal-ghost">({badge.age})</span>}
@@ -421,7 +416,7 @@ export default function MarketPage() {
 
           {/* Volume pane */}
           <div
-            className="shrink-0 bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden"
+            className="shrink-0 glass rounded-2xl overflow-hidden"
             style={{ height: volumeHeight }}
           >
             <VolumePanel
@@ -451,7 +446,7 @@ export default function MarketPage() {
           {quote ? (
             <TickerCard quote={quote} />
           ) : (
-            <div className="bg-terminal-surface border border-terminal-border rounded-lg p-4 space-y-3">
+            <div className="glass rounded-2xl shadow-glass p-4 space-y-3">
               <Skeleton className="h-4 w-20" />
               <Skeleton className="h-8 w-28" />
               <Skeleton className="h-3 w-16" />
@@ -466,6 +461,14 @@ export default function MarketPage() {
           )}
         </aside>
       </div>
+
+      {/* ── Alert form modal ─────────────────────────────────────────── */}
+      {showAlertForm && (
+        <AlertForm
+          initialSymbol={selectedSymbol}
+          onClose={() => setShowAlertForm(false)}
+        />
+      )}
     </div>
   )
 }

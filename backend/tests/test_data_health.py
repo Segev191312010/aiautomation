@@ -13,7 +13,6 @@ from httpx import ASGITransport, AsyncClient
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DB_PATH", "test_trading.db")
 os.environ.setdefault("SIM_MODE", "true")
-os.environ.setdefault("MOCK_MODE", "true")
 
 from data_health import DataFreshnessMonitor
 

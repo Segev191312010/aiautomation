@@ -25,11 +25,6 @@ class Config:
     SIM_INITIAL_CASH: float = float(os.getenv("SIM_INITIAL_CASH", "100000.0"))
     SIM_COMMISSION: float = float(os.getenv("SIM_COMMISSION", "1.0"))  # $ per order
 
-    # ── Mock mode ────────────────────────────────────────────────────────────
-    # MOCK_MODE=true → generate realistic GBM price data when IBKR is offline.
-    # Automatically activates for endpoints that need market data but lack IBKR.
-    MOCK_MODE: bool = os.getenv("MOCK_MODE", "false").lower() == "true"
-
     # ── Auto-reconnect ───────────────────────────────────────────────────────
     # Seconds between reconnect attempts when IBKR connection drops. 0 = disabled.
     RECONNECT_INTERVAL: int = int(os.getenv("RECONNECT_INTERVAL", "30"))
@@ -37,12 +32,22 @@ class Config:
     # ── Bot behaviour ────────────────────────────────────────────────────────
     BOT_INTERVAL_SECONDS: int = int(os.getenv("BOT_INTERVAL_SECONDS", "60"))
 
+    # ── Alert engine ──────────────────────────────────────────────────────────
+    ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
+
     # ── Database ─────────────────────────────────────────────────────────────
     DB_PATH: str = os.getenv("DB_PATH", "trading_bot.db")
     WS_PUSH_INTERVAL_SECONDS: float = float(os.getenv("WS_PUSH_INTERVAL_SECONDS", "1.0"))
     WS_CACHE_TTL_SECONDS: float = float(os.getenv("WS_CACHE_TTL_SECONDS", "1.0"))
     WS_STALE_WARN_SECONDS: int = int(os.getenv("WS_STALE_WARN_SECONDS", "10"))
     WS_STALE_CRITICAL_SECONDS: int = int(os.getenv("WS_STALE_CRITICAL_SECONDS", "30"))
+    ENABLE_MARKET_DIAGNOSTICS: bool = os.getenv("ENABLE_MARKET_DIAGNOSTICS", "false").lower() == "true"
+    DIAG_INTRADAY_INTERVAL_SECONDS: int = int(os.getenv("DIAG_INTRADAY_INTERVAL_SECONDS", "300"))
+    DIAG_LOCK_TTL_SECONDS: int = int(os.getenv("DIAG_LOCK_TTL_SECONDS", "600"))
+    DIAG_NEWS_HOURS_DEFAULT: int = int(os.getenv("DIAG_NEWS_HOURS_DEFAULT", "24"))
+    DIAG_NEWS_LIMIT_DEFAULT: int = int(os.getenv("DIAG_NEWS_LIMIT_DEFAULT", "200"))
+    DIAG_MARKET_MAP_DAYS_DEFAULT: int = int(os.getenv("DIAG_MARKET_MAP_DAYS_DEFAULT", "5"))
+    DIAG_SCHEDULER_TIMEZONE: str = os.getenv("DIAG_SCHEDULER_TIMEZONE", "America/New_York")
 
     # ── API server ───────────────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")

@@ -21,10 +21,10 @@ function RangeBar({ price, low, high }: { price: number; low: number; high: numb
 
   return (
     <div className="mt-2">
-      <div className="flex justify-between text-[9px] font-mono text-terminal-ghost mb-0.5">
-        <span>{low.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-        <span className="text-terminal-dim text-[9px]">52W</span>
-        <span>{high.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+      <div className="flex justify-between text-[10px] font-sans text-terminal-ghost mb-0.5">
+        <span className="font-mono">{low.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+        <span className="text-terminal-dim text-[10px]">52W</span>
+        <span className="font-mono">{high.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
       </div>
       <div className="relative h-1 bg-terminal-muted rounded-full overflow-visible">
         <div
@@ -45,7 +45,7 @@ function RangeBar({ price, low, high }: { price: number; low: number; high: numb
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col">
-      <span className="text-[9px] font-mono text-terminal-ghost uppercase tracking-wider">{label}</span>
+      <span className="text-[10px] font-sans text-terminal-ghost uppercase tracking-wider">{label}</span>
       <span className="text-[11px] font-mono text-terminal-dim">{value}</span>
     </div>
   )
@@ -111,22 +111,19 @@ export default function TickerCard({ quote, compact = false }: Props) {
     <button
       onClick={handleClick}
       className={clsx(
-        'group w-full text-left bg-terminal-surface border border-terminal-border rounded-lg p-3',
-        'hover:border-terminal-blue/40 hover:bg-terminal-elevated transition-all duration-150',
-        'focus:outline-none focus:ring-1 focus:ring-terminal-blue/40',
+        'group w-full text-left glass rounded-2xl p-4',
+        'hover:shadow-glass-lg hover:bg-white/[0.03] transition-all duration-200',
+        'focus:outline-none focus:ring-1 focus:ring-indigo-500/40',
       )}
     >
       {/* ── Header row: symbol + change pill ─────────────────── */}
       <div className="flex items-start justify-between mb-1">
         <div>
           <span className="text-xs font-mono font-semibold text-terminal-text">{symbol}</span>
-          {quote.is_mock && (
-            <span className="ml-1 text-[9px] font-mono text-terminal-ghost">[mock]</span>
-          )}
         </div>
         <span
           className={clsx(
-            'text-[10px] font-mono px-1.5 py-0.5 rounded font-semibold tabular-nums',
+            'text-[10px] font-mono px-1.5 py-0.5 rounded-lg font-semibold tabular-nums',
             up
               ? 'bg-terminal-green/15 text-terminal-green'
               : 'bg-terminal-red/15 text-terminal-red',
@@ -168,6 +165,20 @@ export default function TickerCard({ quote, compact = false }: Props) {
         <div className="flex gap-4 mt-2">
           <Metric label="Mkt Cap" value={fmtCompact(market_cap)} />
           <Metric label="Vol"     value={fmtVol(avg_volume)} />
+        </div>
+      )}
+
+      {/* ── View Profile CTA ───────────────────────────────────── */}
+      {!compact && (
+        <div
+          onClick={(e) => {
+            e.stopPropagation()
+            setSelectedSymbol(symbol)
+            setRoute('stock')
+          }}
+          className="mt-2 w-full text-center text-[10px] font-sans px-2 py-1 rounded-xl bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 border-0 transition-colors cursor-pointer"
+        >
+          View Profile
         </div>
       )}
     </button>

@@ -18,52 +18,52 @@ export function BacktestTradeLog({ trades }: Props) {
   const avgPnlPct = trades.length > 0 ? trades.reduce((sum, t) => sum + t.pnl_pct, 0) / trades.length : 0
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold text-gray-200 mb-2">
-        Trade Log ({trades.length} trades)
+    <div className="glass rounded-2xl shadow-glass p-5">
+      <h3 className="text-sm font-sans font-medium text-terminal-dim mb-4">
+        Trade Log <span className="font-mono text-terminal-ghost">({trades.length} trades)</span>
       </h3>
 
-      <div className="overflow-x-auto rounded border border-gray-700">
+      <div className="overflow-x-auto rounded-xl border border-white/[0.06]">
         <table className="w-full text-xs font-mono">
           <thead>
-            <tr className="bg-gray-800/80 text-gray-400">
-              <th className="text-left px-2 py-1.5">#</th>
-              <th className="text-left px-2 py-1.5">Entry</th>
-              <th className="text-left px-2 py-1.5">Exit</th>
-              <th className="text-right px-2 py-1.5">Entry $</th>
-              <th className="text-right px-2 py-1.5">Exit $</th>
-              <th className="text-right px-2 py-1.5">Qty</th>
-              <th className="text-right px-2 py-1.5">P&L $</th>
-              <th className="text-right px-2 py-1.5">P&L %</th>
-              <th className="text-right px-2 py-1.5">Days</th>
-              <th className="text-left px-2 py-1.5">Reason</th>
+            <tr className="bg-terminal-elevated/80 text-terminal-dim">
+              <th className="text-left px-3 py-2">#</th>
+              <th className="text-left px-3 py-2">Entry</th>
+              <th className="text-left px-3 py-2">Exit</th>
+              <th className="text-right px-3 py-2">Entry $</th>
+              <th className="text-right px-3 py-2">Exit $</th>
+              <th className="text-right px-3 py-2">Qty</th>
+              <th className="text-right px-3 py-2">P&amp;L $</th>
+              <th className="text-right px-3 py-2">P&amp;L %</th>
+              <th className="text-right px-3 py-2">Days</th>
+              <th className="text-left px-3 py-2">Reason</th>
             </tr>
           </thead>
           <tbody>
             {visible.map((t, i) => {
               const isWin = t.pnl > 0
-              const rowBg = isWin ? 'bg-green-900/10' : 'bg-red-900/10'
+              const rowBg = isWin ? 'bg-terminal-green/5' : 'bg-terminal-red/5'
               return (
-                <tr key={i} className={`${rowBg} border-t border-gray-800 hover:bg-gray-800/50`}>
-                  <td className="px-2 py-1 text-gray-500">{i + 1}</td>
-                  <td className="px-2 py-1 text-gray-300">{formatDate(t.entry_date)}</td>
-                  <td className="px-2 py-1 text-gray-300">{formatDate(t.exit_date)}</td>
-                  <td className="px-2 py-1 text-right text-gray-300">{t.entry_price.toFixed(2)}</td>
-                  <td className="px-2 py-1 text-right text-gray-300">{t.exit_price.toFixed(2)}</td>
-                  <td className="px-2 py-1 text-right text-gray-300">{t.qty}</td>
-                  <td className={`px-2 py-1 text-right ${isWin ? 'text-green-400' : 'text-red-400'}`}>
+                <tr key={i} className={`${rowBg} border-t border-white/[0.04] hover:bg-terminal-elevated/40 transition-colors`}>
+                  <td className="px-3 py-1.5 text-terminal-ghost">{i + 1}</td>
+                  <td className="px-3 py-1.5 text-terminal-text">{formatDate(t.entry_date)}</td>
+                  <td className="px-3 py-1.5 text-terminal-text">{formatDate(t.exit_date)}</td>
+                  <td className="px-3 py-1.5 text-right text-terminal-text">{t.entry_price.toFixed(2)}</td>
+                  <td className="px-3 py-1.5 text-right text-terminal-text">{t.exit_price.toFixed(2)}</td>
+                  <td className="px-3 py-1.5 text-right text-terminal-text">{t.qty}</td>
+                  <td className={`px-3 py-1.5 text-right ${isWin ? 'text-terminal-green' : 'text-terminal-red'}`}>
                     {t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}
                   </td>
-                  <td className={`px-2 py-1 text-right ${isWin ? 'text-green-400' : 'text-red-400'}`}>
+                  <td className={`px-3 py-1.5 text-right ${isWin ? 'text-terminal-green' : 'text-terminal-red'}`}>
                     {t.pnl_pct >= 0 ? '+' : ''}{t.pnl_pct.toFixed(1)}%
                   </td>
-                  <td className="px-2 py-1 text-right text-gray-400">{t.duration_days.toFixed(0)}</td>
-                  <td className="px-2 py-1 text-gray-400">
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                      t.exit_reason === 'signal' ? 'bg-blue-900/30 text-blue-400' :
-                      t.exit_reason === 'stop_loss' ? 'bg-red-900/30 text-red-400' :
-                      t.exit_reason === 'take_profit' ? 'bg-green-900/30 text-green-400' :
-                      'bg-gray-700/30 text-gray-400'
+                  <td className="px-3 py-1.5 text-right text-terminal-dim">{t.duration_days.toFixed(0)}</td>
+                  <td className="px-3 py-1.5 text-terminal-dim">
+                    <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-sans ${
+                      t.exit_reason === 'signal'      ? 'bg-terminal-blue/20 text-terminal-blue' :
+                      t.exit_reason === 'stop_loss'   ? 'bg-terminal-red/20 text-terminal-red' :
+                      t.exit_reason === 'take_profit' ? 'bg-terminal-green/20 text-terminal-green' :
+                      'bg-terminal-elevated text-terminal-ghost'
                     }`}>
                       {t.exit_reason}
                     </span>
@@ -74,15 +74,15 @@ export function BacktestTradeLog({ trades }: Props) {
           </tbody>
           {/* Summary row */}
           <tfoot>
-            <tr className="bg-gray-800/60 border-t border-gray-600 font-semibold">
-              <td colSpan={6} className="px-2 py-1.5 text-gray-300">Total</td>
-              <td className={`px-2 py-1.5 text-right ${totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            <tr className="bg-terminal-elevated/60 border-t border-white/[0.08] font-semibold">
+              <td colSpan={6} className="px-3 py-2 text-terminal-dim font-sans">Total</td>
+              <td className={`px-3 py-2 text-right ${totalPnl >= 0 ? 'text-terminal-green' : 'text-terminal-red'}`}>
                 {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
               </td>
-              <td className={`px-2 py-1.5 text-right ${avgPnlPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              <td className={`px-3 py-2 text-right ${avgPnlPct >= 0 ? 'text-terminal-green' : 'text-terminal-red'}`}>
                 avg {avgPnlPct >= 0 ? '+' : ''}{avgPnlPct.toFixed(1)}%
               </td>
-              <td colSpan={2} className="px-2 py-1.5 text-gray-400">
+              <td colSpan={2} className="px-3 py-2 text-terminal-ghost">
                 {trades.length} trades
               </td>
             </tr>
@@ -93,7 +93,7 @@ export function BacktestTradeLog({ trades }: Props) {
       {!showAll && trades.length > PAGE_SIZE && (
         <button
           onClick={() => setShowAll(true)}
-          className="mt-2 text-xs text-blue-400 hover:text-blue-300"
+          className="mt-3 text-xs font-sans text-terminal-blue/80 hover:text-terminal-blue transition-colors"
         >
           Show all {trades.length} trades
         </button>

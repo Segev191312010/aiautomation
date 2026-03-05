@@ -6,7 +6,6 @@ import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DB_PATH", "test_trading.db")
 os.environ.setdefault("SIM_MODE", "true")
-os.environ.setdefault("MOCK_MODE", "true")
 
 import pytest
 from httpx import AsyncClient, ASGITransport

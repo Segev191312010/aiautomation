@@ -23,11 +23,19 @@ export function useToast(): ToastAPI {
   return ctx
 }
 
-const COLORS: Record<ToastType, string> = {
-  success: 'border-terminal-green/50 bg-terminal-green/10 text-terminal-green',
-  error:   'border-terminal-red/50 bg-terminal-red/10 text-terminal-red',
-  warning: 'border-terminal-amber/50 bg-terminal-amber/10 text-terminal-amber',
-  info:    'border-terminal-blue/50 bg-terminal-blue/10 text-terminal-blue',
+// Left border accent per type — keep the colored stripe for fast visual scanning
+const BORDER_ACCENT: Record<ToastType, string> = {
+  success: 'border-l-terminal-green',
+  error:   'border-l-terminal-red',
+  warning: 'border-l-terminal-amber',
+  info:    'border-l-indigo-400',
+}
+
+const TEXT_COLOR: Record<ToastType, string> = {
+  success: 'text-terminal-green',
+  error:   'text-terminal-red',
+  warning: 'text-terminal-amber',
+  info:    'text-indigo-400',
 }
 
 const ICONS: Record<ToastType, string> = {
@@ -69,12 +77,20 @@ export default function ToastProvider({ children }: { children: React.ReactNode 
           <div
             key={t.id}
             onClick={() => dismiss(t.id)}
-            className={`pointer-events-auto cursor-pointer px-4 py-2.5 rounded border font-mono text-xs
-              flex items-center gap-2 shadow-lg backdrop-blur-sm animate-slide-in
-              ${COLORS[t.type]}`}
+            className={[
+              'pointer-events-auto cursor-pointer',
+              'glass-elevated rounded-xl shadow-glass',
+              'pl-4 pr-5 py-3',
+              'flex items-center gap-3',
+              'border-l-2',
+              'animate-slide-in',
+              BORDER_ACCENT[t.type],
+            ].join(' ')}
           >
-            <span className="text-sm">{ICONS[t.type]}</span>
-            <span>{t.message}</span>
+            <span className={['text-sm font-semibold', TEXT_COLOR[t.type]].join(' ')}>
+              {ICONS[t.type]}
+            </span>
+            <span className="text-xs font-sans text-terminal-text">{t.message}</span>
           </div>
         ))}
       </div>

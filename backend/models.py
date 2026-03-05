@@ -2,6 +2,7 @@
 Pydantic data models for the trading bot API.
 """
 from __future__ import annotations
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 import uuid as _uuid
@@ -71,7 +72,6 @@ class AccountSummary(BaseModel):
     unrealized_pnl: float
     realized_pnl: float
     currency: str = "USD"
-    is_mock: bool = False
 
 
 class Position(BaseModel):
@@ -136,7 +136,7 @@ class WsEvent(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Normalized market quote  (unified format — IBKR, Yahoo, or Mock)
+# Normalized market quote  (unified format — IBKR or Yahoo)
 # ---------------------------------------------------------------------------
 
 class MarketQuote(BaseModel):
@@ -152,7 +152,6 @@ class MarketQuote(BaseModel):
     bid: Optional[float] = None
     ask: Optional[float] = None
     last_update: str
-    is_mock: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -377,3 +376,133 @@ class BacktestResult(BaseModel):
 class BacktestSaveRequest(BaseModel):
     name: str
     result: BacktestResult
+
+
+# ---------------------------------------------------------------------------
+# Alert models
+# ---------------------------------------------------------------------------
+
+class Alert(BaseModel):
+    id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
+    user_id: str = "demo"
+    name: str
+    symbol: str
+    condition: Condition
+    alert_type: Literal["one_shot", "recurring"] = "one_shot"
+    cooldown_minutes: int = Field(default=60, ge=0)
+    enabled: bool = True
+    last_triggered: Optional[str] = None  # UTC ISO 8601
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class AlertCreate(BaseModel):
+    name: str
+    symbol: str
+    condition: Condition
+    alert_type: Literal["one_shot", "recurring"] = "one_shot"
+    cooldown_minutes: int = Field(default=60, ge=0)
+    enabled: bool = True
+
+
+class AlertUpdate(BaseModel):
+    name: Optional[str] = None
+    symbol: Optional[str] = None
+    condition: Optional[Condition] = None
+    alert_type: Optional[Literal["one_shot", "recurring"]] = None
+    cooldown_minutes: Optional[int] = Field(default=None, ge=0)
+    enabled: Optional[bool] = None
+
+
+class AlertHistory(BaseModel):
+    id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
+    alert_id: str
+    alert_name: str
+    symbol: str
+    condition_summary: str  # e.g. "RSI(14) < 30"
+    price_at_trigger: float
+    fired_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stock Profile models
+# ---------------------------------------------------------------------------
+
+class StockOverview(BaseModel):
+    symbol: str
+    name: str
+    exchange: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    description: Optional[str] = None
+    employees: Optional[int] = None
+    website: Optional[str] = None
+    price: Optional[float] = None
+    change: Optional[float] = None
+    change_pct: Optional[float] = None
+    fetched_at: float
+
+
+class StockKeyStats(BaseModel):
+    market_cap: Optional[float] = None
+    fifty_two_week_high: Optional[float] = None
+    fifty_two_week_low: Optional[float] = None
+    trailing_pe: Optional[float] = None
+    forward_pe: Optional[float] = None
+    trailing_eps: Optional[float] = None
+    forward_eps: Optional[float] = None
+    volume: Optional[int] = None
+    avg_volume: Optional[int] = None
+    dividend_yield: Optional[float] = None
+    beta: Optional[float] = None
+    fifty_day_ma: Optional[float] = None
+    two_hundred_day_ma: Optional[float] = None
+    fetched_at: float
+
+
+class StockFinancials(BaseModel):
+    total_revenue: Optional[float] = None
+    revenue_growth: Optional[float] = None
+    net_income: Optional[float] = None
+    operating_margins: Optional[float] = None
+    gross_margins: Optional[float] = None
+    profit_margins: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    current_ratio: Optional[float] = None
+    quarterly_revenue: Optional[list[dict]] = None
+    quarterly_net_income: Optional[list[dict]] = None
+    fetched_at: float
+
+
+class StockAnalyst(BaseModel):
+    recommendation_mean: Optional[float] = None
+    recommendation_key: Optional[str] = None
+    target_mean_price: Optional[float] = None
+    target_high_price: Optional[float] = None
+    target_low_price: Optional[float] = None
+    target_median_price: Optional[float] = None
+    num_analyst_opinions: Optional[int] = None
+    fetched_at: float
+
+
+class StockOwnership(BaseModel):
+    held_pct_institutions: Optional[float] = None
+    held_pct_insiders: Optional[float] = None
+    top_holders: Optional[list[dict]] = None
+    fetched_at: float
+
+
+class StockEvents(BaseModel):
+    next_earnings_date: Optional[str] = None
+    ex_dividend_date: Optional[str] = None
+    fetched_at: float
+
+
+class StockNarrative(BaseModel):
+    strengths: list[str]
+    risks: list[str]
+    outlook: str
+    fetched_at: float

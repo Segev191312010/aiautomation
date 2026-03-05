@@ -10,15 +10,16 @@
  *   - Account + positions refresh every 10 s
  */
 import { useEffect, useCallback, useRef } from 'react'
-import { fetchWatchlist, fetchYahooBars, fetchAccountSummary, fetchPositions } from '@/services/api'
-import { getMockQuotes, getMockBars, getMockAccount } from '@/services/mockService'
+import {
+  fetchWatchlist,
+  fetchYahooBars,
+  fetchAccountSummary,
+  fetchPositions,
+  subscribeRtBars,
+  unsubscribeRtBars,
+} from '@/services/api'
 import { wsMdService } from '@/services/ws'
 import { useMarketStore, useAccountStore, useBotStore } from '@/store'
-
-/** Only use mock fallback if backend explicitly says mock mode is on */
-function isMockMode(): boolean {
-  return useBotStore.getState().mockMode
-}
 
 const QUOTE_INTERVAL   = 5_000   // full quote refresh (change_pct, vol, etc.)
 const ACCOUNT_INTERVAL = 10_000
@@ -28,6 +29,7 @@ export function useMarketData(): void {
   const activeWatchlist   = useMarketStore((s) => s.activeWatchlist)
   const selectedSymbol    = useMarketStore((s) => s.selectedSymbol)
   const compSymbol        = useMarketStore((s) => s.compSymbol)
+  const ibkrConnected     = useBotStore((s) => s.ibkrConnected)
   const setQuotes         = useMarketStore((s) => s.setQuotes)
   const applyLiveQuote    = useMarketStore((s) => s.applyLiveQuote)
   const setBars           = useMarketStore((s) => s.setBars)
@@ -39,6 +41,11 @@ export function useMarketData(): void {
   const quoteTimer   = useRef<ReturnType<typeof setInterval> | null>(null)
   const accountTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  const isStockLike = (symbol: string): boolean => {
+    const s = symbol.trim().toUpperCase()
+    return !!s && !s.endsWith('-USD')
+  }
+
   // ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Quotes (full REST refresh) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
 
   const refreshQuotes = useCallback(async () => {
@@ -49,7 +56,6 @@ export function useMarketData(): void {
       setQuotes(quotes)
     } catch (err) {
       console.warn('[useMarketData] Quote fetch failed:', err)
-      if (isMockMode()) setQuotes(getMockQuotes(wl.symbols))
     }
   }, [watchlists, activeWatchlist, setQuotes])
 
@@ -62,7 +68,6 @@ export function useMarketData(): void {
         setter(symbol, bars)
       } catch (err) {
         console.warn('[useMarketData] Bar fetch failed:', err)
-        if (isMockMode()) setter(symbol, getMockBars(symbol, 90))
       }
     },
     [],
@@ -76,7 +81,6 @@ export function useMarketData(): void {
       setAccount(account)
     } catch (err) {
       console.warn('[useMarketData] Account fetch failed:', err)
-      if (isMockMode()) setAccount(getMockAccount())
     }
     try {
       const positions = await fetchPositions()
@@ -163,4 +167,38 @@ export function useMarketData(): void {
   useEffect(() => {
     if (compSymbol) refreshBars(compSymbol, setCompBars)
   }, [compSymbol, refreshBars, setCompBars])
+
+  // Subscribe selected chart symbols to broker 5-second bars when IBKR is connected.
+  // This gives smoother chart movement than relying only on quote ticks.
+  useEffect(() => {
+    if (!ibkrConnected) return
+    const wanted = [selectedSymbol, compSymbol]
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(isStockLike)
+    if (!wanted.length) return
+
+    const active = new Set<string>()
+    let cancelled = false
+    void (async () => {
+      for (const sym of wanted) {
+        try {
+          const resp = await subscribeRtBars(sym)
+          if (!cancelled && resp?.subscribed) {
+            active.add(sym)
+          }
+        } catch {
+          // best-effort
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      for (const sym of active) {
+        void unsubscribeRtBars(sym).catch(() => undefined)
+      }
+    }
+  }, [ibkrConnected, selectedSymbol, compSymbol])
 }

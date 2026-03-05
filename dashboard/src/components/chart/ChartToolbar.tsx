@@ -52,6 +52,7 @@ interface Props {
   chartRef?:       IChartApi | null
   isLoading?:      boolean
   className?:      string
+  onCreateAlert?:  () => void
 }
 
 // ── Component ───────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ export default function ChartToolbar({
   chartRef,
   isLoading,
   className,
+  onCreateAlert,
 }: Props) {
   const chartType       = useMarketStore((s) => s.chartType)
   const setChartType    = useMarketStore((s) => s.setChartType)
@@ -159,10 +161,10 @@ export default function ChartToolbar({
             onClick={() => onTfChange(i)}
             aria-pressed={activeTfIdx === i}
             className={clsx(
-              'text-[11px] font-mono px-2 py-1 rounded border transition-colors',
+              'text-[11px] font-sans px-2 py-1 rounded-xl border transition-colors',
               activeTfIdx === i
-                ? 'border-terminal-blue/50 text-terminal-blue bg-terminal-blue/10'
-                : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim hover:border-terminal-muted',
+                ? 'border-indigo-500/50 text-indigo-400 bg-indigo-500/15'
+                : 'border-white/[0.06] text-terminal-ghost hover:text-terminal-dim hover:border-white/[0.10]',
             )}
           >
             {tf.label}
@@ -171,27 +173,27 @@ export default function ChartToolbar({
       </div>
 
       {/* Divider */}
-      <div className="w-px h-5 bg-terminal-border" />
+      <div className="w-px h-5 bg-white/[0.06]" />
 
       {/* Chart type dropdown */}
       <div ref={typeMenuRef} className="relative">
         <button
           onClick={() => setShowTypeMenu((v) => !v)}
-          className="text-[11px] font-mono px-2 py-1 rounded border border-terminal-border text-terminal-dim hover:text-terminal-text hover:border-terminal-muted transition-colors"
+          className="text-[11px] font-sans px-2 py-1 rounded-xl border border-white/[0.06] text-terminal-dim hover:text-terminal-text hover:border-white/[0.10] transition-colors"
         >
           {currentTypeLabel} ▾
         </button>
         {showTypeMenu && (
-          <div className="absolute top-full left-0 mt-1 z-50 bg-terminal-elevated border border-terminal-border rounded shadow-lg min-w-[140px]">
+          <div className="absolute top-full left-0 mt-1 z-50 glass-elevated rounded-2xl border border-white/[0.06] shadow-lg min-w-[140px] overflow-hidden">
             {CHART_TYPES.map((ct) => (
               <button
                 key={ct.value}
                 onClick={() => { setChartType(ct.value); setShowTypeMenu(false) }}
                 className={clsx(
-                  'w-full text-left text-[11px] font-mono px-3 py-1.5 transition-colors',
+                  'w-full text-left text-[11px] font-sans px-3 py-1.5 transition-colors',
                   chartType === ct.value
-                    ? 'text-terminal-blue bg-terminal-blue/10'
-                    : 'text-terminal-dim hover:text-terminal-text hover:bg-terminal-muted/20',
+                    ? 'text-indigo-400 bg-indigo-500/15'
+                    : 'text-terminal-dim hover:text-terminal-text hover:bg-white/[0.04]',
                 )}
               >
                 {ct.label}
@@ -206,62 +208,71 @@ export default function ChartToolbar({
         <button
           onClick={() => setShowIndMenu((v) => !v)}
           className={clsx(
-            'text-[11px] font-mono px-2 py-1 rounded border transition-colors',
+            'text-[11px] font-sans px-2 py-1 rounded-xl border transition-colors',
             selectedInds.length > 0
-              ? 'border-terminal-blue/40 text-terminal-blue bg-terminal-blue/5'
-              : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
+              ? 'border-indigo-500/40 text-indigo-400 bg-indigo-500/10'
+              : 'border-white/[0.06] text-terminal-ghost hover:text-terminal-dim',
           )}
         >
           Indicators{selectedInds.length > 0 ? ` (${selectedInds.length})` : ''} ▾
         </button>
         {showIndMenu && (
-          <div className="absolute top-full left-0 mt-1 z-50 bg-terminal-elevated border border-terminal-border rounded shadow-lg min-w-[180px] max-h-64 overflow-y-auto">
-            <div className="px-3 py-1.5 text-[9px] font-mono text-terminal-ghost uppercase tracking-wider border-b border-terminal-border">
+          <div className="absolute top-full left-0 mt-1 z-50 glass-elevated rounded-2xl border border-white/[0.06] shadow-lg min-w-[180px] max-h-64 overflow-y-auto">
+            <div className="px-3 py-1.5 text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase border-b border-white/[0.06]">
               Overlays
             </div>
             {OVERLAYS.map((def) => (
               <label
                 key={def.id}
-                className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-terminal-muted/20 transition-colors"
+                className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-white/[0.04] transition-colors"
               >
                 <input
                   type="checkbox"
                   checked={selectedInds.includes(def.id)}
                   onChange={() => toggleIndicator(def.id as IndicatorId)}
-                  className="accent-terminal-blue w-3 h-3"
+                  className="accent-indigo-500 w-3 h-3"
                 />
                 <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: def.color }} />
-                <span className="text-[11px] font-mono text-terminal-dim">{def.label}</span>
+                <span className="text-[11px] font-sans text-terminal-dim">{def.label}</span>
               </label>
             ))}
-            <div className="px-3 py-1.5 text-[9px] font-mono text-terminal-ghost uppercase tracking-wider border-b border-t border-terminal-border">
+            <div className="px-3 py-1.5 text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase border-b border-t border-white/[0.06]">
               Oscillators
             </div>
             {OSCILLATORS.map((def) => (
               <label
                 key={def.id}
-                className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-terminal-muted/20 transition-colors"
+                className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-white/[0.04] transition-colors"
               >
                 <input
                   type="checkbox"
                   checked={selectedInds.includes(def.id)}
                   onChange={() => toggleIndicator(def.id as IndicatorId)}
-                  className="accent-terminal-blue w-3 h-3"
+                  className="accent-indigo-500 w-3 h-3"
                 />
                 <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: def.color }} />
-                <span className="text-[11px] font-mono text-terminal-dim">{def.label}</span>
+                <span className="text-[11px] font-sans text-terminal-dim">{def.label}</span>
               </label>
             ))}
           </div>
         )}
       </div>
 
-      {/* Right side: screenshot + fullscreen */}
+      {/* Right side: alert + screenshot + fullscreen */}
       <div className="ml-auto flex items-center gap-1">
+        {onCreateAlert && (
+          <button
+            onClick={onCreateAlert}
+            title="Create price alert"
+            className="text-[11px] font-sans px-2 py-1 rounded-xl border border-white/[0.06] text-terminal-ghost hover:text-terminal-dim transition-colors"
+          >
+            &#x1F514; Alert
+          </button>
+        )}
         <button
           onClick={handleScreenshot}
           title="Download chart screenshot"
-          className="text-[11px] font-mono px-2 py-1 rounded border border-terminal-border text-terminal-ghost hover:text-terminal-dim transition-colors"
+          className="text-[11px] font-sans px-2 py-1 rounded-xl border border-white/[0.06] text-terminal-ghost hover:text-terminal-dim transition-colors"
         >
           ⊞ Snap
         </button>
@@ -269,10 +280,10 @@ export default function ChartToolbar({
           onClick={handleFullscreen}
           title="Toggle fullscreen"
           className={clsx(
-            'text-[11px] font-mono px-2 py-1 rounded border transition-colors',
+            'text-[11px] font-sans px-2 py-1 rounded-xl border transition-colors',
             isFullscreen
-              ? 'border-terminal-blue/50 text-terminal-blue bg-terminal-blue/10'
-              : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
+              ? 'border-indigo-500/50 text-indigo-400 bg-indigo-500/15'
+              : 'border-white/[0.06] text-terminal-ghost hover:text-terminal-dim',
           )}
         >
           {isFullscreen ? '⊟ Exit' : '⊞ Max'}

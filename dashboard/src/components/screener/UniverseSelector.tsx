@@ -18,7 +18,7 @@ export default function UniverseSelector() {
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       <div className="flex gap-2 flex-wrap">
         {UNIVERSES.map((u) => {
           const active = selectedUniverse === u.id
@@ -28,15 +28,15 @@ export default function UniverseSelector() {
               key={u.id}
               onClick={() => setUniverse(u.id)}
               className={clsx(
-                'px-3 py-1.5 rounded text-xs font-mono font-semibold transition-colors',
+                'px-3.5 py-1.5 rounded-xl text-xs font-sans font-medium transition-colors',
                 active
-                  ? 'bg-terminal-blue text-white'
-                  : 'bg-terminal-muted text-terminal-dim hover:text-terminal-text hover:bg-terminal-surface',
+                  ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/25'
+                  : 'bg-white/[0.04] text-terminal-dim border border-white/[0.06] hover:text-terminal-text hover:bg-white/[0.07]',
               )}
             >
               {u.label}
               {count !== null && (
-                <span className="ml-1.5 text-[10px] opacity-70">({count})</span>
+                <span className="ml-1.5 text-[10px] font-mono opacity-60">({count})</span>
               )}
             </button>
           )
@@ -48,7 +48,7 @@ export default function UniverseSelector() {
           value={customSymbols}
           onChange={(e) => setCustomSymbols(e.target.value.toUpperCase())}
           placeholder="AAPL, MSFT, TSLA, ..."
-          className="w-full px-3 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text placeholder-terminal-ghost focus:border-terminal-blue focus:outline-none"
+          className="w-full px-3.5 py-2 bg-terminal-input border border-white/[0.06] rounded-xl text-xs font-mono text-terminal-text placeholder-terminal-ghost focus:border-indigo-500/50 focus:outline-none transition-colors"
         />
       )}
     </div>

@@ -200,7 +200,22 @@ class IBKRClient:
                 break   # IB Gateway not running; retrying won't help
 
             except Exception as exc:
-                # TimeoutError = clientId in use; reconnect with next ID
+                # If the socket is up but account sync timed out, keep the live
+                # connection and allow market data to flow instead of thrashing.
+                if ib.isConnected():
+                    self._connected = True
+                    log.warning(
+                        "Connected to IBKR at %s:%s (clientId=%d) with degraded sync (%s: %s)",
+                        cfg.IBKR_HOST,
+                        cfg.IBKR_PORT,
+                        client_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    await self._emit({"type": "ibkr_state", "connected": True})
+                    return True
+
+                # TimeoutError can also mean clientId in use; reconnect with next ID.
                 log.warning(
                     "clientId=%d failed (%s: %s) — trying %d",
                     client_id, type(exc).__name__, exc, client_id + 1,

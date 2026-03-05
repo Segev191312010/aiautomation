@@ -82,18 +82,18 @@ export default function ScanResultsTable() {
   const SortHeader = ({ label, sortKeyVal }: { label: string; sortKeyVal: SortKey }) => (
     <th
       onClick={() => handleSort(sortKeyVal)}
-      className="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-terminal-ghost cursor-pointer hover:text-terminal-text select-none whitespace-nowrap"
+      className="px-3 py-2.5 text-left text-xs font-sans font-medium text-terminal-dim uppercase tracking-wide cursor-pointer hover:text-terminal-text select-none whitespace-nowrap transition-colors"
     >
       {label}
       {sortKey === sortKeyVal && (
-        <span className="ml-1">{sortDir === 'asc' ? '\u25B2' : '\u25BC'}</span>
+        <span className="ml-1 text-indigo-400">{sortDir === 'asc' ? '\u25B2' : '\u25BC'}</span>
       )}
     </th>
   )
 
   if (results.length === 0) {
     return (
-      <div className="text-center py-12 text-terminal-ghost font-mono text-sm">
+      <div className="text-center py-14 text-terminal-ghost font-sans text-sm">
         {skippedSymbols.length > 0
           ? `No symbols match your filters. ${skippedSymbols.length} symbols skipped due to missing data.`
           : 'No symbols match your filters. Adjust criteria and scan again.'}
@@ -104,20 +104,20 @@ export default function ScanResultsTable() {
   return (
     <div className="overflow-x-auto">
       {skippedSymbols.length > 0 && (
-        <div className="mb-2 px-3 py-1.5 bg-terminal-amber/10 border border-terminal-amber/20 rounded text-xs font-mono text-terminal-amber">
+        <div className="mb-3 px-3.5 py-2 bg-terminal-amber/10 border border-terminal-amber/20 rounded-xl text-xs font-sans text-terminal-amber">
           {skippedSymbols.length} symbol{skippedSymbols.length > 1 ? 's' : ''} skipped due to missing data
         </div>
       )}
-      <table className="w-full text-xs font-mono">
+      <table className="w-full text-xs">
         <thead>
-          <tr className="border-b border-terminal-border">
+          <tr className="border-b border-white/[0.06]">
             <SortHeader label="Symbol" sortKeyVal="symbol" />
-            <th className="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-terminal-ghost">Name</th>
+            <th className="px-3 py-2.5 text-left text-xs font-sans font-medium text-terminal-dim uppercase tracking-wide">Name</th>
             <SortHeader label="Price" sortKeyVal="price" />
             <SortHeader label="Chg%" sortKeyVal="change_pct" />
             <SortHeader label="Volume" sortKeyVal="volume" />
             <SortHeader label="Mkt Cap" sortKeyVal="market_cap" />
-            <th className="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-terminal-ghost">Sector</th>
+            <th className="px-3 py-2.5 text-left text-xs font-sans font-medium text-terminal-dim uppercase tracking-wide">Sector</th>
             {indicatorCols.map((col) => (
               <SortHeader key={col} label={col} sortKeyVal={col} />
             ))}
@@ -131,19 +131,19 @@ export default function ScanResultsTable() {
               <tr
                 key={row.symbol}
                 onClick={() => handleRowClick(row)}
-                className="border-b border-terminal-border/50 hover:bg-terminal-muted/50 cursor-pointer transition-colors"
+                className="border-b border-white/[0.04] hover:bg-white/[0.03] cursor-pointer transition-colors"
               >
-                <td className="px-3 py-2 font-semibold text-terminal-blue">{row.symbol}</td>
-                <td className="px-3 py-2 text-terminal-dim truncate max-w-[140px]">{enr?.name ?? '-'}</td>
-                <td className="px-3 py-2 text-terminal-text">{row.price.toFixed(2)}</td>
-                <td className={clsx('px-3 py-2', up ? 'text-terminal-green' : 'text-terminal-red')}>
+                <td className="px-3 py-2.5 font-mono font-semibold text-indigo-400">{row.symbol}</td>
+                <td className="px-3 py-2.5 font-sans text-terminal-dim truncate max-w-[140px]">{enr?.name ?? '-'}</td>
+                <td className="px-3 py-2.5 font-mono text-terminal-text">{row.price.toFixed(2)}</td>
+                <td className={clsx('px-3 py-2.5 font-mono', up ? 'text-terminal-green' : 'text-terminal-red')}>
                   {up ? '+' : ''}{row.change_pct.toFixed(2)}%
                 </td>
-                <td className="px-3 py-2 text-terminal-dim">{formatVolume(row.volume)}</td>
-                <td className="px-3 py-2 text-terminal-dim">{formatMktCap(enr?.market_cap)}</td>
-                <td className="px-3 py-2 text-terminal-dim truncate max-w-[100px]">{enr?.sector ?? '-'}</td>
+                <td className="px-3 py-2.5 font-mono text-terminal-dim">{formatVolume(row.volume)}</td>
+                <td className="px-3 py-2.5 font-mono text-terminal-dim">{formatMktCap(enr?.market_cap)}</td>
+                <td className="px-3 py-2.5 font-sans text-terminal-dim truncate max-w-[100px]">{enr?.sector ?? '-'}</td>
                 {indicatorCols.map((col) => (
-                  <td key={col} className="px-3 py-2 text-terminal-text">
+                  <td key={col} className="px-3 py-2.5 font-mono text-terminal-text">
                     {row.indicators[col]?.toFixed(2) ?? '-'}
                   </td>
                 ))}
@@ -152,7 +152,7 @@ export default function ScanResultsTable() {
           })}
         </tbody>
       </table>
-      <div className="mt-2 text-[10px] font-mono text-terminal-ghost px-3">
+      <div className="mt-3 text-xs font-sans text-terminal-ghost px-3">
         {results.length} result{results.length !== 1 ? 's' : ''}
       </div>
     </div>

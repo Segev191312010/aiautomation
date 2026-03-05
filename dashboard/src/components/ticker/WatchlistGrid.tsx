@@ -12,7 +12,6 @@ import clsx from 'clsx'
 import TickerCard from './TickerCard'
 import { useMarketStore } from '@/store'
 import { fetchWatchlist } from '@/services/api'
-import { getMockQuotes } from '@/services/mockService'
 import type { SortField } from '@/types'
 
 // ── Symbol parser (handles TradingView export + plain comma/newline lists) ────
@@ -127,7 +126,7 @@ export default function WatchlistGrid() {
       setQuotes(newQuotes)
     } catch (err) {
       console.warn('[WatchlistGrid] Quote fetch failed:', err)
-      // Don't inject mock data — keep stale data instead
+      // Keep stale data on fetch failure
     } finally {
       setAddLoading(false)
     }
@@ -152,9 +151,9 @@ export default function WatchlistGrid() {
             key={wl.id}
             onClick={() => setActiveWatchlist(wl.id)}
             className={clsx(
-              'shrink-0 text-[11px] font-mono px-3 py-1 rounded-full border transition-colors',
+              'shrink-0 text-[11px] font-mono px-3 py-1 rounded-xl border transition-colors',
               activeWatchlist === wl.id
-                ? 'border-terminal-blue/50 bg-terminal-blue/10 text-terminal-blue'
+                ? 'border-indigo-500/30 bg-indigo-500/15 text-indigo-400'
                 : 'border-terminal-border text-terminal-dim hover:text-terminal-text hover:border-terminal-muted',
             )}
           >
@@ -166,7 +165,7 @@ export default function WatchlistGrid() {
         <button
           onClick={openAdd}
           title="Add symbols (paste from TradingView or type manually)"
-          className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded-full border border-dashed border-terminal-border text-terminal-ghost hover:text-terminal-green hover:border-terminal-green/50 transition-colors"
+          className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded-xl border border-dashed border-terminal-border text-terminal-ghost hover:text-terminal-green hover:border-terminal-green/50 transition-colors"
         >
           + Add
         </button>
@@ -185,9 +184,9 @@ export default function WatchlistGrid() {
               key={field}
               onClick={() => handleSort(field)}
               className={clsx(
-                'text-[10px] font-mono px-2 py-0.5 rounded border transition-colors',
+                'text-[10px] font-mono px-2 py-0.5 rounded-lg border transition-colors',
                 sortField === field
-                  ? 'border-terminal-blue/40 text-terminal-blue bg-terminal-blue/5'
+                  ? 'border-indigo-500/30 text-indigo-400 bg-indigo-500/10'
                   : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
               )}
             >
@@ -202,7 +201,7 @@ export default function WatchlistGrid() {
 
       {/* ── Bulk add panel ───────────────────────────────────────────── */}
       {showAdd && (
-        <div className="mb-3 bg-terminal-surface border border-terminal-border rounded-lg p-3 flex flex-col gap-2">
+        <div className="mb-3 glass rounded-2xl shadow-glass p-3 flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-terminal-text font-semibold">
               Add Symbols
@@ -215,11 +214,11 @@ export default function WatchlistGrid() {
             </button>
           </div>
 
-          <p className="text-[10px] font-mono text-terminal-ghost leading-relaxed">
+          <p className="text-[10px] font-sans text-terminal-ghost leading-relaxed">
             Paste comma-separated symbols or TradingView export (e.g.{' '}
-            <span className="text-terminal-dim">AAPL, TSLA</span> or{' '}
-            <span className="text-terminal-dim">NASDAQ:AAPL</span>).
-            Crypto: <span className="text-terminal-dim">BTCUSDT → BTC-USD</span> auto-converted.
+            <span className="text-terminal-dim font-mono">AAPL, TSLA</span> or{' '}
+            <span className="text-terminal-dim font-mono">NASDAQ:AAPL</span>).
+            Crypto: <span className="text-terminal-dim font-mono">BTCUSDT → BTC-USD</span> auto-converted.
           </p>
 
           <textarea
@@ -228,18 +227,18 @@ export default function WatchlistGrid() {
             onChange={(e) => { setAddInput(e.target.value); setFeedback('') }}
             placeholder={'AAPL, TSLA, NVDA\nNASDAQ:MSFT\nBINANCE:BTCUSDT'}
             rows={4}
-            className="w-full text-xs font-mono bg-terminal-bg border border-terminal-border rounded px-3 py-2 text-terminal-text focus:border-terminal-blue focus:outline-none resize-none"
+            className="w-full text-xs font-sans bg-terminal-bg border border-terminal-border rounded-xl px-3 py-2 text-terminal-text focus:border-indigo-500/50 focus:outline-none resize-none"
           />
 
           {addFeedback && (
-            <span className="text-[10px] font-mono text-terminal-ghost">{addFeedback}</span>
+            <span className="text-[10px] font-sans text-terminal-ghost">{addFeedback}</span>
           )}
 
           <div className="flex items-center gap-2">
             <button
               onClick={handleBulkAdd}
               disabled={addLoading || parsedCount === 0}
-              className="text-xs font-mono px-4 py-1.5 rounded bg-terminal-green/20 border border-terminal-green/40 text-terminal-green hover:bg-terminal-green/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="text-xs font-mono px-4 py-1.5 rounded-xl bg-terminal-green/20 border border-terminal-green/40 text-terminal-green hover:bg-terminal-green/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {addLoading
                 ? 'Loading…'
@@ -248,7 +247,7 @@ export default function WatchlistGrid() {
                   : 'Add'}
             </button>
             {parsedCount > 0 && (
-              <span className="text-[10px] font-mono text-terminal-ghost">
+              <span className="text-[10px] font-sans text-terminal-ghost">
                 {parseSymbols(addInput)
                   .filter((s) => !symbols.includes(s))
                   .slice(0, 5)
@@ -309,7 +308,7 @@ function RemovableCard({
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(symbol) }}
           title={`Remove ${symbol}`}
-          className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-terminal-bg/80 border border-terminal-border text-terminal-ghost hover:text-terminal-red hover:border-terminal-red/40 text-[9px] flex items-center justify-center transition-colors z-10"
+          className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-terminal-bg/80 border border-terminal-border text-terminal-ghost hover:text-terminal-red hover:border-terminal-red/30 text-[9px] flex items-center justify-center transition-colors z-10"
         >
           ✕
         </button>
@@ -322,7 +321,7 @@ function RemovableCard({
 
 function SkeletonCard({ label }: { label?: string }) {
   return (
-    <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3 animate-pulse">
+    <div className="glass rounded-2xl p-3 animate-pulse">
       <div className="flex justify-between mb-2">
         <div className="h-3 w-16 bg-terminal-muted rounded" />
         <div className="h-3 w-12 bg-terminal-muted rounded" />

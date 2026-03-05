@@ -4,13 +4,14 @@
  */
 import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
-import { useMarketStore, useAccountStore, useBotStore, useSimStore } from '@/store'
-import type { WsEvent } from '@/types'
+import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore } from '@/store'
+import type { AlertFiredEvent, WsEvent } from '@/types'
 
 export function useWebSocket(): void {
   const mountedRef = useRef(false)
 
   const setQuotes     = useMarketStore((s) => s.setQuotes)
+  const applyLiveQuote = useMarketStore((s) => s.applyLiveQuote)
   const setBotRunning = useBotStore((s) => s.setBotRunning)
   const setIBKR       = useBotStore((s) => s.setIBKR)
   const addTrade      = useAccountStore((s) => s.addTrade)
@@ -70,12 +71,49 @@ export function useWebSocket(): void {
       })
     })
 
+    // Broker real-time bar updates (5s bars) -> feed through live quote patcher
+    // so chart candles keep moving even in sparse-tick periods.
+    const unBar = wsService.subscribe('bar', (ev: WsEvent) => {
+      const symbol = String(ev['symbol'] ?? '').toUpperCase()
+      const close = Number(ev['close'])
+      const time = Number(ev['time'])
+      if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(time) || time <= 0) {
+        return
+      }
+      const store = useMarketStore.getState()
+      const series = store.bars[symbol] ?? store.compBars[symbol] ?? []
+      let barSeconds = 5
+      if (series.length >= 2) {
+        const last = series[series.length - 1]
+        const prev = series[series.length - 2]
+        const delta = last.time - prev.time
+        if (Number.isFinite(delta) && delta > 0) barSeconds = delta
+      }
+      applyLiveQuote(symbol, close, Math.floor(time), barSeconds, 'ibkr', 0)
+    })
+
+    const unAlertFired = wsService.subscribe('alert_fired', (ev: WsEvent) => {
+      const alertStore = useAlertStore.getState()
+      const event = ev as unknown as AlertFiredEvent
+      alertStore.pushFired(event)
+
+      // Browser push notification (capability + permission safe)
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        new Notification(`Alert: ${event.name}`, {
+          body: `${event.symbol} — ${event.condition_summary}\nPrice: $${event.price.toFixed(2)}`,
+          icon: '/favicon.ico',
+        })
+      }
+    })
+
     return () => {
       unIBKR()
       unBot()
       unFill()
       unReplay()
       unReplayDone()
+      unBar()
+      unAlertFired()
       wsService.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

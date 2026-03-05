@@ -17,28 +17,28 @@ export function EquityCurve({ result }: Props) {
       width: containerRef.current.clientWidth,
       height: 320,
       layout: {
-        background: { color: '#0a0a0f' },
-        textColor: '#9ca3af',
+        background: { color: '#0b0f1a' },
+        textColor: '#94a3b8',  // terminal-dim
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: '#1f2937' },
-        horzLines: { color: '#1f2937' },
+        vertLines: { color: '#1e293b' },  // terminal-elevated
+        horzLines: { color: '#1e293b' },
       },
       crosshair: { mode: 0 },
       rightPriceScale: {
-        borderColor: '#374151',
+        borderColor: 'rgba(148,163,184,0.12)',  // terminal-border
       },
       timeScale: {
-        borderColor: '#374151',
+        borderColor: 'rgba(148,163,184,0.12)',
         timeVisible: false,
       },
     })
     chartRef.current = chart
 
-    // Strategy equity line (blue)
+    // Strategy equity line — indigo accent
     const strategySeries = chart.addLineSeries({
-      color: '#3b82f6',
+      color: '#6366f1',   // terminal-blue / indigo-500
       lineWidth: 2,
       title: 'Strategy',
     })
@@ -49,9 +49,9 @@ export function EquityCurve({ result }: Props) {
     }) as LineData)
     strategySeries.setData(strategyData)
 
-    // Buy-and-hold line (gray)
+    // Buy-and-hold line — muted ghost
     const bhSeries = chart.addLineSeries({
-      color: '#6b7280',
+      color: '#475569',   // terminal-ghost
       lineWidth: 1,
       lineStyle: 2,
       title: 'Buy & Hold',
@@ -73,14 +73,14 @@ export function EquityCurve({ result }: Props) {
         entries.push({
           time: entryTime,
           position: 'belowBar',
-          color: '#22c55e',
+          color: '#10b981',  // terminal-green / emerald-500
           shape: 'arrowUp',
           text: 'BUY',
         })
         entries.push({
           time: exitTime,
           position: 'aboveBar',
-          color: '#ef4444',
+          color: '#ef4444',  // terminal-red
           shape: 'arrowDown',
           text: t.exit_reason === 'stop_loss' ? 'SL' : t.exit_reason === 'take_profit' ? 'TP' : 'SELL',
         })
@@ -110,9 +110,9 @@ export function EquityCurve({ result }: Props) {
   }, [result])
 
   return (
-    <div>
-      <h3 className="text-sm font-semibold text-gray-200 mb-2">Equity Curve</h3>
-      <div ref={containerRef} className="rounded border border-gray-700 overflow-hidden" />
+    <div className="glass rounded-2xl shadow-glass p-5">
+      <h3 className="text-sm font-sans font-medium text-terminal-dim mb-4">Equity Curve</h3>
+      <div ref={containerRef} className="rounded-xl overflow-hidden" />
     </div>
   )
 }

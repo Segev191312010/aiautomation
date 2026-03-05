@@ -34,7 +34,7 @@ export default function PresetSelector() {
       <select
         onChange={handleApply}
         defaultValue=""
-        className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text focus:border-terminal-blue focus:outline-none"
+        className="px-3 py-1.5 bg-terminal-input border border-white/[0.06] rounded-xl text-xs font-sans text-terminal-text focus:border-indigo-500/50 focus:outline-none transition-colors"
       >
         <option value="">Load preset...</option>
         {presets.map((p) => (
@@ -49,12 +49,12 @@ export default function PresetSelector() {
         value={name}
         onChange={(e) => setName(e.target.value)}
         placeholder="Preset name"
-        className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-text placeholder-terminal-ghost focus:border-terminal-blue focus:outline-none w-32"
+        className="px-3 py-1.5 bg-terminal-input border border-white/[0.06] rounded-xl text-xs font-sans text-terminal-text placeholder-terminal-ghost focus:border-indigo-500/50 focus:outline-none transition-colors w-32"
       />
       <button
         onClick={handleSave}
         disabled={saving || !name.trim() || filters.length === 0}
-        className="px-3 py-1.5 rounded text-xs font-mono font-semibold bg-terminal-muted text-terminal-dim hover:text-terminal-text hover:bg-terminal-surface disabled:opacity-40 transition-colors"
+        className="px-3 py-1.5 rounded-xl text-xs font-sans font-medium bg-white/[0.05] text-terminal-dim border border-white/[0.06] hover:text-terminal-text hover:bg-white/[0.09] disabled:opacity-40 transition-colors"
       >
         {saving ? 'Saving...' : 'Save'}
       </button>
@@ -73,7 +73,7 @@ export default function PresetSelector() {
             e.target.value = ''
           }}
           defaultValue=""
-          className="px-2 py-1.5 bg-terminal-bg border border-terminal-border rounded text-xs font-mono text-terminal-dim focus:border-terminal-blue focus:outline-none"
+          className="px-3 py-1.5 bg-terminal-input border border-white/[0.06] rounded-xl text-xs font-sans text-terminal-dim focus:border-indigo-500/50 focus:outline-none transition-colors"
         >
           <option value="">Delete...</option>
           {presets.filter((p) => !p.built_in).map((p) => (

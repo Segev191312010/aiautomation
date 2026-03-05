@@ -60,13 +60,13 @@ export default function ScreenerPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4 p-4 h-full overflow-y-auto">
+    <div className="flex flex-col gap-5 p-5 h-full overflow-y-auto">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-mono font-semibold text-terminal-text">
+        <h1 className="text-lg font-sans font-semibold text-terminal-text">
           Stock Screener
           {results.length > 0 && (
-            <span className="ml-2 text-xs font-normal bg-terminal-blue/15 text-terminal-blue px-2 py-0.5 rounded">
+            <span className="ml-2.5 text-xs font-sans font-medium bg-indigo-500/15 text-indigo-400 px-2.5 py-0.5 rounded-xl">
               {results.length} matches
             </span>
           )}
@@ -74,41 +74,41 @@ export default function ScreenerPage() {
       </div>
 
       {/* Universe */}
-      <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3 space-y-3">
-        <p className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">Universe</p>
+      <div className="glass rounded-2xl shadow-glass p-5 space-y-3">
+        <p className="text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase">Universe</p>
         <UniverseSelector />
       </div>
 
       {/* Timeframe + Presets */}
       <div className="flex gap-4 flex-wrap">
-        <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3 space-y-2 flex-1 min-w-[200px]">
-          <p className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">Timeframe</p>
+        <div className="glass rounded-2xl shadow-glass p-5 space-y-3 flex-1 min-w-[200px]">
+          <p className="text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase">Timeframe</p>
           <div className="flex gap-2">
             <div className="flex gap-1">
               {INTERVALS.map((i) => (
                 <button
                   key={i.value}
                   onClick={() => handleIntervalChange(i.value)}
-                  className={`px-2 py-1 rounded text-[10px] font-mono font-semibold transition-colors ${
+                  className={`px-2.5 py-1 rounded-xl text-xs font-sans font-medium transition-colors ${
                     interval === i.value
-                      ? 'bg-terminal-blue/15 text-terminal-blue'
-                      : 'text-terminal-dim hover:text-terminal-text'
+                      ? 'bg-indigo-500/15 text-indigo-400'
+                      : 'text-terminal-dim hover:text-terminal-text hover:bg-white/[0.04]'
                   }`}
                 >
                   {i.label}
                 </button>
               ))}
             </div>
-            <div className="w-px bg-terminal-border" />
+            <div className="w-px bg-white/[0.06]" />
             <div className="flex gap-1">
               {availablePeriods.map((p) => (
                 <button
                   key={p.value}
                   onClick={() => setPeriod(p.value)}
-                  className={`px-2 py-1 rounded text-[10px] font-mono font-semibold transition-colors ${
+                  className={`px-2.5 py-1 rounded-xl text-xs font-sans font-medium transition-colors ${
                     period === p.value
-                      ? 'bg-terminal-blue/15 text-terminal-blue'
-                      : 'text-terminal-dim hover:text-terminal-text'
+                      ? 'bg-indigo-500/15 text-indigo-400'
+                      : 'text-terminal-dim hover:text-terminal-text hover:bg-white/[0.04]'
                   }`}
                 >
                   {p.label}
@@ -118,15 +118,15 @@ export default function ScreenerPage() {
           </div>
         </div>
 
-        <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3 space-y-2 flex-1 min-w-[300px]">
-          <p className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">Presets</p>
+        <div className="glass rounded-2xl shadow-glass p-5 space-y-3 flex-1 min-w-[300px]">
+          <p className="text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase">Presets</p>
           <PresetSelector />
         </div>
       </div>
 
       {/* Filters */}
-      <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3 space-y-2">
-        <p className="text-[10px] font-mono text-terminal-ghost uppercase tracking-widest">Filters</p>
+      <div className="glass rounded-2xl shadow-glass p-5 space-y-3">
+        <p className="text-xs font-sans font-medium text-terminal-dim tracking-wide uppercase">Filters</p>
         <FilterBuilder />
       </div>
 
@@ -134,7 +134,7 @@ export default function ScreenerPage() {
       <button
         onClick={handleScan}
         disabled={scanning}
-        className="self-start px-6 py-2 rounded-lg text-sm font-mono font-semibold bg-terminal-blue text-white hover:bg-terminal-blue/90 disabled:opacity-50 transition-colors flex items-center gap-2"
+        className="self-start px-6 py-2 rounded-xl text-sm font-sans font-medium bg-gradient-to-r from-indigo-500 to-purple-500 text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-2 shadow-glow-blue"
       >
         {scanning && (
           <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
@@ -146,7 +146,7 @@ export default function ScreenerPage() {
       </button>
 
       {/* Results */}
-      <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3 flex-1 min-h-0">
+      <div className="glass rounded-2xl shadow-glass p-5 flex-1 min-h-0">
         <ScanResultsTable />
       </div>
     </div>

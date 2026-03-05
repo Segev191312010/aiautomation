@@ -4,11 +4,23 @@
  */
 import type {
   AccountSummary,
+  Alert,
+  AlertCreate,
+  AlertHistory,
+  AlertTestResult,
+  AlertUpdate,
   BacktestHistoryItem,
   BacktestRequest,
   BacktestResult,
   BotStatus,
   EnrichResult,
+  DiagnosticIndicator,
+  DiagnosticIndicatorHistoryPoint,
+  DiagnosticMarketMap,
+  DiagnosticNewsArticle,
+  DiagnosticOverview,
+  DiagnosticRefreshRun,
+  DiagnosticSectorProjection,
   MarketQuote,
   OHLCVBar,
   OpenOrder,
@@ -22,6 +34,19 @@ import type {
   SimAccountState,
   SimOrderRecord,
   SimPosition,
+  StockAnalyst,
+  StockAnalystDetail,
+  StockCompanyInfo,
+  StockEarningsDetail,
+  StockEvents,
+  StockFinancials,
+  StockFinancialStatements,
+  StockKeyStats,
+  StockNarrative,
+  StockOverview,
+  StockOwnership,
+  StockRatingScorecard,
+  StockSplits,
   SystemStatus,
   Trade,
   UniverseInfo,
@@ -69,6 +94,53 @@ const del  = <T>(p: string)            => req<T>('DELETE', p)
 export const fetchStatus   = () => get<SystemStatus>('/api/status')
 export const fetchBotStatus= () => get<BotStatus>('/api/bot/status')
 
+// —— Diagnostics ———————————————————————————————————————————————————————
+
+export const fetchDiagnosticsOverview = (lookbackDays: 90 | 180 | 365 = 90) =>
+  get<DiagnosticOverview>(`/api/diagnostics/overview?lookback_days=${lookbackDays}`)
+
+export const fetchDiagnosticsIndicators = () =>
+  get<DiagnosticIndicator[]>('/api/diagnostics/indicators')
+
+export const fetchDiagnosticsIndicator = (code: string) =>
+  get<DiagnosticIndicator>(`/api/diagnostics/indicators/${code}`)
+
+export const fetchDiagnosticsIndicatorHistory = (code: string, days = 365) =>
+  get<DiagnosticIndicatorHistoryPoint[]>(`/api/diagnostics/indicators/${code}/history?days=${days}`)
+
+export const fetchDiagnosticsMarketMap = (days = 5) =>
+  get<DiagnosticMarketMap[]>(`/api/diagnostics/market-map?days=${days}`)
+
+export const fetchDiagnosticsSectorProjectionsLatest = (lookbackDays: 90 | 180 | 365 = 90) =>
+  get<DiagnosticSectorProjection>(`/api/diagnostics/sector-projections/latest?lookback_days=${lookbackDays}`)
+
+export const fetchDiagnosticsSectorProjectionsHistory = (days = 365) =>
+  get<DiagnosticSectorProjection[]>(`/api/diagnostics/sector-projections/history?days=${days}`)
+
+export const fetchDiagnosticsNews = (hours = 24, limit = 200) =>
+  get<DiagnosticNewsArticle[]>(`/api/diagnostics/news?hours=${hours}&limit=${limit}`)
+
+export async function runDiagnosticsRefresh(): Promise<
+  | { status: 202; data: { run_id: number; status: string } }
+  | { status: 409; data: { run_id: number; locked_by: string; lock_expires_at: number } }
+> {
+  const resp = await fetch(`${BASE}/api/diagnostics/refresh`, {
+    method: 'POST',
+    headers: _authToken ? { Authorization: `Bearer ${_authToken}` } : {},
+  })
+  const body = await resp.json().catch(() => ({}))
+  if (resp.status === 202) {
+    return { status: 202, data: body as { run_id: number; status: string } }
+  }
+  if (resp.status === 409) {
+    return { status: 409, data: body as { run_id: number; locked_by: string; lock_expires_at: number } }
+  }
+  throw new Error(`POST /api/diagnostics/refresh -> ${resp.status}: ${JSON.stringify(body)}`)
+}
+
+export const fetchDiagnosticsRefreshRun = (runId: number) =>
+  get<DiagnosticRefreshRun>(`/api/diagnostics/refresh/${runId}`)
+
 // ── IBKR ──────────────────────────────────────────────────────────────────────
 
 export const connectIBKR    = () => post<{ connected: boolean }>('/api/ibkr/connect')
@@ -103,7 +175,7 @@ export const fetchIBKRBars = (symbol: string, barSize = '1D', duration = '60 D')
   get<OHLCVBar[]>(`/api/market/${symbol}/bars?bar_size=${barSize}&duration=${encodeURIComponent(duration)}`)
 
 export const fetchPrice = (symbol: string) =>
-  get<{ symbol: string; price: number; is_mock?: boolean }>(`/api/market/${symbol}/price`)
+  get<{ symbol: string; price: number }>(`/api/market/${symbol}/price`)
 
 export const subscribeRtBars   = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${symbol}/subscribe`)
 export const unsubscribeRtBars = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${symbol}/unsubscribe`)
@@ -194,6 +266,17 @@ export const fetchBacktest = (id: string) =>
 export const deleteBacktest = (id: string) =>
   del<{ deleted: boolean }>(`/api/backtest/${id}`)
 
+// ── Alerts ─────────────────────────────────────────────────────────────────
+
+export const fetchAlerts       = () => get<Alert[]>('/api/alerts')
+export const fetchAlert        = (id: string) => get<Alert>(`/api/alerts/${id}`)
+export const createAlert       = (body: AlertCreate) => post<Alert>('/api/alerts', body)
+export const updateAlert       = (id: string, body: AlertUpdate) => put<Alert>(`/api/alerts/${id}`, body)
+export const deleteAlert       = (id: string) => del<{ deleted: boolean }>(`/api/alerts/${id}`)
+export const toggleAlert       = (id: string) => post<{ id: string; enabled: boolean }>(`/api/alerts/${id}/toggle`)
+export const fetchAlertHistory = (limit = 100) => get<AlertHistory[]>(`/api/alerts/history?limit=${limit}`)
+export const testAlertNotification = (body: AlertCreate) => post<AlertTestResult>('/api/alerts/test', body)
+
 // ── Indicators ──────────────────────────────────────────────────────────
 
 export const fetchIndicatorData = (
@@ -211,3 +294,44 @@ export const fetchIndicatorData = (
   if (params.band)     qs.set('band',     params.band)
   return get<Array<{ time: number; value: number }>>(`/api/market/${symbol}/indicators?${qs}`)
 }
+
+// ── Stock Profile ─────────────────────────────────────────────────────────
+
+export const fetchStockOverview = (symbol: string) =>
+  get<StockOverview>(`/api/stock/${symbol}/overview`)
+
+export const fetchStockKeyStats = (symbol: string) =>
+  get<StockKeyStats>(`/api/stock/${symbol}/key-stats`)
+
+export const fetchStockFinancials = (symbol: string) =>
+  get<StockFinancials>(`/api/stock/${symbol}/financials`)
+
+export const fetchStockAnalyst = (symbol: string) =>
+  get<StockAnalyst>(`/api/stock/${symbol}/analyst`)
+
+export const fetchStockOwnership = (symbol: string) =>
+  get<StockOwnership>(`/api/stock/${symbol}/ownership`)
+
+export const fetchStockEvents = (symbol: string) =>
+  get<StockEvents>(`/api/stock/${symbol}/events`)
+
+export const fetchStockNarrative = (symbol: string) =>
+  get<StockNarrative>(`/api/stock/${symbol}/narrative`)
+
+export const fetchStockFinancialStatements = (symbol: string) =>
+  get<StockFinancialStatements>(`/api/stock/${symbol}/financial-statements`)
+
+export const fetchStockAnalystDetail = (symbol: string) =>
+  get<StockAnalystDetail>(`/api/stock/${symbol}/analyst-detail`)
+
+export const fetchStockRatingScorecard = (symbol: string) =>
+  get<StockRatingScorecard>(`/api/stock/${symbol}/rating-scorecard`)
+
+export const fetchStockCompanyInfo = (symbol: string) =>
+  get<StockCompanyInfo>(`/api/stock/${symbol}/company-info`)
+
+export const fetchStockSplits = (symbol: string) =>
+  get<StockSplits>(`/api/stock/${symbol}/stock-splits`)
+
+export const fetchStockEarningsDetail = (symbol: string) =>
+  get<StockEarningsDetail>(`/api/stock/${symbol}/earnings-detail`)

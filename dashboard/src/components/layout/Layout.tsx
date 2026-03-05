@@ -18,7 +18,7 @@ export default function Layout({ children }: Props) {
       <Sidebar />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-y-auto overflow-x-hidden p-4">
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 gradient-surface transition-colors duration-300">
           {children}
         </main>
       </div>
