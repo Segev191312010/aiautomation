@@ -19,17 +19,6 @@ import type {
   Trade,
 } from '@/types'
 
-// Not exported from types/index.ts yet — define locally
-interface RuleCreate_ {
-  name: string
-  symbol: string
-  enabled?: boolean
-  conditions: Rule['conditions']
-  logic?: 'AND' | 'OR'
-  action: Rule['action']
-  cooldown_minutes?: number
-}
-
 const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -119,7 +108,7 @@ export const setReplaySpeed      = (speed: number) =>
 
 export const fetchRules    = () => get<Rule[]>('/api/rules')
 export const fetchRule     = (id: string) => get<Rule>(`/api/rules/${id}`)
-export const createRule    = (body: RuleCreate_) => post<Rule>('/api/rules', body)
+export const createRule    = (body: RuleCreate) => post<Rule>('/api/rules', body)
 export const updateRule    = (id: string, body: Partial<Rule>) => put<Rule>(`/api/rules/${id}`, body)
 export const deleteRule    = (id: string) => del<{ deleted: boolean }>(`/api/rules/${id}`)
 export const toggleRule    = (id: string) => post<{ id: string; enabled: boolean }>(`/api/rules/${id}/toggle`)

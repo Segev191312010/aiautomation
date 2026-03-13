@@ -24,3 +24,10 @@ html, body, #root {
 
 /* ── Lightweight-charts canvas fix ─────────────────────────────────────── */
 canvas { display: block; }
+
+/* ── Toast slide-in animation ─────────────────────────────────────────── */
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+.animate-slide-in { animation: slideIn 0.25s ease-out; }

@@ -4,26 +4,10 @@ import Dashboard from '@/pages/Dashboard'
 import TradeBotPage from '@/pages/TradeBotPage'
 import MarketPage from '@/pages/MarketPage'
 import SimulationPage from '@/pages/SimulationPage'
+import RulesPage from '@/pages/RulesPage'
+import SettingsPage from '@/pages/SettingsPage'
 import { useUIStore, useBotStore } from '@/store'
 import { fetchStatus } from '@/services/api'
-
-// ── Lazy pages (rules, settings) ─────────────────────────────────────────────
-
-function RulesPage() {
-  return (
-    <div className="flex items-center justify-center h-64 text-terminal-ghost font-mono text-sm">
-      Rules engine — coming soon
-    </div>
-  )
-}
-
-function SettingsPage() {
-  return (
-    <div className="flex items-center justify-center h-64 text-terminal-ghost font-mono text-sm">
-      Settings — coming soon
-    </div>
-  )
-}
 
 // ── Route → component map ─────────────────────────────────────────────────────
 

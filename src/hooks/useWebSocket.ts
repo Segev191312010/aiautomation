@@ -5,6 +5,7 @@
 import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
 import { useMarketStore, useAccountStore, useBotStore, useSimStore } from '@/store'
+import { addToast } from '@/components/notifications/ToastContainer'
 import type { WsEvent } from '@/types'
 
 export function useWebSocket(): void {
@@ -33,10 +34,18 @@ export function useWebSocket(): void {
       setBotRunning(!!(ev['status'] === 'running' && ev['rules_enabled']))
     })
 
-    // Order filled
+    // Order filled — notify user
     const unFill = wsService.subscribe('filled', (ev: WsEvent) => {
-      // The server sends partial trade data — cast as needed
       console.info('[WS] order filled', ev)
+      const symbol = (ev['symbol'] as string) ?? 'Unknown'
+      const action = (ev['action'] as string) ?? ''
+      const qty = (ev['quantity'] as number) ?? (ev['qty'] as number) ?? ''
+      const price = (ev['fill_price'] as number) ?? (ev['price'] as number)
+      addToast({
+        type: 'success',
+        title: 'Order Filled',
+        message: `${action} ${qty} ${symbol}${price ? ` @ $${price.toFixed(2)}` : ''}`,
+      })
     })
 
     // Replay bar
@@ -63,6 +72,24 @@ export function useWebSocket(): void {
       })
     })
 
+    // Error events
+    const unError = wsService.subscribe('error', (ev: WsEvent) => {
+      addToast({
+        type: 'error',
+        title: 'System Error',
+        message: (ev['message'] as string) ?? 'An error occurred',
+      })
+    })
+
+    // Signal events (rule triggered)
+    const unSignal = wsService.subscribe('signal', (ev: WsEvent) => {
+      addToast({
+        type: 'info',
+        title: 'Signal Triggered',
+        message: `${ev['rule_name'] ?? 'Rule'}: ${ev['action'] ?? ''} ${ev['symbol'] ?? ''}`,
+      })
+    })
+
     const unReplayDone = wsService.subscribe('replay_done', () => {
       setPlayback({
         active: false, symbol: '', speed: 1,
@@ -74,6 +101,8 @@ export function useWebSocket(): void {
       unIBKR()
       unBot()
       unFill()
+      unError()
+      unSignal()
       unReplay()
       unReplayDone()
       wsService.disconnect()

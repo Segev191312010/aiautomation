@@ -1,6 +1,8 @@
 import React from 'react'
 import Sidebar from './Sidebar'
 import Header from './Header'
+import ToastContainer from '@/components/notifications/ToastContainer'
+import OrderModal from '@/components/orders/OrderModal'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useMarketData } from '@/hooks/useMarketData'
 
@@ -22,6 +24,8 @@ export default function Layout({ children }: Props) {
           {children}
         </main>
       </div>
+      <ToastContainer />
+      <OrderModal />
     </div>
   )
 }
