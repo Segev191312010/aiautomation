@@ -43,7 +43,7 @@ export default function SectionNav() {
   }
 
   return (
-    <nav className="sticky top-0 z-10 -mx-4 px-4 py-2 bg-[#FAF8F5]/95 border-b border-gray-200 overflow-x-auto">
+    <nav className="sticky top-0 z-10 -mx-4 px-4 py-2 bg-[#FAF8F5]/95 border-b border-zinc-800 overflow-x-auto">
       <div className="flex items-center gap-1.5 min-w-max">
         {SECTIONS.map((section) => (
           <button
@@ -52,8 +52,8 @@ export default function SectionNav() {
             className={clsx(
               'shrink-0 text-[11px] font-sans px-2.5 py-1 rounded-lg border transition-colors',
               active === section.id
-                ? 'bg-gray-900 text-white border-gray-900'
-                : 'bg-white text-gray-500 border-gray-200 hover:text-gray-900 hover:border-gray-300',
+                ? 'bg-zinc-950 text-white border-zinc-800'
+                : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-50 hover:border-zinc-800',
             )}
           >
             {section.label}

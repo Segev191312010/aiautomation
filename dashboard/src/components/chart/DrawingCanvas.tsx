@@ -724,16 +724,16 @@ function ContextMenu({
   }
 
   return (
-    <div style={menuStyle} className="bg-gray-50 border border-gray-200 rounded-lg shadow-card py-1 min-w-[160px]">
+    <div style={menuStyle} className="bg-zinc-900 border border-zinc-800 rounded-lg  py-1 min-w-[160px]">
       <button
         onClick={() => onEditLabel(drawingId)}
-        className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-gray-500 hover:text-gray-800 hover:bg-gray-100/30 transition-colors"
+        className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/30 transition-colors"
       >
         Edit Label
       </button>
       <button
         onClick={() => onToggleLock(drawingId)}
-        className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-gray-500 hover:text-gray-800 hover:bg-gray-100/30 transition-colors"
+        className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/30 transition-colors"
       >
         {drawing.locked ? 'Unlock' : 'Lock'}
       </button>
@@ -741,33 +741,33 @@ function ContextMenu({
         <>
           <button
             onClick={() => onToggleExtend(drawingId, 'left')}
-            className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-gray-500 hover:text-gray-800 hover:bg-gray-100/30 transition-colors"
+            className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/30 transition-colors"
           >
             {drawing.options?.extendLeft ? 'Unextend Left' : 'Extend Left'}
           </button>
           <button
             onClick={() => onToggleExtend(drawingId, 'right')}
-            className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-gray-500 hover:text-gray-800 hover:bg-gray-100/30 transition-colors"
+            className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/30 transition-colors"
           >
             {drawing.options?.extendRight ? 'Unextend Right' : 'Extend Right'}
           </button>
         </>
       )}
-      <div className="border-t border-gray-200 my-1" />
+      <div className="border-t border-zinc-800 my-1" />
       <div className="px-3 py-1.5 flex gap-1">
         {DRAWING_COLORS.map((c) => (
           <button
             key={c}
             onClick={() => onChangeColor(drawingId, c)}
-            className="w-3.5 h-3.5 rounded-full border border-gray-200 hover:scale-125 transition-transform"
+            className="w-3.5 h-3.5 rounded-full border border-zinc-800 hover:scale-125 transition-transform"
             style={{ backgroundColor: c, borderColor: c === drawing.color ? '#dce8f5' : undefined }}
           />
         ))}
       </div>
-      <div className="border-t border-gray-200 my-1" />
+      <div className="border-t border-zinc-800 my-1" />
       <button
         onClick={() => onDelete(drawingId)}
-        className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-red-600 hover:bg-red-600/10 transition-colors"
+        className="w-full text-left px-3 py-1.5 text-[11px] font-mono text-red-400 hover:bg-red-600/10 transition-colors"
       >
         Delete
       </button>
@@ -795,7 +795,7 @@ function LabelEditor({
     <input
       ref={inputRef}
       defaultValue={value}
-      className="absolute bg-gray-50 border border-indigo-600 text-gray-800 text-[11px] font-mono px-2 py-1 rounded shadow-card outline-none"
+      className="absolute bg-zinc-900 border border-indigo-600 text-zinc-100 text-[11px] font-mono px-2 py-1 rounded  outline-none"
       style={{ left: x - 60, top: y - 12, width: 120, zIndex: 1000, pointerEvents: 'auto' }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') onCommit((e.target as HTMLInputElement).value)

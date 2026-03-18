@@ -334,24 +334,24 @@ function LiveSectorStrip({
             type="button"
             onClick={() => onSelectSector(symbol)}
             className={clsx(
-              'rounded-lg border p-2.5 text-left transition-all duration-200 hover:border-gray-600',
+              'rounded-lg border p-2.5 text-left transition-all duration-200 hover:border-zinc-700',
               isSelected
                 ? 'border-blue-500/50 bg-blue-500/5'
-                : 'border-gray-700/50 bg-gray-800/40',
+                : 'border-zinc-700/50 bg-zinc-900/40',
               flash,
             )}
           >
             <div className="flex items-center justify-between gap-1 mb-1">
-              <span className="font-mono text-xs font-bold text-gray-200">{symbol}</span>
+              <span className="font-mono text-xs font-bold text-zinc-600">{symbol}</span>
               {quadrant && (
                 <span className={clsx('text-[9px]', Q_COLORS[quadrant].text)}>
                   {ROTATION_ARROWS[quadrant]}
                 </span>
               )}
             </div>
-            <div className="text-[10px] text-gray-500 truncate mb-1.5">{name}</div>
+            <div className="text-[10px] text-zinc-400 truncate mb-1.5">{name}</div>
             <div className="flex items-baseline justify-between gap-1">
-              <span className="font-mono text-sm font-semibold text-gray-100 tabular-nums">
+              <span className="font-mono text-sm font-semibold text-zinc-700 tabular-nums">
                 {price != null ? fmtPrice(price) : '--'}
               </span>
               {perf1m != null && (
@@ -363,7 +363,7 @@ function LiveSectorStrip({
             {live && (
               <div className="mt-1 flex items-center gap-1">
                 <span className="h-1 w-1 rounded-full bg-emerald-500 animate-pulse" />
-                <span className="text-[8px] text-gray-600 uppercase tracking-wider">LIVE</span>
+                <span className="text-[8px] text-zinc-400 uppercase tracking-wider">LIVE</span>
               </div>
             )}
           </button>
@@ -511,21 +511,21 @@ function RotationQuadrantChart({
       {/* Tooltip */}
       {tooltip && (
         <div
-          className="pointer-events-none absolute z-20 rounded-lg border border-gray-700 bg-gray-800 shadow-xl px-3 py-2.5 text-xs"
+          className="pointer-events-none absolute z-20 rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl px-3 py-2.5 text-xs"
           style={{ left: Math.min(tooltip.x + 14, 380), top: tooltip.y - 12, minWidth: 200 }}
         >
           <div className="flex items-center gap-2 mb-1.5">
-            <span className="font-mono font-bold text-gray-100 text-sm">{tooltip.sector.symbol}</span>
+            <span className="font-mono font-bold text-zinc-700 text-sm">{tooltip.sector.symbol}</span>
             <QuadrantBadge quadrant={tooltip.sector.quadrant} />
           </div>
-          <div className="text-gray-400 mb-2 truncate">{tooltip.sector.name}</div>
+          <div className="text-zinc-500 mb-2 truncate">{tooltip.sector.name}</div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-            <div className="flex justify-between"><span className="text-gray-500">RS Ratio</span><span className="font-mono text-gray-300">{tooltip.sector.rs_ratio.toFixed(3)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">Momentum</span><span className="font-mono text-gray-300">{tooltip.sector.rs_momentum.toFixed(2)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">1W</span><span className={clsx('font-mono', pctColor(tooltip.sector.perf_1w))}>{fmtPct(tooltip.sector.perf_1w)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">1M</span><span className={clsx('font-mono', pctColor(tooltip.sector.perf_1m))}>{fmtPct(tooltip.sector.perf_1m)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">3M</span><span className={clsx('font-mono', pctColor(tooltip.sector.perf_3m))}>{fmtPct(tooltip.sector.perf_3m)}</span></div>
-            <div className="flex justify-between"><span className="text-gray-500">Price</span><span className="font-mono text-gray-300">{fmtPrice(tooltip.sector.price)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-400">RS Ratio</span><span className="font-mono text-zinc-500">{tooltip.sector.rs_ratio.toFixed(3)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-400">Momentum</span><span className="font-mono text-zinc-500">{tooltip.sector.rs_momentum.toFixed(2)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-400">1W</span><span className={clsx('font-mono', pctColor(tooltip.sector.perf_1w))}>{fmtPct(tooltip.sector.perf_1w)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-400">1M</span><span className={clsx('font-mono', pctColor(tooltip.sector.perf_1m))}>{fmtPct(tooltip.sector.perf_1m)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-400">3M</span><span className={clsx('font-mono', pctColor(tooltip.sector.perf_3m))}>{fmtPct(tooltip.sector.perf_3m)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-400">Price</span><span className="font-mono text-zinc-500">{fmtPrice(tooltip.sector.price)}</span></div>
           </div>
         </div>
       )}
@@ -569,15 +569,15 @@ function PerformanceHeatmap({
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
-          <tr className="border-b border-gray-700/50">
-            <th className="text-left py-2 pr-3 font-mono font-medium text-gray-500 text-[10px] uppercase tracking-wider min-w-[140px]">Sector</th>
-            <th className="text-right py-2 px-2 font-mono text-[10px] text-gray-600 uppercase tracking-wider">Quadrant</th>
+          <tr className="border-b border-zinc-700/50">
+            <th className="text-left py-2 pr-3 font-mono font-medium text-zinc-400 text-[10px] uppercase tracking-wider min-w-[140px]">Sector</th>
+            <th className="text-right py-2 px-2 font-mono text-[10px] text-zinc-400 uppercase tracking-wider">Quadrant</th>
             {COLS.map(col => (
               <th
                 key={col.key}
                 className={clsx(
                   'text-right py-2 px-2 font-mono font-medium text-[10px] uppercase tracking-wider cursor-pointer select-none transition-colors',
-                  sortKey === col.key ? 'text-gray-200' : 'text-gray-600 hover:text-gray-400',
+                  sortKey === col.key ? 'text-zinc-600' : 'text-zinc-400 hover:text-zinc-500',
                 )}
                 onClick={() => toggleSort(col.key)}
               >
@@ -592,15 +592,15 @@ function PerformanceHeatmap({
             return (
               <tr
                 key={row.symbol}
-                className="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer transition-colors"
+                className="border-b border-zinc-800/50 hover:bg-zinc-900/30 cursor-pointer transition-colors"
                 onClick={() => onSelectSector(row.symbol)}
               >
                 <td className="py-2 pr-3">
                   <div className="flex items-center gap-2">
                     {rot && <span className={clsx('h-2 w-2 rounded-full shrink-0', Q_COLORS[rot.quadrant].dot)} />}
                     <div>
-                      <div className="font-mono font-semibold text-gray-200 text-[11px]">{row.symbol}</div>
-                      <div className="text-gray-500 text-[10px] truncate max-w-[100px]">{row.name}</div>
+                      <div className="font-mono font-semibold text-zinc-600 text-[11px]">{row.symbol}</div>
+                      <div className="text-zinc-400 text-[10px] truncate max-w-[100px]">{row.name}</div>
                     </div>
                   </div>
                 </td>
@@ -613,7 +613,7 @@ function PerformanceHeatmap({
                     <td key={col.key} className="py-1.5 px-2 text-right">
                       <span className={clsx(
                         'inline-block rounded px-1.5 py-0.5 font-mono text-[11px] tabular-nums',
-                        v != null ? heatmapCellColor(v) : 'text-gray-600',
+                        v != null ? heatmapCellColor(v) : 'text-zinc-400',
                       )}>
                         {v != null ? fmtPct(v) : '--'}
                       </span>
@@ -656,37 +656,37 @@ function SectorLeadersCard({
   const displayed = expanded ? stocks : stocks.slice(0, 5)
 
   return (
-    <div className="rounded-lg border border-gray-700/50 bg-gray-800/30 p-3 flex flex-col gap-2 min-w-[240px]">
+    <div className="rounded-lg border border-zinc-700/50 bg-zinc-900/30 p-3 flex flex-col gap-2 min-w-[240px]">
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="flex items-center gap-1.5 mb-0.5">
-            <span className="font-mono font-bold text-gray-100 text-sm">{sector.symbol}</span>
+            <span className="font-mono font-bold text-zinc-700 text-sm">{sector.symbol}</span>
             <QuadrantBadge quadrant={sector.quadrant} />
           </div>
-          <div className="text-[10px] text-gray-500">{sector.name}</div>
+          <div className="text-[10px] text-zinc-400">{sector.name}</div>
         </div>
         <div className="text-right">
           <span className={clsx('font-mono font-semibold text-sm tabular-nums', pctColor(sector.perf_1m))}>
             {fmtPct(sector.perf_1m)}
           </span>
-          <div className="text-[9px] text-gray-600">1M</div>
+          <div className="text-[9px] text-zinc-400">1M</div>
         </div>
       </div>
 
       <div className="flex gap-3 text-[10px]">
-        <div><span className="text-gray-600">RS</span> <span className="font-mono text-gray-400">{sector.rs_ratio.toFixed(3)}</span></div>
-        <div><span className="text-gray-600">Mom</span> <span className="font-mono text-gray-400">{sector.rs_momentum.toFixed(2)}</span></div>
-        <div><span className="text-gray-600">3M</span> <span className={clsx('font-mono', pctColor(sector.perf_3m))}>{fmtPct(sector.perf_3m, 1)}</span></div>
+        <div><span className="text-zinc-400">RS</span> <span className="font-mono text-zinc-500">{sector.rs_ratio.toFixed(3)}</span></div>
+        <div><span className="text-zinc-400">Mom</span> <span className="font-mono text-zinc-500">{sector.rs_momentum.toFixed(2)}</span></div>
+        <div><span className="text-zinc-400">3M</span> <span className={clsx('font-mono', pctColor(sector.perf_3m))}>{fmtPct(sector.perf_3m, 1)}</span></div>
       </div>
 
-      <div className="border-t border-gray-700/50 pt-2">
-        <div className="text-[9px] font-mono uppercase tracking-wider text-gray-600 mb-1.5">Top Performers</div>
+      <div className="border-t border-zinc-700/50 pt-2">
+        <div className="text-[9px] font-mono uppercase tracking-wider text-zinc-400 mb-1.5">Top Performers</div>
         {loading && !stocks.length ? (
           <div className="space-y-1.5">
-            {[...Array(5)].map((_, i) => <div key={i} className="h-3.5 bg-gray-700/30 rounded animate-pulse" />)}
+            {[...Array(5)].map((_, i) => <div key={i} className="h-3.5 bg-zinc-800/30 rounded animate-pulse" />)}
           </div>
         ) : stocks.length === 0 ? (
-          <div className="text-[11px] text-gray-600 italic">No data</div>
+          <div className="text-[11px] text-zinc-400 italic">No data</div>
         ) : (
           <div className="space-y-0.5">
             {displayed.map((s, i) => (
@@ -694,14 +694,14 @@ function SectorLeadersCard({
                 key={s.symbol}
                 type="button"
                 onClick={() => onNavigateToStock(s.symbol)}
-                className="flex items-center justify-between w-full px-1 py-0.5 rounded hover:bg-gray-700/30 group transition-colors"
+                className="flex items-center justify-between w-full px-1 py-0.5 rounded hover:bg-zinc-800/30 group transition-colors"
               >
                 <span className="flex items-center gap-1.5">
-                  <span className="text-[9px] text-gray-600 font-mono w-3">{i + 1}</span>
-                  <span className="font-mono font-semibold text-[11px] text-gray-300 group-hover:text-blue-400">{s.symbol}</span>
+                  <span className="text-[9px] text-zinc-400 font-mono w-3">{i + 1}</span>
+                  <span className="font-mono font-semibold text-[11px] text-zinc-500 group-hover:text-blue-400">{s.symbol}</span>
                 </span>
                 <div className="flex items-center gap-2 text-[10px]">
-                  <span className="text-gray-600">{fmtPrice(s.price)}</span>
+                  <span className="text-zinc-400">{fmtPrice(s.price)}</span>
                   <span className={clsx('font-mono font-medium tabular-nums', pctColor(s.perf))}>{fmtPct(s.perf)}</span>
                 </div>
               </button>
@@ -714,7 +714,7 @@ function SectorLeadersCard({
         <button
           type="button"
           onClick={() => setExpanded(e => !e)}
-          className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors text-center"
+          className="text-[10px] text-zinc-400 hover:text-zinc-500 transition-colors text-center"
         >
           {expanded ? 'Show less' : `View all ${stocks.length}`}
         </button>
@@ -727,12 +727,12 @@ function SectorLeadersCard({
 
 function Skeleton({ className }: { className?: string }) {
   return (
-    <div className={clsx('rounded-lg border border-gray-700/30 bg-gray-800/20 animate-pulse', className)}>
+    <div className={clsx('rounded-lg border border-zinc-700/30 bg-zinc-900/20 animate-pulse', className)}>
       <div className="p-4 space-y-3">
-        <div className="h-3 w-28 bg-gray-700/40 rounded" />
-        <div className="h-5 w-40 bg-gray-700/40 rounded" />
+        <div className="h-3 w-28 bg-zinc-800/40 rounded" />
+        <div className="h-5 w-40 bg-zinc-800/40 rounded" />
         <div className="space-y-2 mt-4">
-          {[...Array(6)].map((_, i) => <div key={i} className="h-3 bg-gray-700/30 rounded" />)}
+          {[...Array(6)].map((_, i) => <div key={i} className="h-3 bg-zinc-800/30 rounded" />)}
         </div>
       </div>
     </div>
@@ -799,33 +799,33 @@ export default function MarketRotationPage() {
     <div className="flex flex-col gap-4 pb-8">
 
       {/* ── TradingView Ticker Tape ──────────────────────────────── */}
-      <div className="rounded-lg border border-gray-700/30 bg-gray-900/50 overflow-hidden">
+      <div className="rounded-lg border border-zinc-700/30 bg-zinc-950/50 overflow-hidden">
         <TradingViewTickerTape />
       </div>
 
       {/* ── Header ───────────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-sans font-bold text-gray-100">Market Rotation</h1>
-          <p className="text-xs text-gray-500 mt-0.5">Sector relative strength, momentum rankings & live data</p>
+          <h1 className="text-xl font-sans font-bold text-zinc-700">Market Rotation</h1>
+          <p className="text-xs text-zinc-400 mt-0.5">Sector relative strength, momentum rankings & live data</p>
         </div>
         <div className="flex items-center gap-3">
           {lastUpdate && (
-            <span className="text-[10px] font-mono text-gray-600">
+            <span className="text-[10px] font-mono text-zinc-400">
               {formatTime(lastUpdate)}
             </span>
           )}
           <div className="flex items-center gap-1">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-[10px] font-mono text-gray-500">{livePrices.size} LIVE</span>
+            <span className="text-[10px] font-mono text-zinc-400">{livePrices.size} LIVE</span>
           </div>
           <button
             type="button"
             onClick={() => { setLoading(true); loadData() }}
             disabled={loading}
             className={clsx(
-              'flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1',
-              'text-[10px] font-mono text-gray-400 hover:border-gray-500 hover:text-gray-200 transition-colors',
+              'flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1',
+              'text-[10px] font-mono text-zinc-500 hover:border-zinc-700 hover:text-zinc-600 transition-colors',
               loading && 'opacity-50 cursor-not-allowed',
             )}
           >
@@ -861,7 +861,7 @@ export default function MarketRotationPage() {
       {/* ── Live Sector ETF Strip ────────────────────────────────── */}
       {loading && !rotation.length ? (
         <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11 gap-2">
-          {[...Array(11)].map((_, i) => <div key={i} className="h-24 bg-gray-800/30 rounded-lg animate-pulse border border-gray-700/30" />)}
+          {[...Array(11)].map((_, i) => <div key={i} className="h-24 bg-zinc-900/30 rounded-lg animate-pulse border border-zinc-700/30" />)}
         </div>
       ) : (
         <LiveSectorStrip
@@ -873,7 +873,7 @@ export default function MarketRotationPage() {
       )}
 
       {/* ── Tab Navigation ───────────────────────────────────────── */}
-      <div className="flex gap-1 border-b border-gray-700/50">
+      <div className="flex gap-1 border-b border-zinc-700/50">
         {([
           { key: 'heatmap' as const, label: 'S&P 500 Heatmap' },
           { key: 'quadrant' as const, label: 'Rotation Quadrant' },
@@ -887,7 +887,7 @@ export default function MarketRotationPage() {
               'px-4 py-2 text-xs font-mono transition-colors border-b-2 -mb-[1px]',
               activeTab === tab.key
                 ? 'text-blue-400 border-blue-400'
-                : 'text-gray-500 border-transparent hover:text-gray-300',
+                : 'text-zinc-400 border-transparent hover:text-zinc-500',
             )}
           >
             {tab.label}
@@ -898,7 +898,7 @@ export default function MarketRotationPage() {
       {/* ── Main Content Area ────────────────────────────────────── */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
         {/* Left: Active tab content */}
-        <div className="rounded-lg border border-gray-700/30 bg-gray-900/30 overflow-hidden">
+        <div className="rounded-lg border border-zinc-700/30 bg-zinc-950/30 overflow-hidden">
           {activeTab === 'heatmap' && (
             <div className="h-[500px]">
               <TradingViewHeatmap />
@@ -915,7 +915,7 @@ export default function MarketRotationPage() {
                   onSelectSector={setSelectedSector}
                 />
               ) : (
-                <div className="flex items-center justify-center h-64 text-sm text-gray-500">No data</div>
+                <div className="flex items-center justify-center h-64 text-sm text-zinc-400">No data</div>
               )}
             </div>
           )}
@@ -927,17 +927,17 @@ export default function MarketRotationPage() {
         </div>
 
         {/* Right: Performance Table */}
-        <div className="rounded-lg border border-gray-700/30 bg-gray-900/30 p-4">
+        <div className="rounded-lg border border-zinc-700/30 bg-zinc-950/30 p-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-mono font-semibold text-gray-300 uppercase tracking-wider">Performance Rankings</h3>
-            <span className="text-[9px] font-mono text-gray-600">Click to sort</span>
+            <h3 className="text-xs font-mono font-semibold text-zinc-500 uppercase tracking-wider">Performance Rankings</h3>
+            <span className="text-[9px] font-mono text-zinc-400">Click to sort</span>
           </div>
           {loading && !heatmap.length ? (
             <Skeleton className="h-[400px]" />
           ) : heatmap.length > 0 ? (
             <PerformanceHeatmap rows={heatmap} rotationMap={rotationMap} onSelectSector={setSelectedSector} />
           ) : (
-            <div className="flex items-center justify-center h-64 text-sm text-gray-500">No data</div>
+            <div className="flex items-center justify-center h-64 text-sm text-zinc-400">No data</div>
           )}
         </div>
       </div>
@@ -945,7 +945,7 @@ export default function MarketRotationPage() {
       {/* ── TradingView Mini Widgets Row ─────────────────────────── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {(['XLK', 'XLE', 'XLF', 'XLV'] as const).map(sym => (
-          <div key={sym} className="rounded-lg border border-gray-700/30 bg-gray-900/30 h-[180px] overflow-hidden">
+          <div key={sym} className="rounded-lg border border-zinc-700/30 bg-zinc-950/30 h-[180px] overflow-hidden">
             <TradingViewMiniWidget symbol={sym} />
           </div>
         ))}
@@ -954,7 +954,7 @@ export default function MarketRotationPage() {
       {/* ── Sector Leaders Grid ──────────────────────────────────── */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-xs font-mono font-semibold text-gray-300 uppercase tracking-wider">
+          <h3 className="text-xs font-mono font-semibold text-zinc-500 uppercase tracking-wider">
             Sector Leaders — Top Stocks by Momentum
           </h3>
         </div>
@@ -964,7 +964,7 @@ export default function MarketRotationPage() {
             {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-64" />)}
           </div>
         ) : rotation.length === 0 ? (
-          <div className="text-sm text-gray-500 text-center py-8">No sector data</div>
+          <div className="text-sm text-zinc-400 text-center py-8">No sector data</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
             {sortedByMomentum.map(sector => (

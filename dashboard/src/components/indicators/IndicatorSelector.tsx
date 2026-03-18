@@ -29,7 +29,7 @@ function Pill({ id, label, color, active, onToggle }: PillProps) {
         'inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full border transition-all',
         active
           ? 'border-transparent text-[#FAF8F5] font-medium'
-          : 'border-gray-200 text-gray-400 hover:text-gray-500 hover:border-gray-200',
+          : 'border-zinc-800 text-zinc-500 hover:text-zinc-400 hover:border-zinc-800',
       )}
       style={active ? { background: color, borderColor: color } : {}}
     >
@@ -53,7 +53,7 @@ export default function IndicatorSelector() {
     <div className="flex items-center gap-3 flex-wrap">
       {/* Overlay group */}
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-mono text-gray-400 uppercase tracking-wider mr-0.5">
+        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">
           Overlay
         </span>
         {OVERLAYS.map((def) => (
@@ -69,11 +69,11 @@ export default function IndicatorSelector() {
       </div>
 
       {/* Divider */}
-      <div className="w-px h-4 bg-gray-200" />
+      <div className="w-px h-4 bg-zinc-800" />
 
       {/* Oscillator group */}
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-mono text-gray-400 uppercase tracking-wider mr-0.5">
+        <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-wider mr-0.5">
           Oscillator
         </span>
         {OSCILLATORS.map((def) => (

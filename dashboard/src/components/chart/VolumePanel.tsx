@@ -113,7 +113,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
   return (
     <div className={clsx('w-full', className)} style={{ touchAction: 'none' }}>
       <div className="flex items-center px-3 py-0.5">
-        <span className="text-[10px] font-mono text-gray-400">Volume</span>
+        <span className="text-[10px] font-mono text-zinc-500">Volume</span>
       </div>
       <div ref={containerRef} className="w-full" style={{ height: 'calc(100% - 20px)' }} />
     </div>

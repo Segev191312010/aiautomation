@@ -284,13 +284,13 @@ function SectionHeader({
   return (
     <div className="flex items-center gap-2.5 mb-4">
       {icon && (
-        <div className="w-7 h-7 rounded-lg bg-gray-100/60 flex items-center justify-center flex-shrink-0">
+        <div className="w-7 h-7 rounded-lg bg-zinc-800/60 flex items-center justify-center flex-shrink-0">
           {icon}
         </div>
       )}
       <div className="min-w-0">
-        <div className="text-[10px] font-sans uppercase tracking-[0.2em] text-gray-400">{eyebrow}</div>
-        <h2 className="text-sm font-sans font-semibold text-gray-800 tracking-wide">{title}</h2>
+        <div className="text-[10px] font-sans uppercase tracking-[0.2em] text-zinc-500">{eyebrow}</div>
+        <h2 className="text-sm font-sans font-semibold text-zinc-100 tracking-wide">{title}</h2>
       </div>
       {badge && <div className="ml-1">{badge}</div>}
       {action && <div className="ml-auto">{action}</div>}
@@ -314,13 +314,13 @@ interface KpiCardProps {
 
 function KpiCard({ label, value, sub, positive, icon, iconBg, accentColor }: KpiCardProps) {
   const valueColor =
-    positive === undefined ? 'text-gray-800' : positive ? 'text-emerald-600' : 'text-red-600'
+    positive === undefined ? 'text-zinc-100' : positive ? 'text-emerald-600' : 'text-red-400'
   const gradientFrom =
-    positive === true ? 'from-emerald-600/[0.04]' : positive === false ? 'from-red-600/[0.04]' : 'from-gray-50/50'
+    positive === true ? 'from-emerald-600/[0.04]' : positive === false ? 'from-red-600/[0.04]' : 'from-zinc-50/50'
 
   return (
     <div className={clsx(
-      'card rounded-2xl shadow-card p-4 flex flex-col gap-2 border-l-2 relative overflow-hidden',
+      'card rounded-2xl  p-4 flex flex-col gap-2 border-l-2 relative overflow-hidden',
       accentColor,
     )}>
       <div className={clsx(
@@ -331,7 +331,7 @@ function KpiCard({ label, value, sub, positive, icon, iconBg, accentColor }: Kpi
         <div className={clsx('w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0', iconBg)}>
           {icon}
         </div>
-        <span className="text-[10px] font-sans font-medium text-gray-500 tracking-widest uppercase truncate">
+        <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase truncate">
           {label}
         </span>
       </div>
@@ -339,7 +339,7 @@ function KpiCard({ label, value, sub, positive, icon, iconBg, accentColor }: Kpi
         {value}
       </span>
       {sub && (
-        <span className="text-[11px] font-mono text-gray-400 tabular-nums">{sub}</span>
+        <span className="text-[11px] font-mono text-zinc-500 tabular-nums">{sub}</span>
       )}
     </div>
   )
@@ -347,12 +347,12 @@ function KpiCard({ label, value, sub, positive, icon, iconBg, accentColor }: Kpi
 
 function KpiSkeleton() {
   return (
-    <div className="card rounded-2xl shadow-card p-4 flex flex-col gap-3 animate-pulse">
+    <div className="card rounded-2xl  p-4 flex flex-col gap-3 animate-pulse">
       <div className="flex items-center gap-2">
-        <div className="w-6 h-6 rounded-lg bg-gray-100" />
-        <div className="h-2.5 w-24 rounded bg-gray-100" />
+        <div className="w-6 h-6 rounded-lg bg-zinc-800" />
+        <div className="h-2.5 w-24 rounded bg-zinc-800" />
       </div>
-      <div className="h-6 w-32 rounded-xl bg-gray-100" />
+      <div className="h-6 w-32 rounded-xl bg-zinc-800" />
     </div>
   )
 }
@@ -428,19 +428,19 @@ function EquityCurveChart({ analytics, range, onRangeChange }: EquityCurveProps)
             onClick={() => onRangeChange(r)}
             className={clsx(
               'px-2.5 py-1 text-[11px] font-mono rounded-lg transition-colors',
-              range === r ? 'bg-indigo-600 text-white' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800',
+              range === r ? 'bg-indigo-600 text-white' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100',
             )}
           >
             {r}
           </button>
         ))}
-        <span className="ml-auto text-[10px] font-sans text-gray-400 flex items-center gap-3">
+        <span className="ml-auto text-[10px] font-sans text-zinc-500 flex items-center gap-3">
           <span className="flex items-center gap-1.5">
             <span className="w-5 h-0.5 bg-indigo-600 inline-block rounded" />
             Portfolio
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="w-5 h-px bg-gray-400 inline-block rounded" />
+            <span className="w-5 h-px bg-zinc-600 inline-block rounded" />
             SPY
           </span>
         </span>
@@ -499,8 +499,8 @@ function DailyPnLChart({ data }: { data: DailyPnL[] }) {
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-4 text-[11px] font-mono">
         <span className="text-emerald-600 font-semibold">{wins} up days</span>
-        <span className="text-red-500 font-semibold">{losses} down days</span>
-        <span className="text-gray-500">{winPct}% win rate</span>
+        <span className="text-red-400 font-semibold">{losses} down days</span>
+        <span className="text-zinc-400">{winPct}% win rate</span>
       </div>
       <div ref={containerRef} className="rounded-xl overflow-hidden" />
     </div>
@@ -524,7 +524,7 @@ const SECTOR_PALETTE: Record<string, { bar: string; dot: string; hex: string }> 
   'Real Estate':            { bar: 'bg-pink-500',    dot: 'bg-pink-500',    hex: '#EC4899' },
   'Communication Services': { bar: 'bg-sky-500',     dot: 'bg-sky-500',     hex: '#0EA5E9' },
   ETF:                      { bar: 'bg-slate-400',   dot: 'bg-slate-400',   hex: '#94A3B8' },
-  Unknown:                  { bar: 'bg-gray-400',    dot: 'bg-gray-400',    hex: '#9CA3AF' },
+  Unknown:                  { bar: 'bg-zinc-600',    dot: 'bg-zinc-600',    hex: '#9CA3AF' },
 }
 const pal = (sector: string) => SECTOR_PALETTE[sector] ?? SECTOR_PALETTE['Unknown']
 
@@ -553,10 +553,10 @@ function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
     <div className="flex flex-col gap-5">
       {/* Stacked allocation bar */}
       <div>
-        <div className="text-[10px] font-sans uppercase tracking-widest text-gray-400 mb-2">
+        <div className="text-[10px] font-sans uppercase tracking-widest text-zinc-500 mb-2">
           Position Allocation
         </div>
-        <div className="h-6 rounded-full overflow-hidden flex bg-gray-100">
+        <div className="h-6 rounded-full overflow-hidden flex bg-zinc-800">
           {sorted.map((p) => {
             const pct = totalValue > 0 ? (p.value / totalValue) * 100 : 0
             return (
@@ -580,9 +580,9 @@ function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
         <div className="flex-shrink-0 relative">
           <div className="w-[88px] h-[88px] rounded-full" style={{ background: conicGradient }} />
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="w-[52px] h-[52px] rounded-full bg-white flex flex-col items-center justify-center">
-              <span className="text-[8px] font-sans text-gray-400 uppercase tracking-wider leading-none">Sectors</span>
-              <span className="text-[13px] font-mono font-bold text-gray-800 leading-none mt-0.5">
+            <div className="w-[52px] h-[52px] rounded-full bg-zinc-900 flex flex-col items-center justify-center">
+              <span className="text-[8px] font-sans text-zinc-500 uppercase tracking-wider leading-none">Sectors</span>
+              <span className="text-[13px] font-mono font-bold text-zinc-100 leading-none mt-0.5">
                 {sectorEntries.length}
               </span>
             </div>
@@ -592,8 +592,8 @@ function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
           {sectorEntries.map(([sector, pct]) => (
             <div key={sector} className="flex items-center gap-2">
               <span className={clsx('w-2 h-2 rounded-full flex-shrink-0', pal(sector).dot)} />
-              <span className="text-[11px] font-sans text-gray-600 truncate flex-1">{sector}</span>
-              <span className="text-[11px] font-mono text-gray-500 tabular-nums">{pct.toFixed(1)}%</span>
+              <span className="text-[11px] font-sans text-zinc-400 truncate flex-1">{sector}</span>
+              <span className="text-[11px] font-mono text-zinc-400 tabular-nums">{pct.toFixed(1)}%</span>
             </div>
           ))}
         </div>
@@ -601,12 +601,12 @@ function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
 
       {/* Top 5 table */}
       <div>
-        <div className="text-[10px] font-sans uppercase tracking-widest text-gray-400 mb-2">Top Positions</div>
+        <div className="text-[10px] font-sans uppercase tracking-widest text-zinc-500 mb-2">Top Positions</div>
         <table className="w-full">
           <thead>
-            <tr className="border-b border-gray-200">
+            <tr className="border-b border-zinc-800">
               {['Symbol', 'Sector', 'Value', 'Weight', 'P&L'].map((c, i) => (
-                <th key={c} className={clsx('py-1.5 px-2 text-[10px] font-sans uppercase tracking-widest text-gray-400', i < 2 ? 'text-left' : 'text-right')}>
+                <th key={c} className={clsx('py-1.5 px-2 text-[10px] font-sans uppercase tracking-widest text-zinc-500', i < 2 ? 'text-left' : 'text-right')}>
                   {c}
                 </th>
               ))}
@@ -614,29 +614,29 @@ function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
           </thead>
           <tbody>
             {top5.map((p) => (
-              <tr key={p.symbol} className="border-b border-gray-100 hover:bg-gray-50/60 transition-colors">
-                <td className="py-2 px-2 font-mono text-sm font-semibold text-gray-800">{p.symbol}</td>
+              <tr key={p.symbol} className="border-b border-zinc-800 hover:bg-zinc-900/60 transition-colors">
+                <td className="py-2 px-2 font-mono text-sm font-semibold text-zinc-100">{p.symbol}</td>
                 <td className="py-2 px-2">
-                  <span className="flex items-center gap-1.5 text-[11px] font-sans text-gray-500 max-w-[120px]">
+                  <span className="flex items-center gap-1.5 text-[11px] font-sans text-zinc-400 max-w-[120px]">
                     <span className={clsx('w-1.5 h-1.5 rounded-full flex-shrink-0', pal(p.sector).dot)} />
                     <span className="truncate">{p.sector}</span>
                   </span>
                 </td>
-                <td className="py-2 px-2 font-mono text-sm text-gray-600 tabular-nums text-right">
+                <td className="py-2 px-2 font-mono text-sm text-zinc-400 tabular-nums text-right">
                   {fmtUSDCompact(p.value)}
                 </td>
                 <td className="py-2 px-2 text-right">
                   <div className="flex items-center justify-end gap-2">
-                    <div className="w-12 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                    <div className="w-12 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                       <div className="h-full rounded-full bg-indigo-500" style={{ width: `${Math.min(p.weight_pct, 100)}%` }} />
                     </div>
-                    <span className="font-mono text-[11px] text-gray-500 tabular-nums w-10 text-right">
+                    <span className="font-mono text-[11px] text-zinc-400 tabular-nums w-10 text-right">
                       {p.weight_pct.toFixed(1)}%
                     </span>
                   </div>
                 </td>
                 <td className="py-2 px-2 text-right">
-                  <span className={clsx('text-[11px] font-mono font-semibold tabular-nums', p.pnl >= 0 ? 'text-emerald-600' : 'text-red-600')}>
+                  <span className={clsx('text-[11px] font-mono font-semibold tabular-nums', p.pnl >= 0 ? 'text-emerald-600' : 'text-red-400')}>
                     {p.pnl >= 0 ? '+' : ''}{fmtUSD(p.pnl)}
                   </span>
                 </td>
@@ -659,7 +659,7 @@ function usagePct(used: number, limit: number): number {
 }
 
 function riskCol(pct: number) {
-  if (pct >= 80) return { bar: 'bg-red-500',    text: 'text-red-600',    bg: 'bg-red-50',    border: 'border-red-200'    }
+  if (pct >= 80) return { bar: 'bg-red-500',    text: 'text-red-400',    bg: 'bg-red-500/10',    border: 'border-red-200'    }
   if (pct >= 60) return { bar: 'bg-amber-500',  text: 'text-amber-600',  bg: 'bg-amber-50',  border: 'border-amber-200'  }
   return             { bar: 'bg-emerald-500', text: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' }
 }
@@ -677,13 +677,13 @@ function RiskGauge({ item }: { item: RiskLimits['limits'][0] }) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-sans text-gray-600">{item.label}</span>
+        <span className="text-[11px] font-sans text-zinc-400">{item.label}</span>
         <span className={clsx('text-[11px] font-mono font-semibold tabular-nums', col.text)}>
           {fmt(item.used)}
-          <span className="text-gray-400 font-normal"> / {fmt(item.limit)}</span>
+          <span className="text-zinc-500 font-normal"> / {fmt(item.limit)}</span>
         </span>
       </div>
-      <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+      <div className="h-2 rounded-full bg-zinc-800 overflow-hidden">
         <div className={clsx('h-full rounded-full transition-all duration-700', col.bar)} style={{ width: `${pct}%` }} />
       </div>
       <div className="flex items-center justify-between">
@@ -720,10 +720,10 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
       {/* Win/loss distribution bar */}
       <div>
         <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[10px] font-sans uppercase tracking-widest text-gray-400">Win / Loss Distribution</span>
-          <span className="text-[11px] font-mono text-gray-500">{closed.length} closed trades</span>
+          <span className="text-[10px] font-sans uppercase tracking-widest text-zinc-500">Win / Loss Distribution</span>
+          <span className="text-[11px] font-mono text-zinc-400">{closed.length} closed trades</span>
         </div>
-        <div className="h-5 rounded-full overflow-hidden flex bg-gray-100">
+        <div className="h-5 rounded-full overflow-hidden flex bg-zinc-800">
           {closed.length > 0 && (
             <>
               <div
@@ -744,7 +744,7 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
         <div className="flex flex-wrap items-center gap-4 mt-1.5">
           <span className="text-[11px] font-mono text-emerald-600">{winPct.toFixed(1)}% win rate</span>
           {avgHoldDays !== null && (
-            <span className="text-[11px] font-mono text-gray-500">Avg hold: {avgHoldDays.toFixed(1)} days</span>
+            <span className="text-[11px] font-mono text-zinc-400">Avg hold: {avgHoldDays.toFixed(1)} days</span>
           )}
           {best && (
             <span className="text-[11px] font-mono text-emerald-600 ml-auto">
@@ -752,7 +752,7 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
             </span>
           )}
           {worst && (
-            <span className="text-[11px] font-mono text-red-600">
+            <span className="text-[11px] font-mono text-red-400">
               Worst: {fmtUSD(worst.pnl ?? 0)} ({worst.symbol})
             </span>
           )}
@@ -761,13 +761,13 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
 
       {/* Recent trades table */}
       <div>
-        <div className="text-[10px] font-sans uppercase tracking-widest text-gray-400 mb-2">Recent Trades</div>
+        <div className="text-[10px] font-sans uppercase tracking-widest text-zinc-500 mb-2">Recent Trades</div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[500px]">
             <thead>
-              <tr className="border-b border-gray-200">
+              <tr className="border-b border-zinc-800">
                 {['Time', 'Symbol', 'Side', 'Qty', 'Fill Price', 'P&L', 'Hold'].map((c, i) => (
-                  <th key={c} className={clsx('py-2 px-2 text-[10px] font-sans uppercase tracking-widest text-gray-400', i < 3 ? 'text-left' : 'text-right')}>
+                  <th key={c} className={clsx('py-2 px-2 text-[10px] font-sans uppercase tracking-widest text-zinc-500', i < 3 ? 'text-left' : 'text-right')}>
                     {c}
                   </th>
                 ))}
@@ -777,26 +777,26 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
               {trades.slice(0, 20).map((t) => {
                 const isBuy = t.action === 'BUY'
                 return (
-                  <tr key={t.id} className={clsx('border-b border-gray-100 transition-colors', isBuy ? 'hover:bg-emerald-500/[0.03]' : 'hover:bg-red-500/[0.03]')}>
-                    <td className="py-2 px-2 font-mono text-[11px] text-gray-400 whitespace-nowrap">{fmtDate(t.timestamp)}</td>
-                    <td className="py-2 px-2 font-mono text-sm font-semibold text-gray-800">{t.symbol}</td>
+                  <tr key={t.id} className={clsx('border-b border-zinc-800 transition-colors', isBuy ? 'hover:bg-emerald-500/[0.03]' : 'hover:bg-red-500/[0.03]')}>
+                    <td className="py-2 px-2 font-mono text-[11px] text-zinc-500 whitespace-nowrap">{fmtDate(t.timestamp)}</td>
+                    <td className="py-2 px-2 font-mono text-sm font-semibold text-zinc-100">{t.symbol}</td>
                     <td className="py-2 px-2">
                       <span className={clsx(
                         'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg border text-[10px] font-mono font-semibold',
-                        isBuy ? 'text-emerald-600 bg-emerald-50 border-emerald-200' : 'text-red-600 bg-red-50 border-red-200',
+                        isBuy ? 'text-emerald-600 bg-emerald-50 border-emerald-200' : 'text-red-400 bg-red-500/10 border-red-200',
                       )}>
                         <span className={clsx('w-1 h-1 rounded-full', isBuy ? 'bg-emerald-500' : 'bg-red-500')} />
                         {t.action}
                       </span>
                     </td>
-                    <td className="py-2 px-2 font-mono text-sm text-gray-500 tabular-nums text-right">{t.quantity.toLocaleString('en-US')}</td>
-                    <td className="py-2 px-2 font-mono text-sm text-gray-600 tabular-nums text-right">{fmtUSD(t.fill_price)}</td>
+                    <td className="py-2 px-2 font-mono text-sm text-zinc-400 tabular-nums text-right">{t.quantity.toLocaleString('en-US')}</td>
+                    <td className="py-2 px-2 font-mono text-sm text-zinc-400 tabular-nums text-right">{fmtUSD(t.fill_price)}</td>
                     <td className="py-2 px-2 font-mono text-sm tabular-nums text-right">
                       {t.pnl !== undefined
-                        ? <span className={t.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}>{t.pnl >= 0 ? '+' : ''}{fmtUSD(t.pnl)}</span>
-                        : <span className="text-gray-300">—</span>}
+                        ? <span className={t.pnl >= 0 ? 'text-emerald-600' : 'text-red-400'}>{t.pnl >= 0 ? '+' : ''}{fmtUSD(t.pnl)}</span>
+                        : <span className="text-zinc-500">—</span>}
                     </td>
-                    <td className="py-2 px-2 font-mono text-[11px] text-gray-400 text-right">
+                    <td className="py-2 px-2 font-mono text-[11px] text-zinc-500 text-right">
                       {t.holding_days !== undefined ? `${t.holding_days}d` : '—'}
                     </td>
                   </tr>
@@ -815,21 +815,21 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function corrBg(v: number): string {
-  if (v === 1)     return 'bg-gray-200'
+  if (v === 1)     return 'bg-zinc-800'
   const a = Math.abs(v)
   if (a >= 0.8)    return v > 0 ? 'bg-red-200'    : 'bg-blue-200'
-  if (a >= 0.6)    return v > 0 ? 'bg-red-100'    : 'bg-blue-100'
+  if (a >= 0.6)    return v > 0 ? 'bg-red-500/15'    : 'bg-blue-100'
   if (a >= 0.4)    return v > 0 ? 'bg-orange-100' : 'bg-indigo-100'
   if (a >= 0.2)    return v > 0 ? 'bg-amber-50'   : 'bg-sky-50'
-  return 'bg-gray-50'
+  return 'bg-zinc-900'
 }
 
 function corrText(v: number): string {
-  if (v === 1) return 'text-gray-600'
+  if (v === 1) return 'text-zinc-400'
   const a = Math.abs(v)
   if (a >= 0.6) return v > 0 ? 'text-red-700'    : 'text-blue-700'
   if (a >= 0.3) return v > 0 ? 'text-orange-700' : 'text-indigo-700'
-  return 'text-gray-600'
+  return 'text-zinc-400'
 }
 
 function CorrelationMatrixPanel({ matrix }: { matrix: CorrelationMatrix }) {
@@ -841,14 +841,14 @@ function CorrelationMatrixPanel({ matrix }: { matrix: CorrelationMatrix }) {
           <tr>
             <th className="w-16 h-8" />
             {symbols.map((s) => (
-              <th key={s} className="w-16 h-8 text-[10px] font-mono font-semibold text-gray-600 tracking-wide">{s}</th>
+              <th key={s} className="w-16 h-8 text-[10px] font-mono font-semibold text-zinc-400 tracking-wide">{s}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {symbols.map((rowSym, i) => (
             <tr key={rowSym}>
-              <td className="text-[10px] font-mono font-semibold text-gray-600 pr-2 text-right whitespace-nowrap">{rowSym}</td>
+              <td className="text-[10px] font-mono font-semibold text-zinc-400 pr-2 text-right whitespace-nowrap">{rowSym}</td>
               {symbols.map((_, j) => {
                 const v = mat[i][j]
                 return (
@@ -861,9 +861,9 @@ function CorrelationMatrixPanel({ matrix }: { matrix: CorrelationMatrix }) {
           ))}
         </tbody>
       </table>
-      <div className="mt-3 flex items-center gap-4 text-[10px] font-sans text-gray-500 flex-wrap">
+      <div className="mt-3 flex items-center gap-4 text-[10px] font-sans text-zinc-400 flex-wrap">
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-200 inline-block" /> High positive (concentrated)</span>
-        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-gray-50 border border-gray-200 inline-block" /> Low (diversified)</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-zinc-900 border border-zinc-800 inline-block" /> Low (diversified)</span>
         <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-blue-200 inline-block" /> Negative (hedge)</span>
       </div>
     </div>
@@ -951,8 +951,8 @@ export default function AnalyticsPage() {
       positive: kpiData.day_pnl >= 0,
       icon:     kpiData.day_pnl >= 0
         ? <IconTrendUp   className="w-3.5 h-3.5 text-emerald-600" />
-        : <IconTrendDown className="w-3.5 h-3.5 text-red-600" />,
-      iconBg:      kpiData.day_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-50',
+        : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />,
+      iconBg:      kpiData.day_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-500/10',
       accentColor: kpiData.day_pnl >= 0 ? 'border-l-emerald-500/60' : 'border-l-red-500/60',
     },
     {
@@ -962,8 +962,8 @@ export default function AnalyticsPage() {
       positive: kpiData.total_pnl >= 0,
       icon:     kpiData.total_pnl >= 0
         ? <IconTrendUp   className="w-3.5 h-3.5 text-emerald-600" />
-        : <IconTrendDown className="w-3.5 h-3.5 text-red-600" />,
-      iconBg:      kpiData.total_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-50',
+        : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />,
+      iconBg:      kpiData.total_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-500/10',
       accentColor: kpiData.total_pnl >= 0 ? 'border-l-emerald-500/60' : 'border-l-red-500/60',
     },
     {
@@ -1000,8 +1000,8 @@ export default function AnalyticsPage() {
       {/* ── Page title ──────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-4">
         <div>
-          <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-gray-400">Stage 7</div>
-          <h1 className="mt-1 text-2xl font-sans font-semibold text-gray-900">Portfolio Analytics</h1>
+          <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">Stage 7</div>
+          <h1 className="mt-1 text-2xl font-sans font-semibold text-zinc-50">Portfolio Analytics</h1>
         </div>
         <div className="flex items-center gap-2">
           {simMode && (
@@ -1010,14 +1010,14 @@ export default function AnalyticsPage() {
             </span>
           )}
           {loading && (
-            <span className="text-[10px] font-mono text-gray-400 animate-pulse">Loading…</span>
+            <span className="text-[10px] font-mono text-zinc-500 animate-pulse">Loading…</span>
           )}
         </div>
       </div>
 
       {/* ── 1. KPI Strip ────────────────────────────────────────────────── */}
       <section className="animate-fade-in-up">
-        <div className="text-[10px] font-sans uppercase tracking-[0.2em] text-gray-400 mb-3">
+        <div className="text-[10px] font-sans uppercase tracking-[0.2em] text-zinc-500 mb-3">
           Portfolio KPIs
         </div>
         {loading && !analytics ? (
@@ -1033,37 +1033,37 @@ export default function AnalyticsPage() {
 
       {/* ── 2. Equity Curve ─────────────────────────────────────────────── */}
       <section
-        className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+        className="card rounded-2xl  p-5 animate-fade-in-up"
         style={{ animationDelay: '40ms' }}
       >
         <SectionHeader
           icon={<IconTrendUp className="w-3.5 h-3.5 text-indigo-500" />}
           eyebrow="Performance"
           title="Equity Curve"
-          badge={<span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-gray-100 text-gray-500">vs SPY</span>}
+          badge={<span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">vs SPY</span>}
         />
         {liveAnalytics ? (
           <EquityCurveChart analytics={liveAnalytics} range={range} onRangeChange={setRange} />
         ) : (
-          <div className="h-[300px] rounded-xl bg-gray-100/40 animate-pulse" />
+          <div className="h-[300px] rounded-xl bg-zinc-800/40 animate-pulse" />
         )}
       </section>
 
       {/* ── 3. Daily P&L Bar Chart ───────────────────────────────────────── */}
       <section
-        className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+        className="card rounded-2xl  p-5 animate-fade-in-up"
         style={{ animationDelay: '80ms' }}
       >
         <SectionHeader
           icon={<IconBarChart className="w-3.5 h-3.5 text-emerald-500" />}
           eyebrow="Daily"
           title="Daily P&L"
-          badge={<span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-gray-100 text-gray-500">90 days</span>}
+          badge={<span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">90 days</span>}
         />
         {dailyPnL ? (
           <DailyPnLChart data={dailyPnL} />
         ) : (
-          <div className="h-[220px] rounded-xl bg-gray-100/40 animate-pulse" />
+          <div className="h-[220px] rounded-xl bg-zinc-800/40 animate-pulse" />
         )}
       </section>
 
@@ -1073,14 +1073,14 @@ export default function AnalyticsPage() {
         style={{ animationDelay: '120ms' }}
       >
         {/* 4. Position Exposure */}
-        <section className="card rounded-2xl shadow-card p-5">
+        <section className="card rounded-2xl  p-5">
           <SectionHeader
             icon={<IconPieChart className="w-3.5 h-3.5 text-indigo-500" />}
             eyebrow="Allocation"
             title="Position Exposure"
             badge={
               exposure && (
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-gray-100 text-gray-500">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">
                   {exposure.positions.length} positions
                 </span>
               )
@@ -1090,14 +1090,14 @@ export default function AnalyticsPage() {
             <ExposurePanel exposure={exposure} />
           ) : (
             <div className="space-y-3 animate-pulse">
-              <div className="h-6 rounded-full bg-gray-100" />
-              <div className="h-24 rounded-xl bg-gray-100" />
+              <div className="h-6 rounded-full bg-zinc-800" />
+              <div className="h-24 rounded-xl bg-zinc-800" />
             </div>
           )}
         </section>
 
         {/* 5. Risk Metrics */}
-        <section className="card rounded-2xl shadow-card p-5">
+        <section className="card rounded-2xl  p-5">
           <SectionHeader
             icon={<IconShield className="w-3.5 h-3.5 text-rose-500" />}
             eyebrow="Risk Management"
@@ -1108,7 +1108,7 @@ export default function AnalyticsPage() {
               {riskLimits.limits.map((item) => (
                 <RiskGauge key={item.label} item={item} />
               ))}
-              <p className="text-[10px] font-sans text-gray-400 pt-1 border-t border-gray-100">
+              <p className="text-[10px] font-sans text-zinc-500 pt-1 border-t border-zinc-800">
                 Bars turn amber at 60% and red at 80% of each limit.
               </p>
             </div>
@@ -1116,8 +1116,8 @@ export default function AnalyticsPage() {
             <div className="space-y-4 animate-pulse">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div key={i} className="flex flex-col gap-1.5">
-                  <div className="h-3 w-40 rounded bg-gray-100" />
-                  <div className="h-2 rounded-full bg-gray-100" />
+                  <div className="h-3 w-40 rounded bg-zinc-800" />
+                  <div className="h-2 rounded-full bg-zinc-800" />
                 </div>
               ))}
             </div>
@@ -1127,16 +1127,16 @@ export default function AnalyticsPage() {
 
       {/* ── 6. Trade History Summary ─────────────────────────────────────── */}
       <section
-        className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+        className="card rounded-2xl  p-5 animate-fade-in-up"
         style={{ animationDelay: '160ms' }}
       >
         <SectionHeader
-          icon={<IconHistory className="w-3.5 h-3.5 text-gray-500" />}
+          icon={<IconHistory className="w-3.5 h-3.5 text-zinc-400" />}
           eyebrow="Trades"
           title="Trade History Summary"
           badge={
             tradeHist && (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-gray-100 text-gray-500">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">
                 Last {Math.min(tradeHist.length, 20)}
               </span>
             )
@@ -1148,11 +1148,11 @@ export default function AnalyticsPage() {
           <div className="space-y-2.5 animate-pulse">
             {Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="flex gap-3">
-                <div className="h-3 w-16 rounded bg-gray-100" />
-                <div className="h-3 w-12 rounded bg-gray-100" />
-                <div className="h-5 w-10 rounded bg-gray-100" />
-                <div className="h-3 w-8 rounded bg-gray-100 ml-auto" />
-                <div className="h-3 w-20 rounded bg-gray-100" />
+                <div className="h-3 w-16 rounded bg-zinc-800" />
+                <div className="h-3 w-12 rounded bg-zinc-800" />
+                <div className="h-5 w-10 rounded bg-zinc-800" />
+                <div className="h-3 w-8 rounded bg-zinc-800 ml-auto" />
+                <div className="h-3 w-20 rounded bg-zinc-800" />
               </div>
             ))}
           </div>
@@ -1162,7 +1162,7 @@ export default function AnalyticsPage() {
       {/* ── 7. Correlation Matrix (3+ positions only) ────────────────────── */}
       {showCorrelation && correlation && (
         <section
-          className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+          className="card rounded-2xl  p-5 animate-fade-in-up"
           style={{ animationDelay: '200ms' }}
         >
           <SectionHeader
@@ -1170,7 +1170,7 @@ export default function AnalyticsPage() {
             eyebrow="Diversification"
             title="Correlation Matrix"
             badge={
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-gray-100 text-gray-500">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">
                 {correlation.symbols.length} assets
               </span>
             }

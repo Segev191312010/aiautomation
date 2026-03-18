@@ -65,14 +65,14 @@ export default function StockProfilePage() {
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto">
-      <section className="card rounded-lg p-5 shadow-card">
+      <section className="card rounded-lg p-5 ">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-gray-400">Stock Analysis</div>
-            <h1 className="mt-1 text-3xl font-sans font-semibold tracking-tight text-gray-900">
+            <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">Stock Analysis</div>
+            <h1 className="mt-1 text-3xl font-sans font-semibold tracking-tight text-zinc-50">
               {overview?.symbol ?? symbol}
             </h1>
-            <p className="mt-2 text-sm font-sans text-gray-600">
+            <p className="mt-2 text-sm font-sans text-zinc-400">
               Fundamentals-first company profile with statements, narrative context, analyst opinion, catalysts, and ownership.
             </p>
           </div>
@@ -83,22 +83,22 @@ export default function StockProfilePage() {
                 value={searchInput}
                 onChange={(e) => setSearch(e.target.value.toUpperCase())}
                 placeholder="Enter ticker symbol..."
-                className="flex-1 text-sm font-mono bg-white border border-gray-200 rounded-l-lg px-4 py-2.5 text-gray-800 placeholder:text-gray-400 focus:border-gray-400 focus:outline-none transition-colors"
+                className="flex-1 text-sm font-mono bg-zinc-900 border border-zinc-800 rounded-l-lg px-4 py-2.5 text-zinc-100 placeholder:text-zinc-500 focus:border-zinc-700 focus:outline-none transition-colors"
               />
               <button
                 type="submit"
-                className="text-sm font-sans font-semibold px-5 py-2.5 rounded-r-lg bg-gray-900 hover:bg-gray-800 border border-gray-900 text-white transition-colors shrink-0"
+                className="text-sm font-sans font-semibold px-5 py-2.5 rounded-r-lg bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 text-white transition-colors shrink-0"
               >
                 Search
               </button>
             </form>
 
             <div className="flex flex-wrap gap-2">
-              <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+              <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">
                 {overview?.exchange ?? 'Profile'}
               </span>
               {overview?.sector && (
-                <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+                <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">
                   {overview.sector}
                 </span>
               )}
@@ -115,7 +115,7 @@ export default function StockProfilePage() {
       <SectionNav />
 
       {error && (
-        <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-2.5 text-[11px] font-sans text-red-600">
+        <div className="rounded-lg border border-red-300 bg-red-500/10 px-4 py-2.5 text-[11px] font-sans text-red-400">
           {error}
         </div>
       )}

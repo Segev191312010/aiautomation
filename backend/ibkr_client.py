@@ -320,22 +320,99 @@ class IBKRClient:
 
     async def get_positions(self) -> list[Position]:
         """
-        ib.portfolio() includes live price, value, and P&L — unlike
-        ib.positions() which lacks those fields.
+        Try portfolio() first (includes live price/P&L), fall back to positions().
+        For multi-account setups, filter to the primary trading account.
         """
         positions: list[Position] = []
-        for item in self._ib.portfolio():
-            contract = item.contract
+
+        # Determine primary account
+        accounts = self._ib.managedAccounts()
+        primary_account = accounts[0] if accounts else None
+
+        # Try portfolio() first — has live price data
+        portfolio_items = self._ib.portfolio(primary_account) if primary_account else self._ib.portfolio()
+        if portfolio_items:
+            for item in portfolio_items:
+                if item.position == 0:
+                    continue
+                contract = item.contract
+                positions.append(
+                    Position(
+                        symbol=contract.symbol,
+                        asset_type=contract.secType,
+                        qty=item.position,
+                        avg_cost=item.averageCost,
+                        market_price=item.marketPrice,
+                        market_value=item.marketValue,
+                        unrealized_pnl=item.unrealizedPNL,
+                        realized_pnl=item.realizedPNL,
+                    )
+                )
+            return positions
+
+        # Fallback: positions() + fetch live prices
+        raw_positions = self._ib.positions(primary_account) if primary_account else self._ib.positions()
+        raw_positions = [p for p in raw_positions if p.position != 0]
+
+        if not raw_positions:
+            return positions
+
+        # Fetch live prices via IBKR reqTickers (fast snapshot)
+        live_prices: dict[str, float] = {}
+        try:
+            contracts = [p.contract for p in raw_positions]
+            await self._ib.qualifyContractsAsync(*contracts)
+            tickers = await self._ib.reqTickersAsync(*contracts)
+            for ticker in tickers:
+                sym = ticker.contract.symbol
+                price = ticker.marketPrice()
+                if price and price > 0 and price != float('inf'):
+                    live_prices[sym] = price
+                elif ticker.last and ticker.last > 0:
+                    live_prices[sym] = ticker.last
+                elif ticker.close and ticker.close > 0:
+                    live_prices[sym] = ticker.close
+        except Exception as e:
+            log.warning("Failed to fetch live prices via IBKR: %s — trying yfinance", e)
+
+        # Fallback: yfinance batch for any missing prices
+        missing = [p.contract.symbol for p in raw_positions if p.contract.symbol not in live_prices]
+        if missing:
+            try:
+                import yfinance as yf
+                data = yf.download(missing, period="1d", progress=False)
+                if not data.empty:
+                    close = data["Close"]
+                    if hasattr(close, "columns"):
+                        for sym in missing:
+                            if sym in close.columns:
+                                val = close[sym].dropna()
+                                if len(val) > 0:
+                                    live_prices[sym] = float(val.iloc[-1])
+                    else:
+                        if len(missing) == 1 and len(close.dropna()) > 0:
+                            live_prices[missing[0]] = float(close.dropna().iloc[-1])
+            except Exception as e:
+                log.warning("yfinance price fallback failed: %s", e)
+
+        for item in raw_positions:
+            sym = item.contract.symbol
+            avg_cost = item.avgCost
+            qty = item.position
+            live_price = live_prices.get(sym, avg_cost)
+            market_value = qty * live_price
+            unrealized_pnl = (live_price - avg_cost) * qty
+
             positions.append(
                 Position(
-                    symbol=contract.symbol,
-                    asset_type=contract.secType,
-                    qty=item.position,
-                    avg_cost=item.averageCost,
-                    market_price=item.marketPrice,
-                    market_value=item.marketValue,
-                    unrealized_pnl=item.unrealizedPNL,
-                    realized_pnl=item.realizedPNL,
+                    symbol=sym,
+                    asset_type=item.contract.secType,
+                    qty=qty,
+                    avg_cost=avg_cost,
+                    market_price=live_price,
+                    market_value=market_value,
+                    unrealized_pnl=round(unrealized_pnl, 2),
+                    realized_pnl=0.0,
                 )
             )
         return positions

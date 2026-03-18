@@ -27,7 +27,7 @@ function StatCard({
   const accentMap = {
     indigo: 'bg-indigo-50 text-indigo-600 border-indigo-100',
     amber:  'bg-amber-50  text-amber-600  border-amber-100',
-    green:  'bg-green-50  text-green-600  border-green-100',
+    green:  'bg-emerald-500/10  text-emerald-400  border-emerald-100',
   }
   return (
     <div className={`flex flex-col items-center justify-center px-4 py-3 rounded-xl border ${accentMap[accent]}`}>
@@ -74,7 +74,7 @@ function MiniBarChart({ data, height = 48 }: BarChartProps) {
             width={`${w}%`}
             height={barHeight}
             rx="1"
-            className={isEmpty ? 'fill-gray-100' : 'fill-indigo-400'}
+            className={isEmpty ? 'fill-zinc-800' : 'fill-indigo-400'}
             aria-label={`${d.date}: ${d.count} alerts`}
           />
         )
@@ -88,7 +88,7 @@ function MiniBarChart({ data, height = 48 }: BarChartProps) {
 function TopSymbolsList({ symbols }: { symbols: { symbol: string; count: number }[] }) {
   if (symbols.length === 0) {
     return (
-      <p className="text-[11px] font-sans text-gray-400 italic">No data yet.</p>
+      <p className="text-[11px] font-sans text-zinc-500 italic">No data yet.</p>
     )
   }
 
@@ -103,14 +103,14 @@ function TopSymbolsList({ symbols }: { symbols: { symbol: string; count: number 
             {symbol}
           </span>
           {/* Progress bar */}
-          <div className="flex-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+          <div className="flex-1 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
             <div
               className="h-full rounded-full bg-amber-400"
               style={{ width: `${(count / maxCount) * 100}%` }}
             />
           </div>
           {/* Count */}
-          <span className="text-[11px] font-mono text-gray-400 shrink-0 w-6 text-right tabular-nums">
+          <span className="text-[11px] font-mono text-zinc-500 shrink-0 w-6 text-right tabular-nums">
             {count}
           </span>
         </li>
@@ -126,11 +126,11 @@ function StatsSkeleton() {
     <div className="space-y-4 animate-pulse">
       <div className="grid grid-cols-3 gap-3">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="h-16 rounded-xl bg-gray-100" />
+          <div key={i} className="h-16 rounded-xl bg-zinc-800" />
         ))}
       </div>
-      <div className="h-14 rounded-xl bg-gray-100" />
-      <div className="h-20 rounded-xl bg-gray-100" />
+      <div className="h-14 rounded-xl bg-zinc-800" />
+      <div className="h-20 rounded-xl bg-zinc-800" />
     </div>
   )
 }
@@ -140,12 +140,12 @@ function StatsSkeleton() {
 function EmptyStats() {
   return (
     <div className="flex flex-col items-center justify-center py-10 gap-3">
-      <div className="w-10 h-10 rounded-xl bg-gray-50 flex items-center justify-center">
-        <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 text-gray-300">
+      <div className="w-10 h-10 rounded-xl bg-zinc-900 flex items-center justify-center">
+        <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 text-zinc-500">
           <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z" />
         </svg>
       </div>
-      <p className="text-xs font-sans text-gray-400 text-center">
+      <p className="text-xs font-sans text-zinc-500 text-center">
         No statistics yet.<br />Triggered alerts will appear here.
       </p>
     </div>
@@ -170,14 +170,14 @@ export default function AlertStats() {
   if (!stats) {
     if (history.length === 0) {
       return (
-        <div className="card rounded-2xl border border-gray-200 p-5">
+        <div className="card rounded-2xl border border-zinc-800 p-5">
           <SectionHeader title="Activity" />
           <EmptyStats />
         </div>
       )
     }
     return (
-      <div className="card rounded-2xl border border-gray-200 p-5">
+      <div className="card rounded-2xl border border-zinc-800 p-5">
         <SectionHeader title="Activity" />
         <StatsSkeleton />
       </div>
@@ -195,7 +195,7 @@ function SectionHeader({ title }: { title: string }) {
           <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z" />
         </svg>
       </div>
-      <h3 className="text-xs font-sans font-semibold text-gray-700 tracking-wide uppercase">
+      <h3 className="text-xs font-sans font-semibold text-zinc-200 tracking-wide uppercase">
         {title}
       </h3>
     </div>
@@ -212,7 +212,7 @@ function AlertStatsPanel({ stats }: { stats: AlertStatsType }) {
   const hasActivity = stats.total_month > 0 || stats.daily_counts.some((d) => d.count > 0)
 
   return (
-    <div className="card rounded-2xl border border-gray-200 p-5 space-y-5">
+    <div className="card rounded-2xl border border-zinc-800 p-5 space-y-5">
       <SectionHeader title="Alert Activity" />
 
       {/* ── Summary KPIs ─────────────────────────────────────────────── */}
@@ -229,17 +229,17 @@ function AlertStatsPanel({ stats }: { stats: AlertStatsType }) {
           {/* ── Activity bar chart ──────────────────────────────────── */}
           {stats.daily_counts.length > 0 && (
             <div>
-              <p className="text-[10px] font-sans font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              <p className="text-[10px] font-sans font-semibold text-zinc-500 uppercase tracking-wider mb-2">
                 Last 14 days
               </p>
               <MiniBarChart data={stats.daily_counts} height={44} />
               {/* X-axis labels: first and last date only */}
               {stats.daily_counts.length >= 2 && (
                 <div className="flex justify-between mt-1">
-                  <span className="text-[10px] font-mono text-gray-400">
+                  <span className="text-[10px] font-mono text-zinc-500">
                     {fmtDate(stats.daily_counts[0]!.date)}
                   </span>
-                  <span className="text-[10px] font-mono text-gray-400">
+                  <span className="text-[10px] font-mono text-zinc-500">
                     {fmtDate(stats.daily_counts[stats.daily_counts.length - 1]!.date)}
                   </span>
                 </div>
@@ -250,7 +250,7 @@ function AlertStatsPanel({ stats }: { stats: AlertStatsType }) {
           {/* ── Top symbols ─────────────────────────────────────────── */}
           {stats.top_symbols.length > 0 && (
             <div>
-              <p className="text-[10px] font-sans font-semibold text-gray-400 uppercase tracking-wider mb-2.5">
+              <p className="text-[10px] font-sans font-semibold text-zinc-500 uppercase tracking-wider mb-2.5">
                 Most active symbols
               </p>
               <TopSymbolsList symbols={stats.top_symbols} />

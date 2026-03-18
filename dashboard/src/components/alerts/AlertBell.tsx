@@ -32,17 +32,17 @@ interface FiredItemProps {
 
 function FiredItem({ event }: FiredItemProps) {
   return (
-    <div className="group px-4 py-3 border-b border-gray-100 last:border-0 hover:bg-gray-100/60 cursor-pointer transition-colors">
+    <div className="group px-4 py-3 border-b border-zinc-800 last:border-0 hover:bg-zinc-800/60 cursor-pointer transition-colors">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           {/* Amber trigger dot */}
           <span className="w-1.5 h-1.5 rounded-full bg-amber-600 shrink-0 mt-0.5" />
-          <span className="text-xs font-sans font-semibold text-gray-800 truncate">
+          <span className="text-xs font-sans font-semibold text-zinc-100 truncate">
             {event.name}
           </span>
         </div>
         {/* timestamp — keep font-mono */}
-        <span className="text-[10px] font-mono text-gray-400 shrink-0">
+        <span className="text-[10px] font-mono text-zinc-500 shrink-0">
           {timeAgo(event.timestamp)}
         </span>
       </div>
@@ -52,10 +52,10 @@ function FiredItem({ event }: FiredItemProps) {
           {event.symbol}
         </span>
         {/* price — keep font-mono */}
-        <span className="text-[10px] font-mono text-green-600 font-semibold">
+        <span className="text-[10px] font-mono text-emerald-400 font-semibold">
           {fmtPrice(event.price)}
         </span>
-        <span className="text-[10px] font-sans text-gray-400 truncate">
+        <span className="text-[10px] font-sans text-zinc-500 truncate">
           {event.condition_summary}
         </span>
       </div>
@@ -113,7 +113,7 @@ export default function AlertBell() {
           'relative p-1.5 rounded-lg transition-all duration-150',
           open
             ? 'text-amber-600 bg-amber-50'
-            : 'text-gray-400 hover:text-amber-600 hover:bg-gray-100',
+            : 'text-zinc-500 hover:text-amber-600 hover:bg-zinc-800',
         ].join(' ')}
       >
         {/* Bell SVG — shakes when unread */}
@@ -140,14 +140,14 @@ export default function AlertBell() {
 
       {/* ── Dropdown panel ──────────────────────────────────────────── */}
       {open && (
-        <div className="absolute top-full right-0 mt-2 w-80 card-elevated rounded-2xl shadow-card-lg z-50 overflow-hidden border border-gray-200 animate-fade-in">
+        <div className="absolute top-full right-0 mt-2 w-80 card-elevated rounded-2xl -lg z-50 overflow-hidden border border-zinc-800 animate-fade-in">
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
             <div className="flex items-center gap-2">
               <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 text-amber-600">
                 <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
               </svg>
-              <span className="text-xs font-sans font-semibold text-gray-800">
+              <span className="text-xs font-sans font-semibold text-zinc-100">
                 Recent Alerts
               </span>
               {recent5.length > 0 && (
@@ -167,10 +167,10 @@ export default function AlertBell() {
           {/* Fired items */}
           {recent5.length === 0 ? (
             <div className="flex flex-col items-center justify-center px-4 py-7 gap-2">
-              <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-gray-400/40">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-zinc-500/40">
                 <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
               </svg>
-              <p className="text-xs font-sans text-gray-400 text-center">
+              <p className="text-xs font-sans text-zinc-500 text-center">
                 No recent alerts
               </p>
             </div>
@@ -183,10 +183,10 @@ export default function AlertBell() {
           )}
 
           {/* Footer link */}
-          <div className="px-4 py-2.5 border-t border-gray-200 bg-gray-50">
+          <div className="px-4 py-2.5 border-t border-zinc-800 bg-zinc-900">
             <button
               onClick={handleViewAll}
-              className="w-full text-center text-[11px] font-sans text-gray-400 hover:text-gray-500 transition-colors"
+              className="w-full text-center text-[11px] font-sans text-zinc-500 hover:text-zinc-400 transition-colors"
             >
               Open Alerts Manager
             </button>

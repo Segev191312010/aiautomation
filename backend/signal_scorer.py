@@ -18,7 +18,8 @@ DEFAULT_WEIGHTS = {
 class SignalScorer:
     """Multi-factor signal scoring. Higher composite = better trade."""
 
-    def score_signal(self, symbol: str, df: pd.DataFrame, side: str = "BUY") -> dict:
+    def score_signal(self, symbol: str, df: pd.DataFrame, side: str = "BUY",
+                     bars_cache: dict | None = None) -> dict:
         if df is None or len(df) < 20:
             return {"symbol": symbol, "composite_score": 0, "factors": {}}
 
@@ -108,8 +109,16 @@ class SignalScorer:
         else:
             scores["bollinger"] = 50
 
-        total_w = sum(DEFAULT_WEIGHTS.values())
-        composite = sum(scores[k] * DEFAULT_WEIGHTS[k] for k in DEFAULT_WEIGHTS) / total_w
+        # Regime-aware weights
+        weights = self._get_regime_weights(bars_cache)
+        total_w = sum(weights.values())
+        composite = sum(scores[k] * weights[k] for k in weights) / total_w
+
+        # Transaction cost penalty — cheap stocks have high commission drag
+        if price < 5.0:
+            composite *= 0.70
+        elif price < 15.0:
+            composite *= 0.88
 
         return {
             "symbol": symbol,
@@ -121,6 +130,27 @@ class SignalScorer:
             "atr_pct": round(atr_pct, 2),
             "side": side,
         }
+
+    def _get_regime_weights(self, bars_cache: dict | None) -> dict:
+        """SPY SMA200-based regime detection → adjust signal weights."""
+        if not bars_cache or "SPY" not in bars_cache:
+            return DEFAULT_WEIGHTS
+        try:
+            spy = bars_cache["SPY"]
+            if len(spy) < 200:
+                return DEFAULT_WEIGHTS
+            spy_close = spy["close"]
+            price = float(spy_close.iloc[-1])
+            sma200 = float(spy_close.rolling(200).mean().iloc[-1])
+            if price > sma200 * 1.02:  # BULL
+                return {"rsi": 15, "volume": 15, "trend": 30, "volatility": 8,
+                        "momentum": 17, "support": 5, "macd": 8, "bollinger": 2}
+            elif price < sma200 * 0.98:  # BEAR
+                return {"rsi": 20, "volume": 15, "trend": 10, "volatility": 18,
+                        "momentum": 5, "support": 17, "macd": 10, "bollinger": 5}
+        except Exception:
+            pass
+        return DEFAULT_WEIGHTS
 
     def rank_signals(self, signals: list[dict], top_n: int = 5, min_score: float = 55) -> list[dict]:
         qualified = [s for s in signals if s["composite_score"] >= min_score]

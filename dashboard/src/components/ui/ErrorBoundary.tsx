@@ -75,10 +75,10 @@ export default class ErrorBoundary extends React.Component<Props, State> {
                 </div>
 
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-sans font-semibold text-red-600 leading-tight mb-1">
+                  <p className="text-sm font-sans font-semibold text-red-400 leading-tight mb-1">
                     Something went wrong
                   </p>
-                  <p className="text-xs font-sans text-gray-500 leading-relaxed break-words">
+                  <p className="text-xs font-sans text-zinc-400 leading-relaxed break-words">
                     {error?.message || 'An unexpected error occurred in this component tree.'}
                   </p>
                 </div>
@@ -86,20 +86,20 @@ export default class ErrorBoundary extends React.Component<Props, State> {
 
               {/* Stack trace collapsible */}
               {error?.stack && (
-                <div className="rounded-xl overflow-hidden border border-gray-200">
+                <div className="rounded-xl overflow-hidden border border-zinc-800">
                   <button
                     type="button"
                     onClick={() => this.setState((s) => ({ stackOpen: !s.stackOpen }))}
-                    className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-gray-50 transition-colors"
+                    className="w-full flex items-center justify-between px-4 py-2.5 text-left hover:bg-zinc-900 transition-colors"
                   >
-                    <span className="text-[11px] font-mono text-gray-400 uppercase tracking-wider">
+                    <span className="text-[11px] font-mono text-zinc-500 uppercase tracking-wider">
                       Stack trace
                     </span>
                     <svg
                       viewBox="0 0 24 24"
                       fill="none"
                       className={[
-                        'w-3.5 h-3.5 text-gray-400 transition-transform duration-200',
+                        'w-3.5 h-3.5 text-zinc-500 transition-transform duration-200',
                         stackOpen ? 'rotate-180' : '',
                       ].join(' ')}
                       aria-hidden="true"
@@ -118,8 +118,8 @@ export default class ErrorBoundary extends React.Component<Props, State> {
                     <pre
                       className={[
                         'px-4 py-3 text-[10px] font-mono leading-relaxed',
-                        'text-gray-400 overflow-x-auto whitespace-pre-wrap break-all',
-                        'border-t border-gray-100',
+                        'text-zinc-500 overflow-x-auto whitespace-pre-wrap break-all',
+                        'border-t border-zinc-800',
                         'max-h-40',
                       ].join(' ')}
                       style={{ background: 'rgba(0,0,0,0.25)' }}
@@ -139,8 +139,8 @@ export default class ErrorBoundary extends React.Component<Props, State> {
                     'flex items-center gap-2',
                     'px-4 py-2 rounded-xl',
                     'text-xs font-sans font-medium',
-                    'text-red-600 border border-red-300',
-                    'hover:bg-red-50 active:bg-red-50',
+                    'text-red-400 border border-red-300',
+                    'hover:bg-red-500/10 active:bg-red-500/10',
                     'transition-colors duration-150',
                   ].join(' ')}
                 >
@@ -175,8 +175,8 @@ export default class ErrorBoundary extends React.Component<Props, State> {
                   className={[
                     'px-4 py-2 rounded-xl',
                     'text-xs font-sans font-medium',
-                    'text-gray-500 border border-gray-200',
-                    'hover:bg-gray-100/60 active:bg-gray-100',
+                    'text-zinc-400 border border-zinc-800',
+                    'hover:bg-zinc-800/60 active:bg-zinc-800',
                     'transition-colors duration-150',
                   ].join(' ')}
                 >

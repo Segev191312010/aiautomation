@@ -229,8 +229,8 @@ export default function Sidebar() {
                 className={clsx(
                   'rounded-full px-2 py-1 text-[10px] font-mono',
                   selectedQuote?.change_pct != null && selectedQuote.change_pct >= 0
-                    ? 'bg-green-50 text-green-700'
-                    : 'bg-red-50 text-red-700',
+                    ? 'bg-emerald-500/10 text-emerald-300'
+                    : 'bg-red-500/10 text-red-700',
                 )}
               >
                 {selectedQuote?.change_pct != null
@@ -241,12 +241,12 @@ export default function Sidebar() {
 
             <div className="mt-3 flex items-end justify-between gap-2">
               <div>
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Last Price</div>
-                <div className="text-base font-mono font-semibold text-gray-900">{formatPrice(selectedQuote?.price)}</div>
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Last Price</div>
+                <div className="text-base font-mono font-semibold text-zinc-50">{formatPrice(selectedQuote?.price)}</div>
               </div>
               <div className="text-right">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Feed</div>
-                <div className="text-[11px] font-mono text-gray-600">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Feed</div>
+                <div className="text-[11px] font-mono text-zinc-400">
                   {selectedQuote?.live_source === 'ibkr' ? 'IBKR' : 'Yahoo'}
                 </div>
               </div>
@@ -256,14 +256,14 @@ export default function Sidebar() {
               <button
                 type="button"
                 onClick={() => jumpTo('market', selectedSymbol)}
-                className="rounded-lg border border-gray-900 bg-gray-900 px-2.5 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-gray-800"
+                className="rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-zinc-900"
               >
                 Open Market
               </button>
               <button
                 type="button"
                 onClick={() => jumpTo('stock', selectedSymbol)}
-                className="rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-[11px] font-sans font-medium text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900"
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
               >
                 Stock Analysis
               </button>
@@ -275,10 +275,10 @@ export default function Sidebar() {
       {!sidebarCollapsed && watchlist && (
         <div className="mt-4 flex-1 overflow-y-auto px-2 min-h-0">
           <div className="px-2 mb-2 flex items-center justify-between">
-            <p className="text-[10px] font-mono text-gray-400 uppercase tracking-widest">
+            <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">
               Watchlist
             </p>
-            <p className="text-[10px] font-mono text-gray-300">
+            <p className="text-[10px] font-mono text-zinc-500">
               {watchlist.symbols.length} names
             </p>
           </div>
@@ -296,30 +296,30 @@ export default function Sidebar() {
                   className={clsx(
                     'flex items-center w-full px-2 py-2 rounded-lg transition-colors group border',
                     active
-                      ? 'bg-gray-100 border-gray-200'
-                      : 'bg-white border-transparent hover:bg-gray-50 hover:border-gray-100',
+                      ? 'bg-zinc-800 border-zinc-800'
+                      : 'bg-zinc-900 border-transparent hover:bg-zinc-900 hover:border-zinc-800',
                   )}
                 >
                   <div className="flex items-center gap-2 flex-1 min-w-0">
                     {q ? (
-                      <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', up ? 'bg-green-500' : 'bg-red-500')} />
+                      <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', up ? 'bg-emerald-500' : 'bg-red-500')} />
                     ) : (
-                      <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-gray-300" />
+                      <span className="w-1.5 h-1.5 rounded-full shrink-0 bg-zinc-700" />
                     )}
-                    <span className="text-xs font-mono text-gray-800 group-hover:text-gray-900 truncate">
+                    <span className="text-xs font-mono text-zinc-100 group-hover:text-zinc-50 truncate">
                       {sym}
                     </span>
                   </div>
 
                   {q && (
                     <div className="text-right shrink-0 ml-2">
-                      <div className="text-[11px] font-mono text-gray-700 leading-tight tabular-nums">
+                      <div className="text-[11px] font-mono text-zinc-200 leading-tight tabular-nums">
                         {formatPrice(q.price)}
                       </div>
                       <div
                         className={clsx(
                           'text-[10px] font-mono leading-tight tabular-nums',
-                          up ? 'text-green-600' : 'text-red-600',
+                          up ? 'text-emerald-400' : 'text-red-400',
                         )}
                       >
                         {up ? '+' : ''}{q.change_pct.toFixed(2)}%
@@ -335,13 +335,13 @@ export default function Sidebar() {
 
       {!sidebarCollapsed && (
         <div className="border-t border-[#E8E4DF] px-4 py-3">
-          <div className="flex items-center justify-between text-[10px] font-mono text-gray-500">
+          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
             <span className="inline-flex items-center gap-1.5">
-              <span className={clsx('h-1.5 w-1.5 rounded-full', ibkrConnected ? 'bg-green-500' : 'bg-red-400')} />
+              <span className={clsx('h-1.5 w-1.5 rounded-full', ibkrConnected ? 'bg-emerald-500' : 'bg-red-400')} />
               IBKR
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <span className={clsx('h-1.5 w-1.5 rounded-full', botRunning ? 'bg-green-500' : 'bg-gray-300')} />
+              <span className={clsx('h-1.5 w-1.5 rounded-full', botRunning ? 'bg-emerald-500' : 'bg-zinc-700')} />
               BOT
             </span>
           </div>

@@ -19,9 +19,9 @@ function fmtPct(v: number | null): string {
 
 function MetricRow({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
-    <div className="flex justify-between items-center py-1.5 border-b border-gray-200 last:border-0">
-      <span className="text-[11px] font-sans text-gray-500">{label}</span>
-      <span className={clsx('text-[11px] font-mono tabular-nums', highlight ? 'text-gray-800 font-semibold' : 'text-gray-800')}>
+    <div className="flex justify-between items-center py-1.5 border-b border-zinc-800 last:border-0">
+      <span className="text-[11px] font-sans text-zinc-400">{label}</span>
+      <span className={clsx('text-[11px] font-mono tabular-nums', highlight ? 'text-zinc-100 font-semibold' : 'text-zinc-100')}>
         {value}
       </span>
     </div>
@@ -34,7 +34,7 @@ function QuarterlyBars({ data, label }: { data: { period: string; value: number 
 
   return (
     <div className="mt-3">
-      <span className="text-[9px] font-sans text-gray-400 uppercase tracking-wide">{label}</span>
+      <span className="text-[9px] font-sans text-zinc-500 uppercase tracking-wide">{label}</span>
       <div className="flex items-end gap-1 mt-1.5 h-16">
         {data.slice(-6).map((d) => {
           const pct = maxVal > 0 ? (Math.abs(d.value) / maxVal) * 100 : 0
@@ -51,7 +51,7 @@ function QuarterlyBars({ data, label }: { data: { period: string; value: number 
                   title={`${d.period}: ${fmtCompact(d.value)}`}
                 />
               </div>
-              <span className="text-[8px] font-mono text-gray-400 truncate w-full text-center">
+              <span className="text-[8px] font-mono text-zinc-500 truncate w-full text-center">
                 {d.period.slice(-5)}
               </span>
             </div>
@@ -67,12 +67,12 @@ interface Props { data: StockFinancials | null; loading: boolean }
 export default function FinancialHealthModule({ data, loading }: Props) {
   if (!data && loading) {
     return (
-      <section className="card rounded-lg shadow-card p-6 animate-pulse">
-        <div className="h-3 w-32 bg-gray-100 rounded-xl mb-4" />
+      <section className="card rounded-lg  p-6 animate-pulse">
+        <div className="h-3 w-32 bg-zinc-800 rounded-xl mb-4" />
         {Array.from({ length: 5 }).map((_, i) => (
           <div key={i} className="flex justify-between py-2">
-            <div className="h-3 w-24 bg-gray-100 rounded-xl" />
-            <div className="h-3 w-16 bg-gray-100 rounded-xl" />
+            <div className="h-3 w-24 bg-zinc-800 rounded-xl" />
+            <div className="h-3 w-16 bg-zinc-800 rounded-xl" />
           </div>
         ))}
       </section>
@@ -81,9 +81,9 @@ export default function FinancialHealthModule({ data, loading }: Props) {
   if (!data) return null
 
   return (
-    <section id="section-financials" className="card rounded-lg shadow-card p-6">
+    <section id="section-financials" className="card rounded-lg  p-6">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-sans font-medium text-gray-500 tracking-wide">Financial Health</h3>
+        <h3 className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Financial Health</h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
       </div>
 

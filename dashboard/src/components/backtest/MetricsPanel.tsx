@@ -15,20 +15,20 @@ interface MetricCardProps {
 function MetricCard({ label, value, subValue, accent, large }: MetricCardProps) {
   const accentMap: Record<string, { bar: string; text: string; bg: string }> = {
     indigo:  { bar: 'bg-indigo-600',    text: 'text-indigo-600',    bg: 'bg-indigo-50' },
-    green:   { bar: 'bg-green-600',     text: 'text-green-600',     bg: 'bg-green-50' },
-    red:     { bar: 'bg-red-600',       text: 'text-red-600',       bg: 'bg-red-50' },
+    green:   { bar: 'bg-emerald-600',     text: 'text-emerald-400',     bg: 'bg-emerald-500/10' },
+    red:     { bar: 'bg-red-600',       text: 'text-red-400',       bg: 'bg-red-500/10' },
     amber:   { bar: 'bg-amber-600',     text: 'text-amber-600',     bg: 'bg-amber-50' },
-    neutral: { bar: 'bg-gray-400',      text: 'text-gray-800',      bg: 'bg-gray-50' },
+    neutral: { bar: 'bg-zinc-600',      text: 'text-zinc-100',      bg: 'bg-zinc-900' },
   }
 
   const colors = accentMap[accent] ?? accentMap.neutral
 
   return (
-    <div className={`relative overflow-hidden rounded-xl border border-gray-200 ${colors.bg} p-3.5 flex flex-col gap-1.5`}>
+    <div className={`relative overflow-hidden rounded-xl border border-zinc-800 ${colors.bg} p-3.5 flex flex-col gap-1.5`}>
       {/* Left accent bar */}
       <div className={`absolute left-0 top-0 bottom-0 w-0.5 ${colors.bar} rounded-l-xl`} />
 
-      <span className="text-[10px] font-sans font-semibold uppercase tracking-widest text-gray-400 pl-1">
+      <span className="text-[10px] font-sans font-semibold uppercase tracking-widest text-zinc-500 pl-1">
         {label}
       </span>
       <span className={`font-mono font-bold tabular-nums leading-none pl-1 ${colors.text} ${large ? 'text-2xl' : 'text-xl'}`}>
@@ -37,7 +37,7 @@ function MetricCard({ label, value, subValue, accent, large }: MetricCardProps) 
           : value}
       </span>
       {subValue && (
-        <span className="text-[10px] font-mono text-gray-400 pl-1">{subValue}</span>
+        <span className="text-[10px] font-mono text-zinc-500 pl-1">{subValue}</span>
       )}
     </div>
   )
@@ -51,7 +51,7 @@ function sharpeAccent(v: number): 'green' | 'amber' | 'red' {
 
 export function MetricsPanel({ metrics }: Props) {
   return (
-    <div className="card rounded-2xl shadow-card p-5">
+    <div className="card rounded-2xl  p-5">
       {/* Header */}
       <div className="flex items-center gap-2 mb-4">
         <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center">
@@ -61,7 +61,7 @@ export function MetricsPanel({ metrics }: Props) {
             />
           </svg>
         </div>
-        <h3 className="text-sm font-sans font-semibold text-gray-800">Performance Metrics</h3>
+        <h3 className="text-sm font-sans font-semibold text-zinc-100">Performance Metrics</h3>
       </div>
 
       {/* Primary metrics — 3-column grid */}
@@ -127,22 +127,22 @@ export function MetricsPanel({ metrics }: Props) {
       </div>
 
       {/* Compact stats footer */}
-      <div className="mt-4 pt-3.5 border-t border-gray-200 grid grid-cols-2 gap-x-6 gap-y-1.5">
+      <div className="mt-4 pt-3.5 border-t border-zinc-800 grid grid-cols-2 gap-x-6 gap-y-1.5">
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className="text-gray-400">Avg Win</span>
-          <span className="text-green-600 font-medium">+${metrics.avg_win.toFixed(2)}</span>
+          <span className="text-zinc-500">Avg Win</span>
+          <span className="text-emerald-400 font-medium">+${metrics.avg_win.toFixed(2)}</span>
         </div>
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className="text-gray-400">Avg Loss</span>
-          <span className="text-red-600 font-medium">-${Math.abs(metrics.avg_loss).toFixed(2)}</span>
+          <span className="text-zinc-500">Avg Loss</span>
+          <span className="text-red-400 font-medium">-${Math.abs(metrics.avg_loss).toFixed(2)}</span>
         </div>
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className="text-gray-400">Win Streak</span>
-          <span className="text-gray-500">{metrics.longest_win_streak}</span>
+          <span className="text-zinc-500">Win Streak</span>
+          <span className="text-zinc-400">{metrics.longest_win_streak}</span>
         </div>
         <div className="flex items-center justify-between text-xs font-mono">
-          <span className="text-gray-400">Lose Streak</span>
-          <span className="text-gray-500">{metrics.longest_lose_streak}</span>
+          <span className="text-zinc-500">Lose Streak</span>
+          <span className="text-zinc-400">{metrics.longest_lose_streak}</span>
         </div>
       </div>
     </div>

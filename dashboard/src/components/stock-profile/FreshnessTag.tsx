@@ -15,7 +15,7 @@ export default function FreshnessTag({ fetchedAt }: { fetchedAt: number }) {
     <span
       className={clsx(
         'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[9px] font-sans',
-        status === 'live' && 'bg-green-50 text-green-600 border-green-200',
+        status === 'live' && 'bg-green-50 text-emerald-400 border-green-200',
         status === 'cached' && 'bg-amber-50 text-amber-600 border-amber-200',
         status === 'stale' && 'bg-red-50 text-red-600 border-red-200',
       )}
@@ -23,7 +23,7 @@ export default function FreshnessTag({ fetchedAt }: { fetchedAt: number }) {
       <span
         className={clsx(
           'w-1.5 h-1.5 rounded-full shrink-0',
-          status === 'live' && 'bg-green-600',
+          status === 'live' && 'bg-emerald-600',
           status === 'cached' && 'bg-amber-600',
           status === 'stale' && 'bg-red-600',
         )}

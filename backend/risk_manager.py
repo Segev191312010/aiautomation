@@ -7,8 +7,86 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from risk_config import RiskLimits, DEFAULT_LIMITS
+from config import cfg
 
 log = logging.getLogger(__name__)
+
+# ── GICS sector map (top symbols) ────────────────────────────────────────────
+_SECTOR_MAP: dict[str, str] = {
+    "AAPL": "Tech", "MSFT": "Tech", "GOOGL": "Tech", "GOOG": "Tech", "NVDA": "Tech",
+    "META": "Tech", "AVGO": "Tech", "ORCL": "Tech", "CSCO": "Tech", "ADBE": "Tech",
+    "CRM": "Tech", "AMD": "Tech", "INTC": "Tech", "QCOM": "Tech", "TXN": "Tech",
+    "AMZN": "ConsDisc", "TSLA": "ConsDisc", "HD": "ConsDisc", "NKE": "ConsDisc",
+    "MCD": "ConsDisc", "SBUX": "ConsDisc", "TGT": "ConsDisc", "LOW": "ConsDisc",
+    "JPM": "Finance", "BAC": "Finance", "GS": "Finance", "MS": "Finance",
+    "WFC": "Finance", "C": "Finance", "BLK": "Finance", "SCHW": "Finance",
+    "JNJ": "Health", "UNH": "Health", "PFE": "Health", "ABBV": "Health",
+    "MRK": "Health", "LLY": "Health", "TMO": "Health", "ABT": "Health",
+    "XOM": "Energy", "CVX": "Energy", "COP": "Energy", "SLB": "Energy",
+    "PG": "Staples", "KO": "Staples", "PEP": "Staples", "WMT": "Staples", "COST": "Staples",
+    "NEE": "Utilities", "DUK": "Utilities", "SO": "Utilities",
+    "AMT": "RealEstate", "PLD": "RealEstate", "AVB": "RealEstate",
+    "CAT": "Industrials", "UNP": "Industrials", "HON": "Industrials", "BA": "Industrials",
+    "LIN": "Materials", "APD": "Materials", "SHW": "Materials",
+    "SPY": "ETF", "QQQ": "ETF", "IWM": "ETF", "XLB": "ETF", "XLV": "ETF", "XLU": "ETF",
+}
+
+
+def get_sector(symbol: str) -> str:
+    return _SECTOR_MAP.get(symbol.upper(), "Other")
+
+
+# ── Account state (fetched once per cycle) ───────────────────────────────────
+
+def get_account_state(ib) -> dict:
+    """Pull equity, cash, daily P&L, positions from IBKR in one call."""
+    equity = 0.0
+    cash = 0.0
+    daily_pnl = 0.0
+    try:
+        for av in ib.accountValues():
+            if av.currency != "USD":
+                continue
+            if av.tag == "NetLiquidation":
+                equity = float(av.value)
+            elif av.tag == "AvailableFunds":
+                cash = float(av.value)
+            elif av.tag == "RealizedPnL":
+                daily_pnl = float(av.value)
+    except Exception as e:
+        log.warning("Failed to read account values: %s", e)
+
+    positions = []
+    try:
+        for p in ib.positions():
+            if p.position == 0:
+                continue
+            positions.append({
+                "symbol": p.contract.symbol,
+                "qty": p.position,
+                "avg_cost": p.avgCost,
+                "market_price": p.avgCost,
+                "sector": get_sector(p.contract.symbol),
+            })
+    except Exception as e:
+        log.warning("Failed to read positions: %s", e)
+
+    return {"equity": equity, "cash": cash, "daily_pnl": daily_pnl, "positions": positions}
+
+
+def check_drawdown_live(equity: float, peak_equity: float) -> bool:
+    """True if drawdown exceeds MAX_TOTAL_DRAWDOWN → bot should pause."""
+    if peak_equity <= 0:
+        return False
+    dd = (peak_equity - equity) / peak_equity
+    return dd >= cfg.MAX_TOTAL_DRAWDOWN
+
+
+def check_daily_loss(daily_pnl: float, equity: float) -> bool:
+    """True if today's loss exceeds MAX_DAILY_RISK → skip new entries."""
+    if equity <= 0:
+        return False
+    return daily_pnl < -(equity * cfg.MAX_DAILY_RISK)
 
 
 @dataclass
@@ -34,6 +112,7 @@ def check_trade_risk(
     positions: list[dict],
     account_value: float,
     limits: RiskLimits | None = None,
+    est_price: float = 0,
 ) -> RiskCheckResult:
     """Pre-trade risk check. Returns PASS, WARN, or BLOCK with reasons."""
     if limits is None:
@@ -44,38 +123,47 @@ def check_trade_risk(
     if account_value <= 0:
         return RiskCheckResult("BLOCK", ["Account value is zero or negative."])
 
-    # Estimate price from existing position or default
-    existing = next((p for p in positions if p.get("symbol") == symbol), None)
-    est_price = (existing.get("market_price") or existing.get("avg_cost") or 100) if existing else 100
+    # Price: use provided, or fallback to position/default
+    if est_price <= 0:
+        existing = next((p for p in positions if p.get("symbol") == symbol), None)
+        est_price = (existing.get("market_price") or existing.get("avg_cost") or 100) if existing else 100
     order_pct = (qty * est_price / account_value) * 100
 
-    # Position size check
-    if order_pct > limits.max_position_pct:
+    # Cash-only: reject SELL if no long position
+    if side == "BUY" and not cfg.SHORT_ALLOWED:
+        pass  # BUY is always fine
+    elif side == "SELL":
+        held = next((p for p in positions if p.get("symbol") == symbol and p.get("qty", 0) > 0), None)
+        if not held:
+            return RiskCheckResult("BLOCK", [f"SELL rejected: no long position in {symbol} (cash account)."])
+
+    # Position count check (use cfg)
+    open_count = len([p for p in positions if p.get("qty", 0) > 0])
+    if side == "BUY" and open_count >= cfg.MAX_POSITIONS_TOTAL:
+        return RiskCheckResult("BLOCK", [f"Max positions ({cfg.MAX_POSITIONS_TOTAL}) reached."])
+
+    # Sector concentration check
+    target_sector = get_sector(symbol)
+    if side == "BUY" and target_sector != "Other":
+        sector_count = sum(1 for p in positions if get_sector(p.get("symbol", "")) == target_sector and p.get("qty", 0) > 0)
+        if sector_count >= cfg.MAX_POSITIONS_PER_SECTOR:
+            return RiskCheckResult("BLOCK", [f"Sector '{target_sector}' has {sector_count} positions (limit {cfg.MAX_POSITIONS_PER_SECTOR})."])
+
+    # Already holding check
+    if side == "BUY":
+        already = next((p for p in positions if p.get("symbol") == symbol and p.get("qty", 0) > 0), None)
+        if already:
+            return RiskCheckResult("BLOCK", [f"Already holding {symbol}."])
+
+    # Position size check (cap at 20% per position)
+    max_pct = 20.0
+    if order_pct > max_pct:
         reasons.append(f"Position size {order_pct:.1f}% exceeds limit {limits.max_position_pct}%.")
         status = "BLOCK"
     elif order_pct > limits.max_position_pct * 0.8:
         reasons.append(f"Position size {order_pct:.1f}% approaching limit {limits.max_position_pct}%.")
         if status == "PASS":
             status = "WARN"
-
-    # Open positions check
-    open_count = len(positions)
-    if side == "BUY" and not existing:
-        if open_count >= limits.max_open_positions:
-            reasons.append(f"Open positions ({open_count}) at limit ({limits.max_open_positions}).")
-            status = "BLOCK"
-        elif open_count >= limits.max_open_positions - 2:
-            reasons.append(f"Open positions ({open_count}) near limit ({limits.max_open_positions}).")
-            if status == "PASS":
-                status = "WARN"
-
-    # Concentration check
-    if existing and side == "BUY":
-        total_qty = existing.get("qty", 0) + qty
-        total_pct = (total_qty * est_price / account_value) * 100
-        if total_pct > limits.max_position_pct * 1.5:
-            reasons.append(f"Combined position {total_pct:.1f}% exceeds concentration limit.")
-            status = "BLOCK"
 
     if not reasons:
         reasons.append("All risk checks passed.")

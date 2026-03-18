@@ -133,8 +133,8 @@ function Tooltip({ tip, children }: { tip: string; children: React.ReactNode }) 
       {children}
       <div
         className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5
-                   px-1.5 py-0.5 rounded-md bg-gray-50 border border-gray-200
-                   text-[10px] font-sans text-gray-500 whitespace-nowrap
+                   px-1.5 py-0.5 rounded-md bg-zinc-900 border border-zinc-800
+                   text-[10px] font-sans text-zinc-400 whitespace-nowrap
                    opacity-0 group-hover/tip:opacity-100 transition-opacity duration-150 z-50"
       >
         {tip}
@@ -238,7 +238,7 @@ export default function ChartToolbar({
       role="toolbar"
       aria-label="Chart controls"
       className={clsx(
-        'flex items-center gap-2 flex-wrap rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-card',
+        'flex items-center gap-2 flex-wrap rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 ',
         className,
       )}
     >
@@ -246,7 +246,7 @@ export default function ChartToolbar({
       <div
         className={clsx(
           'flex items-center',
-          'bg-gray-100/60 rounded-xl p-0.5 gap-px',
+          'bg-zinc-800/60 rounded-xl p-0.5 gap-px',
           isLoading && 'opacity-40 pointer-events-none',
         )}
       >
@@ -258,8 +258,8 @@ export default function ChartToolbar({
             className={clsx(
               'text-[11px] font-sans px-2.5 py-1 rounded-lg transition-all duration-150',
               activeTfIdx === i
-                ? 'bg-gray-900 text-white'
-                : 'text-gray-500 hover:text-gray-900 hover:bg-white',
+                ? 'bg-zinc-950 text-white'
+                : 'text-zinc-400 hover:text-zinc-50 hover:bg-zinc-900',
             )}
           >
             {tf.label}
@@ -268,7 +268,7 @@ export default function ChartToolbar({
       </div>
 
       {/* ── Divider ───────────────────────────────────────────────────── */}
-      <div className="w-px h-5 bg-gray-200 self-center" />
+      <div className="w-px h-5 bg-zinc-800 self-center" />
 
       {/* ── Chart type dropdown ───────────────────────────────────────── */}
       <div ref={typeMenuRef} className="relative">
@@ -278,11 +278,11 @@ export default function ChartToolbar({
             'flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1.5 rounded-lg',
             'border transition-all duration-150',
             showTypeMenu
-              ? 'border-gray-900 text-gray-900 bg-gray-100'
-              : 'border-gray-200 text-gray-500 hover:text-gray-800 hover:bg-gray-100',
+              ? 'border-zinc-800 text-zinc-50 bg-zinc-800'
+              : 'border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800',
           )}
         >
-          <span className={clsx('transition-colors', showTypeMenu ? 'text-gray-900' : 'text-gray-400')}>
+          <span className={clsx('transition-colors', showTypeMenu ? 'text-zinc-50' : 'text-zinc-500')}>
             {currentType.icon}
           </span>
           <span>{currentType.short}</span>
@@ -295,7 +295,7 @@ export default function ChartToolbar({
         </button>
 
         {showTypeMenu && (
-          <div className="absolute top-full left-0 mt-1.5 z-50 card-elevated rounded-xl border border-gray-200 shadow-card min-w-[152px] overflow-hidden animate-fade-in">
+          <div className="absolute top-full left-0 mt-1.5 z-50 card-elevated rounded-xl border border-zinc-800  min-w-[152px] overflow-hidden animate-fade-in">
             {CHART_TYPES.map((ct) => (
               <button
                 key={ct.value}
@@ -303,16 +303,16 @@ export default function ChartToolbar({
                 className={clsx(
                   'w-full flex items-center gap-2.5 text-left text-[11px] font-sans px-3 py-2 transition-colors',
                   chartType === ct.value
-                    ? 'text-gray-900 bg-gray-100'
-                    : 'text-gray-500 hover:text-gray-800 hover:bg-gray-50',
+                    ? 'text-zinc-50 bg-zinc-800'
+                    : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900',
                 )}
               >
-                <span className={clsx(chartType === ct.value ? 'text-gray-900' : 'text-gray-400')}>
+                <span className={clsx(chartType === ct.value ? 'text-zinc-50' : 'text-zinc-500')}>
                   {ct.icon}
                 </span>
                 <span>{ct.label}</span>
                 {chartType === ct.value && (
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="ml-auto text-gray-900" aria-hidden="true">
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" className="ml-auto text-zinc-50" aria-hidden="true">
                     <path d="M2 5L4.2 7.5L8 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
@@ -330,10 +330,10 @@ export default function ChartToolbar({
             'flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1.5 rounded-lg',
             'border transition-all duration-150',
             selectedInds.length > 0
-              ? 'border-gray-900 text-gray-900 bg-gray-100'
+              ? 'border-zinc-800 text-zinc-50 bg-zinc-800'
               : showIndMenu
-              ? 'border-gray-200 text-gray-800 bg-gray-100'
-              : 'border-gray-200 text-gray-500 hover:text-gray-800 hover:bg-gray-100',
+              ? 'border-zinc-800 text-zinc-100 bg-zinc-800'
+              : 'border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800',
           )}
         >
           {/* Mini colored dot strip for active indicators */}
@@ -346,7 +346,7 @@ export default function ChartToolbar({
                 ) : null
               })}
               {selectedInds.length > 3 && (
-                <span className="text-[9px] text-gray-900 leading-none">+{selectedInds.length - 3}</span>
+                <span className="text-[9px] text-zinc-50 leading-none">+{selectedInds.length - 3}</span>
               )}
             </span>
           )}
@@ -362,9 +362,9 @@ export default function ChartToolbar({
         </button>
 
         {showIndMenu && (
-          <div className="absolute top-full left-0 mt-1.5 z-50 card-elevated rounded-xl border border-gray-200 shadow-card min-w-[190px] max-h-72 overflow-y-auto animate-fade-in">
+          <div className="absolute top-full left-0 mt-1.5 z-50 card-elevated rounded-xl border border-zinc-800  min-w-[190px] max-h-72 overflow-y-auto animate-fade-in">
             {/* Overlays section */}
-            <div className="px-3 py-1.5 text-[10px] font-sans font-semibold text-gray-400 tracking-widest uppercase sticky top-0 bg-white border-b border-gray-200">
+            <div className="px-3 py-1.5 text-[10px] font-sans font-semibold text-zinc-500 tracking-widest uppercase sticky top-0 bg-zinc-900 border-b border-zinc-800">
               Overlays
             </div>
             {OVERLAYS.map((def) => {
@@ -374,20 +374,20 @@ export default function ChartToolbar({
                   key={def.id}
                   className={clsx(
                     'flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors',
-                    active ? 'bg-gray-50/60' : 'hover:bg-gray-50',
+                    active ? 'bg-zinc-900/60' : 'hover:bg-zinc-900',
                   )}
                 >
                   {/* Custom toggle pill */}
                   <span
                     className={clsx(
                       'relative flex-shrink-0 w-6 h-3.5 rounded-full transition-colors duration-200',
-                      active ? 'bg-gray-200' : 'bg-gray-100',
+                      active ? 'bg-zinc-800' : 'bg-zinc-800',
                     )}
                   >
                     <span
                       className={clsx(
                         'absolute top-0.5 w-2.5 h-2.5 rounded-full transition-all duration-200 shadow-sm',
-                        active ? 'left-[calc(100%-0.625rem-0.125rem)] bg-gray-900' : 'left-0.5 bg-gray-400',
+                        active ? 'left-[calc(100%-0.625rem-0.125rem)] bg-zinc-950' : 'left-0.5 bg-zinc-600',
                       )}
                     />
                   </span>
@@ -398,7 +398,7 @@ export default function ChartToolbar({
                     className="sr-only"
                   />
                   <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: def.color }} />
-                  <span className={clsx('text-[11px] font-sans', active ? 'text-gray-800' : 'text-gray-500')}>
+                  <span className={clsx('text-[11px] font-sans', active ? 'text-zinc-100' : 'text-zinc-400')}>
                     {def.label}
                   </span>
                 </label>
@@ -406,7 +406,7 @@ export default function ChartToolbar({
             })}
 
             {/* Oscillators section */}
-            <div className="px-3 py-1.5 text-[10px] font-sans font-semibold text-gray-400 tracking-widest uppercase sticky top-0 bg-white border-y border-gray-200">
+            <div className="px-3 py-1.5 text-[10px] font-sans font-semibold text-zinc-500 tracking-widest uppercase sticky top-0 bg-zinc-900 border-y border-zinc-800">
               Oscillators
             </div>
             {OSCILLATORS.map((def) => {
@@ -416,19 +416,19 @@ export default function ChartToolbar({
                   key={def.id}
                   className={clsx(
                     'flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors',
-                    active ? 'bg-gray-50/60' : 'hover:bg-gray-50',
+                    active ? 'bg-zinc-900/60' : 'hover:bg-zinc-900',
                   )}
                 >
                   <span
                     className={clsx(
                       'relative flex-shrink-0 w-6 h-3.5 rounded-full transition-colors duration-200',
-                      active ? 'bg-gray-200' : 'bg-gray-100',
+                      active ? 'bg-zinc-800' : 'bg-zinc-800',
                     )}
                   >
                     <span
                       className={clsx(
                         'absolute top-0.5 w-2.5 h-2.5 rounded-full transition-all duration-200 shadow-sm',
-                        active ? 'left-[calc(100%-0.625rem-0.125rem)] bg-gray-900' : 'left-0.5 bg-gray-400',
+                        active ? 'left-[calc(100%-0.625rem-0.125rem)] bg-zinc-950' : 'left-0.5 bg-zinc-600',
                       )}
                     />
                   </span>
@@ -439,7 +439,7 @@ export default function ChartToolbar({
                     className="sr-only"
                   />
                   <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: def.color }} />
-                  <span className={clsx('text-[11px] font-sans', active ? 'text-gray-800' : 'text-gray-500')}>
+                  <span className={clsx('text-[11px] font-sans', active ? 'text-zinc-100' : 'text-zinc-400')}>
                     {def.label}
                   </span>
                 </label>
@@ -456,7 +456,7 @@ export default function ChartToolbar({
             <button
               onClick={onCreateAlert}
               className="flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1.5 rounded-lg
-                         border border-gray-200 text-gray-400
+                         border border-zinc-800 text-zinc-500
                          hover:text-amber-600 hover:border-amber-300 hover:bg-amber-50
                          transition-all duration-150"
             >
@@ -473,8 +473,8 @@ export default function ChartToolbar({
           <button
             onClick={handleScreenshot}
             className="flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1.5 rounded-lg
-                       border border-gray-200 text-gray-400
-                       hover:text-gray-500 hover:bg-gray-100
+                       border border-zinc-800 text-zinc-500
+                       hover:text-zinc-400 hover:bg-zinc-800
                        transition-all duration-150"
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
@@ -493,8 +493,8 @@ export default function ChartToolbar({
               'flex items-center gap-1.5 text-[11px] font-sans px-2.5 py-1.5 rounded-lg',
               'border transition-all duration-150',
               isFullscreen
-                ? 'border-gray-900 text-gray-900 bg-gray-100'
-                : 'border-gray-200 text-gray-400 hover:text-gray-500 hover:bg-gray-100',
+                ? 'border-zinc-800 text-zinc-50 bg-zinc-800'
+                : 'border-zinc-800 text-zinc-500 hover:text-zinc-400 hover:bg-zinc-800',
             )}
           >
             {isFullscreen ? (

@@ -27,8 +27,8 @@ function SaveIndicator({ status }: { status: SaveStatus }) {
     <span className={clsx(
       'text-[10px] font-mono ml-1',
       status === 'saving' && 'text-amber-600 animate-pulse',
-      status === 'saved'  && 'text-green-600',
-      status === 'error'  && 'text-red-600',
+      status === 'saved'  && 'text-emerald-400',
+      status === 'error'  && 'text-red-400',
     )}>
       {status === 'saving' ? '●' : status === 'saved' ? '✓' : '✗'}
     </span>
@@ -136,7 +136,7 @@ export default function DrawingTools({ symbol, timeframe, className }: Props) {
               'text-[11px] font-mono px-2 py-1 rounded border transition-colors',
               activeTool === t.type
                 ? 'border-indigo-600/50 text-indigo-600 bg-indigo-600/10'
-                : 'border-gray-200 text-gray-400 hover:text-gray-500',
+                : 'border-zinc-800 text-zinc-500 hover:text-zinc-400',
             )}
           >
             <span className="mr-1">{t.icon}</span>
@@ -146,18 +146,18 @@ export default function DrawingTools({ symbol, timeframe, className }: Props) {
       </div>
 
       {/* Divider */}
-      <div className="w-px h-5 bg-gray-200" />
+      <div className="w-px h-5 bg-zinc-800" />
 
       {/* Color picker */}
       <div className="relative">
         <button
           onClick={() => setShowColors(!showColors)}
-          className="w-5 h-5 rounded border border-gray-200 hover:border-gray-500 transition-colors"
+          className="w-5 h-5 rounded border border-zinc-800 hover:border-zinc-700 transition-colors"
           style={{ backgroundColor: drawingColor }}
           title="Drawing color"
         />
         {showColors && (
-          <div className="absolute top-7 left-0 z-50 bg-gray-50 border border-gray-200 rounded-lg shadow-card p-1.5 flex gap-1">
+          <div className="absolute top-7 left-0 z-50 bg-zinc-900 border border-zinc-800 rounded-lg  p-1.5 flex gap-1">
             {DRAWING_COLORS.map((c) => (
               <button
                 key={c}
@@ -165,8 +165,8 @@ export default function DrawingTools({ symbol, timeframe, className }: Props) {
                 className={clsx(
                   'w-4 h-4 rounded-full border transition-all',
                   drawingColor === c
-                    ? 'border-gray-800 scale-125'
-                    : 'border-gray-200 hover:border-gray-500',
+                    ? 'border-zinc-800 scale-125'
+                    : 'border-zinc-800 hover:border-zinc-700',
                 )}
                 style={{ backgroundColor: c }}
               />
@@ -176,14 +176,14 @@ export default function DrawingTools({ symbol, timeframe, className }: Props) {
       </div>
 
       {/* Divider */}
-      <div className="w-px h-5 bg-gray-200" />
+      <div className="w-px h-5 bg-zinc-800" />
 
       {/* Delete / Clear */}
       <button
         onClick={handleDelete}
         disabled={!selectedDrawingId}
         title="Delete selected (Del)"
-        className="text-[11px] font-mono px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-red-600 hover:border-red-300/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        className="text-[11px] font-mono px-2 py-1 rounded border border-zinc-800 text-zinc-500 hover:text-red-400 hover:border-red-300/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
       >
         Delete
       </button>
@@ -191,27 +191,27 @@ export default function DrawingTools({ symbol, timeframe, className }: Props) {
         onClick={handleClearAll}
         disabled={drawings.length === 0}
         title="Clear all drawings for this symbol"
-        className="text-[11px] font-mono px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-red-600 hover:border-red-300/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        className="text-[11px] font-mono px-2 py-1 rounded border border-zinc-800 text-zinc-500 hover:text-red-400 hover:border-red-300/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
       >
         Clear ({drawings.length})
       </button>
 
       {/* Divider */}
-      <div className="w-px h-5 bg-gray-200" />
+      <div className="w-px h-5 bg-zinc-800" />
 
       {/* Export / Import */}
       <button
         onClick={handleExport}
         disabled={Object.keys(useDrawingStore.getState().drawings).length === 0}
         title="Export all drawings as JSON"
-        className="text-[11px] font-mono px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+        className="text-[11px] font-mono px-2 py-1 rounded border border-zinc-800 text-zinc-500 hover:text-zinc-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
       >
         Export
       </button>
       <button
         onClick={handleImport}
         title="Import drawings from JSON"
-        className="text-[11px] font-mono px-2 py-1 rounded border border-gray-200 text-gray-400 hover:text-gray-500 transition-colors"
+        className="text-[11px] font-mono px-2 py-1 rounded border border-zinc-800 text-zinc-500 hover:text-zinc-400 transition-colors"
       >
         Import
       </button>

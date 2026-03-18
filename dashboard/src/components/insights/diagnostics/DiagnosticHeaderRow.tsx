@@ -27,7 +27,7 @@ export default function DiagnosticHeaderRow({
   const conflictRun = running && Boolean(refreshRun?.locked_by)
 
   return (
-    <div className="flex flex-wrap items-center gap-2 card rounded-2xl shadow-card p-3">
+    <div className="flex flex-wrap items-center gap-2 card rounded-2xl  p-3">
       <div className="flex items-center gap-1">
         {[
           { label: '90D', value: 90 as const },
@@ -40,7 +40,7 @@ export default function DiagnosticHeaderRow({
             className={`text-[10px] font-sans px-2 py-1 rounded-xl border transition-colors ${
               lookbackDays === item.value
                 ? 'border-indigo-50 text-indigo-600 bg-indigo-50'
-                : 'border-gray-200 text-gray-400 hover:text-gray-800'
+                : 'border-zinc-800 text-zinc-500 hover:text-zinc-100'
             }`}
           >
             {item.label}
@@ -51,12 +51,12 @@ export default function DiagnosticHeaderRow({
       <button
         onClick={onRefresh}
         disabled={refreshing}
-        className="text-[10px] font-sans px-2.5 py-1 rounded-xl border border-green-300/40 text-green-600 bg-green-50 hover:bg-green-50/80 disabled:opacity-50"
+        className="text-[10px] font-sans px-2.5 py-1 rounded-xl border border-emerald-300/40 text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/10/80 disabled:opacity-50"
       >
         {conflictRun ? 'Refresh already running' : refreshing ? 'Refreshing...' : 'Manual Refresh'}
       </button>
 
-      <div className="ml-auto text-[10px] font-mono text-gray-400 flex items-center gap-3">
+      <div className="ml-auto text-[10px] font-mono text-zinc-500 flex items-center gap-3">
         <span>Last run: {fmtTs(lastRunTs)}</span>
         {refreshRun && (
           <span>

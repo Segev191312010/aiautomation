@@ -70,7 +70,7 @@ export default function ResizeHandle({ onDelta, onDoubleClick }: Props) {
       onMouseDown={onMouseDown}
       onDoubleClick={onDoubleClick}
     >
-      <div className="w-8 h-px bg-gray-200 group-hover:bg-indigo-600/40 transition-colors" />
+      <div className="w-8 h-px bg-zinc-800 group-hover:bg-indigo-600/40 transition-colors" />
     </div>
   )
 }

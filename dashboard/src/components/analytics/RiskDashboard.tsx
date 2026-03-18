@@ -136,12 +136,12 @@ function DrawdownGauge({ currentDrawdownPct, limitPct }: DrawdownGaugeProps) {
       <div className="flex flex-col items-center -mt-1">
         <span className={clsx(
           'text-2xl font-mono font-bold tabular-nums leading-none',
-          fraction >= 0.9 ? 'text-red-500' : fraction >= 0.6 ? 'text-amber-500' : 'text-emerald-500',
+          fraction >= 0.9 ? 'text-red-400' : fraction >= 0.6 ? 'text-amber-500' : 'text-emerald-500',
         )}>
           -{currentDrawdownPct.toFixed(2)}%
         </span>
-        <span className="text-[10px] font-sans text-gray-400 mt-1">Current Drawdown</span>
-        <span className="text-[9px] font-mono text-gray-400/60">limit: -{limitPct}%</span>
+        <span className="text-[10px] font-sans text-zinc-500 mt-1">Current Drawdown</span>
+        <span className="text-[9px] font-mono text-zinc-500/60">limit: -{limitPct}%</span>
       </div>
     </div>
   )
@@ -156,32 +156,32 @@ function RiskCheckCard({ check }: { check: RiskCheckResult }) {
   const statusStyles = {
     OK:     { badge: 'text-emerald-500 bg-emerald-500/10 border-emerald-500/20', bar: 'bg-emerald-500', border: 'border-l-emerald-500/50' },
     WARN:   { badge: 'text-amber-600 bg-amber-500/10 border-amber-500/20',       bar: 'bg-amber-500',   border: 'border-l-amber-500/50'   },
-    BREACH: { badge: 'text-red-500 bg-red-500/10 border-red-500/20',             bar: 'bg-red-500',     border: 'border-l-red-500/60'     },
+    BREACH: { badge: 'text-red-400 bg-red-500/10 border-red-500/20',             bar: 'bg-red-500',     border: 'border-l-red-500/60'     },
   }[check.status]
 
   return (
     <div className={clsx(
-      'card rounded-xl shadow-card p-4 flex flex-col gap-2.5 border-l-2',
+      'card rounded-xl  p-4 flex flex-col gap-2.5 border-l-2',
       statusStyles.border,
     )}>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-sans text-gray-600 truncate">{check.name}</span>
+        <span className="text-[11px] font-sans text-zinc-400 truncate">{check.name}</span>
         <span className={clsx('text-[9px] font-mono font-semibold px-2 py-0.5 rounded-lg border flex-shrink-0', statusStyles.badge)}>
           {check.status}
         </span>
       </div>
 
       <div className="flex items-baseline justify-between gap-1">
-        <span className="text-sm font-mono font-bold tabular-nums text-gray-800">
+        <span className="text-sm font-mono font-bold tabular-nums text-zinc-100">
           {fmtValue(check.current, check.unit)}
         </span>
-        <span className="text-[10px] font-mono text-gray-400">
+        <span className="text-[10px] font-mono text-zinc-500">
           / {fmtValue(check.limit, check.unit)}
         </span>
       </div>
 
       {/* Progress bar */}
-      <div className="h-1 rounded-full bg-gray-100 overflow-hidden">
+      <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
         <div
           className={clsx('h-full rounded-full transition-all duration-300', statusStyles.bar)}
           style={{ width: `${pctBar}%` }}
@@ -212,9 +212,9 @@ export default function RiskDashboard({ riskLimits, riskChecks, loading }: Props
   if (loading && !riskLimits) {
     return (
       <div className="animate-pulse space-y-3">
-        <div className="h-40 bg-gray-100 rounded-2xl" />
+        <div className="h-40 bg-zinc-800 rounded-2xl" />
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          {[1, 2, 3, 4].map((i) => <div key={i} className="h-24 bg-gray-100 rounded-xl" />)}
+          {[1, 2, 3, 4].map((i) => <div key={i} className="h-24 bg-zinc-800 rounded-xl" />)}
         </div>
       </div>
     )
@@ -225,16 +225,16 @@ export default function RiskDashboard({ riskLimits, riskChecks, loading }: Props
       {/* Drawdown gauge + summary */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {/* Gauge */}
-        <div className="card rounded-2xl shadow-card p-5">
-          <div className="text-[10px] font-sans uppercase tracking-widest text-gray-400 mb-3">
+        <div className="card rounded-2xl  p-5">
+          <div className="text-[10px] font-sans uppercase tracking-widest text-zinc-500 mb-3">
             Drawdown Monitor
           </div>
           <DrawdownGauge currentDrawdownPct={currentDD} limitPct={limitDD} />
         </div>
 
         {/* Status summary */}
-        <div className="card rounded-2xl shadow-card p-5 flex flex-col gap-4">
-          <div className="text-[10px] font-sans uppercase tracking-widest text-gray-400">
+        <div className="card rounded-2xl  p-5 flex flex-col gap-4">
+          <div className="text-[10px] font-sans uppercase tracking-widest text-zinc-500">
             Risk Status
           </div>
 
@@ -248,12 +248,12 @@ export default function RiskDashboard({ riskLimits, riskChecks, loading }: Props
                 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.6)]',
               )} />
               <div>
-                <div className="text-sm font-sans font-semibold text-gray-800">
+                <div className="text-sm font-sans font-semibold text-zinc-100">
                   {breachCount > 0 ? 'Risk Breach Detected' :
                    warnCount   > 0 ? 'Risk Warning Active' :
                    'All Limits OK'}
                 </div>
-                <div className="text-[10px] font-sans text-gray-400">
+                <div className="text-[10px] font-sans text-zinc-500">
                   {riskChecks.length} checks ·{' '}
                   {breachCount > 0 ? `${breachCount} breach${breachCount > 1 ? 'es' : ''}` :
                    warnCount > 0   ? `${warnCount} warning${warnCount > 1 ? 's' : ''}` :
@@ -272,8 +272,8 @@ export default function RiskDashboard({ riskLimits, riskChecks, loading }: Props
                   { label: 'Max Positions', value: String(riskLimits.max_open_positions) },
                 ].map(({ label, value }) => (
                   <div key={label} className="flex flex-col gap-0.5">
-                    <span className="text-[9px] font-sans uppercase tracking-wider text-gray-400">{label}</span>
-                    <span className="text-xs font-mono font-semibold text-gray-700">{value}</span>
+                    <span className="text-[9px] font-sans uppercase tracking-wider text-zinc-500">{label}</span>
+                    <span className="text-xs font-mono font-semibold text-zinc-200">{value}</span>
                   </div>
                 ))}
               </div>
@@ -285,7 +285,7 @@ export default function RiskDashboard({ riskLimits, riskChecks, loading }: Props
       {/* Risk check cards grid */}
       {riskChecks.length > 0 && (
         <div>
-          <div className="text-[10px] font-sans uppercase tracking-widest text-gray-400 mb-3">
+          <div className="text-[10px] font-sans uppercase tracking-widest text-zinc-500 mb-3">
             Limit Status
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -297,7 +297,7 @@ export default function RiskDashboard({ riskLimits, riskChecks, loading }: Props
       )}
 
       {!riskLimits && !loading && (
-        <div className="text-center py-8 text-sm text-gray-400">
+        <div className="text-center py-8 text-sm text-zinc-500">
           No risk limits configured. Connect backend to enable risk monitoring.
         </div>
       )}

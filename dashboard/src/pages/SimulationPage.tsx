@@ -20,7 +20,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex items-center gap-2">
       <span className="block w-0.5 h-3.5 rounded-full bg-indigo-600/60" />
-      <span className="text-[11px] font-sans font-semibold text-gray-500 tracking-widest uppercase">
+      <span className="text-[11px] font-sans font-semibold text-zinc-400 tracking-widest uppercase">
         {children}
       </span>
     </div>
@@ -81,10 +81,10 @@ export default function SimulationPage() {
             </svg>
           </div>
           <div>
-            <h1 className="text-base font-sans font-semibold text-gray-800 leading-tight">
+            <h1 className="text-base font-sans font-semibold text-zinc-100 leading-tight">
               Simulation
             </h1>
-            <p className="text-[11px] font-sans text-gray-400 mt-0.5">
+            <p className="text-[11px] font-sans text-zinc-500 mt-0.5">
               Historical replay with virtual paper trading
             </p>
           </div>
@@ -96,14 +96,14 @@ export default function SimulationPage() {
             className={`inline-flex items-center gap-1.5 text-[10px] font-sans font-semibold tracking-widest uppercase px-2.5 py-1 rounded-lg border ${
               playback.active
                 ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-400'
-                : 'bg-gray-50 border-white/[0.07] text-gray-400'
+                : 'bg-zinc-900 border-white/[0.07] text-zinc-500'
             }`}
           >
             <span
               className={`inline-block w-1.5 h-1.5 rounded-full ${
                 playback.active
                   ? 'bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.8)]'
-                  : 'bg-gray-400'
+                  : 'bg-zinc-600'
               }`}
             />
             {playback.active ? 'Running' : 'Stopped'}
@@ -112,7 +112,7 @@ export default function SimulationPage() {
       </div>
 
       {/* ── KPIs ─────────────────────────────────────────────────────── */}
-      <section className="card rounded-2xl shadow-card p-4">
+      <section className="card rounded-2xl  p-4">
         <div className="flex items-center justify-between mb-3.5">
           <SectionLabel>Virtual Account</SectionLabel>
           <button
@@ -158,11 +158,11 @@ export default function SimulationPage() {
       </section>
 
       {/* ── Chart (replay symbol) ────────────────────────────────────── */}
-      <section className="flex-1 min-h-0 card rounded-2xl shadow-card overflow-hidden flex flex-col">
+      <section className="flex-1 min-h-0 card rounded-2xl  overflow-hidden flex flex-col">
         {/* Chart header */}
-        <div className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-200 shrink-0">
+        <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 shrink-0">
           <span className="block w-0.5 h-3.5 rounded-full bg-indigo-600/60" />
-          <span className="font-mono font-bold text-gray-800 tracking-wide">{replaySymbol}</span>
+          <span className="font-mono font-bold text-zinc-100 tracking-wide">{replaySymbol}</span>
 
           {playback.active && (
             <span className="flex items-center gap-1 text-[10px] font-sans font-semibold text-amber-600 animate-pulse-slow">
@@ -176,17 +176,17 @@ export default function SimulationPage() {
               <>
                 {/* progress mini-bar */}
                 <div className="hidden sm:flex items-center gap-2">
-                  <div className="relative w-24 h-1 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="relative w-24 h-1 bg-zinc-800 rounded-full overflow-hidden">
                     <div
                       className="absolute inset-y-0 left-0 bg-indigo-600/80 rounded-full transition-all"
                       style={{ width: `${playback.progress * 100}%` }}
                     />
                   </div>
-                  <span className="text-[10px] font-mono text-gray-400 tabular-nums">
+                  <span className="text-[10px] font-mono text-zinc-500 tabular-nums">
                     {(playback.progress * 100).toFixed(0)}%
                   </span>
                 </div>
-                <span className="text-[10px] font-mono text-gray-400 tabular-nums">
+                <span className="text-[10px] font-mono text-zinc-500 tabular-nums">
                   {playback.current_index + 1}/{playback.total_bars} bars
                 </span>
               </>
@@ -203,11 +203,11 @@ export default function SimulationPage() {
       <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
         {/* Virtual Positions */}
-        <div className="card rounded-2xl shadow-card p-5">
+        <div className="card rounded-2xl  p-5">
           <div className="flex items-center justify-between mb-3.5">
             <SectionLabel>Virtual Positions</SectionLabel>
             {simPositions.length > 0 && (
-              <span className="text-[10px] font-mono text-gray-400">
+              <span className="text-[10px] font-mono text-zinc-500">
                 {simPositions.length} open
               </span>
             )}
@@ -215,18 +215,18 @@ export default function SimulationPage() {
 
           {simPositions.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 gap-2">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-6 h-6 text-gray-400/40">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-6 h-6 text-zinc-500/40">
                 <rect x="3" y="3" width="18" height="18" rx="2" />
                 <path strokeLinecap="round" d="M3 9h18M9 21V9" />
               </svg>
-              <p className="text-xs font-sans text-gray-400">No open positions</p>
+              <p className="text-xs font-sans text-zinc-500">No open positions</p>
             </div>
           ) : (
             <table className="w-full text-xs">
               <thead>
-                <tr className="border-b border-gray-200">
+                <tr className="border-b border-zinc-800">
                   {['Symbol', 'Qty', 'Avg Cost', 'Price', 'P&L'].map((c) => (
-                    <th key={c} className="pb-2 px-2 font-sans font-medium text-gray-400 text-right first:text-left">
+                    <th key={c} className="pb-2 px-2 font-sans font-medium text-zinc-500 text-right first:text-left">
                       {c}
                     </th>
                   ))}
@@ -234,11 +234,11 @@ export default function SimulationPage() {
               </thead>
               <tbody>
                 {simPositions.map((p) => (
-                  <tr key={p.symbol} className="border-b border-gray-100 hover:bg-gray-50/70 transition-colors">
-                    <td className="py-2 px-2 font-mono text-gray-800 font-semibold">{p.symbol}</td>
-                    <td className="py-2 px-2 font-mono text-gray-500 tabular-nums text-right">{p.qty}</td>
-                    <td className="py-2 px-2 font-mono text-gray-500 tabular-nums text-right">{fmtUSD(p.avg_cost)}</td>
-                    <td className="py-2 px-2 font-mono text-gray-800 tabular-nums text-right">{fmtUSD(p.current_price)}</td>
+                  <tr key={p.symbol} className="border-b border-zinc-800 hover:bg-zinc-900/70 transition-colors">
+                    <td className="py-2 px-2 font-mono text-zinc-100 font-semibold">{p.symbol}</td>
+                    <td className="py-2 px-2 font-mono text-zinc-400 tabular-nums text-right">{p.qty}</td>
+                    <td className="py-2 px-2 font-mono text-zinc-400 tabular-nums text-right">{fmtUSD(p.avg_cost)}</td>
+                    <td className="py-2 px-2 font-mono text-zinc-100 tabular-nums text-right">{fmtUSD(p.current_price)}</td>
                     <td className={`py-2 px-2 font-mono tabular-nums text-right font-medium ${p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                       {p.unrealized_pnl >= 0 ? '+' : ''}{fmtUSD(p.unrealized_pnl)}
                     </td>
@@ -250,11 +250,11 @@ export default function SimulationPage() {
         </div>
 
         {/* Order History */}
-        <div className="card rounded-2xl shadow-card p-5">
+        <div className="card rounded-2xl  p-5">
           <div className="flex items-center justify-between mb-3.5">
             <SectionLabel>Order History</SectionLabel>
             {simOrders.length > 0 && (
-              <span className="text-[10px] font-mono text-gray-400">
+              <span className="text-[10px] font-mono text-zinc-500">
                 {simOrders.length} orders
               </span>
             )}
@@ -262,18 +262,18 @@ export default function SimulationPage() {
 
           {simOrders.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 gap-2">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-6 h-6 text-gray-400/40">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-6 h-6 text-zinc-500/40">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
-              <p className="text-xs font-sans text-gray-400">No orders yet</p>
+              <p className="text-xs font-sans text-zinc-500">No orders yet</p>
             </div>
           ) : (
             <div className="overflow-y-auto max-h-48">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="border-b border-gray-200">
+                  <tr className="border-b border-zinc-800">
                     {['Time', 'Symbol', 'Side', 'Qty', 'Price', 'P&L'].map((c) => (
-                      <th key={c} className="pb-2 px-2 font-sans font-medium text-gray-400 text-right first:text-left">
+                      <th key={c} className="pb-2 px-2 font-sans font-medium text-zinc-500 text-right first:text-left">
                         {c}
                       </th>
                     ))}
@@ -281,16 +281,16 @@ export default function SimulationPage() {
                 </thead>
                 <tbody>
                   {simOrders.map((o) => (
-                    <tr key={o.id} className="border-b border-gray-100 hover:bg-gray-50/70 transition-colors">
-                      <td className="py-1.5 px-2 font-mono text-gray-400 tabular-nums">
+                    <tr key={o.id} className="border-b border-zinc-800 hover:bg-zinc-900/70 transition-colors">
+                      <td className="py-1.5 px-2 font-mono text-zinc-500 tabular-nums">
                         {new Date(o.timestamp).toLocaleTimeString()}
                       </td>
-                      <td className="py-1.5 px-2 font-mono text-gray-800 font-semibold">{o.symbol}</td>
+                      <td className="py-1.5 px-2 font-mono text-zinc-100 font-semibold">{o.symbol}</td>
                       <td className={`py-1.5 px-2 font-mono font-semibold ${o.action === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>
                         {o.action}
                       </td>
-                      <td className="py-1.5 px-2 font-mono text-gray-500 tabular-nums text-right">{o.qty}</td>
-                      <td className="py-1.5 px-2 font-mono text-gray-500 tabular-nums text-right">{fmtUSD(o.price)}</td>
+                      <td className="py-1.5 px-2 font-mono text-zinc-400 tabular-nums text-right">{o.qty}</td>
+                      <td className="py-1.5 px-2 font-mono text-zinc-400 tabular-nums text-right">{fmtUSD(o.price)}</td>
                       <td className={`py-1.5 px-2 font-mono tabular-nums text-right ${(o.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {o.pnl != null ? `${o.pnl >= 0 ? '+' : ''}${fmtUSD(o.pnl)}` : '—'}
                       </td>

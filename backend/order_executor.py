@@ -20,12 +20,35 @@ class OrderError(Exception):
     """Raised when an order cannot be placed."""
 
 
+# Positions snapshot — updated by bot_runner each cycle for cash-only guard
+_current_positions: dict[str, float] = {}
+
+
+def update_positions_snapshot(positions: list[dict]) -> None:
+    global _current_positions
+    _current_positions = {p["symbol"]: p.get("qty", 0) for p in positions}
+
+
+def _compute_atr(bars, fallback_price: float, period: int = 14) -> float:
+    """ATR from bars DataFrame. Falls back to 2% of price."""
+    if bars is None or len(bars) < period + 1:
+        return fallback_price * 0.02
+    try:
+        import pandas as pd
+        h, l, c = bars["high"], bars["low"], bars["close"]
+        tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        val = float(tr.rolling(period).mean().iloc[-1])
+        return val if val > 0 else fallback_price * 0.02
+    except Exception:
+        return fallback_price * 0.02
+
+
 # ── Pre-flight order validation ──────────────────────────────────────────────
 MAX_ORDER_QTY = 10_000
 MIN_PRICE = 0.01
 MAX_PRICE = 1_000_000
 MIN_ORDER_VALUE = 100  # minimum notional value
-DEDUP_WINDOW = 5  # seconds
+DEDUP_WINDOW = 60  # seconds — prevent duplicate fills in slow markets
 _recent_orders: dict[str, float] = {}  # "symbol:action" -> timestamp
 
 
@@ -38,6 +61,12 @@ def _pre_flight_check(rule: Rule, price_estimate: float | None = None) -> str | 
     if rule.action.limit_price is not None:
         if not (MIN_PRICE <= rule.action.limit_price <= MAX_PRICE):
             return f"Limit price {rule.action.limit_price} outside [{MIN_PRICE}, {MAX_PRICE}]"
+
+    # Cash-only guard: reject SELL if no long position held
+    if rule.action.type == "SELL" and not cfg.SHORT_ALLOWED:
+        held = _current_positions.get(rule.symbol, 0)
+        if held <= 0:
+            return f"SELL rejected for {rule.symbol}: no long position (cash account)"
 
     # Min order value check
     if price_estimate and rule.action.limit_price:
@@ -67,7 +96,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def place_order(rule: Rule) -> Optional[Trade]:
+async def place_order(rule: Rule, bars=None) -> Optional[Trade]:
     """
     Place an order for the given rule's action.
 
@@ -110,9 +139,14 @@ async def place_order(rule: Rule) -> Optional[Trade]:
     else:
         ib_order = MarketOrder(action_str, qty)
 
-    # Extended hours + GTC so orders work outside regular trading hours
-    ib_order.outsideRth = True
-    ib_order.tif = "GTC"
+    # Regular hours only, DAY orders (re-evaluate daily, don't hold stale orders)
+    ib_order.outsideRth = False
+    ib_order.tif = "DAY"
+
+    # Multi-account: must set account on every order
+    accounts = ibkr.ib.managedAccounts()
+    if accounts:
+        ib_order.account = accounts[0]
 
     # Record trade in DB (PENDING status)
     trade_rec = Trade(
@@ -142,7 +176,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
                  action_str, qty, rule.symbol, trade_rec.order_id)
 
         # Watch for fill asynchronously
-        asyncio.create_task(_watch_fill(ib_trade, trade_rec, contract, rule))
+        asyncio.create_task(_watch_fill(ib_trade, trade_rec, contract, rule, bars=bars))
 
         return trade_rec
 
@@ -153,7 +187,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         return trade_rec
 
 
-async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule, timeout: int = 60) -> None:
+async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule, timeout: int = 60, bars=None) -> None:
     """Poll the IBKR trade object until it fills or times out."""
     elapsed = 0
     while elapsed < timeout:
@@ -184,12 +218,16 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule,
             except Exception:
                 pass
 
-            # -- Bracket orders (SL + TP) after a BUY fill --
-            # 2.2:1 reward/risk — risk 2%, target 4.4%
+            # -- ATR-based bracket orders (2×ATR stop, 2.2:1 R/R) --
             if trade_rec.action == "BUY" and trade_rec.fill_price:
                 fill = trade_rec.fill_price
-                sl_price = round(fill * 0.98, 2)    # -2% stop loss
-                tp_price = round(fill * 1.044, 2)   # +4.4% take profit (2.2:1 R/R)
+                atr = _compute_atr(bars, fill)
+                sl_dist = 2.0 * atr
+                tp_dist = 2.2 * sl_dist  # 2.2:1 reward/risk
+                sl_price = round(fill - sl_dist, 2)
+                tp_price = round(fill + tp_dist, 2)
+                log.info("ATR=%.2f → SL=%.2f (-%s) TP=%.2f (+%s)",
+                         atr, sl_price, f"{sl_dist:.2f}", tp_price, f"{tp_dist:.2f}")
                 oca_group = f"OCA_{trade_rec.id[:8]}"
 
                 sl_order = StopOrder("SELL", trade_rec.quantity, sl_price)

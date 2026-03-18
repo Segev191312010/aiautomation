@@ -14,6 +14,14 @@ from indicators import calculate, detect_cross, resolve_value
 
 log = logging.getLogger(__name__)
 
+# Global indicator cache — cleared once per bot cycle
+_indicator_cache: dict[tuple, object] = {}
+
+
+def clear_indicator_cache() -> None:
+    """Call from bot_runner at the start of each cycle."""
+    _indicator_cache.clear()
+
 
 # ---------------------------------------------------------------------------
 # Single condition evaluation
@@ -30,8 +38,13 @@ def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict) -> bool:
     op = cond.operator.lower().strip()
 
     try:
-        # Compute the primary indicator series
-        series_a = calculate(df, cond.indicator, cond.params)
+        # Compute the primary indicator series (with global cache)
+        cache_key = (id(df), cond.indicator, str(cond.params))
+        if cache_key in _indicator_cache:
+            series_a = _indicator_cache[cache_key]
+        else:
+            series_a = calculate(df, cond.indicator, cond.params)
+            _indicator_cache[cache_key] = series_a
         cache[f"{cond.indicator}_{cond.params}"] = series_a
 
         # Resolve the right-hand side (scalar or another series)

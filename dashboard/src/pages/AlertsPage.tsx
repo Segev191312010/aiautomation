@@ -14,9 +14,9 @@ import AlertForm from '@/components/alerts/AlertForm'
 function AlertsPageSkeleton() {
   return (
     <div className="flex flex-col gap-3 animate-pulse">
-      <div className="h-10 w-full bg-gray-50 rounded-xl" />
-      <div className="h-10 w-full bg-gray-50 rounded-xl" />
-      <div className="h-10 w-full bg-gray-50 rounded-xl" />
+      <div className="h-10 w-full bg-zinc-900 rounded-xl" />
+      <div className="h-10 w-full bg-zinc-900 rounded-xl" />
+      <div className="h-10 w-full bg-zinc-900 rounded-xl" />
     </div>
   )
 }
@@ -25,9 +25,9 @@ function AlertsPageSkeleton() {
 
 function StatusPill({ count, label, color }: { count: number; label: string; color: 'green' | 'amber' | 'ghost' }) {
   const colorMap = {
-    green: 'bg-green-600/10 text-green-600 border-green-300/20',
+    green: 'bg-emerald-600/10 text-emerald-400 border-emerald-300/20',
     amber: 'bg-amber-600/10 text-amber-600 border-amber-300/20',
-    ghost: 'bg-gray-100/60 text-gray-500 border-gray-200',
+    ghost: 'bg-zinc-800/60 text-zinc-400 border-zinc-800',
   }
   return (
     <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-sans font-medium ${colorMap[color]}`}>
@@ -94,11 +94,11 @@ export default function AlertsPage() {
                 <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
               </svg>
             </div>
-            <h1 className="text-base font-sans font-semibold text-gray-800 tracking-wide">
+            <h1 className="text-base font-sans font-semibold text-zinc-100 tracking-wide">
               Alerts
             </h1>
           </div>
-          <p className="text-xs font-sans text-gray-400 ml-9">
+          <p className="text-xs font-sans text-zinc-500 ml-9">
             Price and indicator triggers with browser notifications
           </p>
         </div>
@@ -133,7 +133,7 @@ export default function AlertsPage() {
       )}
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
-      <div className="flex border-b border-gray-200 mb-4">
+      <div className="flex border-b border-zinc-800 mb-4">
         {(['active', 'history'] as ActiveTab[]).map((tab) => (
           <button
             key={tab}
@@ -142,7 +142,7 @@ export default function AlertsPage() {
               'text-sm font-sans font-medium px-4 py-2 border-b-2 transition-colors',
               activeTab === tab
                 ? 'border-indigo-600 text-indigo-600'
-                : 'border-transparent text-gray-400 hover:text-gray-500',
+                : 'border-transparent text-zinc-500 hover:text-zinc-400',
             ].join(' ')}
           >
             {tab === 'active' ? 'Active Alerts' : 'History'}

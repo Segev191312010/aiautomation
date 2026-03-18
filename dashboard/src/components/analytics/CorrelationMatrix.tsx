@@ -32,7 +32,7 @@ function corrToColor(c: number): string {
 }
 
 function corrToTextColor(c: number): string {
-  return Math.abs(c) > 0.55 ? 'text-white' : 'text-gray-700'
+  return Math.abs(c) > 0.55 ? 'text-white' : 'text-zinc-200'
 }
 
 // ── Detail popover ────────────────────────────────────────────────────────────
@@ -54,14 +54,14 @@ function CellDetailPanel({ detail, onClose }: { detail: CellDetail; onClose: () 
     'Low Correlation'
 
   return (
-    <div className="card rounded-2xl shadow-card border border-gray-200 p-5 flex flex-col gap-3">
+    <div className="card rounded-2xl  border border-zinc-800 p-5 flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <div className="text-xs font-sans font-semibold text-gray-700">
+        <div className="text-xs font-sans font-semibold text-zinc-200">
           {symA} vs {symB}
         </div>
         <button
           onClick={onClose}
-          className="text-gray-400 hover:text-gray-600 transition-colors"
+          className="text-zinc-500 hover:text-zinc-400 transition-colors"
           aria-label="Close"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
@@ -75,7 +75,7 @@ function CellDetailPanel({ detail, onClose }: { detail: CellDetail; onClose: () 
         <span
           className={clsx(
             'text-3xl font-mono font-bold tabular-nums',
-            corr >= 0.5 ? 'text-red-500' : corr <= -0.5 ? 'text-blue-500' : 'text-gray-700',
+            corr >= 0.5 ? 'text-red-400' : corr <= -0.5 ? 'text-blue-500' : 'text-zinc-200',
           )}
         >
           {corr.toFixed(3)}
@@ -84,7 +84,7 @@ function CellDetailPanel({ detail, onClose }: { detail: CellDetail; onClose: () 
           'text-xs font-sans px-2 py-1 rounded-lg border',
           isHigh
             ? 'text-amber-600 bg-amber-500/10 border-amber-500/20'
-            : 'text-gray-500 bg-gray-100/60 border-gray-200',
+            : 'text-zinc-400 bg-zinc-800/60 border-zinc-800',
         )}>
           {label}
         </span>
@@ -103,7 +103,7 @@ function CellDetailPanel({ detail, onClose }: { detail: CellDetail; onClose: () 
         </div>
       )}
 
-      <div className="text-[10px] font-sans text-gray-400">
+      <div className="text-[10px] font-sans text-zinc-500">
         Correlation scale: +1 = perfect positive, 0 = no correlation, −1 = perfect inverse
       </div>
     </div>
@@ -116,7 +116,7 @@ function ColorLegend() {
   const steps = [-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1]
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[9px] font-mono text-gray-400">−1</span>
+      <span className="text-[9px] font-mono text-zinc-500">−1</span>
       <div className="flex h-3 rounded-sm overflow-hidden flex-1 max-w-32">
         {steps.map((v, i) => (
           <div
@@ -126,7 +126,7 @@ function ColorLegend() {
           />
         ))}
       </div>
-      <span className="text-[9px] font-mono text-gray-400">+1</span>
+      <span className="text-[9px] font-mono text-zinc-500">+1</span>
     </div>
   )
 }
@@ -146,7 +146,7 @@ export default function CorrelationMatrix({ data, loading, warnThreshold = 0.8 }
     return (
       <div className="animate-pulse space-y-2">
         {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="h-8 bg-gray-100 rounded" />
+          <div key={i} className="h-8 bg-zinc-800 rounded" />
         ))}
       </div>
     )
@@ -154,7 +154,7 @@ export default function CorrelationMatrix({ data, loading, warnThreshold = 0.8 }
 
   if (!data || data.symbols.length === 0) {
     return (
-      <div className="flex items-center justify-center py-10 text-sm text-gray-400">
+      <div className="flex items-center justify-center py-10 text-sm text-zinc-500">
         No correlation data (need at least 2 positions with price history)
       </div>
     )
@@ -196,7 +196,7 @@ export default function CorrelationMatrix({ data, loading, warnThreshold = 0.8 }
               <th className="w-14" />
               {symbols.map((sym) => (
                 <th key={sym} className="w-14 text-center pb-1">
-                  <span className="text-[9px] font-mono text-gray-500 writing-mode-vertical truncate block max-w-[56px] overflow-hidden">
+                  <span className="text-[9px] font-mono text-zinc-400 writing-mode-vertical truncate block max-w-[56px] overflow-hidden">
                     {sym}
                   </span>
                 </th>
@@ -207,7 +207,7 @@ export default function CorrelationMatrix({ data, loading, warnThreshold = 0.8 }
             {symbols.map((rowSym, i) => (
               <tr key={rowSym}>
                 <td className="text-right pr-1.5 pb-0.5">
-                  <span className="text-[9px] font-mono text-gray-500 truncate block">{rowSym}</span>
+                  <span className="text-[9px] font-mono text-zinc-400 truncate block">{rowSym}</span>
                 </td>
                 {symbols.map((colSym, j) => {
                   const corr = matrix[i]?.[j] ?? 0
@@ -244,7 +244,7 @@ export default function CorrelationMatrix({ data, loading, warnThreshold = 0.8 }
       {/* Legend + detail */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <ColorLegend />
-        <span className="text-[9px] font-sans text-gray-400">Click a cell for details</span>
+        <span className="text-[9px] font-sans text-zinc-500">Click a cell for details</span>
       </div>
 
       {selected && (

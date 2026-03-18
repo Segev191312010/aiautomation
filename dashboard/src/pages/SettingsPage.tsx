@@ -80,7 +80,7 @@ function IconRefresh({ className }: { className?: string }) {
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
-    <label className="text-xs font-sans font-medium text-gray-500 tracking-wide uppercase mb-2 block">
+    <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide uppercase mb-2 block">
       {children}
     </label>
   )
@@ -98,15 +98,15 @@ interface SectionCardProps {
 function SectionCard({ icon, title, delay = 0, children }: SectionCardProps) {
   return (
     <section
-      className="card rounded-2xl shadow-card overflow-hidden animate-fade-in-up"
+      className="card rounded-2xl  overflow-hidden animate-fade-in-up"
       style={{ animationDelay: `${delay}ms`, animationFillMode: 'both' }}
     >
       {/* Section header */}
-      <div className="flex items-center gap-2.5 px-5 py-4 border-b border-gray-200">
+      <div className="flex items-center gap-2.5 px-5 py-4 border-b border-zinc-800">
         <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600">
           {icon}
         </span>
-        <h2 className="text-xs font-sans font-semibold text-gray-500 tracking-widest uppercase">
+        <h2 className="text-xs font-sans font-semibold text-zinc-400 tracking-widest uppercase">
           {title}
         </h2>
       </div>
@@ -184,8 +184,8 @@ export default function SettingsPage() {
 
   // Shared input class
   const inputCls =
-    'w-full text-sm font-mono bg-white border border-gray-200 rounded-xl px-4 py-2.5 ' +
-    'text-gray-800 placeholder-gray-400 transition-colors duration-150 ' +
+    'w-full text-sm font-mono bg-zinc-900 border border-zinc-800 rounded-xl px-4 py-2.5 ' +
+    'text-zinc-100 placeholder-zinc-400 transition-colors duration-150 ' +
     'focus:border-indigo-100 focus:ring-1 focus:ring-indigo-300 focus:outline-none uppercase'
 
   return (
@@ -197,8 +197,8 @@ export default function SettingsPage() {
           <IconSettings className="w-5 h-5 text-indigo-600" />
         </div>
         <div>
-          <h1 className="text-base font-sans font-bold text-gray-800 tracking-tight">Settings</h1>
-          <p className="text-[11px] font-sans text-gray-400 mt-0.5">Configure platform preferences and defaults</p>
+          <h1 className="text-base font-sans font-bold text-zinc-100 tracking-tight">Settings</h1>
+          <p className="text-[11px] font-sans text-zinc-500 mt-0.5">Configure platform preferences and defaults</p>
         </div>
       </div>
 
@@ -218,7 +218,7 @@ export default function SettingsPage() {
           </div>
 
           {/* Divider */}
-          <div className="h-px bg-gray-100/60" />
+          <div className="h-px bg-zinc-800/60" />
 
           {/* Default Bar Size */}
           <div>
@@ -231,7 +231,7 @@ export default function SettingsPage() {
                   className={`text-xs font-mono px-3 py-1.5 rounded-xl border transition-all duration-150 ${
                     defaultBarSize === bs
                       ? 'border-indigo-100 text-indigo-600 bg-indigo-50 shadow-[0_0_12px_rgba(99,102,241,0.15)]'
-                      : 'border-gray-200 text-gray-400 bg-white hover:text-gray-500 hover:border-white/[0.12] hover:bg-gray-50'
+                      : 'border-zinc-800 text-zinc-500 bg-zinc-900 hover:text-zinc-400 hover:border-white/[0.12] hover:bg-zinc-900'
                   }`}
                 >
                   {bs}
@@ -241,7 +241,7 @@ export default function SettingsPage() {
           </div>
 
           {/* Divider */}
-          <div className="h-px bg-gray-100/60" />
+          <div className="h-px bg-zinc-800/60" />
 
           {/* Default Watchlist */}
           <div>
@@ -252,7 +252,7 @@ export default function SettingsPage() {
               placeholder="SPY, QQQ, AAPL, ..."
               className={inputCls}
             />
-            <p className="text-[10px] font-sans text-gray-400 mt-1.5 tracking-wide">
+            <p className="text-[10px] font-sans text-zinc-500 mt-1.5 tracking-wide">
               Comma-separated ticker symbols
             </p>
           </div>
@@ -273,9 +273,9 @@ export default function SettingsPage() {
               onChange={(e) => setBotInterval(Number(e.target.value))}
               className={`${inputCls} max-w-[8rem]`}
             />
-            <span className="text-xs font-sans text-gray-400">seconds</span>
+            <span className="text-xs font-sans text-zinc-500">seconds</span>
           </div>
-          <p className="text-[10px] font-sans text-gray-400 mt-1.5 tracking-wide">
+          <p className="text-[10px] font-sans text-zinc-500 mt-1.5 tracking-wide">
             How frequently the rule engine evaluates open conditions (5 – 3600 s)
           </p>
         </div>
@@ -290,7 +290,7 @@ export default function SettingsPage() {
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 inline-block" />
               Dark
             </span>
-            <span className="text-[10px] font-sans text-gray-400">Light theme coming in Stage 8</span>
+            <span className="text-[10px] font-sans text-zinc-500">Light theme coming in Stage 8</span>
           </div>
         </div>
       </SectionCard>
@@ -299,15 +299,15 @@ export default function SettingsPage() {
       <SectionCard icon={<IconInfo className="w-3.5 h-3.5" />} title="About" delay={240}>
         <div className="grid grid-cols-[auto_1fr] gap-x-8 gap-y-3">
 
-          <span className="text-xs font-sans text-gray-400 uppercase tracking-wide">Version</span>
-          <span className="text-xs font-mono text-gray-800">2.0.0</span>
+          <span className="text-xs font-sans text-zinc-500 uppercase tracking-wide">Version</span>
+          <span className="text-xs font-mono text-zinc-100">2.0.0</span>
 
-          <span className="text-xs font-sans text-gray-400 uppercase tracking-wide">Mode</span>
-          <span className="text-xs font-sans text-gray-800">
+          <span className="text-xs font-sans text-zinc-500 uppercase tracking-wide">Mode</span>
+          <span className="text-xs font-sans text-zinc-100">
             {status?.sim_mode ? 'Simulation' : status?.ibkr_connected ? 'IBKR Live' : 'Disconnected'}
           </span>
 
-          <span className="text-xs font-sans text-gray-400 uppercase tracking-wide">IBKR</span>
+          <span className="text-xs font-sans text-zinc-500 uppercase tracking-wide">IBKR</span>
           <span className={`text-xs font-sans flex items-center gap-1.5 ${status?.ibkr_connected ? 'text-emerald-400' : 'text-red-400'}`}>
             <span className={`w-1.5 h-1.5 rounded-full inline-block ${status?.ibkr_connected ? 'bg-emerald-400' : 'bg-red-400'}`} />
             {status?.ibkr_connected ? 'Connected' : 'Disconnected'}
@@ -352,8 +352,8 @@ export default function SettingsPage() {
           disabled={saving || !settings}
           className={[
             'inline-flex items-center gap-2 text-sm font-sans font-medium px-4 py-2.5 rounded-xl',
-            'border border-gray-200 text-gray-500 bg-transparent',
-            'hover:border-white/[0.14] hover:text-gray-800 hover:bg-gray-50',
+            'border border-zinc-800 text-zinc-400 bg-transparent',
+            'hover:border-white/[0.14] hover:text-zinc-100 hover:bg-zinc-900',
             'active:scale-[0.98] transition-all duration-150',
             'disabled:opacity-30 disabled:cursor-not-allowed',
           ].join(' ')}

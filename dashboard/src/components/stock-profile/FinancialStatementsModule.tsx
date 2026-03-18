@@ -172,7 +172,7 @@ interface TableProps {
 function StatementTable({ periods, rows, periodMode }: TableProps) {
   if (!periods.length || !rows.length) {
     return (
-      <p className="text-[11px] text-gray-400 py-4 text-center">
+      <p className="text-[11px] text-zinc-500 py-4 text-center">
         No data available
       </p>
     )
@@ -182,7 +182,7 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
   const hasAnyData = rows.some((r) => r.values.some((v) => v != null))
   if (!hasAnyData) {
     return (
-      <p className="text-[11px] text-gray-400 py-4 text-center">
+      <p className="text-[11px] text-zinc-500 py-4 text-center">
         Data not available for this statement
       </p>
     )
@@ -194,14 +194,14 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
 
         {/* ── Header row ── */}
         <thead>
-          <tr className="bg-gray-100/60 border-b-2 border-gray-200">
-            <th className="text-left font-sans font-medium text-gray-400 py-2.5 pr-4 min-w-[160px] text-[11.5px]">
+          <tr className="bg-zinc-800/60 border-b-2 border-zinc-800">
+            <th className="text-left font-sans font-medium text-zinc-500 py-2.5 pr-4 min-w-[160px] text-[11.5px]">
               {/* row label column — no header text */}
             </th>
             {periods.map((p) => (
               <th
                 key={p}
-                className="text-right font-sans font-semibold text-gray-500 py-2.5 px-3 min-w-[96px] whitespace-nowrap text-[11.5px]"
+                className="text-right font-sans font-semibold text-zinc-400 py-2.5 px-3 min-w-[96px] whitespace-nowrap text-[11.5px]"
               >
                 {formatPeriod(p, periodMode)}
               </th>
@@ -219,8 +219,8 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
               <tr
                 key={row.label}
                 className={clsx(
-                  'border-b border-gray-100 hover:bg-gray-50 transition-colors',
-                  isEven ? 'bg-gray-50/60' : 'bg-transparent',
+                  'border-b border-zinc-800 hover:bg-zinc-900 transition-colors',
+                  isEven ? 'bg-zinc-900/60' : 'bg-transparent',
                 )}
               >
                 {/* Row label */}
@@ -228,8 +228,8 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
                   className={clsx(
                     'font-sans font-medium py-2 pr-4 whitespace-nowrap',
                     isComputed
-                      ? 'text-gray-400 italic'
-                      : 'text-gray-500',
+                      ? 'text-zinc-500 italic'
+                      : 'text-zinc-400',
                   )}
                 >
                   {row.label}
@@ -245,20 +245,20 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
                       key={colIdx}
                       className={clsx(
                         'text-right font-mono tabular-nums py-2 px-3 whitespace-nowrap',
-                        isNegative ? 'text-red-600' : 'text-gray-800',
+                        isNegative ? 'text-red-400' : 'text-zinc-100',
                       )}
                     >
                       <span className="inline-flex items-center justify-end gap-1">
                         {fmtCompact(v, row.isPercent)}
 
                         {dir === 'up' && (
-                          <span className="inline-flex items-center bg-green-50 px-1 rounded leading-none">
-                            <span className="text-green-600 text-[10px] leading-none">▲</span>
+                          <span className="inline-flex items-center bg-emerald-500/10 px-1 rounded leading-none">
+                            <span className="text-emerald-400 text-[10px] leading-none">▲</span>
                           </span>
                         )}
                         {dir === 'down' && (
-                          <span className="inline-flex items-center bg-red-50 px-1 rounded leading-none">
-                            <span className="text-red-600 text-[10px] leading-none">▼</span>
+                          <span className="inline-flex items-center bg-red-500/10 px-1 rounded leading-none">
+                            <span className="text-red-400 text-[10px] leading-none">▼</span>
                           </span>
                         )}
                       </span>
@@ -278,22 +278,22 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
 
 function LoadingSkeleton() {
   return (
-    <section className="card rounded-lg shadow-card p-6 animate-pulse">
+    <section className="card rounded-lg  p-6 animate-pulse">
       <div className="flex items-center justify-between mb-5">
-        <div className="h-3 w-44 bg-gray-100 rounded-lg" />
-        <div className="h-3 w-12 bg-gray-100 rounded-lg" />
+        <div className="h-3 w-44 bg-zinc-800 rounded-lg" />
+        <div className="h-3 w-12 bg-zinc-800 rounded-lg" />
       </div>
       <div className="flex items-center justify-between mb-5">
         <div className="flex gap-1.5">
           {[140, 112, 96].map((w) => (
-            <div key={w} className="h-7 bg-gray-100 rounded-lg" style={{ width: w }} />
+            <div key={w} className="h-7 bg-zinc-800 rounded-lg" style={{ width: w }} />
           ))}
         </div>
-        <div className="h-7 w-28 bg-gray-100 rounded-lg" />
+        <div className="h-7 w-28 bg-zinc-800 rounded-lg" />
       </div>
       <div className="space-y-2.5">
         {[1, 2, 3, 4, 5, 6].map((i) => (
-          <div key={i} className="h-8 bg-gray-100 rounded-lg" />
+          <div key={i} className="h-8 bg-zinc-800 rounded-lg" />
         ))}
       </div>
     </section>
@@ -323,11 +323,11 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
   if (!data) return null
 
   return (
-    <section id="section-financials" className="card rounded-lg shadow-card p-6">
+    <section id="section-financials" className="card rounded-lg  p-6">
 
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
-        <h3 className="text-xs font-sans font-semibold text-gray-500 tracking-wide uppercase">
+        <h3 className="text-xs font-sans font-semibold text-zinc-400 tracking-wide uppercase">
           Financial Statements
         </h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
@@ -337,7 +337,7 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
       <div className="flex items-center justify-between flex-wrap gap-2 mb-5">
 
         {/* Statement tabs — proper tab bar with bottom-border active indicator */}
-        <div className="flex gap-0 border-b border-gray-200">
+        <div className="flex gap-0 border-b border-zinc-800">
           {TABS.map((tab) => {
             const isActive = activeTab === tab.key
             return (
@@ -348,7 +348,7 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
                   'text-[10px] font-sans px-3.5 py-1.5 -mb-px transition-all duration-150 border-b-2',
                   isActive
                     ? 'bg-indigo-50 text-indigo-600 border-indigo-600 rounded-t-md'
-                    : 'text-gray-400 border-transparent hover:text-gray-500 hover:underline',
+                    : 'text-zinc-500 border-transparent hover:text-zinc-400 hover:underline',
                 )}
               >
                 {tab.label}
@@ -358,7 +358,7 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
         </div>
 
         {/* Quarterly / Annual — sharper segmented control */}
-        <div className="flex gap-0 bg-gray-100 rounded-md p-0.5 border border-gray-200">
+        <div className="flex gap-0 bg-zinc-800 rounded-md p-0.5 border border-zinc-800">
           {(['quarterly', 'annual'] as const).map((mode) => {
             const isActive = periodMode === mode
             return (
@@ -369,7 +369,7 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
                   'text-[10px] font-sans capitalize px-3 py-1 rounded transition-all duration-200',
                   isActive
                     ? 'bg-indigo-100 text-indigo-600 shadow-sm ring-1 ring-indigo-300'
-                    : 'text-gray-400 hover:text-gray-500',
+                    : 'text-zinc-500 hover:text-zinc-400',
                 )}
               >
                 {mode.charAt(0).toUpperCase() + mode.slice(1)}

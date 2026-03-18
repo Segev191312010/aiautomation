@@ -138,7 +138,7 @@ function DonutChart({ rows, hoveredSector, onHover }: DonutProps) {
             <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />
             <span className={clsx(
               'text-[10px] font-sans',
-              hoveredSector === row.sector ? 'text-gray-800 font-semibold' : 'text-gray-400',
+              hoveredSector === row.sector ? 'text-zinc-100 font-semibold' : 'text-zinc-500',
             )}>
               {row.sector.length > 12 ? row.sector.slice(0, 11) + '…' : row.sector}
             </span>
@@ -169,13 +169,13 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
     return (
       <div className="flex flex-col gap-4 animate-pulse">
         <div className="flex justify-center">
-          <div className="w-44 h-44 rounded-full bg-gray-100" />
+          <div className="w-44 h-44 rounded-full bg-zinc-800" />
         </div>
         <div className="space-y-2">
           {[1, 2, 3].map((i) => (
             <div key={i} className="flex justify-between items-center">
-              <div className="h-3 w-24 rounded bg-gray-100" />
-              <div className="h-3 w-16 rounded bg-gray-100" />
+              <div className="h-3 w-24 rounded bg-zinc-800" />
+              <div className="h-3 w-16 rounded bg-zinc-800" />
             </div>
           ))}
         </div>
@@ -185,7 +185,7 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
 
   if (!rows.length) {
     return (
-      <div className="flex items-center justify-center py-10 text-sm text-gray-400">
+      <div className="flex items-center justify-center py-10 text-sm text-zinc-500">
         No sector exposure data
       </div>
     )
@@ -217,12 +217,12 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
       <div className="overflow-x-auto">
         <table className="w-full min-w-[340px]">
           <thead>
-            <tr className="border-b border-gray-200">
+            <tr className="border-b border-zinc-800">
               {['Sector', 'Weight', 'Value', 'Positions', 'P&L'].map((col, i) => (
                 <th
                   key={col}
                   className={clsx(
-                    'py-2 px-2 text-[9px] font-sans uppercase tracking-widest text-gray-400 font-medium',
+                    'py-2 px-2 text-[9px] font-sans uppercase tracking-widest text-zinc-500 font-medium',
                     i === 0 ? 'text-left' : 'text-right',
                   )}
                 >
@@ -239,8 +239,8 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
                 <tr
                   key={row.sector}
                   className={clsx(
-                    'border-b border-gray-100 transition-colors cursor-default',
-                    hoveredSector === row.sector ? 'bg-gray-100/50' : 'hover:bg-gray-50/50',
+                    'border-b border-zinc-800 transition-colors cursor-default',
+                    hoveredSector === row.sector ? 'bg-zinc-800/50' : 'hover:bg-zinc-900/50',
                   )}
                   onMouseEnter={() => setHoveredSector(row.sector)}
                   onMouseLeave={() => setHoveredSector(null)}
@@ -249,7 +249,7 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
                   <td className="py-2 px-2 text-left">
                     <div className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: color }} />
-                      <span className="text-xs font-sans text-gray-700 truncate max-w-[110px]">
+                      <span className="text-xs font-sans text-zinc-200 truncate max-w-[110px]">
                         {row.sector}
                       </span>
                       {isOver && (
@@ -263,7 +263,7 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
                   {/* Weight with mini bar */}
                   <td className="py-2 px-2 text-right">
                     <div className="flex items-center justify-end gap-1.5">
-                      <div className="w-12 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                      <div className="w-12 h-1.5 rounded-full bg-zinc-800 overflow-hidden">
                         <div
                           className={clsx('h-full rounded-full', isOver ? 'bg-amber-500' : 'bg-indigo-500')}
                           style={{ width: `${Math.min(100, row.weight_pct)}%` }}
@@ -271,7 +271,7 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
                       </div>
                       <span className={clsx(
                         'text-[11px] font-mono tabular-nums',
-                        isOver ? 'text-amber-600 font-semibold' : 'text-gray-600',
+                        isOver ? 'text-amber-600 font-semibold' : 'text-zinc-400',
                       )}>
                         {row.weight_pct.toFixed(1)}%
                       </span>
@@ -279,19 +279,19 @@ export default function SectorExposure({ rows, maxSectorPct = 30, loading }: Pro
                   </td>
 
                   {/* Value */}
-                  <td className="py-2 px-2 text-right text-[11px] font-mono tabular-nums text-gray-600">
+                  <td className="py-2 px-2 text-right text-[11px] font-mono tabular-nums text-zinc-400">
                     {fmtUSD(row.value)}
                   </td>
 
                   {/* Position count */}
-                  <td className="py-2 px-2 text-right text-[11px] font-mono tabular-nums text-gray-500">
+                  <td className="py-2 px-2 text-right text-[11px] font-mono tabular-nums text-zinc-400">
                     {row.position_count}
                   </td>
 
                   {/* P&L */}
                   <td className={clsx(
                     'py-2 px-2 text-right text-[11px] font-mono tabular-nums font-medium',
-                    row.pnl >= 0 ? 'text-green-600' : 'text-red-600',
+                    row.pnl >= 0 ? 'text-emerald-400' : 'text-red-400',
                   )}>
                     {row.pnl >= 0 ? '+' : ''}{fmtUSD(row.pnl)}
                   </td>

@@ -205,6 +205,21 @@ async def lifespan(app: FastAPI):
 
     # Register order-fill â†’ WS broadcast
     async def _on_trade_fill(trade: Trade) -> None:
+        # Compute bracket prices and account %
+        sl_price = round(trade.fill_price * 0.98, 2) if trade.fill_price and trade.action == "BUY" else None
+        tp_price = round(trade.fill_price * 1.044, 2) if trade.fill_price and trade.action == "BUY" else None
+        # Get account balance for % calculation
+        pct_of_account = None
+        try:
+            acct_vals = ibkr.ib.accountValues()
+            for av in acct_vals:
+                if av.tag == "NetLiquidation" and av.currency == "USD":
+                    bal = float(av.value)
+                    if bal > 0 and trade.fill_price:
+                        pct_of_account = round((trade.fill_price * trade.quantity) / bal * 100, 2)
+                    break
+        except Exception:
+            pass
         await _broadcast(
             {
                 "type":     "filled",
@@ -214,6 +229,10 @@ async def lifespan(app: FastAPI):
                 "action":   trade.action,
                 "qty":      trade.quantity,
                 "price":    trade.fill_price,
+                "rule_name": trade.rule_name,
+                "sl_price": sl_price,
+                "tp_price": tp_price,
+                "pct_of_account": pct_of_account,
             }
         )
     on_fill(lambda t: asyncio.create_task(_on_trade_fill(t)))
@@ -1009,6 +1028,95 @@ async def get_positions():
     return [p.model_dump() for p in await ibkr.get_positions()]
 
 
+@app.get("/api/positions/brackets")
+async def get_positions_with_brackets():
+    """Positions enriched with their SL/TP bracket orders."""
+    if not ibkr.is_connected():
+        raise HTTPException(503, "IBKR not connected")
+
+    positions = [p.model_dump() for p in await ibkr.get_positions()]
+    open_orders = ibkr.ib.openOrders()
+    open_trades = ibkr.ib.openTrades()
+
+    # Map bracket orders to positions by symbol
+    for pos in positions:
+        sym = pos["symbol"]
+        pos["sl_order"] = None
+        pos["tp_order"] = None
+        for t in open_trades:
+            if t.contract.symbol == sym and t.order.action == "SELL":
+                if t.order.orderType == "STP":
+                    pos["sl_order"] = {
+                        "order_id": t.order.orderId,
+                        "price": t.order.auxPrice,
+                        "status": t.orderStatus.status,
+                    }
+                elif t.order.orderType == "LMT":
+                    pos["tp_order"] = {
+                        "order_id": t.order.orderId,
+                        "price": t.order.lmtPrice,
+                        "status": t.orderStatus.status,
+                    }
+        # Compute P&L %
+        if pos["avg_cost"] and pos["avg_cost"] > 0:
+            pos["pnl_pct"] = round((pos["market_price"] / pos["avg_cost"] - 1) * 100, 2)
+        else:
+            pos["pnl_pct"] = 0.0
+
+    # Get account balance for % of account calc
+    try:
+        acct = await ibkr.get_account_summary()
+        balance = acct.balance if acct.balance > 0 else 1
+        for pos in positions:
+            pos["pct_of_account"] = round(abs(pos["market_value"]) / balance * 100, 2)
+    except Exception:
+        for pos in positions:
+            pos["pct_of_account"] = 0.0
+
+    return positions
+
+
+@app.put("/api/orders/{order_id}/modify")
+async def modify_order(order_id: int, price: float):
+    """Modify the price of an existing SL or TP order."""
+    if not ibkr.is_connected():
+        raise HTTPException(503, "IBKR not connected")
+
+    for trade in ibkr.ib.openTrades():
+        if trade.order.orderId == order_id:
+            order = trade.order
+            if order.orderType == "STP":
+                order.auxPrice = price
+            elif order.orderType == "LMT":
+                order.lmtPrice = price
+            else:
+                raise HTTPException(400, f"Cannot modify order type: {order.orderType}")
+            ibkr.ib.placeOrder(trade.contract, order)
+            order_type_label = "Stop Loss" if order.orderType == "STP" else "Take Profit"
+            # Broadcast modification via WebSocket
+            await _broadcast({
+                "type": "order_modified",
+                "order_id": order_id,
+                "symbol": trade.contract.symbol,
+                "order_type": order_type_label,
+                "new_price": price,
+                "old_price": trade.order.auxPrice if order.orderType == "STP" else trade.order.lmtPrice,
+            })
+            # Also send notification
+            try:
+                from notification_service import notification_service
+                await notification_service.notify_risk_event({
+                    "level": "Info",
+                    "symbol": trade.contract.symbol,
+                    "message": f"{order_type_label} modified to ${price:.2f}",
+                })
+            except Exception:
+                pass
+            return {"status": "modified", "order_id": order_id, "new_price": price}
+
+    raise HTTPException(404, f"Order {order_id} not found")
+
+
 # ---------------------------------------------------------------------------
 # Simulation endpoints
 # ---------------------------------------------------------------------------
@@ -1518,7 +1626,10 @@ def _cache_prices_from_quotes(quotes: list[dict]) -> None:
         _ws_last_yahoo_quote_ts = ts
 
 
+_position_push_counter = 0
+
 async def _market_heartbeat_loop() -> None:
+    global _position_push_counter
     while True:
         await asyncio.sleep(_MARKET_HEARTBEAT_INTERVAL_SECONDS)
         symbols = _all_heartbeat_symbols()
@@ -1532,6 +1643,20 @@ async def _market_heartbeat_loop() -> None:
             raise
         except Exception as exc:
             log.debug("Market heartbeat fetch failed: %s", exc)
+
+        # Push position + account updates every 3rd cycle (~15s)
+        _position_push_counter += 1
+        if _position_push_counter % 3 == 0 and ibkr.is_connected() and not cfg.SIM_MODE:
+            try:
+                positions = [p.model_dump() for p in await ibkr.get_positions()]
+                acct = await ibkr.get_account_summary()
+                await _broadcast({
+                    "type": "positions_update",
+                    "positions": positions,
+                    "account": acct.model_dump(),
+                })
+            except Exception:
+                pass
 
 
 async def _start_market_heartbeat() -> None:

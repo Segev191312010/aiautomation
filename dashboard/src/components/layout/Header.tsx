@@ -78,12 +78,12 @@ export default function Header() {
   }
 
   return (
-    <header className="flex items-center h-14 px-5 shrink-0 bg-white border-b border-[#E8E4DF] gap-4">
+    <header className="flex items-center h-14 px-5 shrink-0 bg-zinc-900 border-b border-[#E8E4DF] gap-4">
       <div className="min-w-0 shrink-0">
-        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-gray-400">
+        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">
           Workspace
         </div>
-        <h1 className="text-sm font-mono font-semibold text-gray-900 tracking-wide">
+        <h1 className="text-sm font-mono font-semibold text-zinc-50 tracking-wide">
           {PAGE_LABELS[activeRoute] ?? 'Dashboard'}
         </h1>
       </div>
@@ -98,7 +98,7 @@ export default function Header() {
         >
           <div className="relative flex-1 min-w-0">
             <svg
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500 pointer-events-none"
               viewBox="0 0 16 16"
               fill="none"
               stroke="currentColor"
@@ -120,14 +120,14 @@ export default function Header() {
           </div>
           <button
             type="submit"
-            className="rounded-lg border border-gray-900 bg-gray-900 px-3 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-gray-800"
+            className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-zinc-900"
           >
             Market
           </button>
           <button
             type="button"
             onClick={() => commitTicker('stock')}
-            className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] font-sans font-medium text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900"
+            className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
           >
             Analysis
           </button>
@@ -146,12 +146,12 @@ export default function Header() {
         <button
           onClick={handleConnectIBKR}
           title={ibkrConnected ? 'IBKR connected' : 'Click to connect IBKR'}
-          className="flex items-center gap-1.5 text-[11px] font-mono text-gray-500 hover:text-gray-800 transition-colors"
+          className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 transition-colors"
         >
           <span
             className={clsx(
               'w-1.5 h-1.5 rounded-full',
-              ibkrConnected ? 'bg-green-500' : 'bg-red-400',
+              ibkrConnected ? 'bg-emerald-500' : 'bg-red-400',
             )}
           />
           IBKR
@@ -160,12 +160,12 @@ export default function Header() {
         <button
           onClick={handleBotToggle}
           title={botRunning ? 'Stop bot' : 'Start bot'}
-          className="flex items-center gap-1.5 text-[11px] font-mono text-gray-500 hover:text-gray-800 transition-colors"
+          className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-400 hover:text-zinc-100 transition-colors"
         >
           <span
             className={clsx(
               'w-1.5 h-1.5 rounded-full',
-              botRunning ? 'bg-green-500' : 'bg-gray-300',
+              botRunning ? 'bg-emerald-500' : 'bg-zinc-700',
             )}
           />
           BOT
@@ -189,7 +189,7 @@ function Clock() {
   const timePart = time.toLocaleTimeString('en-US', { hour12: false })
 
   return (
-    <span className="text-[11px] font-mono text-gray-400 tabular-nums whitespace-nowrap">
+    <span className="text-[11px] font-mono text-zinc-500 tabular-nums whitespace-nowrap">
       {datePart} {timePart}
     </span>
   )

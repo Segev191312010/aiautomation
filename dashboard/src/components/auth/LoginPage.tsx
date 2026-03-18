@@ -82,7 +82,7 @@ export default function LoginPage({ onLogin, onShowRegister }: Props) {
 
         {/* Card */}
         <div
-          className="card rounded-2xl shadow-card-lg p-6 flex flex-col gap-5"
+          className="card rounded-2xl -lg p-6 flex flex-col gap-5"
           style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
         >
           <div>

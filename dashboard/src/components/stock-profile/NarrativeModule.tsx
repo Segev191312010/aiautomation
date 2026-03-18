@@ -161,11 +161,11 @@ interface StrengthItemProps {
 
 function StrengthItem({ text }: StrengthItemProps) {
   return (
-    <li className="flex items-start gap-2.5 px-3 py-2 rounded-lg transition-colors duration-100 hover:bg-green-600/[0.06] group">
-      <span className="text-green-600 mt-[1px]">
+    <li className="flex items-start gap-2.5 px-3 py-2 rounded-lg transition-colors duration-100 hover:bg-emerald-600/[0.06] group">
+      <span className="text-emerald-400 mt-[1px]">
         <CheckCircleIcon />
       </span>
-      <span className="text-[12px] font-sans text-gray-500 leading-relaxed group-hover:text-gray-800 transition-colors duration-100">
+      <span className="text-[12px] font-sans text-zinc-400 leading-relaxed group-hover:text-zinc-100 transition-colors duration-100">
         {text}
       </span>
     </li>
@@ -179,10 +179,10 @@ interface RiskItemProps {
 function RiskItem({ text }: RiskItemProps) {
   return (
     <li className="flex items-start gap-2.5 px-3 py-2 rounded-lg transition-colors duration-100 hover:bg-red-600/[0.06] group">
-      <span className="text-red-600 mt-[1px]">
+      <span className="text-red-400 mt-[1px]">
         <WarningTriangleIcon />
       </span>
-      <span className="text-[12px] font-sans text-gray-500 leading-relaxed group-hover:text-gray-800 transition-colors duration-100">
+      <span className="text-[12px] font-sans text-zinc-400 leading-relaxed group-hover:text-zinc-100 transition-colors duration-100">
         {text}
       </span>
     </li>
@@ -193,33 +193,33 @@ function RiskItem({ text }: RiskItemProps) {
 
 function LoadingSkeleton() {
   return (
-    <section className="card rounded-lg shadow-card p-6 animate-pulse">
+    <section className="card rounded-lg  p-6 animate-pulse">
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
-        <div className="h-3 w-44 bg-gray-100 rounded-lg" />
-        <div className="h-3 w-12 bg-gray-100 rounded-lg" />
+        <div className="h-3 w-44 bg-zinc-800 rounded-lg" />
+        <div className="h-3 w-12 bg-zinc-800 rounded-lg" />
       </div>
       {/* Two-col cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-        <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-          <div className="h-3 w-20 bg-gray-100 rounded-lg mb-3" />
+        <div className="bg-zinc-900 rounded-xl p-4 border border-zinc-800">
+          <div className="h-3 w-20 bg-zinc-800 rounded-lg mb-3" />
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-3 bg-gray-100 rounded-lg mb-2 last:mb-0" style={{ width: `${75 + (i % 2) * 15}%` }} />
+            <div key={i} className="h-3 bg-zinc-800 rounded-lg mb-2 last:mb-0" style={{ width: `${75 + (i % 2) * 15}%` }} />
           ))}
         </div>
-        <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-          <div className="h-3 w-16 bg-gray-100 rounded-lg mb-3" />
+        <div className="bg-zinc-900 rounded-xl p-4 border border-zinc-800">
+          <div className="h-3 w-16 bg-zinc-800 rounded-lg mb-3" />
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-3 bg-gray-100 rounded-lg mb-2 last:mb-0" style={{ width: `${70 + (i % 3) * 10}%` }} />
+            <div key={i} className="h-3 bg-zinc-800 rounded-lg mb-2 last:mb-0" style={{ width: `${70 + (i % 3) * 10}%` }} />
           ))}
         </div>
       </div>
       {/* Outlook card */}
-      <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-        <div className="h-3 w-16 bg-gray-100 rounded-lg mb-3" />
-        <div className="h-3 w-full bg-gray-100 rounded-lg mb-2" />
-        <div className="h-3 w-5/6 bg-gray-100 rounded-lg mb-2" />
-        <div className="h-3 w-4/5 bg-gray-100 rounded-lg" />
+      <div className="bg-zinc-900 rounded-xl p-4 border border-zinc-800">
+        <div className="h-3 w-16 bg-zinc-800 rounded-lg mb-3" />
+        <div className="h-3 w-full bg-zinc-800 rounded-lg mb-2" />
+        <div className="h-3 w-5/6 bg-zinc-800 rounded-lg mb-2" />
+        <div className="h-3 w-4/5 bg-zinc-800 rounded-lg" />
       </div>
     </section>
   )
@@ -239,12 +239,12 @@ export default function NarrativeModule({ data, loading }: Props) {
   return (
     <section
       id="section-narrative"
-      className="card rounded-lg shadow-card p-6"
+      className="card rounded-lg  p-6"
     >
       {/* Module header */}
       <div className="flex items-center justify-between mb-5">
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-sans font-semibold text-gray-500 tracking-wide uppercase">
+          <h3 className="text-xs font-sans font-semibold text-zinc-400 tracking-wide uppercase">
             Executive Summary
           </h3>
         </div>
@@ -255,12 +255,12 @@ export default function NarrativeModule({ data, loading }: Props) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
 
         {/* Strengths card */}
-        <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden">
-          <div className="flex items-center gap-2 px-4 pt-3.5 pb-2.5 border-b border-gray-200">
-            <span className="text-green-600">
+        <div className="bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 pt-3.5 pb-2.5 border-b border-zinc-800">
+            <span className="text-emerald-400">
               <CheckCircleHeaderIcon />
             </span>
-            <span className="text-[10px] font-sans font-semibold text-green-600 uppercase tracking-widest">
+            <span className="text-[10px] font-sans font-semibold text-emerald-400 uppercase tracking-widest">
               Strengths
             </span>
           </div>
@@ -271,19 +271,19 @@ export default function NarrativeModule({ data, loading }: Props) {
               ))}
             </ul>
           ) : (
-            <p className="text-[11px] font-sans text-gray-400 px-4 py-3">
+            <p className="text-[11px] font-sans text-zinc-500 px-4 py-3">
               No strengths identified.
             </p>
           )}
         </div>
 
         {/* Risks card */}
-        <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden">
-          <div className="flex items-center gap-2 px-4 pt-3.5 pb-2.5 border-b border-gray-200">
-            <span className="text-red-600">
+        <div className="bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 pt-3.5 pb-2.5 border-b border-zinc-800">
+            <span className="text-red-400">
               <WarningTriangleHeaderIcon />
             </span>
-            <span className="text-[10px] font-sans font-semibold text-red-600 uppercase tracking-widest">
+            <span className="text-[10px] font-sans font-semibold text-red-400 uppercase tracking-widest">
               Risks
             </span>
           </div>
@@ -294,7 +294,7 @@ export default function NarrativeModule({ data, loading }: Props) {
               ))}
             </ul>
           ) : (
-            <p className="text-[11px] font-sans text-gray-400 px-4 py-3">
+            <p className="text-[11px] font-sans text-zinc-500 px-4 py-3">
               No risks identified.
             </p>
           )}
@@ -302,8 +302,8 @@ export default function NarrativeModule({ data, loading }: Props) {
       </div>
 
       {/* Outlook card */}
-      <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden">
-        <div className="flex items-center gap-2 px-4 pt-3.5 pb-2.5 border-b border-gray-200">
+      <div className="bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden">
+        <div className="flex items-center gap-2 px-4 pt-3.5 pb-2.5 border-b border-zinc-800">
           <span className="text-indigo-600">
             <InfoCircleHeaderIcon />
           </span>
@@ -315,7 +315,7 @@ export default function NarrativeModule({ data, loading }: Props) {
           <span className="text-indigo-600 mt-0.5 shrink-0">
             <InfoCircleIcon />
           </span>
-          <p className="text-[13px] font-sans text-gray-800 leading-relaxed">
+          <p className="text-[13px] font-sans text-zinc-100 leading-relaxed">
             {data.outlook}
           </p>
         </div>

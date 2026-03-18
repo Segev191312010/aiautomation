@@ -17,10 +17,10 @@ const INDICATORS: { value: ScreenerIndicator; label: string; defaultParams: Reco
 ]
 
 const OPERATORS: { value: ScreenerOperator; label: string; tone: string }[] = [
-  { value: 'GT', label: '>', tone: 'text-green-700 bg-green-50 border-green-200' },
-  { value: 'GTE', label: '>=', tone: 'text-green-700 bg-green-50 border-green-200' },
-  { value: 'LT', label: '<', tone: 'text-red-700 bg-red-50 border-red-200' },
-  { value: 'LTE', label: '<=', tone: 'text-red-700 bg-red-50 border-red-200' },
+  { value: 'GT', label: '>', tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-200' },
+  { value: 'GTE', label: '>=', tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-200' },
+  { value: 'LT', label: '<', tone: 'text-red-700 bg-red-500/10 border-red-200' },
+  { value: 'LTE', label: '<=', tone: 'text-red-700 bg-red-500/10 border-red-200' },
   { value: 'CROSSES_ABOVE', label: 'Crosses Up', tone: 'text-sky-700 bg-sky-50 border-sky-200' },
   { value: 'CROSSES_BELOW', label: 'Crosses Down', tone: 'text-amber-700 bg-amber-50 border-amber-200' },
 ]
@@ -28,12 +28,12 @@ const OPERATORS: { value: ScreenerOperator; label: string; tone: string }[] = [
 const isCrossOperator = (op: string) => op === 'CROSSES_ABOVE' || op === 'CROSSES_BELOW'
 
 const selectClass =
-  'rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs font-sans text-gray-800 ' +
-  'focus:border-gray-400 focus:outline-none transition-colors'
+  'rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs font-sans text-zinc-100 ' +
+  'focus:border-zinc-700 focus:outline-none transition-colors'
 
 const inputClass =
-  'rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs font-mono text-gray-800 text-center ' +
-  'focus:border-gray-400 focus:outline-none transition-colors'
+  'rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs font-mono text-zinc-100 text-center ' +
+  'focus:border-zinc-700 focus:outline-none transition-colors'
 
 interface FilterRowProps {
   filter: ScanFilter
@@ -120,13 +120,13 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
   const operatorMeta = OPERATORS.find((item) => item.value === filter.operator)
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-4">
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-4">
       <div className="flex items-center justify-between gap-3">
         <div className="inline-flex items-center gap-2">
-          <span className="rounded-full bg-white px-2 py-1 text-[10px] font-mono text-gray-500">
+          <span className="rounded-full bg-zinc-900 px-2 py-1 text-[10px] font-mono text-zinc-400">
             Rule {index + 1}
           </span>
-          <span className={clsx('rounded-full border px-2 py-1 text-[10px] font-mono', operatorMeta?.tone ?? 'text-gray-600 bg-white border-gray-200')}>
+          <span className={clsx('rounded-full border px-2 py-1 text-[10px] font-mono', operatorMeta?.tone ?? 'text-zinc-400 bg-zinc-900 border-zinc-800')}>
             {operatorMeta?.label ?? filter.operator}
           </span>
         </div>
@@ -135,7 +135,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
           <button
             type="button"
             onClick={() => removeFilter(index)}
-            className="rounded-lg border border-transparent px-2 py-1 text-[11px] font-sans text-gray-400 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+            className="rounded-lg border border-transparent px-2 py-1 text-[11px] font-sans text-zinc-500 transition-colors hover:border-red-200 hover:bg-red-500/10 hover:text-red-400"
           >
             Remove
           </button>
@@ -155,7 +155,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
 
         {Object.entries(filter.params).map(([key, value]) => (
           <label key={key} className="inline-flex items-center gap-1.5">
-            <span className="text-[10px] font-sans uppercase tracking-[0.12em] text-gray-400">{key}</span>
+            <span className="text-[10px] font-sans uppercase tracking-[0.12em] text-zinc-500">{key}</span>
             <input
               type="number"
               value={value}
@@ -208,7 +208,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
 
             {Object.entries(filter.value.params ?? {}).map(([key, value]) => (
               <label key={key} className="inline-flex items-center gap-1.5">
-                <span className="text-[10px] font-sans uppercase tracking-[0.12em] text-gray-400">{key}</span>
+                <span className="text-[10px] font-sans uppercase tracking-[0.12em] text-zinc-500">{key}</span>
                 <input
                   type="number"
                   value={value}
@@ -219,7 +219,7 @@ function FilterRow({ filter, index, canRemove }: FilterRowProps) {
             ))}
 
             <label className="inline-flex items-center gap-1.5">
-              <span className="text-[10px] font-sans uppercase tracking-[0.12em] text-gray-400">x</span>
+              <span className="text-[10px] font-sans uppercase tracking-[0.12em] text-zinc-500">x</span>
               <input
                 type="number"
                 value={filter.value.multiplier ?? 1}
@@ -249,7 +249,7 @@ export default function FilterBuilder() {
         type="button"
         onClick={addFilter}
         disabled={filters.length >= 15}
-        className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] font-sans font-medium text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40"
+        className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
       >
         Add Filter {filters.length >= 15 ? '(max 15)' : ''}
       </button>

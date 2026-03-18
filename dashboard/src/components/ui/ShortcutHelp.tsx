@@ -41,7 +41,7 @@ export default function ShortcutHelp() {
       aria-label="Keyboard shortcuts"
     >
       <div
-        className="card rounded-2xl shadow-card-lg w-full max-w-md animate-fade-in-up overflow-hidden"
+        className="card rounded-2xl -lg w-full max-w-md animate-fade-in-up overflow-hidden"
         style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
         onClick={(e) => e.stopPropagation()}
       >

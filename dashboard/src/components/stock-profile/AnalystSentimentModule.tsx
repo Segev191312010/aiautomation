@@ -31,10 +31,10 @@ function getRatingInfo(mean: number): RatingInfo {
   }
   if (mean <= 2.5) return {
     text: 'Buy',
-    color: 'text-green-600',
+    color: 'text-emerald-400',
     hexColor: '#4ade80',
-    bgClass: 'bg-green-500/10',
-    borderClass: 'border-green-500/20',
+    bgClass: 'bg-emerald-500/10',
+    borderClass: 'border-emerald-500/20',
   }
   if (mean <= 3.5) return {
     text: 'Hold',
@@ -52,7 +52,7 @@ function getRatingInfo(mean: number): RatingInfo {
   }
   return {
     text: 'Strong Sell',
-    color: 'text-red-600',
+    color: 'text-red-400',
     hexColor: '#f87171',
     bgClass: 'bg-red-500/10',
     borderClass: 'border-red-500/20',
@@ -88,7 +88,7 @@ interface Segment {
 
 const SEGMENTS: Segment[] = [
   { key: 'strongBuy',  label: 'Strong Buy',  shortLabel: 'S.Buy',  color: 'bg-emerald-500', hexColor: '#10b981' },
-  { key: 'buy',        label: 'Buy',          shortLabel: 'Buy',    color: 'bg-green-500',   hexColor: '#22c55e' },
+  { key: 'buy',        label: 'Buy',          shortLabel: 'Buy',    color: 'bg-emerald-500',   hexColor: '#22c55e' },
   { key: 'hold',       label: 'Hold',         shortLabel: 'Hold',   color: 'bg-amber-500',   hexColor: '#f59e0b' },
   { key: 'sell',       label: 'Sell',         shortLabel: 'Sell',   color: 'bg-orange-500',  hexColor: '#f97316' },
   { key: 'strongSell', label: 'Strong Sell',  shortLabel: 'S.Sell', color: 'bg-red-500',     hexColor: '#ef4444' },
@@ -276,17 +276,17 @@ function DistributionBar({ counts, totalAnalysts, period }: DistributionBarProps
   return (
     <div className="mt-5">
       <div className="flex items-center justify-between gap-3 mb-2">
-        <div className="text-[9px] font-sans text-gray-400 uppercase tracking-wider">
+        <div className="text-[9px] font-sans text-zinc-500 uppercase tracking-wider">
           Latest Recommendation Mix
         </div>
         {period && (
-          <div className="text-[9px] font-mono text-gray-400">
+          <div className="text-[9px] font-mono text-zinc-500">
             {period}
           </div>
         )}
       </div>
 
-      <div className="flex h-5 rounded-full overflow-hidden bg-[#FAF8F5] border border-gray-200">
+      <div className="flex h-5 rounded-full overflow-hidden bg-[#FAF8F5] border border-zinc-800">
         {SEGMENTS.map((seg, i) => {
           const count = counts[i]
           if (count <= 0) return null
@@ -303,11 +303,11 @@ function DistributionBar({ counts, totalAnalysts, period }: DistributionBarProps
 
       <div className="grid grid-cols-5 gap-1 mt-2">
         {SEGMENTS.map((seg, i) => (
-          <div key={seg.key} className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-center">
-            <div className="text-[9px] font-mono font-semibold text-gray-600 tabular-nums">
+          <div key={seg.key} className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-center">
+            <div className="text-[9px] font-mono font-semibold text-zinc-400 tabular-nums">
               {counts[i]}
             </div>
-            <div className="text-[8px] font-sans text-gray-400 truncate">
+            <div className="text-[8px] font-sans text-zinc-500 truncate">
               {seg.shortLabel}
             </div>
           </div>
@@ -315,7 +315,7 @@ function DistributionBar({ counts, totalAnalysts, period }: DistributionBarProps
       </div>
 
       {totalAnalysts != null && totalAnalysts !== total && (
-        <div className="mt-2 text-[9px] font-sans text-gray-400">
+        <div className="mt-2 text-[9px] font-sans text-zinc-500">
           Consensus buckets sum to {total}; reported analyst count is {totalAnalysts}.
         </div>
       )}
@@ -334,22 +334,22 @@ export default function AnalystSentimentModule({ data, loading }: Props) {
   // Loading skeleton
   if (!data && loading) {
     return (
-      <section className="card rounded-lg shadow-card p-6 animate-pulse">
+      <section className="card rounded-lg  p-6 animate-pulse">
         <div className="flex items-center justify-between mb-4">
-          <div className="h-3 w-36 bg-gray-100 rounded-xl" />
-          <div className="h-3 w-12 bg-gray-100 rounded-xl" />
+          <div className="h-3 w-36 bg-zinc-800 rounded-xl" />
+          <div className="h-3 w-12 bg-zinc-800 rounded-xl" />
         </div>
         {/* Gauge placeholder */}
         <div className="flex justify-center mb-4">
-          <div className="w-44 h-24 bg-gray-100 rounded-xl" />
+          <div className="w-44 h-24 bg-zinc-800 rounded-xl" />
         </div>
         {/* Big number placeholder */}
         <div className="flex flex-col items-center gap-2 mb-4">
-          <div className="h-8 w-16 bg-gray-100 rounded-xl" />
-          <div className="h-4 w-24 bg-gray-100 rounded-xl" />
+          <div className="h-8 w-16 bg-zinc-800 rounded-xl" />
+          <div className="h-4 w-24 bg-zinc-800 rounded-xl" />
         </div>
         {/* Bar placeholder */}
-        <div className="h-5 w-full bg-gray-100 rounded-full" />
+        <div className="h-5 w-full bg-zinc-800 rounded-full" />
       </section>
     )
   }
@@ -371,10 +371,10 @@ export default function AnalystSentimentModule({ data, loading }: Props) {
   const hasDistribution = counts.some((count) => count > 0)
 
   return (
-    <section id="section-analyst" className="card rounded-lg shadow-card p-6">
+    <section id="section-analyst" className="card rounded-lg  p-6">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-xs font-sans font-medium text-gray-500 tracking-wide">
+        <h3 className="text-xs font-sans font-medium text-zinc-400 tracking-wide">
           Analyst Sentiment
         </h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
@@ -404,27 +404,27 @@ export default function AnalystSentimentModule({ data, loading }: Props) {
           {ratingInfo.text}
         </span>
         {data.num_analyst_opinions != null && (
-          <span className="text-[10px] font-sans text-gray-400 mt-1.5">
+          <span className="text-[10px] font-sans text-zinc-500 mt-1.5">
             Based on {data.num_analyst_opinions} analyst
             {data.num_analyst_opinions !== 1 ? 's' : ''}
           </span>
         )}
         {data.recommendation_period && (
-          <span className="text-[10px] font-mono text-gray-400 mt-1">
+          <span className="text-[10px] font-mono text-zinc-500 mt-1">
             Snapshot {data.recommendation_period}
           </span>
         )}
       </div>
 
       {/* Scale legend */}
-      <div className="flex justify-between text-[8px] font-sans text-gray-400 mt-3 px-1">
+      <div className="flex justify-between text-[8px] font-sans text-zinc-500 mt-3 px-1">
         <span className="text-emerald-500/70">Strong Buy</span>
         <span className="text-amber-500/70">Hold</span>
-        <span className="text-red-500/70">Strong Sell</span>
+        <span className="text-red-400/70">Strong Sell</span>
       </div>
 
       {/* Divider */}
-      <div className="border-t border-gray-200 mt-4" />
+      <div className="border-t border-zinc-800 mt-4" />
 
       {/* Distribution bar */}
       {hasDistribution ? (
@@ -434,7 +434,7 @@ export default function AnalystSentimentModule({ data, loading }: Props) {
           period={data.recommendation_period}
         />
       ) : (
-        <p className="mt-5 text-[10px] font-sans text-gray-400">
+        <p className="mt-5 text-[10px] font-sans text-zinc-500">
           No recommendation bucket breakdown available for this symbol.
         </p>
       )}

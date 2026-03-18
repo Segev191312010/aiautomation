@@ -2,8 +2,8 @@ import React, { useMemo } from 'react'
 import type { DiagnosticMarketMap } from '@/types'
 
 function colorForChange(pct: number): string {
-  if (pct >= 1.5) return 'bg-green-600/50 border-green-300/70'
-  if (pct >= 0) return 'bg-green-600/25 border-green-300/40'
+  if (pct >= 1.5) return 'bg-emerald-600/50 border-emerald-300/70'
+  if (pct >= 0) return 'bg-emerald-600/25 border-emerald-300/40'
   if (pct <= -1.5) return 'bg-red-600/50 border-red-300/70'
   return 'bg-red-600/25 border-red-300/40'
 }
@@ -22,13 +22,13 @@ export default function BubbleMarketMap({ rows }: { rows: DiagnosticMarketMap[] 
   }, [rows])
 
   return (
-    <section className="card rounded-2xl shadow-card p-3">
-      <h3 className="text-xs font-sans font-medium text-gray-500 mb-2">Bubble Market Map</h3>
-      <div className="relative h-56 rounded-xl border border-gray-200 bg-[#FAF8F5] overflow-hidden">
+    <section className="card rounded-2xl  p-3">
+      <h3 className="text-xs font-sans font-medium text-zinc-400 mb-2">Bubble Market Map</h3>
+      <div className="relative h-56 rounded-xl border border-zinc-800 bg-[#FAF8F5] overflow-hidden">
         {points.map((p) => (
           <div
             key={p.symbol}
-            className={`absolute rounded-full border flex items-center justify-center text-[10px] font-mono text-gray-800 ${colorForChange(p.pct_change)}`}
+            className={`absolute rounded-full border flex items-center justify-center text-[10px] font-mono text-zinc-100 ${colorForChange(p.pct_change)}`}
             style={{
               left: `calc(${p.x}% - ${p.size / 2}px)`,
               top: `calc(${p.y}% - ${p.size / 2}px)`,
@@ -41,7 +41,7 @@ export default function BubbleMarketMap({ rows }: { rows: DiagnosticMarketMap[] 
           </div>
         ))}
       </div>
-      <div className="mt-2 text-[10px] font-mono text-gray-400">Y = % change · Size = relative volume</div>
+      <div className="mt-2 text-[10px] font-mono text-zinc-500">Y = % change · Size = relative volume</div>
     </section>
   )
 }

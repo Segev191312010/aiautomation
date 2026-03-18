@@ -129,9 +129,9 @@ export default function SimController() {
   }
 
   return (
-    <div className="fixed bottom-0 left-0 right-0 z-30 card-elevated border-t border-gray-200 shadow-card-lg rounded-t-2xl">
+    <div className="fixed bottom-0 left-0 right-0 z-30 card-elevated border-t border-zinc-800 -lg rounded-t-2xl">
       {/* ── Progress bar ────────────────────────────────────────────────── */}
-      <div className="relative h-[3px] bg-gray-100/60 rounded-t-2xl overflow-hidden">
+      <div className="relative h-[3px] bg-zinc-800/60 rounded-t-2xl overflow-hidden">
         <div
           className={clsx(
             'absolute inset-y-0 left-0 rounded-full transition-all duration-500',
@@ -152,8 +152,8 @@ export default function SimController() {
                 className={clsx(
                   'inline-block w-1.5 h-1.5 rounded-full',
                   playback.active
-                    ? 'bg-green-600 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.8)]'
-                    : 'bg-gray-400',
+                    ? 'bg-emerald-600 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.8)]'
+                    : 'bg-zinc-600',
                 )}
               />
               Sim Mode
@@ -161,7 +161,7 @@ export default function SimController() {
           </div>
 
           {/* ── Divider ─────────────────────────────────────────────────── */}
-          <div className="h-5 w-px bg-white/[0.07] shrink-0" />
+          <div className="h-5 w-px bg-zinc-900/[0.07] shrink-0" />
 
           {/* ── Symbol / period loader ───────────────────────────────────── */}
           <div className="flex items-center gap-2">
@@ -170,9 +170,9 @@ export default function SimController() {
               onChange={(e) => setSym(e.target.value.toUpperCase())}
               placeholder="AAPL"
               className={clsx(
-                'w-20 text-xs font-mono bg-white border rounded-xl px-2.5 py-1.5',
-                'text-gray-800 placeholder:text-gray-400',
-                'border-gray-200 focus:border-indigo-600/60 focus:outline-none',
+                'w-20 text-xs font-mono bg-zinc-900 border rounded-xl px-2.5 py-1.5',
+                'text-zinc-100 placeholder:text-zinc-500',
+                'border-zinc-800 focus:border-indigo-600/60 focus:outline-none',
                 'transition-colors',
               )}
             />
@@ -185,7 +185,7 @@ export default function SimController() {
                     'text-[10px] font-sans px-1.5 py-1 rounded-lg border transition-colors',
                     period.value === p.value
                       ? 'border-indigo-600/50 text-indigo-600 bg-indigo-50 font-semibold'
-                      : 'border-gray-200 text-gray-400 hover:text-gray-500 hover:border-white/[0.12]',
+                      : 'border-zinc-800 text-zinc-500 hover:text-zinc-400 hover:border-white/[0.12]',
                   )}
                 >
                   {p.label}
@@ -217,7 +217,7 @@ export default function SimController() {
           </div>
 
           {/* ── Divider ─────────────────────────────────────────────────── */}
-          <div className="h-5 w-px bg-white/[0.07] shrink-0" />
+          <div className="h-5 w-px bg-zinc-900/[0.07] shrink-0" />
 
           {/* ── Play / Pause / Stop ──────────────────────────────────────── */}
           <div className="flex items-center gap-1.5">
@@ -228,7 +228,7 @@ export default function SimController() {
                 'flex items-center gap-1.5 text-[11px] font-sans font-semibold px-3.5 py-1.5 rounded-xl border transition-all disabled:opacity-40 disabled:cursor-not-allowed',
                 playback.active
                   ? 'border-amber-300/50 text-amber-600 bg-amber-600/10 hover:bg-amber-600/18 shadow-[0_0_12px_rgba(245,158,11,0.12)]'
-                  : 'border-green-300/40 text-green-600 bg-green-600/10 hover:bg-green-600/18 shadow-[0_0_12px_rgba(16,185,129,0.1)]',
+                  : 'border-emerald-300/40 text-emerald-400 bg-emerald-600/10 hover:bg-emerald-600/18 shadow-[0_0_12px_rgba(16,185,129,0.1)]',
               )}
             >
               {playback.active ? <><IconPause /> Pause</> : <><IconPlay /> Play</>}
@@ -239,8 +239,8 @@ export default function SimController() {
               disabled={playback.total_bars === 0}
               title="Reset to beginning"
               className={clsx(
-                'p-1.5 rounded-xl border border-gray-200 text-gray-400',
-                'hover:text-gray-500 hover:border-white/[0.14] hover:bg-gray-50',
+                'p-1.5 rounded-xl border border-zinc-800 text-zinc-500',
+                'hover:text-zinc-400 hover:border-white/[0.14] hover:bg-zinc-900',
                 'transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
               )}
             >
@@ -249,11 +249,11 @@ export default function SimController() {
           </div>
 
           {/* ── Divider ─────────────────────────────────────────────────── */}
-          <div className="h-5 w-px bg-white/[0.07] shrink-0" />
+          <div className="h-5 w-px bg-zinc-900/[0.07] shrink-0" />
 
           {/* ── Speed ────────────────────────────────────────────────────── */}
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-sans font-medium text-gray-400 tracking-wide uppercase">
+            <span className="text-[10px] font-sans font-medium text-zinc-500 tracking-wide uppercase">
               Speed
             </span>
             {SPEEDS.map((s) => (
@@ -264,7 +264,7 @@ export default function SimController() {
                   'text-[10px] font-mono w-7 py-1 rounded-lg border transition-colors',
                   playback.speed === s
                     ? 'border-indigo-600/50 text-indigo-600 bg-indigo-50 font-bold'
-                    : 'border-gray-200 text-gray-400 hover:text-gray-500 hover:border-white/[0.12]',
+                    : 'border-zinc-800 text-zinc-500 hover:text-zinc-400 hover:border-white/[0.12]',
                 )}
               >
                 {s}×
@@ -276,19 +276,19 @@ export default function SimController() {
           <div className="ml-auto flex items-center gap-4 shrink-0">
             {playback.total_bars > 0 && (
               <>
-                <div className="flex items-center gap-1.5 text-[11px] font-mono text-gray-500">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-400">
                   <IconBar />
                   <span className="tabular-nums">
                     {playback.current_index + 1}
-                    <span className="text-gray-400"> / </span>
+                    <span className="text-zinc-500"> / </span>
                     {playback.total_bars}
-                    <span className="text-gray-400 ml-1">bars</span>
+                    <span className="text-zinc-500 ml-1">bars</span>
                   </span>
                 </div>
-                <div className="flex items-center gap-1.5 text-[11px] font-mono text-gray-800">
+                <div className="flex items-center gap-1.5 text-[11px] font-mono text-zinc-100">
                   <IconClock />
                   <span>{currentDate}</span>
-                  <span className="text-gray-400 text-[10px]">({pctDone.toFixed(0)}%)</span>
+                  <span className="text-zinc-500 text-[10px]">({pctDone.toFixed(0)}%)</span>
                 </div>
               </>
             )}

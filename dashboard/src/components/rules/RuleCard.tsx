@@ -39,7 +39,7 @@ export function RuleCard({ rule, onToggle, onEdit, onClone, onDelete, onBacktest
             }`}
           >
             <span
-              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+              className={`absolute top-0.5 h-4 w-4 rounded-full bg-zinc-900 transition-transform ${
                 rule.enabled ? 'left-5' : 'left-0.5'
               }`}
             />

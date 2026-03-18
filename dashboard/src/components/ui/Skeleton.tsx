@@ -41,7 +41,7 @@ export default function Skeleton({ className = '', width, height, style }: Skele
 
 export function SkeletonCard({ className = '' }: { className?: string }) {
   return (
-    <div className={`card rounded-2xl shadow-card p-4 ${className}`}>
+    <div className={`card rounded-2xl  p-4 ${className}`}>
       <Skeleton className="h-3 w-24 mb-3" />
       <Skeleton className="h-6 w-32" />
     </div>
@@ -101,9 +101,9 @@ export function SkeletonAvatar({ size = 40, className = '' }: { size?: number; c
 
 export function SkeletonChart({ className = '' }: { className?: string }) {
   return (
-    <div className={`card rounded-2xl shadow-card overflow-hidden ${className}`}>
+    <div className={`card rounded-2xl  overflow-hidden ${className}`}>
       {/* Toolbar row */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-zinc-800">
         <Skeleton className="h-4 w-16" />
         <Skeleton className="h-4 w-10" />
         <Skeleton className="h-4 w-10" />

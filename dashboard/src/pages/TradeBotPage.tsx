@@ -15,7 +15,8 @@ import BotToggle from '@/components/tradebot/BotToggle'
 import PositionsTable from '@/components/tradebot/PositionsTable'
 import { useToast } from '@/components/ui/ToastProvider'
 import { useAccountStore, useBotStore, useSimStore } from '@/store'
-import { fetchTrades, fetchSimAccount, fetchSimPositions, placeManualOrder } from '@/services/api'
+import { fetchTrades, fetchSimAccount, fetchSimPositions, fetchAccountSummary, fetchPositions, placeManualOrder } from '@/services/api'
+import LiveActivityFeed from '@/components/tradebot/LiveActivityFeed'
 import type { Trade, SimAccountState, AccountSummary } from '@/types'
 
 function fmtUSD(v: number): string {
@@ -109,12 +110,12 @@ function IconArrows({ className }: { className?: string }) {
 
 function KPISkeletonCard() {
   return (
-    <div className="card rounded-2xl shadow-card p-5 flex flex-col gap-3">
+    <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-3">
       <div className="flex items-center gap-2">
-        <div className="w-7 h-7 rounded-lg bg-gray-100/40 animate-pulse" />
-        <div className="h-2.5 w-24 rounded-lg bg-gray-100/40 animate-pulse" />
+        <div className="w-7 h-7 rounded-lg bg-zinc-800/40 animate-pulse" />
+        <div className="h-2.5 w-24 rounded-lg bg-zinc-800/40 animate-pulse" />
       </div>
-      <div className="h-7 w-36 rounded-xl bg-gray-100/30 animate-pulse" />
+      <div className="h-7 w-36 rounded-xl bg-zinc-800/30 animate-pulse" />
     </div>
   )
 }
@@ -124,10 +125,10 @@ function KPISkeletonCard() {
 function SectionHeader({ icon, title, badge }: { icon: React.ReactNode; title: string; badge?: React.ReactNode }) {
   return (
     <div className="flex items-center gap-2.5 mb-4">
-      <div className="w-7 h-7 rounded-lg bg-gray-100/50 flex items-center justify-center flex-shrink-0">
+      <div className="w-7 h-7 rounded-lg bg-zinc-800/50 flex items-center justify-center flex-shrink-0">
         {icon}
       </div>
-      <h2 className="text-sm font-sans font-semibold text-gray-800 tracking-wide">
+      <h2 className="text-sm font-sans font-semibold text-zinc-100 tracking-wide">
         {title}
       </h2>
       {badge}
@@ -173,20 +174,20 @@ function QuickOrderForm() {
       <div className="flex flex-wrap items-end gap-4">
         {/* Symbol */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+          <label className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
             Symbol
           </label>
           <input
             value={sym}
             onChange={(e) => setSym(e.target.value)}
             placeholder="AAPL"
-            className="w-28 text-sm font-mono bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-800 focus:border-indigo-600/50 focus:outline-none uppercase tracking-wider placeholder:text-gray-400/50"
+            className="w-28 text-sm font-mono bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-zinc-100 focus:border-indigo-600/50 focus:outline-none uppercase tracking-wider placeholder:text-zinc-500/50"
           />
         </div>
 
         {/* Quantity */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+          <label className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
             Quantity
           </label>
           <input
@@ -194,16 +195,16 @@ function QuickOrderForm() {
             min={1}
             value={qty}
             onChange={(e) => setQty(Number(e.target.value))}
-            className="w-24 text-sm font-mono bg-white border border-gray-200 rounded-xl px-3 py-2 text-gray-800 focus:border-indigo-600/50 focus:outline-none"
+            className="w-24 text-sm font-mono bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-zinc-100 focus:border-indigo-600/50 focus:outline-none"
           />
         </div>
 
         {/* Side toggle */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+          <label className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
             Side
           </label>
-          <div className="flex rounded-xl overflow-hidden border border-gray-200">
+          <div className="flex rounded-xl overflow-hidden border border-zinc-800">
             {(['BUY', 'SELL'] as const).map((a) => (
               <button
                 key={a}
@@ -212,12 +213,12 @@ function QuickOrderForm() {
                 className={clsx(
                   'text-sm font-sans font-semibold px-5 py-2 transition-all duration-150',
                   action === a && a === 'BUY'
-                    ? 'bg-emerald-500/20 text-emerald-400 border-r border-gray-200'
+                    ? 'bg-emerald-500/20 text-emerald-400 border-r border-zinc-800'
                     : action === a && a === 'SELL'
                     ? 'bg-red-500/20 text-red-400'
                     : a === 'BUY'
-                    ? 'text-gray-400 hover:text-gray-500 bg-transparent border-r border-gray-200'
-                    : 'text-gray-400 hover:text-gray-500 bg-transparent',
+                    ? 'text-zinc-500 hover:text-zinc-400 bg-transparent border-r border-zinc-800'
+                    : 'text-zinc-500 hover:text-zinc-400 bg-transparent',
                 )}
               >
                 {a}
@@ -237,9 +238,9 @@ function QuickOrderForm() {
         )}>
           <span className="opacity-60">Preview:</span>
           <span className="font-semibold">{isBuy ? 'BUY' : 'SELL'}</span>
-          <span className="text-gray-500">{qty} share{qty !== 1 ? 's' : ''} of</span>
-          <span className="font-semibold text-gray-800">{sym.toUpperCase()}</span>
-          <span className="text-gray-400 ml-1">— Market Order</span>
+          <span className="text-zinc-400">{qty} share{qty !== 1 ? 's' : ''} of</span>
+          <span className="font-semibold text-zinc-100">{sym.toUpperCase()}</span>
+          <span className="text-zinc-500 ml-1">— Market Order</span>
         </div>
       )}
 
@@ -260,7 +261,7 @@ function QuickOrderForm() {
           {busy ? 'Placing…' : `Place ${action} Order`}
         </button>
         {status && (
-          <span className="text-[11px] font-sans text-gray-500">{status}</span>
+          <span className="text-[11px] font-sans text-zinc-400">{status}</span>
         )}
       </form>
     </div>
@@ -272,35 +273,35 @@ function QuickOrderForm() {
 const STATUS_DOT: Record<string, string> = {
   FILLED:    'bg-emerald-400',
   PENDING:   'bg-amber-600',
-  CANCELLED: 'bg-gray-400',
+  CANCELLED: 'bg-zinc-600',
   ERROR:     'bg-red-400',
 }
 
 const STATUS_BADGE: Record<string, string> = {
   FILLED:    'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
   PENDING:   'text-amber-600 bg-amber-500/10 border-amber-500/20',
-  CANCELLED: 'text-gray-400 bg-gray-100/60 border-gray-200',
+  CANCELLED: 'text-zinc-500 bg-zinc-800/60 border-zinc-800',
   ERROR:     'text-red-400 bg-red-500/10 border-red-500/20',
 }
 
 function TradeRow({ trade }: { trade: Trade }) {
   const isBuy = trade.action === 'BUY'
-  const dotClass    = STATUS_DOT[trade.status]    ?? 'bg-gray-400'
-  const badgeClass  = STATUS_BADGE[trade.status]  ?? 'text-gray-400 bg-gray-100/60 border-gray-200'
+  const dotClass    = STATUS_DOT[trade.status]    ?? 'bg-zinc-600'
+  const badgeClass  = STATUS_BADGE[trade.status]  ?? 'text-zinc-500 bg-zinc-800/60 border-zinc-800'
 
   return (
     <tr
       className={clsx(
-        'border-b border-gray-100 transition-colors group',
+        'border-b border-zinc-800 transition-colors group',
         isBuy
           ? 'hover:bg-emerald-500/[0.04]'
           : 'hover:bg-red-500/[0.04]',
       )}
     >
-      <td className="py-2.5 px-3 font-mono text-[11px] text-gray-400 tabular-nums whitespace-nowrap">
+      <td className="py-2.5 px-3 font-mono text-[11px] text-zinc-500 tabular-nums whitespace-nowrap">
         {fmtTimestamp(trade.timestamp)}
       </td>
-      <td className="py-2.5 px-3 font-mono text-sm font-semibold text-gray-800 tracking-wide">
+      <td className="py-2.5 px-3 font-mono text-sm font-semibold text-zinc-100 tracking-wide">
         {trade.symbol}
       </td>
       <td className="py-2.5 px-3">
@@ -321,12 +322,12 @@ function TradeRow({ trade }: { trade: Trade }) {
           {trade.action}
         </span>
       </td>
-      <td className="py-2.5 px-3 font-mono text-sm text-gray-500 tabular-nums text-right">
+      <td className="py-2.5 px-3 font-mono text-sm text-zinc-400 tabular-nums text-right">
         {trade.quantity}
       </td>
-      <td className="py-2.5 px-3 font-mono text-sm text-gray-500 tabular-nums text-right">
+      <td className="py-2.5 px-3 font-mono text-sm text-zinc-400 tabular-nums text-right">
         {trade.fill_price != null ? fmtUSD(trade.fill_price) : (
-          <span className="text-gray-400">—</span>
+          <span className="text-zinc-500">—</span>
         )}
       </td>
       <td className="py-2.5 px-3 text-right">
@@ -349,11 +350,11 @@ function TradeRow({ trade }: { trade: Trade }) {
 function PositionsEmptyState() {
   return (
     <div className="flex flex-col items-center justify-center py-14 gap-3">
-      <div className="w-14 h-14 rounded-2xl bg-gray-100/30 flex items-center justify-center">
-        <IconBriefcase className="w-7 h-7 text-gray-400/50" />
+      <div className="w-14 h-14 rounded-2xl bg-zinc-800/30 flex items-center justify-center">
+        <IconBriefcase className="w-7 h-7 text-zinc-500/50" />
       </div>
-      <p className="text-sm font-sans text-gray-400">No open positions</p>
-      <p className="text-[11px] font-sans text-gray-400/60">
+      <p className="text-sm font-sans text-zinc-500">No open positions</p>
+      <p className="text-[11px] font-sans text-zinc-500/60">
         Use the Quick Order form to enter a trade
       </p>
     </div>
@@ -365,11 +366,11 @@ function PositionsEmptyState() {
 function TradesEmptyState() {
   return (
     <div className="flex flex-col items-center justify-center py-14 gap-3">
-      <div className="w-14 h-14 rounded-2xl bg-gray-100/30 flex items-center justify-center">
-        <IconArrows className="w-7 h-7 text-gray-400/50" />
+      <div className="w-14 h-14 rounded-2xl bg-zinc-800/30 flex items-center justify-center">
+        <IconArrows className="w-7 h-7 text-zinc-500/50" />
       </div>
-      <p className="text-sm font-sans text-gray-400">No trades yet</p>
-      <p className="text-[11px] font-sans text-gray-400/60">
+      <p className="text-sm font-sans text-zinc-500">No trades yet</p>
+      <p className="text-[11px] font-sans text-zinc-500/60">
         Executed orders will appear here
       </p>
     </div>
@@ -404,11 +405,18 @@ export default function TradeBotPage() {
           setSimAccount(acc)
           setSimPositions(pos)
         } catch { /* ignore */ }
+      } else {
+        // Live mode: fetch real account + positions
+        try {
+          const [acc, pos] = await Promise.all([fetchAccountSummary(), fetchPositions()])
+          useAccountStore.getState().setAccount(acc)
+          useAccountStore.getState().setPositions(pos)
+        } catch { /* ignore */ }
       }
       setInitialLoad(false)
     }
     load()
-    const t = setInterval(load, 15_000)
+    const t = setInterval(load, 10_000)  // poll every 10s
     return () => clearInterval(t)
   }, [simMode, setTrades, setSimAccount, setSimPositions])
 
@@ -418,7 +426,7 @@ export default function TradeBotPage() {
       {/* ── KPI header ───────────────────────────────────────────────────── */}
       <section className="animate-fade-in-up">
         <div className="flex items-center gap-2 mb-3">
-          <h2 className="text-xs font-sans font-medium text-gray-500 tracking-widest uppercase">
+          <h2 className="text-xs font-sans font-medium text-zinc-400 tracking-widest uppercase">
             Account Overview
           </h2>
           {simMode && (
@@ -438,38 +446,38 @@ export default function TradeBotPage() {
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {/* Net Liquidation — indigo accent */}
-            <div className="card rounded-2xl shadow-card p-5 flex flex-col gap-2 border-l-2 border-l-indigo-600/60">
+            <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2 border-l-indigo-600/60">
               <div className="flex items-center gap-2">
                 <div className="w-6 h-6 rounded-lg bg-indigo-50 flex items-center justify-center flex-shrink-0">
                   <IconDollar className="w-3.5 h-3.5 text-indigo-600" />
                 </div>
-                <span className="text-[10px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
                   Net Liquidation
                 </span>
               </div>
-              <span className="text-2xl font-mono font-bold tabular-nums text-gray-800">
+              <span className="text-2xl font-mono font-bold tabular-nums text-zinc-100">
                 {netLiq != null ? fmtUSD(netLiq) : '—'}
               </span>
             </div>
 
             {/* Cash — blue accent */}
-            <div className="card rounded-2xl shadow-card p-5 flex flex-col gap-2 border-l-2 border-l-blue-500/50">
+            <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2 border-l-blue-500/50">
               <div className="flex items-center gap-2">
                 <div className="w-6 h-6 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
                   <IconWallet className="w-3.5 h-3.5 text-blue-400" />
                 </div>
-                <span className="text-[10px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
                   Cash
                 </span>
               </div>
-              <span className="text-2xl font-mono font-bold tabular-nums text-gray-800">
+              <span className="text-2xl font-mono font-bold tabular-nums text-zinc-100">
                 {cash != null ? fmtUSD(cash) : '—'}
               </span>
             </div>
 
             {/* Unrealized P&L — green/red accent */}
             <div className={clsx(
-              'card rounded-2xl shadow-card p-5 flex flex-col gap-2 border-l-2',
+              'bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2',
               unrealPnl == null
                 ? 'border-l-white/[0.08]'
                 : unrealPnl >= 0
@@ -480,27 +488,27 @@ export default function TradeBotPage() {
                 <div className={clsx(
                   'w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0',
                   unrealPnl == null
-                    ? 'bg-gray-100/50'
+                    ? 'bg-zinc-800/50'
                     : unrealPnl >= 0
                     ? 'bg-emerald-500/15'
                     : 'bg-red-500/15',
                 )}>
                   {unrealPnl == null || unrealPnl >= 0
-                    ? <IconTrendUp className={clsx('w-3.5 h-3.5', unrealPnl == null ? 'text-gray-400' : 'text-emerald-400')} />
+                    ? <IconTrendUp className={clsx('w-3.5 h-3.5', unrealPnl == null ? 'text-zinc-500' : 'text-emerald-400')} />
                     : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />
                   }
                 </div>
-                <span className="text-[10px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
                   Unrealized P&L
                 </span>
               </div>
               <span className={clsx(
                 'text-2xl font-mono font-bold tabular-nums',
                 unrealPnl == null
-                  ? 'text-gray-800'
+                  ? 'text-zinc-100'
                   : unrealPnl >= 0
-                  ? 'text-green-600'
-                  : 'text-red-600',
+                  ? 'text-emerald-400'
+                  : 'text-red-400',
               )}>
                 {unrealPnl != null
                   ? (unrealPnl >= 0 ? '+' : '') + fmtUSD(unrealPnl)
@@ -510,7 +518,7 @@ export default function TradeBotPage() {
 
             {/* Realized P&L — green/red accent */}
             <div className={clsx(
-              'card rounded-2xl shadow-card p-5 flex flex-col gap-2 border-l-2',
+              'bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2',
               realPnl == null
                 ? 'border-l-white/[0.08]'
                 : realPnl >= 0
@@ -521,27 +529,27 @@ export default function TradeBotPage() {
                 <div className={clsx(
                   'w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0',
                   realPnl == null
-                    ? 'bg-gray-100/50'
+                    ? 'bg-zinc-800/50'
                     : realPnl >= 0
                     ? 'bg-emerald-500/15'
                     : 'bg-red-500/15',
                 )}>
                   {realPnl == null || realPnl >= 0
-                    ? <IconTrendUp className={clsx('w-3.5 h-3.5', realPnl == null ? 'text-gray-400' : 'text-emerald-400')} />
+                    ? <IconTrendUp className={clsx('w-3.5 h-3.5', realPnl == null ? 'text-zinc-500' : 'text-emerald-400')} />
                     : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />
                   }
                 </div>
-                <span className="text-[10px] font-sans font-medium text-gray-500 tracking-widest uppercase">
+                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
                   Realized P&L
                 </span>
               </div>
               <span className={clsx(
                 'text-2xl font-mono font-bold tabular-nums',
                 realPnl == null
-                  ? 'text-gray-800'
+                  ? 'text-zinc-100'
                   : realPnl >= 0
-                  ? 'text-green-600'
-                  : 'text-red-600',
+                  ? 'text-emerald-400'
+                  : 'text-red-400',
               )}>
                 {realPnl != null
                   ? (realPnl >= 0 ? '+' : '') + fmtUSD(realPnl)
@@ -559,7 +567,7 @@ export default function TradeBotPage() {
 
       {/* ── Quick order ───────────────────────────────────────────────────── */}
       <section
-        className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+        className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 animate-fade-in-up"
         style={{ animationDelay: '80ms' }}
       >
         <SectionHeader
@@ -569,17 +577,22 @@ export default function TradeBotPage() {
         <QuickOrderForm />
       </section>
 
+      {/* ── Live Activity Feed ──────────────────────────────────────────── */}
+      <section className="animate-fade-in-up" style={{ animationDelay: '100ms' }}>
+        <LiveActivityFeed />
+      </section>
+
       {/* ── Positions table ───────────────────────────────────────────────── */}
       <section
-        className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+        className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 animate-fade-in-up"
         style={{ animationDelay: '120ms' }}
       >
         <SectionHeader
-          icon={<IconBriefcase className="w-3.5 h-3.5 text-gray-500" />}
+          icon={<IconBriefcase className="w-3.5 h-3.5 text-zinc-400" />}
           title="Open Positions"
           badge={
             positions.length > 0 ? (
-              <span className="ml-auto text-[11px] font-mono text-gray-400 bg-gray-100/50 px-2 py-0.5 rounded-lg">
+              <span className="ml-auto text-[11px] font-mono text-zinc-500 bg-zinc-800/50 px-2 py-0.5 rounded-lg">
                 {positions.length}
               </span>
             ) : undefined
@@ -593,15 +606,15 @@ export default function TradeBotPage() {
 
       {/* ── Trade log ─────────────────────────────────────────────────────── */}
       <section
-        className="card rounded-2xl shadow-card p-5 animate-fade-in-up"
+        className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 animate-fade-in-up"
         style={{ animationDelay: '160ms' }}
       >
         <SectionHeader
-          icon={<IconArrows className="w-3.5 h-3.5 text-gray-500" />}
+          icon={<IconArrows className="w-3.5 h-3.5 text-zinc-400" />}
           title="Recent Trades"
           badge={
             trades.length > 0 ? (
-              <span className="ml-auto text-[11px] font-mono text-gray-400 bg-gray-100/50 px-2 py-0.5 rounded-lg">
+              <span className="ml-auto text-[11px] font-mono text-zinc-500 bg-zinc-800/50 px-2 py-0.5 rounded-lg">
                 {trades.length > 30 ? '30+' : trades.length}
               </span>
             ) : undefined
@@ -612,12 +625,12 @@ export default function TradeBotPage() {
           <div className="space-y-2 pt-1">
             {Array.from({ length: 4 }).map((_, i) => (
               <div key={i} className="flex gap-3 items-center animate-pulse">
-                <div className="h-3 w-24 rounded-lg bg-gray-100/40" />
-                <div className="h-3 w-12 rounded-lg bg-gray-100/30" />
-                <div className="h-5 w-10 rounded-lg bg-gray-100/20" />
-                <div className="h-3 w-8 rounded-lg bg-gray-100/30 ml-auto" />
-                <div className="h-3 w-16 rounded-lg bg-gray-100/20" />
-                <div className="h-5 w-16 rounded-lg bg-gray-100/20" />
+                <div className="h-3 w-24 rounded-lg bg-zinc-800/40" />
+                <div className="h-3 w-12 rounded-lg bg-zinc-800/30" />
+                <div className="h-5 w-10 rounded-lg bg-zinc-800/20" />
+                <div className="h-3 w-8 rounded-lg bg-zinc-800/30 ml-auto" />
+                <div className="h-3 w-16 rounded-lg bg-zinc-800/20" />
+                <div className="h-5 w-16 rounded-lg bg-zinc-800/20" />
               </div>
             ))}
           </div>
@@ -627,12 +640,12 @@ export default function TradeBotPage() {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[520px]">
               <thead>
-                <tr className="border-b border-gray-200">
+                <tr className="border-b border-zinc-800">
                   {['Time', 'Symbol', 'Side', 'Qty', 'Fill Price', 'Status'].map((c, i) => (
                     <th
                       key={c}
                       className={clsx(
-                        'py-2 px-3 text-[10px] font-sans font-medium uppercase tracking-widest text-gray-400',
+                        'py-2 px-3 text-[10px] font-sans font-medium uppercase tracking-widest text-zinc-500',
                         i === 0 || i === 1 || i === 2 ? 'text-left' : 'text-right',
                       )}
                     >

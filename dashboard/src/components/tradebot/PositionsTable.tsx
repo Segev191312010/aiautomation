@@ -1,120 +1,203 @@
 /**
- * PositionsTable — shows open positions with live P&L coloring.
- * Works for both live IBKR positions and simulation positions.
+ * PositionsTable — live positions with P&L, SL/TP brackets, % of account.
+ * Fetches bracket data from /api/positions/brackets for live mode.
  */
-import React from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import clsx from 'clsx'
 import { useAccountStore, useBotStore } from '@/store'
+import { useToast } from '@/components/ui/ToastProvider'
 import type { Position, SimPosition } from '@/types'
 
 function fmtUSD(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
-function isSimPos(p: Position | SimPosition): p is SimPosition {
-  return 'pnl_pct' in p
+function isSimPos(p: any): p is SimPosition {
+  return 'pnl_pct' in p && 'current_price' in p
 }
 
-interface RowProps {
-  pos: Position | SimPosition
+interface BracketInfo {
+  sl_order?: { order_id: number; price: number; status: string } | null
+  tp_order?: { order_id: number; price: number; status: string } | null
+  pnl_pct?: number
+  pct_of_account?: number
 }
 
-function PositionRow({ pos }: RowProps) {
-  const pnl    = isSimPos(pos) ? pos.unrealized_pnl : pos.unrealized_pnl
-  const price  = isSimPos(pos) ? pos.current_price  : pos.market_price
-  const value  = isSimPos(pos) ? pos.market_value   : pos.market_value
-  const pnlPct = isSimPos(pos) ? pos.pnl_pct        : (pos.market_price - pos.avg_cost) / pos.avg_cost * 100
-  const up = pnl >= 0
+type EnrichedPosition = (Position | SimPosition) & BracketInfo
+
+function EditablePrice({ value, onSave, color }: {
+  value: number | null | undefined; onSave: (v: number) => void; color: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [input, setInput] = useState('')
+
+  if (!value && value !== 0) return <span className="text-zinc-600">—</span>
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        step="0.01"
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        onBlur={() => { if (+input > 0) onSave(+input); setEditing(false) }}
+        onKeyDown={e => {
+          if (e.key === 'Enter' && +input > 0) { onSave(+input); setEditing(false) }
+          if (e.key === 'Escape') setEditing(false)
+        }}
+        className="w-20 px-1 py-0.5 bg-zinc-800 border border-zinc-600 rounded text-xs text-zinc-200 text-right"
+      />
+    )
+  }
 
   return (
-    <tr className="border-b border-gray-200 hover:bg-gray-100/30 transition-colors">
-      <td className="py-2 px-3 font-mono text-sm text-gray-800 font-semibold">{pos.symbol}</td>
-      <td className="py-2 px-3 font-mono text-sm text-gray-500 tabular-nums text-right">{pos.qty}</td>
-      <td className="py-2 px-3 font-mono text-sm text-gray-500 tabular-nums text-right">
-        {fmtUSD(pos.avg_cost)}
+    <button
+      onClick={() => { setInput(value.toFixed(2)); setEditing(true) }}
+      className={`text-xs font-mono tabular-nums hover:underline cursor-pointer ${color}`}
+      title="Click to edit"
+    >
+      ${value.toFixed(2)}
+    </button>
+  )
+}
+
+function PositionRow({ pos, onModifyOrder }: {
+  pos: EnrichedPosition
+  onModifyOrder: (orderId: number, price: number) => void
+}) {
+  const price = isSimPos(pos) ? pos.current_price : pos.market_price
+  const pnl = pos.unrealized_pnl
+  const pnlPct = (pos as any).pnl_pct ?? (price && pos.avg_cost ? ((price / pos.avg_cost - 1) * 100) : 0)
+  const up = pnl >= 0
+  const slOrder = (pos as any).sl_order
+  const tpOrder = (pos as any).tp_order
+  const pctAcct = (pos as any).pct_of_account
+
+  return (
+    <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/20 transition-colors">
+      <td className="py-2 px-2 font-mono text-sm text-zinc-100 font-semibold">{pos.symbol}</td>
+      <td className="py-2 px-2 font-mono text-xs text-zinc-400 tabular-nums text-right">{pos.qty}</td>
+      <td className="py-2 px-2 font-mono text-xs text-zinc-500 tabular-nums text-right">{fmtUSD(pos.avg_cost)}</td>
+      <td className="py-2 px-2 font-mono text-xs text-zinc-200 tabular-nums text-right">{fmtUSD(price)}</td>
+      <td className={clsx('py-2 px-2 font-mono text-xs tabular-nums text-right font-medium', up ? 'text-emerald-400' : 'text-red-400')}>
+        {up ? '+' : ''}{fmtUSD(pnl)}
+        <div className="text-[10px] opacity-70">{up ? '+' : ''}{pnlPct.toFixed(2)}%</div>
       </td>
-      <td className="py-2 px-3 font-mono text-sm text-gray-800 tabular-nums text-right">
-        {fmtUSD(price)}
+      <td className="py-2 px-2 text-right">
+        {slOrder ? (
+          <EditablePrice
+            value={slOrder.price}
+            onSave={(v) => onModifyOrder(slOrder.order_id, v)}
+            color="text-red-400"
+          />
+        ) : <span className="text-zinc-700 text-xs">—</span>}
       </td>
-      <td className="py-2 px-3 font-mono text-sm tabular-nums text-right">
-        <span className={up ? 'text-green-600' : 'text-red-600'}>
-          {fmtUSD(value)}
-        </span>
+      <td className="py-2 px-2 text-right">
+        {tpOrder ? (
+          <EditablePrice
+            value={tpOrder.price}
+            onSave={(v) => onModifyOrder(tpOrder.order_id, v)}
+            color="text-emerald-400"
+          />
+        ) : <span className="text-zinc-700 text-xs">—</span>}
       </td>
-      <td className="py-2 px-3 font-mono text-sm tabular-nums text-right">
-        <div className={clsx('flex flex-col items-end', up ? 'text-green-600' : 'text-red-600')}>
-          <span>{up ? '+' : ''}{fmtUSD(pnl)}</span>
-          <span className="text-[10px] opacity-80">
-            {up ? '+' : ''}{pnlPct.toFixed(2)}%
+      <td className="py-2 px-2 text-right">
+        {pctAcct != null ? (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400">
+            {pctAcct.toFixed(1)}%
           </span>
-        </div>
+        ) : <span className="text-zinc-700 text-xs">—</span>}
       </td>
     </tr>
   )
 }
 
 export default function PositionsTable() {
-  const { positions, loading } = useAccountStore()
+  const { positions, account } = useAccountStore()
+  const simMode = useBotStore((s) => s.simMode)
+  const [enriched, setEnriched] = useState<EnrichedPosition[]>([])
+  const toast = useToast()
 
-  if (loading) {
+  // Fetch bracket data for live positions
+  const fetchBrackets = useCallback(async () => {
+    if (simMode || positions.length === 0) {
+      setEnriched(positions as EnrichedPosition[])
+      return
+    }
+    try {
+      const res = await fetch('/api/positions/brackets')
+      if (res.ok) {
+        const data = await res.json()
+        setEnriched(data)
+      } else {
+        setEnriched(positions as EnrichedPosition[])
+      }
+    } catch {
+      setEnriched(positions as EnrichedPosition[])
+    }
+  }, [positions, simMode])
+
+  useEffect(() => { fetchBrackets() }, [fetchBrackets])
+
+  const handleModifyOrder = async (orderId: number, newPrice: number) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/modify?price=${newPrice}`, { method: 'PUT' })
+      if (res.ok) {
+        toast.success(`Order ${orderId} modified to $${newPrice.toFixed(2)}`)
+        setTimeout(fetchBrackets, 1000) // refresh after IBKR processes
+      } else {
+        const data = await res.json()
+        toast.error(data.detail || 'Failed to modify order')
+      }
+    } catch {
+      toast.error('Failed to modify order')
+    }
+  }
+
+  if (positions.length === 0 && enriched.length === 0) {
     return (
-      <div className="animate-pulse space-y-2">
-        {[...Array(3)].map((_, i) => (
-          <div key={i} className="h-10 bg-gray-100 rounded" />
-        ))}
+      <div className="flex flex-col items-center justify-center py-10 text-zinc-600">
+        <p className="text-sm">No open positions</p>
       </div>
     )
   }
 
-  if (positions.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-        <svg viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 mb-2 opacity-30">
-          <path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z" />
-        </svg>
-        <p className="text-sm font-mono">No open positions</p>
-      </div>
-    )
-  }
+  const totalValue = enriched.reduce((s, p) => s + (isSimPos(p) ? p.market_value : p.market_value), 0)
+  const totalPnl = enriched.reduce((s, p) => s + p.unrealized_pnl, 0)
+
+  const cols = ['Symbol', 'Qty', 'Avg Cost', 'Price', 'P&L', 'SL', 'TP', '% Acct']
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[560px]">
+      <table className="w-full min-w-[700px]">
         <thead>
-          <tr className="border-b border-gray-200">
-            {['Symbol', 'Qty', 'Avg Cost', 'Mkt Price', 'Value', 'Unrealized P&L'].map((col) => (
-              <th
-                key={col}
-                className="py-2 px-3 text-[10px] font-mono uppercase tracking-widest text-gray-400 font-normal text-right first:text-left"
-              >
+          <tr className="border-b border-zinc-800">
+            {cols.map((col) => (
+              <th key={col} className="py-2 px-2 text-[10px] font-mono uppercase tracking-widest text-zinc-500 font-normal text-right first:text-left">
                 {col}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {positions.map((p) => (
-            <PositionRow key={p.symbol} pos={p} />
+          {enriched.map((p) => (
+            <PositionRow key={p.symbol} pos={p} onModifyOrder={handleModifyOrder} />
           ))}
         </tbody>
         <tfoot>
-          <tr className="border-t border-gray-200">
-            <td colSpan={4} className="py-2 px-3 text-[10px] font-mono text-gray-400">
-              TOTAL
+          <tr className="border-t border-zinc-700">
+            <td colSpan={3} className="py-2 px-2 text-[10px] font-mono text-zinc-500">
+              TOTAL ({enriched.length} positions)
             </td>
-            <td className="py-2 px-3 font-mono text-sm text-gray-800 tabular-nums text-right">
-              {fmtUSD(positions.reduce((s, p) => s + (isSimPos(p) ? p.market_value : p.market_value), 0))}
+            <td className="py-2 px-2 font-mono text-xs text-zinc-300 tabular-nums text-right">
+              {fmtUSD(totalValue)}
             </td>
-            <td className="py-2 px-3 font-mono text-sm tabular-nums text-right">
-              {(() => {
-                const total = positions.reduce((s, p) => s + p.unrealized_pnl, 0)
-                return (
-                  <span className={total >= 0 ? 'text-green-600' : 'text-red-600'}>
-                    {total >= 0 ? '+' : ''}{fmtUSD(total)}
-                  </span>
-                )
-              })()}
+            <td className={clsx('py-2 px-2 font-mono text-xs tabular-nums text-right font-medium',
+              totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+              {totalPnl >= 0 ? '+' : ''}{fmtUSD(totalPnl)}
             </td>
+            <td colSpan={3} />
           </tr>
         </tfoot>
       </table>

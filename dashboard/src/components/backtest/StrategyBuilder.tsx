@@ -15,10 +15,10 @@ function ConditionRow({ cond, onChange, onRemove, accent }: ConditionRowProps) {
   const borderColor = accent === 'green' ? 'border-l-green-600' : 'border-l-red-600'
 
   return (
-    <div className={`flex items-center gap-2 bg-gray-50 rounded-xl border border-gray-200 border-l-2 ${borderColor} px-3 py-2.5 transition-colors hover:bg-gray-100/60`}>
+    <div className={`flex items-center gap-2 bg-zinc-900 rounded-xl border border-zinc-800 border-l-2 ${borderColor} px-3 py-2.5 transition-colors hover:bg-zinc-800/60`}>
       {/* Indicator select */}
       <select
-        className="bg-white border border-gray-200 rounded-lg px-2 py-1 text-xs font-mono text-gray-800 w-24 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all cursor-pointer appearance-none"
+        className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-zinc-100 w-24 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all cursor-pointer appearance-none"
         value={cond.indicator}
         onChange={(e) => {
           const ind = e.target.value as Indicator
@@ -31,10 +31,10 @@ function ConditionRow({ cond, onChange, onRemove, accent }: ConditionRowProps) {
       {/* Params */}
       {paramDefs.map((p) => (
         <div key={p.key} className="flex items-center gap-1">
-          <span className="text-[10px] font-sans text-gray-400 tracking-wide">{p.label}</span>
+          <span className="text-[10px] font-sans text-zinc-500 tracking-wide">{p.label}</span>
           {p.key === 'band' ? (
             <select
-              className="bg-white border border-gray-200 rounded-lg px-1 py-1 text-xs font-mono text-gray-800 w-16 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all cursor-pointer appearance-none"
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-1 py-1 text-xs font-mono text-zinc-100 w-16 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all cursor-pointer appearance-none"
               value={String(cond.params[p.key] ?? 'mid')}
               onChange={(e) => onChange({ ...cond, params: { ...cond.params, [p.key]: e.target.value } })}
             >
@@ -45,7 +45,7 @@ function ConditionRow({ cond, onChange, onRemove, accent }: ConditionRowProps) {
           ) : (
             <input
               type="number"
-              className="bg-white border border-gray-200 rounded-lg px-1 py-1 text-xs font-mono text-gray-800 w-14 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all"
+              className="bg-zinc-900 border border-zinc-800 rounded-lg px-1 py-1 text-xs font-mono text-zinc-100 w-14 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all"
               value={cond.params[p.key] ?? p.def}
               onChange={(e) => onChange({ ...cond, params: { ...cond.params, [p.key]: Number(e.target.value) } })}
             />
@@ -55,7 +55,7 @@ function ConditionRow({ cond, onChange, onRemove, accent }: ConditionRowProps) {
 
       {/* Operator */}
       <select
-        className="bg-white border border-gray-200 rounded-lg px-2 py-1 text-xs font-mono text-gray-800 w-32 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all cursor-pointer appearance-none"
+        className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-zinc-100 w-32 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all cursor-pointer appearance-none"
         value={cond.operator}
         onChange={(e) => onChange({ ...cond, operator: e.target.value })}
       >
@@ -64,7 +64,7 @@ function ConditionRow({ cond, onChange, onRemove, accent }: ConditionRowProps) {
 
       {/* Value */}
       <input
-        className="bg-white border border-gray-200 rounded-lg px-2 py-1 text-xs font-mono text-gray-800 w-20 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all"
+        className="bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-zinc-100 w-20 focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20 transition-all"
         value={cond.value}
         onChange={(e) => {
           const v = e.target.value
@@ -76,7 +76,7 @@ function ConditionRow({ cond, onChange, onRemove, accent }: ConditionRowProps) {
       {/* Remove button */}
       <button
         onClick={onRemove}
-        className="ml-auto flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-gray-400 hover:text-red-600 hover:bg-red-600/10 transition-all text-sm leading-none"
+        className="ml-auto flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-600/10 transition-all text-sm leading-none"
         title="Remove condition"
       >
         &times;
@@ -106,11 +106,11 @@ function ConditionSection({ label, icon, accent, conditions, onChange }: Conditi
     if (conditions.length < 10) onChange([...conditions, defaultCondition()])
   }
 
-  const headerColor = accent === 'green' ? 'text-green-600' : 'text-red-600'
-  const dotColor    = accent === 'green' ? 'bg-green-600' : 'bg-red-600'
+  const headerColor = accent === 'green' ? 'text-emerald-400' : 'text-red-400'
+  const dotColor    = accent === 'green' ? 'bg-emerald-600' : 'bg-red-600'
   const addColor    = accent === 'green'
-    ? 'text-green-600/70 hover:text-green-600 hover:bg-green-600/10'
-    : 'text-red-600/70 hover:text-red-600 hover:bg-red-600/10'
+    ? 'text-emerald-400/70 hover:text-emerald-400 hover:bg-emerald-600/10'
+    : 'text-red-400/70 hover:text-red-400 hover:bg-red-600/10'
 
   return (
     <div className="space-y-2">
@@ -120,7 +120,7 @@ function ConditionSection({ label, icon, accent, conditions, onChange }: Conditi
         <span className={`text-[11px] font-sans font-semibold uppercase tracking-widest ${headerColor}`}>
           {icon} {label}
         </span>
-        <span className="text-[10px] font-mono text-gray-400 ml-1">
+        <span className="text-[10px] font-mono text-zinc-500 ml-1">
           ({conditions.length}/10)
         </span>
       </div>
@@ -128,7 +128,7 @@ function ConditionSection({ label, icon, accent, conditions, onChange }: Conditi
       {/* Condition cards */}
       <div className="space-y-1.5">
         {conditions.length === 0 && (
-          <div className="text-xs font-sans text-gray-400 italic px-3 py-2 bg-gray-50/30 rounded-lg border border-dashed border-gray-200">
+          <div className="text-xs font-sans text-zinc-500 italic px-3 py-2 bg-zinc-900/30 rounded-lg border border-dashed border-zinc-800">
             No conditions — all bars will trigger
           </div>
         )}
@@ -165,7 +165,7 @@ export function StrategyBuilder() {
   } = useBacktestStore()
 
   return (
-    <div className="card rounded-2xl shadow-card p-5 space-y-5">
+    <div className="card rounded-2xl  p-5 space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -177,18 +177,18 @@ export function StrategyBuilder() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
           </div>
-          <h3 className="text-sm font-sans font-semibold text-gray-800">Strategy Builder</h3>
+          <h3 className="text-sm font-sans font-semibold text-zinc-100">Strategy Builder</h3>
         </div>
 
         <div className="flex items-center gap-2">
           {/* AND / OR toggle */}
-          <div className="flex bg-white rounded-lg overflow-hidden text-[11px] border border-gray-200">
+          <div className="flex bg-zinc-900 rounded-lg overflow-hidden text-[11px] border border-zinc-800">
             <button
               onClick={() => setConditionLogic('AND')}
               className={`px-3 py-1.5 font-sans font-semibold tracking-wide transition-all ${
                 conditionLogic === 'AND'
                   ? 'bg-indigo-500 text-white shadow-glow-blue'
-                  : 'text-gray-400 hover:text-gray-500'
+                  : 'text-zinc-500 hover:text-zinc-400'
               }`}
             >
               AND
@@ -198,7 +198,7 @@ export function StrategyBuilder() {
               className={`px-3 py-1.5 font-sans font-semibold tracking-wide transition-all ${
                 conditionLogic === 'OR'
                   ? 'bg-indigo-500 text-white shadow-glow-blue'
-                  : 'text-gray-400 hover:text-gray-500'
+                  : 'text-zinc-500 hover:text-zinc-400'
               }`}
             >
               OR
@@ -208,7 +208,7 @@ export function StrategyBuilder() {
           {/* Reset */}
           <button
             onClick={reset}
-            className="flex items-center gap-1 text-[11px] font-sans text-gray-400 hover:text-gray-500 hover:bg-gray-50/60 px-2 py-1.5 rounded-lg transition-all"
+            className="flex items-center gap-1 text-[11px] font-sans text-zinc-500 hover:text-zinc-400 hover:bg-zinc-900/60 px-2 py-1.5 rounded-lg transition-all"
             title="Reset to defaults"
           >
             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -222,7 +222,7 @@ export function StrategyBuilder() {
       </div>
 
       {/* Divider */}
-      <div className="border-t border-gray-200" />
+      <div className="border-t border-zinc-800" />
 
       <ConditionSection
         label="Entry Conditions"
@@ -232,7 +232,7 @@ export function StrategyBuilder() {
         onChange={setEntryConditions}
       />
 
-      <div className="border-t border-gray-200" />
+      <div className="border-t border-zinc-800" />
 
       <ConditionSection
         label="Exit Conditions"

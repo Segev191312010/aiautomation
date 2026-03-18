@@ -42,11 +42,11 @@ interface GradeStyle {
 
 const GRADE_STYLES: Record<GradeTier, GradeStyle> = {
   strong_buy:  { pill: 'bg-emerald-50 text-emerald-700 border-emerald-200', dot: 'bg-emerald-500', text: 'text-emerald-700' },
-  buy:         { pill: 'bg-green-50 text-green-700 border-green-200',       dot: 'bg-green-500',   text: 'text-green-700'   },
+  buy:         { pill: 'bg-emerald-500/10 text-emerald-300 border-emerald-200',       dot: 'bg-emerald-500',   text: 'text-emerald-300'   },
   hold:        { pill: 'bg-amber-50 text-amber-700 border-amber-200',       dot: 'bg-amber-500',   text: 'text-amber-700'   },
   sell:        { pill: 'bg-orange-50 text-orange-700 border-orange-200',    dot: 'bg-orange-500',  text: 'text-orange-700'  },
-  strong_sell: { pill: 'bg-red-50 text-red-700 border-red-200',             dot: 'bg-red-500',     text: 'text-red-700'     },
-  neutral:     { pill: 'bg-gray-100 text-gray-400 border-gray-200',               dot: 'bg-gray-400',    text: 'text-gray-400'    },
+  strong_sell: { pill: 'bg-red-500/10 text-red-700 border-red-200',             dot: 'bg-red-500',     text: 'text-red-700'     },
+  neutral:     { pill: 'bg-zinc-800 text-zinc-500 border-zinc-800',               dot: 'bg-zinc-600',    text: 'text-zinc-500'    },
 }
 
 function gradePill(grade: string) {
@@ -68,17 +68,17 @@ function gradePill(grade: string) {
 
 function actionStyle(action: string): string {
   const a = action.toLowerCase()
-  if (a === 'upgrade' || a === 'initiated') return 'text-green-600'
-  if (a === 'downgrade') return 'text-red-600'
-  return 'text-gray-400'
+  if (a === 'upgrade' || a === 'initiated') return 'text-emerald-400'
+  if (a === 'downgrade') return 'text-red-400'
+  return 'text-zinc-500'
 }
 
 function actionBg(action: string): string {
   const a = action.toLowerCase()
-  if (a === 'upgrade') return 'bg-green-50'
-  if (a === 'downgrade') return 'bg-red-50'
+  if (a === 'upgrade') return 'bg-emerald-500/10'
+  if (a === 'downgrade') return 'bg-red-500/10'
   if (a === 'initiated') return 'bg-indigo-50'
-  return 'bg-gray-50/70'
+  return 'bg-zinc-900/70'
 }
 
 // ── Grade summary tally ───────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ const SUMMARY_ITEMS: { key: keyof GradeTally; label: string; tier: GradeTier }[]
 
 const TREND_SEGMENTS = [
   { key: 'strong_buy'  as const, color: 'bg-emerald-500', label: 'Strong Buy'  },
-  { key: 'buy'         as const, color: 'bg-green-500',   label: 'Buy'         },
+  { key: 'buy'         as const, color: 'bg-emerald-500',   label: 'Buy'         },
   { key: 'hold'        as const, color: 'bg-amber-500',   label: 'Hold'        },
   { key: 'sell'        as const, color: 'bg-orange-500',  label: 'Sell'        },
   { key: 'strong_sell' as const, color: 'bg-red-500',     label: 'Strong Sell' },
@@ -126,12 +126,12 @@ function GradeCard({ entry }: { entry: GradeEntry }) {
   return (
     <div
       className={clsx(
-        'flex flex-col gap-1.5 rounded-xl border border-gray-200 p-3 transition-colors',
+        'flex flex-col gap-1.5 rounded-xl border border-zinc-800 p-3 transition-colors',
         actionBg(entry.action),
       )}
     >
       <div className="flex items-start justify-between gap-1 min-w-0">
-        <span className="text-[10px] font-sans font-medium text-gray-800 leading-snug truncate flex-1">
+        <span className="text-[10px] font-sans font-medium text-zinc-100 leading-snug truncate flex-1">
           {entry.firm}
         </span>
         <span className={clsx('text-[8px] font-sans capitalize shrink-0 mt-0.5', actionStyle(entry.action))}>
@@ -142,7 +142,7 @@ function GradeCard({ entry }: { entry: GradeEntry }) {
       <div className="flex items-center gap-1.5 flex-wrap">
         {entry.from_grade && (
           <>
-            <span className="text-[9px] font-sans text-gray-400 line-through opacity-60">
+            <span className="text-[9px] font-sans text-zinc-500 line-through opacity-60">
               {entry.from_grade}
             </span>
             <span className={clsx('text-[9px]', actionStyle(entry.action))}>→</span>
@@ -152,9 +152,9 @@ function GradeCard({ entry }: { entry: GradeEntry }) {
       </div>
 
       {(entry.price_target != null || entry.prior_price_target != null) && (
-        <div className="flex items-center gap-1.5 flex-wrap text-[9px] font-mono text-gray-500">
+        <div className="flex items-center gap-1.5 flex-wrap text-[9px] font-mono text-zinc-400">
           {entry.price_target_action && (
-            <span className="uppercase tracking-wide text-[8px] text-gray-400">
+            <span className="uppercase tracking-wide text-[8px] text-zinc-500">
               {entry.price_target_action}
             </span>
           )}
@@ -164,14 +164,14 @@ function GradeCard({ entry }: { entry: GradeEntry }) {
             </span>
           )}
           {entry.price_target != null && (
-            <span className="font-semibold text-gray-700">
+            <span className="font-semibold text-zinc-200">
               ${entry.price_target.toFixed(0)}
             </span>
           )}
         </div>
       )}
 
-      <span className="text-[8px] font-mono text-gray-400">{entry.date}</span>
+      <span className="text-[8px] font-mono text-zinc-500">{entry.date}</span>
     </div>
   )
 }
@@ -205,15 +205,15 @@ export default function AnalystDetailModule({ data, loading }: Props) {
 
   if (!data && loading) {
     return (
-      <section className="card rounded-lg shadow-card p-6 animate-pulse">
-        <div className="h-3 w-32 bg-gray-100 rounded-xl mb-5" />
+      <section className="card rounded-lg  p-6 animate-pulse">
+        <div className="h-3 w-32 bg-zinc-800 rounded-xl mb-5" />
         <div className="grid grid-cols-2 gap-2 mb-4">
           {[...Array(4)].map((_, i) => (
-            <div key={i} className="h-20 bg-gray-100 rounded-xl" />
+            <div key={i} className="h-20 bg-zinc-800 rounded-xl" />
           ))}
         </div>
-        <div className="h-3 w-48 bg-gray-100 rounded-xl mb-3" />
-        <div className="h-20 bg-gray-100 rounded-xl" />
+        <div className="h-3 w-48 bg-zinc-800 rounded-xl mb-3" />
+        <div className="h-20 bg-zinc-800 rounded-xl" />
       </section>
     )
   }
@@ -230,10 +230,10 @@ export default function AnalystDetailModule({ data, loading }: Props) {
   const hasMore = upgrades.length > INITIAL_SHOWN
 
   return (
-    <section id="section-analyst-detail" className="card rounded-lg shadow-card p-6 flex flex-col gap-5">
+    <section id="section-analyst-detail" className="card rounded-lg  p-6 flex flex-col gap-5">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-sans font-medium text-gray-500 tracking-wide">Analyst Grades</h3>
+        <h3 className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Analyst Grades</h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
       </div>
 
@@ -259,7 +259,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
             )
           })}
           {data?.latest_recommendation?.period && (
-            <span className="text-[9px] font-mono text-gray-400 ml-auto">
+            <span className="text-[9px] font-mono text-zinc-500 ml-auto">
               Snapshot {data.latest_recommendation.period}
             </span>
           )}
@@ -270,7 +270,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
       {hasGrades && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[9px] font-sans text-gray-400 uppercase tracking-wide">
+            <span className="text-[9px] font-sans text-zinc-500 uppercase tracking-wide">
               {showAll ? `All ${upgrades.length} grades` : `Top ${Math.min(INITIAL_SHOWN, upgrades.length)} of ${upgrades.length}`}
             </span>
           </div>
@@ -297,7 +297,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
       {/* Recommendation Trend */}
       {hasTrend && (
         <div>
-          <span className="text-[9px] font-sans text-gray-400 uppercase tracking-wide">
+          <span className="text-[9px] font-sans text-zinc-500 uppercase tracking-wide">
             Recommendation Trend
           </span>
 
@@ -307,7 +307,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
               if (total === 0) return null
               return (
                 <div key={t.period} className="flex items-center gap-2.5">
-                  <span className="text-[9px] font-mono text-gray-400 w-12 shrink-0">{t.period}</span>
+                  <span className="text-[9px] font-mono text-zinc-500 w-12 shrink-0">{t.period}</span>
                   <div className="flex-1 flex h-5 rounded-lg overflow-hidden">
                     {TREND_SEGMENTS.map(({ key, color, label }) => {
                       const count = t[key]
@@ -327,7 +327,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
                       )
                     })}
                   </div>
-                  <span className="text-[9px] font-mono text-gray-400 w-6 text-right shrink-0">
+                  <span className="text-[9px] font-mono text-zinc-500 w-6 text-right shrink-0">
                     {total}
                   </span>
                 </div>
@@ -340,7 +340,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
             {TREND_SEGMENTS.map(({ color, label }) => (
               <div key={label} className="flex items-center gap-1.5">
                 <div className={clsx('w-2 h-2 rounded-sm shrink-0', color)} />
-                <span className="text-[8px] font-sans text-gray-400">{label}</span>
+                <span className="text-[8px] font-sans text-zinc-500">{label}</span>
               </div>
             ))}
           </div>

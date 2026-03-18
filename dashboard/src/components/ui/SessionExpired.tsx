@@ -31,7 +31,7 @@ export default function SessionExpired() {
       aria-label="Session expired"
     >
       <div
-        className="card rounded-2xl shadow-card-lg w-full max-w-sm p-7 flex flex-col gap-5 animate-fade-in-up"
+        className="card rounded-2xl -lg w-full max-w-sm p-7 flex flex-col gap-5 animate-fade-in-up"
         style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
       >
         {/* Icon */}

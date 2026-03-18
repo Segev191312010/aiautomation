@@ -19,11 +19,11 @@ function gradeTextColor(grade: string): string {
   const g = grade.replace(/[+-]/, '') // strip modifier for color lookup
   switch (g) {
     case 'A': return 'text-emerald-700'
-    case 'B': return 'text-green-700'
+    case 'B': return 'text-emerald-300'
     case 'C': return 'text-amber-600'
     case 'D': return 'text-orange-700'
     case 'F': return 'text-red-700'
-    default:  return 'text-gray-400'
+    default:  return 'text-zinc-500'
   }
 }
 
@@ -31,11 +31,11 @@ function gradeBadgeBg(grade: string): string {
   const g = grade.replace(/[+-]/, '')
   switch (g) {
     case 'A': return 'bg-emerald-50 border-emerald-200'
-    case 'B': return 'bg-green-50 border-green-200'
+    case 'B': return 'bg-emerald-500/10 border-emerald-200'
     case 'C': return 'bg-amber-50 border-amber-200'
     case 'D': return 'bg-orange-50 border-orange-200'
-    case 'F': return 'bg-red-50 border-red-200'
-    default:  return 'bg-gray-100 border-gray-200'
+    case 'F': return 'bg-red-500/10 border-red-200'
+    default:  return 'bg-zinc-800 border-zinc-800'
   }
 }
 
@@ -50,16 +50,16 @@ function StarRow({ metric }: StarRowProps) {
   const isEmpty = stars === 0
 
   return (
-    <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+    <div className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
       {/* Metric name */}
-      <span className="text-[11px] font-sans text-gray-500 leading-snug">
+      <span className="text-[11px] font-sans text-zinc-400 leading-snug">
         {metric.name}
       </span>
 
       {/* Star display */}
       <div className="flex items-center gap-2 flex-shrink-0 ml-3">
         {isEmpty ? (
-          <span className="text-[10px] font-sans text-gray-400">—</span>
+          <span className="text-[10px] font-sans text-zinc-500">—</span>
         ) : (
           <div className="flex gap-0.5" aria-label={`${stars} out of 5 stars`}>
             {Array.from({ length: 5 }, (_, i) => (
@@ -121,9 +121,9 @@ function GradeBadge({ grade, score }: GradeBadgeProps) {
 
       {/* Label + overall stars */}
       <div className="flex flex-col gap-1.5">
-        <p className="text-sm font-sans font-semibold text-gray-800">Composite Fundamentals</p>
+        <p className="text-sm font-sans font-semibold text-zinc-100">Composite Fundamentals</p>
         {score != null && (
-          <p className="text-[10px] font-mono text-gray-400 tabular-nums">
+          <p className="text-[10px] font-mono text-zinc-500 tabular-nums">
             Score: {score.toFixed(0)} / 100
           </p>
         )}
@@ -143,22 +143,22 @@ function GradeBadge({ grade, score }: GradeBadgeProps) {
 
 function LoadingSkeleton() {
   return (
-    <section className="card rounded-lg shadow-card p-6 animate-pulse">
+    <section className="card rounded-lg  p-6 animate-pulse">
       <div className="flex items-center justify-between mb-5">
-        <div className="h-3 w-36 bg-gray-100 rounded-lg" />
-        <div className="h-3 w-12 bg-gray-100 rounded-lg" />
+        <div className="h-3 w-36 bg-zinc-800 rounded-lg" />
+        <div className="h-3 w-12 bg-zinc-800 rounded-lg" />
       </div>
       <div className="flex items-center gap-4 mb-5">
-        <div className="w-16 h-16 bg-gray-100 rounded-lg flex-shrink-0" />
+        <div className="w-16 h-16 bg-zinc-800 rounded-lg flex-shrink-0" />
         <div className="flex flex-col gap-2 flex-1">
-          <div className="h-3 w-28 bg-gray-100 rounded-lg" />
-          <div className="h-3 w-20 bg-gray-100 rounded-lg" />
-          <div className="h-3 w-24 bg-gray-100 rounded-lg" />
+          <div className="h-3 w-28 bg-zinc-800 rounded-lg" />
+          <div className="h-3 w-20 bg-zinc-800 rounded-lg" />
+          <div className="h-3 w-24 bg-zinc-800 rounded-lg" />
         </div>
       </div>
       <div className="space-y-2">
         {Array.from({ length: 8 }, (_, i) => (
-          <div key={i} className="h-8 bg-gray-100 rounded-lg" />
+          <div key={i} className="h-8 bg-zinc-800 rounded-lg" />
         ))}
       </div>
     </section>
@@ -180,18 +180,18 @@ export default function RatingScorecardModule({ data, loading }: Props) {
   const allMetrics: ScorecardMetric[] = data.categories.flatMap((cat) => cat.metrics)
 
   return (
-    <section id="section-rating" className="card rounded-lg shadow-card p-6">
+    <section id="section-rating" className="card rounded-lg  p-6">
 
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
-        <h3 className="text-xs font-sans font-semibold text-gray-500 tracking-wide uppercase">
+        <h3 className="text-xs font-sans font-semibold text-zinc-400 tracking-wide uppercase">
           Fundamental Scorecard
         </h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
       </div>
 
       {/* Overall grade + stars */}
-      <div className="mb-5 pb-4 border-b border-gray-200">
+      <div className="mb-5 pb-4 border-b border-zinc-800">
         <GradeBadge grade={data.overall_grade} score={data.overall_score} />
       </div>
 
@@ -203,7 +203,7 @@ export default function RatingScorecardModule({ data, loading }: Props) {
           ))}
         </div>
       ) : (
-        <p className="text-[11px] text-gray-400 text-center py-4">
+        <p className="text-[11px] text-zinc-500 text-center py-4">
           No metrics available
         </p>
       )}

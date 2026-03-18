@@ -44,8 +44,8 @@ function SectionHeader({ eyebrow, title, action }: { eyebrow: string; title: str
   return (
     <div className="flex items-end justify-between gap-4">
       <div>
-        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-gray-400">{eyebrow}</div>
-        <h2 className="mt-1 text-lg font-sans font-semibold text-gray-900">{title}</h2>
+        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">{eyebrow}</div>
+        <h2 className="mt-1 text-lg font-sans font-semibold text-zinc-50">{title}</h2>
       </div>
       {action}
     </div>
@@ -102,25 +102,25 @@ export default function Dashboard() {
   return (
     <div className="flex flex-col gap-5 h-full">
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.9fr)]">
-        <div className="card rounded-lg p-5 shadow-card">
+        <div className="card rounded-lg p-5 ">
           <div className="flex flex-col gap-5">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-[10px] font-sans uppercase tracking-[0.24em] text-gray-400">
+                <div className="text-[10px] font-sans uppercase tracking-[0.24em] text-zinc-500">
                   Market Snapshot
                 </div>
                 <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
-                  <div className="text-4xl font-mono font-bold tracking-tight text-gray-900">
+                  <div className="text-4xl font-mono font-bold tracking-tight text-zinc-50">
                     {selectedSymbol}
                   </div>
-                  <div className="text-2xl font-mono font-semibold text-gray-800">
+                  <div className="text-2xl font-mono font-semibold text-zinc-100">
                     {formatPrice(selectedQuote?.price)}
                   </div>
                   {selectedQuote && (
                     <div
                       className={clsx(
                         'text-sm font-mono font-semibold tabular-nums',
-                        selectedQuote.change_pct >= 0 ? 'text-green-600' : 'text-red-600',
+                        selectedQuote.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400',
                       )}
                     >
                       {selectedQuote.change_pct >= 0 ? '+' : ''}
@@ -129,7 +129,7 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
-                <p className="mt-3 max-w-2xl text-sm font-sans text-gray-600">
+                <p className="mt-3 max-w-2xl text-sm font-sans text-zinc-400">
                   Start with the active name, then drill into the live market workspace, full stock analysis, or run a broader screen.
                 </p>
               </div>
@@ -138,21 +138,21 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setRoute('market')}
-                  className="rounded-lg border border-gray-900 bg-gray-900 px-3.5 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-gray-800"
+                  className="rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-zinc-900"
                 >
                   Open market workspace
                 </button>
                 <button
                   type="button"
                   onClick={() => setRoute('stock')}
-                  className="rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-[11px] font-sans font-medium text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900"
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-3.5 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
                 >
                   Open stock analysis
                 </button>
                 <button
                   type="button"
                   onClick={() => setRoute('screener')}
-                  className="rounded-lg border border-gray-200 bg-[#FAF8F5] px-3.5 py-2 text-[11px] font-sans font-medium text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900"
+                  className="rounded-lg border border-zinc-800 bg-[#FAF8F5] px-3.5 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
                 >
                   Run screener
                 </button>
@@ -160,21 +160,21 @@ export default function Dashboard() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">Market Cap</div>
-                <div className="mt-1 text-base font-mono font-semibold text-gray-900">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Market Cap</div>
+                <div className="mt-1 text-base font-mono font-semibold text-zinc-50">
                   {formatCompact(selectedQuote?.market_cap)}
                 </div>
               </div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">Volume</div>
-                <div className="mt-1 text-base font-mono font-semibold text-gray-900">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Volume</div>
+                <div className="mt-1 text-base font-mono font-semibold text-zinc-50">
                   {selectedQuote?.volume?.toLocaleString('en-US') ?? '--'}
                 </div>
               </div>
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">Feed</div>
-                <div className="mt-1 text-base font-mono font-semibold text-gray-900">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Feed</div>
+                <div className="mt-1 text-base font-mono font-semibold text-zinc-50">
                   {selectedQuote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback'}
                 </div>
               </div>
@@ -182,7 +182,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="card rounded-lg p-5 shadow-card">
+        <div className="card rounded-lg p-5 ">
           <SectionHeader eyebrow="Capital" title="Account Snapshot" />
           <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
             {!account ? (
@@ -239,20 +239,20 @@ export default function Dashboard() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.9fr)] flex-1 min-h-0 animate-fade-in-up" style={{ animationDelay: '80ms' }}>
-        <div className="card rounded-lg overflow-hidden shadow-card min-h-[28rem] flex flex-col">
+        <div className="card rounded-lg overflow-hidden  min-h-[28rem] flex flex-col">
           <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E8E4DF]">
             <div>
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Chart</div>
-              <div className="text-base font-mono font-bold text-gray-900">{selectedSymbol}</div>
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Chart</div>
+              <div className="text-base font-mono font-bold text-zinc-50">{selectedSymbol}</div>
             </div>
-            <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-gray-500">
+            <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-zinc-400">
               {chartType}
             </span>
             {selectedQuote && (
               <span
                 className={clsx(
                   'text-[11px] font-mono tabular-nums',
-                  selectedQuote.change_pct >= 0 ? 'text-green-600' : 'text-red-600',
+                  selectedQuote.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400',
                 )}
               >
                 {selectedQuote.change_pct >= 0 ? '+' : ''}{selectedQuote.change_pct.toFixed(2)}%
@@ -265,7 +265,7 @@ export default function Dashboard() {
                   value={compSymbol}
                   onChange={(e) => setCompSymbol(e.target.value.toUpperCase())}
                   placeholder="vs. MSFT"
-                  className="w-24 rounded-lg border border-gray-200 bg-[#FAF8F5] px-2.5 py-1.5 text-xs font-mono text-gray-800 focus:border-gray-400 focus:outline-none"
+                  className="w-24 rounded-lg border border-zinc-800 bg-[#FAF8F5] px-2.5 py-1.5 text-xs font-mono text-zinc-100 focus:border-zinc-700 focus:outline-none"
                 />
               )}
               <button
@@ -274,8 +274,8 @@ export default function Dashboard() {
                 className={clsx(
                   'rounded-lg border px-2.5 py-1.5 text-[11px] font-sans transition-colors',
                   compMode
-                    ? 'border-gray-900 bg-gray-100 text-gray-900'
-                    : 'border-gray-200 text-gray-500 hover:border-gray-400 hover:text-gray-800',
+                    ? 'border-zinc-800 bg-zinc-800 text-zinc-50'
+                    : 'border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-100',
                 )}
               >
                 Compare
@@ -283,7 +283,7 @@ export default function Dashboard() {
               <button
                 type="button"
                 onClick={() => setRoute('market')}
-                className="rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[11px] font-sans text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900"
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-sans text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
               >
                 Open workspace
               </button>
@@ -295,20 +295,20 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="card rounded-lg p-5 shadow-card flex flex-col gap-4">
+        <div className="card rounded-lg p-5  flex flex-col gap-4">
           <SectionHeader eyebrow="Context" title="Quick Brief" />
 
-          <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Active Name</div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
+            <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Active Name</div>
             <div className="mt-1 flex items-end justify-between gap-3">
               <div>
-                <div className="text-xl font-mono font-bold text-gray-900">{selectedSymbol}</div>
-                <div className="text-sm font-mono text-gray-600">{formatPrice(selectedQuote?.price)}</div>
+                <div className="text-xl font-mono font-bold text-zinc-50">{selectedSymbol}</div>
+                <div className="text-sm font-mono text-zinc-400">{formatPrice(selectedQuote?.price)}</div>
               </div>
               <button
                 type="button"
                 onClick={() => setRoute('stock')}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] font-sans text-gray-700 transition-colors hover:border-gray-400 hover:text-gray-900"
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-sans text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
               >
                 Full analysis
               </button>
@@ -316,29 +316,29 @@ export default function Dashboard() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-            <div className="rounded-lg border border-gray-200 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">52W Range</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">
+            <div className="rounded-lg border border-zinc-800 px-4 py-3">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">52W Range</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
                 {selectedQuote?.year_low != null && selectedQuote?.year_high != null
                   ? `$${selectedQuote.year_low.toFixed(0)} - $${selectedQuote.year_high.toFixed(0)}`
                   : '--'}
               </div>
             </div>
-            <div className="rounded-lg border border-gray-200 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Market State</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">
+            <div className="rounded-lg border border-zinc-800 px-4 py-3">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Market State</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
                 {selectedQuote?.market_state?.toUpperCase() ?? 'UNKNOWN'}
               </div>
             </div>
-            <div className="rounded-lg border border-gray-200 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Volume</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">
+            <div className="rounded-lg border border-zinc-800 px-4 py-3">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Volume</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
                 {selectedQuote?.volume?.toLocaleString('en-US') ?? '--'}
               </div>
             </div>
-            <div className="rounded-lg border border-gray-200 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-400">Market Cap</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">
+            <div className="rounded-lg border border-zinc-800 px-4 py-3">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Market Cap</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
                 {formatCompact(selectedQuote?.market_cap)}
               </div>
             </div>
@@ -355,7 +355,7 @@ export default function Dashboard() {
               <button
                 type="button"
                 onClick={() => setDiagnosticsExpanded((v) => !v)}
-                className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-[11px] font-sans text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-900"
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] font-sans text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-50"
               >
                 {diagnosticsExpanded ? 'Hide' : 'Show'}
               </button>
@@ -365,11 +365,11 @@ export default function Dashboard() {
           {!diagnosticsExpanded ? (
             <div className="card rounded-lg p-4 flex items-center justify-between gap-4">
               <div>
-                <p className="text-sm font-sans text-gray-700">
+                <p className="text-sm font-sans text-zinc-200">
                   Diagnostics stay collapsed by default so the dashboard remains focused on scanning and drilldowns.
                 </p>
                 {overview?.last_run_ts && (
-                  <p className="text-[11px] font-mono text-gray-500 mt-1">
+                  <p className="text-[11px] font-mono text-zinc-400 mt-1">
                     Last run: {new Date(overview.last_run_ts).toLocaleString()}
                   </p>
                 )}
@@ -377,7 +377,7 @@ export default function Dashboard() {
               <button
                 type="button"
                 onClick={() => setDiagnosticsExpanded(true)}
-                className="rounded-lg border border-gray-900 bg-gray-900 px-3 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-gray-800"
+                className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-zinc-900"
               >
                 Expand diagnostics
               </button>
@@ -394,9 +394,9 @@ export default function Dashboard() {
               />
 
               {diagnosticsError && (
-                <div className="rounded-lg border border-red-300 bg-red-50 p-5 flex items-start gap-3">
+                <div className="rounded-lg border border-red-300 bg-red-500/10 p-5 flex items-start gap-3">
                   <svg
-                    className="w-4 h-4 text-red-600 shrink-0 mt-0.5"
+                    className="w-4 h-4 text-red-400 shrink-0 mt-0.5"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -408,14 +408,14 @@ export default function Dashboard() {
                     <line x1="12" y1="8" x2="12" y2="12" />
                     <line x1="12" y1="16" x2="12.01" y2="16" />
                   </svg>
-                  <span className="text-xs font-sans font-medium text-red-600">
+                  <span className="text-xs font-sans font-medium text-red-400">
                     Diagnostics error: {diagnosticsError}
                   </span>
                 </div>
               )}
 
               {diagnosticsLoading && !overview && indicators.length === 0 ? (
-                <div className="card rounded-lg p-5 text-xs font-sans font-medium text-gray-400">
+                <div className="card rounded-lg p-5 text-xs font-sans font-medium text-zinc-500">
                   Loading diagnostics...
                 </div>
               ) : (

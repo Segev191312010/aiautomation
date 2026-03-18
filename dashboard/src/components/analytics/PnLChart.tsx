@@ -180,7 +180,7 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
       {/* Toolbar */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         {/* Bucket toggle */}
-        <div className="flex rounded-xl overflow-hidden border border-gray-200 text-xs font-mono">
+        <div className="flex rounded-xl overflow-hidden border border-zinc-800 text-xs font-mono">
           {(['daily', 'weekly', 'monthly'] as Bucket[]).map((b) => (
             <button
               key={b}
@@ -188,8 +188,8 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
               className={clsx(
                 'px-3 py-1.5 capitalize transition-colors duration-100',
                 bucket === b
-                  ? 'bg-gray-100 text-gray-800 font-semibold'
-                  : 'text-gray-400 hover:text-gray-600',
+                  ? 'bg-zinc-800 text-zinc-100 font-semibold'
+                  : 'text-zinc-500 hover:text-zinc-400',
               )}
             >
               {b}
@@ -204,7 +204,7 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
             'flex items-center gap-1.5 text-[11px] font-mono px-3 py-1.5 rounded-xl border transition-colors duration-100',
             showBench
               ? 'border-indigo-500/30 bg-indigo-500/10 text-indigo-400'
-              : 'border-gray-200 text-gray-400 hover:text-gray-600',
+              : 'border-zinc-800 text-zinc-500 hover:text-zinc-400',
           )}
         >
           <span className="w-5 h-px border-t-2 border-dashed border-current inline-block" />
@@ -214,9 +214,9 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
 
       {/* Chart */}
       {loading && !dailyPnL.length ? (
-        <div className="h-64 rounded-2xl bg-gray-100/40 animate-pulse" />
+        <div className="h-64 rounded-2xl bg-zinc-800/40 animate-pulse" />
       ) : !dailyPnL.length ? (
-        <div className="h-64 rounded-2xl border border-gray-200 flex items-center justify-center text-sm text-gray-400">
+        <div className="h-64 rounded-2xl border border-zinc-800 flex items-center justify-center text-sm text-zinc-500">
           No P&L history available
         </div>
       ) : (

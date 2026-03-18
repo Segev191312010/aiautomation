@@ -410,10 +410,31 @@ export type WsEventType =
   | 'sim_order'
   | 'sim_reset'
   | 'alert_fired'
+  | 'positions_update'
+  | 'account_update'
+  | 'order_filled'
+  | 'order_modified'
 
 export interface WsEvent {
   type: WsEventType
   [key: string]: unknown
+}
+
+// ── Activity Feed ──────────────────────────────────────────────────────────────
+
+export interface ActivityEvent {
+  id: string
+  timestamp: string
+  type: 'fill' | 'signal' | 'cancelled'
+  symbol: string
+  action: 'BUY' | 'SELL'
+  qty: number
+  price?: number
+  ruleName: string
+  slPrice?: number
+  tpPrice?: number
+  pctOfAccount?: number
+  status: 'FILLED' | 'PENDING' | 'CANCELLED'
 }
 
 // ── UI / watchlist ────────────────────────────────────────────────────────────

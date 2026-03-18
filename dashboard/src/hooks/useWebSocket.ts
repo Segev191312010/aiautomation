@@ -5,8 +5,8 @@
 import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
 import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore } from '@/store'
-import { fetchTrades, fetchPositions } from '@/services/api'
-import type { AlertFiredEvent, WsEvent } from '@/types'
+import { fetchTrades, fetchPositions, fetchAccountSummary } from '@/services/api'
+import type { ActivityEvent, AlertFiredEvent, WsEvent } from '@/types'
 import { useToast } from '@/components/ui/ToastProvider'
 
 export function useWebSocket(): void {
@@ -20,7 +20,6 @@ export function useWebSocket(): void {
   const setPlayback    = useSimStore((s) => s.setPlayback)
   const pushReplayBar  = useSimStore((s) => s.pushReplayBar)
 
-  // Stable ref so the one-time useEffect closure always reads the latest toast API
   const toast = useToast()
   const toastRef = useRef(toast)
   toastRef.current = toast
@@ -50,18 +49,62 @@ export function useWebSocket(): void {
       })
     })
 
-    // Order filled — refresh trades and positions so the UI reflects the fill immediately
+    // Order filled — refresh everything and push to activity feed
     const unFill = wsService.subscribe('filled', (ev: WsEvent) => {
-      console.info('[WS] order filled', ev)
       const symbol    = String(ev['symbol'] ?? '').toUpperCase()
-      const qty       = ev['qty']    != null ? String(ev['qty'])    : null
-      const fillPrice = ev['price']  != null ? `@${Number(ev['price']).toFixed(2)}` : ''
-      const side      = ev['action'] != null ? String(ev['action']) : 'Order'
-      const label     = [side, qty ? qty + ' ' + symbol : symbol, fillPrice].filter(Boolean).join(' ')
-      toastRef.current.success('Filled: ' + label)
-      const { setTrades, setPositions } = useAccountStore.getState()
-      fetchTrades().then(setTrades).catch(() => { /* best effort */ })
-      fetchPositions().then(setPositions).catch(() => { /* best effort */ })
+      const qty       = Number(ev['qty'] ?? 0)
+      const fillPrice = ev['price'] != null ? Number(ev['price']) : undefined
+      const side      = String(ev['action'] ?? 'BUY')
+      const ruleName  = String(ev['rule_name'] ?? 'Manual')
+      const slPrice   = ev['sl_price'] != null ? Number(ev['sl_price']) : undefined
+      const tpPrice   = ev['tp_price'] != null ? Number(ev['tp_price']) : undefined
+      const pctAcct   = ev['pct_of_account'] != null ? Number(ev['pct_of_account']) : undefined
+
+      // Enriched toast
+      const parts = [`${side} ${qty} ${symbol}`]
+      if (fillPrice) parts[0] += ` @$${fillPrice.toFixed(2)}`
+      parts.push(`Rule: ${ruleName}`)
+      if (slPrice && tpPrice) parts.push(`SL: $${slPrice.toFixed(2)} / TP: $${tpPrice.toFixed(2)}`)
+      if (pctAcct) parts.push(`${pctAcct.toFixed(1)}% of account`)
+      toastRef.current.success(parts.join(' | '))
+
+      // Push to activity feed
+      const { pushActivity, setTrades, setPositions, setAccount } = useAccountStore.getState()
+      pushActivity({
+        id: String(ev['trade_id'] ?? crypto.randomUUID()),
+        timestamp: new Date().toISOString(),
+        type: 'fill',
+        symbol,
+        action: side as 'BUY' | 'SELL',
+        qty,
+        price: fillPrice,
+        ruleName,
+        slPrice,
+        tpPrice,
+        pctOfAccount: pctAcct,
+        status: 'FILLED',
+      })
+
+      // Refresh all account data
+      fetchTrades().then(setTrades).catch(() => {})
+      fetchPositions().then(setPositions).catch(() => {})
+      fetchAccountSummary().then(setAccount).catch(() => {})
+    })
+
+    // Signal fired (before order placed) — show as PENDING in feed
+    const unSignal = wsService.subscribe('signal', (ev: WsEvent) => {
+      const { pushActivity } = useAccountStore.getState()
+      pushActivity({
+        id: String(ev['trade_id'] ?? crypto.randomUUID()),
+        timestamp: new Date().toISOString(),
+        type: 'signal',
+        symbol: String(ev['symbol'] ?? '').toUpperCase(),
+        action: String(ev['action'] ?? 'BUY') as 'BUY' | 'SELL',
+        qty: Number(ev['qty'] ?? 0),
+        ruleName: String(ev['rule_name'] ?? ''),
+        status: 'PENDING',
+      })
+      toastRef.current.info(`Signal: ${ev['action']} ${ev['symbol']} — ${ev['rule_name']}`)
     })
 
     // Replay bar
@@ -95,15 +138,12 @@ export function useWebSocket(): void {
       })
     })
 
-    // Broker real-time bar updates (5s bars) -> feed through live quote patcher
-    // so chart candles keep moving even in sparse-tick periods.
+    // Broker real-time bar updates
     const unBar = wsService.subscribe('bar', (ev: WsEvent) => {
       const symbol = String(ev['symbol'] ?? '').toUpperCase()
       const close  = Number(ev['close'])
       const time   = Number(ev['time'])
-      if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(time) || time <= 0) {
-        return
-      }
+      if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(time) || time <= 0) return
       const store  = useMarketStore.getState()
       const series = store.bars[symbol] ?? store.compBars[symbol] ?? []
       let barSeconds = 5
@@ -116,12 +156,42 @@ export function useWebSocket(): void {
       applyLiveQuote(symbol, close, Math.floor(time), barSeconds, 'ibkr', 0)
     })
 
+    // Live position + account updates from backend heartbeat
+    const unPositions = wsService.subscribe('positions_update', (ev: WsEvent) => {
+      const { setPositions, setAccount } = useAccountStore.getState()
+      const positions = ev['positions'] as any[]
+      const account = ev['account'] as any
+      if (positions) setPositions(positions)
+      if (account) setAccount(account)
+    })
+
+    // Order modified (SL/TP changed)
+    const unOrderModified = wsService.subscribe('order_modified', (ev: WsEvent) => {
+      const sym = String(ev['symbol'] ?? '')
+      const type = String(ev['order_type'] ?? 'Order')
+      const price = Number(ev['new_price'] ?? 0)
+      toastRef.current.success(`${type} for ${sym} modified to $${price.toFixed(2)}`)
+
+      // Push to activity feed
+      const { pushActivity } = useAccountStore.getState()
+      pushActivity({
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        type: 'signal',
+        symbol: sym,
+        action: 'SELL',
+        qty: 0,
+        ruleName: `${type} Modified`,
+        slPrice: type === 'Stop Loss' ? price : undefined,
+        tpPrice: type === 'Take Profit' ? price : undefined,
+        status: 'FILLED',
+      })
+    })
+
     const unAlertFired = wsService.subscribe('alert_fired', (ev: WsEvent) => {
       const alertStore = useAlertStore.getState()
       const event = ev as unknown as AlertFiredEvent
       alertStore.pushFired(event)
-
-      // Browser push notification (capability + permission safe)
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
         new Notification(`Alert: ${event.name}`, {
           body: `${event.symbol} — ${event.condition_summary}\nPrice: $${event.price.toFixed(2)}`,
@@ -131,13 +201,7 @@ export function useWebSocket(): void {
     })
 
     return () => {
-      unIBKR()
-      unBot()
-      unFill()
-      unReplay()
-      unReplayDone()
-      unBar()
-      unAlertFired()
+      unIBKR(); unBot(); unFill(); unSignal(); unReplay(); unReplayDone(); unBar(); unPositions(); unOrderModified(); unAlertFired()
       wsService.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -3,15 +3,15 @@ import { useMarketStore } from '@/store'
 import { rankOpportunitySignals } from '@/utils/opportunitySignals'
 
 function sentimentClass(value: number): string {
-  if (value >= 20) return 'text-terminal-green'
-  if (value <= -20) return 'text-terminal-red'
-  return 'text-terminal-amber'
+  if (value >= 20) return 'text-emerald-400'
+  if (value <= -20) return 'text-red-400'
+  return 'text-amber-600'
 }
 
 function scoreBarClass(score: number): string {
-  if (score >= 75) return 'bg-terminal-green'
-  if (score >= 55) return 'bg-terminal-amber'
-  return 'bg-terminal-muted'
+  if (score >= 75) return 'bg-emerald-600'
+  if (score >= 55) return 'bg-amber-600'
+  return 'bg-zinc-800'
 }
 
 function SignalCol({
@@ -33,37 +33,37 @@ function SignalCol({
   onSelect: (symbol: string) => void
 }) {
   return (
-    <div className="rounded-lg border border-terminal-border bg-terminal-bg/70 p-3">
+    <div className="rounded-lg border border-zinc-800 bg-[#FAF8F5]/70 p-3">
       <div className="mb-3 flex items-center justify-between">
         <h3 className={`text-xs font-mono font-semibold ${toneClass}`}>{title}</h3>
-        <span className="text-[10px] font-mono text-terminal-ghost">{rows.length}</span>
+        <span className="text-[10px] font-mono text-zinc-500">{rows.length}</span>
       </div>
 
       {rows.length === 0 ? (
-        <p className="text-[11px] font-mono text-terminal-ghost">{emptyText}</p>
+        <p className="text-[11px] font-mono text-zinc-500">{emptyText}</p>
       ) : (
         <div className="space-y-2.5">
           {rows.map((row) => (
             <button
               key={row.symbol}
               onClick={() => onSelect(row.symbol)}
-              className="w-full rounded border border-terminal-border/80 bg-terminal-surface/50 p-2 text-left transition-colors hover:border-terminal-blue/40"
+              className="w-full rounded border border-zinc-800/80 bg-zinc-900/50 p-2 text-left transition-colors hover:border-indigo-600/40"
             >
               <div className="mb-1.5 flex items-center justify-between">
-                <span className="font-mono text-xs font-semibold text-terminal-text">{row.symbol}</span>
+                <span className="font-mono text-xs font-semibold text-zinc-100">{row.symbol}</span>
                 <span className={`text-[10px] font-mono ${sentimentClass(row.sentimentProxy)}`}>
                   sentiment {row.sentimentProxy > 0 ? '+' : ''}{row.sentimentProxy}
                 </span>
               </div>
 
-              <div className="mb-1.5 h-1.5 w-full overflow-hidden rounded bg-terminal-border">
+              <div className="mb-1.5 h-1.5 w-full overflow-hidden rounded bg-zinc-800">
                 <div
                   className={`h-full ${scoreBarClass(row.confidence)}`}
                   style={{ width: `${row.confidence}%` }}
                 />
               </div>
 
-              <div className="mb-1 text-[10px] font-mono text-terminal-ghost">
+              <div className="mb-1 text-[10px] font-mono text-zinc-500">
                 confidence {row.confidence}%
               </div>
 
@@ -71,7 +71,7 @@ function SignalCol({
                 {row.reasons.map((reason) => (
                   <span
                     key={`${row.symbol}-${reason}`}
-                    className="rounded border border-terminal-border px-1.5 py-0.5 text-[10px] font-mono text-terminal-dim"
+                    className="rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-400"
                   >
                     {reason}
                   </span>
@@ -104,11 +104,11 @@ export default function OpportunityBoard() {
   }, [watchlists, activeWatchlist, quotes])
 
   return (
-    <section className="rounded-lg border border-terminal-border bg-terminal-surface p-3">
+    <section className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-mono font-semibold text-terminal-text">Signal Board</h2>
-          <p className="text-[10px] font-mono text-terminal-ghost">
+          <h2 className="text-sm font-mono font-semibold text-zinc-100">Signal Board</h2>
+          <p className="text-[10px] font-mono text-zinc-500">
             Inspired by sentiment + disconnect analysis (price, 52W range, momentum, volume)
           </p>
         </div>
@@ -119,14 +119,14 @@ export default function OpportunityBoard() {
           title="Buy Opportunities"
           emptyText="No high-conviction buy setups in this watchlist now."
           rows={board.buy}
-          toneClass="text-terminal-green"
+          toneClass="text-emerald-400"
           onSelect={setSelectedSymbol}
         />
         <SignalCol
           title="Sell Risks"
           emptyText="No immediate sell-risk setups in this watchlist now."
           rows={board.sell}
-          toneClass="text-terminal-red"
+          toneClass="text-red-400"
           onSelect={setSelectedSymbol}
         />
       </div>

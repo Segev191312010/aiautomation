@@ -16,7 +16,7 @@ SMART_RULES = [
             Condition(indicator="PRICE", params={}, operator="<", value="BBANDS_LOWER_20"),
         ],
         action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
     Rule(
         name="Trend Pullback Buy",
@@ -27,7 +27,7 @@ SMART_RULES = [
             Condition(indicator="MACD", params={"fast": 12, "slow": 26, "signal": 9}, operator=">", value=0),
         ],
         action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
     Rule(
         name="Breakout Momentum",
@@ -38,7 +38,7 @@ SMART_RULES = [
             Condition(indicator="PRICE", params={}, operator=">", value="BBANDS_UPPER_20"),
         ],
         action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
     Rule(
         name="Triple Confirmation Buy",
@@ -50,7 +50,7 @@ SMART_RULES = [
             Condition(indicator="RSI", params={"period": 14}, operator="<", value=70),
         ],
         action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
     Rule(
         name="Stochastic + RSI Oversold",
@@ -60,7 +60,7 @@ SMART_RULES = [
             Condition(indicator="RSI", params={"period": 14}, operator="<", value=35),
         ],
         action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
     Rule(
         name="Overbought Exit",
@@ -70,7 +70,7 @@ SMART_RULES = [
             Condition(indicator="PRICE", params={}, operator=">", value="BBANDS_UPPER_20"),
         ],
         action=TradeAction(type="SELL", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
     Rule(
         name="Trend Breakdown Exit",
@@ -81,7 +81,7 @@ SMART_RULES = [
             Condition(indicator="MACD", params={"fast": 12, "slow": 26, "signal": 9}, operator="<", value=0),
         ],
         action=TradeAction(type="SELL", quantity=1, order_type="MKT"),
-        cooldown_minutes=4320,
+        cooldown_minutes=1440,
     ),
 ]
 

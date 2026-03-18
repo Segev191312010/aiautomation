@@ -34,8 +34,8 @@ const BORDER_ACCENT: Record<ToastType, string> = {
 }
 
 const ICON_COLOR: Record<ToastType, string> = {
-  success: 'text-green-600',
-  error:   'text-red-600',
+  success: 'text-emerald-400',
+  error:   'text-red-400',
   warning: 'text-amber-600',
   info:    'text-indigo-600',
 }
@@ -128,9 +128,9 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
         'rounded-xl border-l-[3px]',
         BORDER_ACCENT[toast.type],
         // card background + subtle outer ring
-        'border border-gray-200',
+        'border border-zinc-800',
         // shadow
-        'shadow-card',
+        '',
         // animation
         toast.exiting ? 'animate-toast-out' : 'animate-slide-in',
       ].join(' ')}
@@ -152,7 +152,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
       </div>
 
       {/* Message */}
-      <span className="flex-1 text-xs font-sans font-medium text-gray-800 leading-relaxed">
+      <span className="flex-1 text-xs font-sans font-medium text-zinc-100 leading-relaxed">
         {toast.message}
       </span>
 
@@ -162,8 +162,8 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
         onClick={() => onDismiss(toast.id)}
         className={[
           'shrink-0 w-6 h-6 rounded-lg flex items-center justify-center',
-          'text-gray-400 hover:text-gray-500',
-          'hover:bg-gray-100 active:bg-gray-100',
+          'text-zinc-500 hover:text-zinc-400',
+          'hover:bg-zinc-800 active:bg-zinc-800',
           'transition-colors duration-150',
         ].join(' ')}
         aria-label="Dismiss"

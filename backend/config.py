@@ -32,6 +32,15 @@ class Config:
     # ── Bot behaviour ────────────────────────────────────────────────────────
     BOT_INTERVAL_SECONDS: int = int(os.getenv("BOT_INTERVAL_SECONDS", "60"))
 
+    # ── Trading risk limits ───────────────────────────────────────────────────
+    SHORT_ALLOWED: bool = os.getenv("SHORT_ALLOWED", "false").lower() == "true"
+    RISK_PER_TRADE_PCT: float = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
+    MAX_TOTAL_DRAWDOWN: float = float(os.getenv("MAX_TOTAL_DRAWDOWN", "0.18"))
+    MAX_DAILY_RISK: float = float(os.getenv("MAX_DAILY_RISK", "0.03"))
+    MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", "100"))
+    MAX_POSITIONS_PER_SECTOR: int = int(os.getenv("MAX_POSITIONS_PER_SECTOR", "3"))
+    MAX_TRADES_PER_CYCLE: int = int(os.getenv("MAX_TRADES_PER_CYCLE", "50"))
+
     # ── Alert engine ──────────────────────────────────────────────────────────
     ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
 

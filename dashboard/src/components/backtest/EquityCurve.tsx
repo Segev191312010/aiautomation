@@ -110,8 +110,8 @@ export function EquityCurve({ result }: Props) {
   }, [result])
 
   return (
-    <div className="card rounded-2xl shadow-card p-5">
-      <h3 className="text-sm font-sans font-medium text-gray-500 mb-4">Equity Curve</h3>
+    <div className="card rounded-2xl  p-5">
+      <h3 className="text-sm font-sans font-medium text-zinc-400 mb-4">Equity Curve</h3>
       <div ref={containerRef} className="rounded-xl overflow-hidden" />
     </div>
   )

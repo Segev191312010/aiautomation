@@ -20,13 +20,13 @@ function ParamInput({ label, icon, value, onChange, help, min = 0, max, step = 1
     : null
 
   return (
-    <div className="bg-gray-50/60 rounded-xl border border-gray-200 p-3.5 hover:border-gray-200 transition-colors group">
+    <div className="bg-zinc-900/60 rounded-xl border border-zinc-800 p-3.5 hover:border-zinc-800 transition-colors group">
       {/* Label row */}
       <div className="flex items-center gap-2 mb-3">
-        <div className="w-6 h-6 rounded-md bg-white flex items-center justify-center text-gray-500 group-hover:text-gray-800 transition-colors flex-shrink-0">
+        <div className="w-6 h-6 rounded-md bg-zinc-900 flex items-center justify-center text-zinc-400 group-hover:text-zinc-100 transition-colors flex-shrink-0">
           {icon}
         </div>
-        <label className="text-xs font-sans font-medium text-gray-500 group-hover:text-gray-800 transition-colors">
+        <label className="text-xs font-sans font-medium text-zinc-400 group-hover:text-zinc-100 transition-colors">
           {label}
         </label>
       </div>
@@ -34,15 +34,15 @@ function ParamInput({ label, icon, value, onChange, help, min = 0, max, step = 1
       {/* Input */}
       <div className="relative">
         {prefix && (
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-mono text-gray-400 pointer-events-none select-none">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-mono text-zinc-500 pointer-events-none select-none">
             {prefix}
           </span>
         )}
         <input
           type="number"
-          className={`w-full bg-white border border-gray-200 rounded-lg py-1.5 text-sm font-mono text-gray-800
+          className={`w-full bg-zinc-900 border border-zinc-800 rounded-lg py-1.5 text-sm font-mono text-zinc-100
             focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20
-            hover:border-gray-200 transition-all
+            hover:border-zinc-800 transition-all
             ${prefix ? 'pl-7 pr-3' : 'px-3'}`}
           value={value}
           onChange={(e) => onChange(Number(e.target.value))}
@@ -54,7 +54,7 @@ function ParamInput({ label, icon, value, onChange, help, min = 0, max, step = 1
 
       {/* Slider-bar visual for percentage inputs */}
       {fillPct !== null && (
-        <div className="mt-2.5 h-1 bg-white rounded-full overflow-hidden">
+        <div className="mt-2.5 h-1 bg-zinc-900 rounded-full overflow-hidden">
           <div
             className="h-full rounded-full bg-gradient-to-r from-indigo-600/60 to-indigo-600 transition-all duration-300"
             style={{ width: `${fillPct}%` }}
@@ -64,7 +64,7 @@ function ParamInput({ label, icon, value, onChange, help, min = 0, max, step = 1
 
       {/* Help text */}
       {help && (
-        <span className="text-[10px] font-sans text-gray-400 mt-1.5 block">{help}</span>
+        <span className="text-[10px] font-sans text-zinc-500 mt-1.5 block">{help}</span>
       )}
     </div>
   )
@@ -109,7 +109,7 @@ export function BacktestParams() {
   } = useBacktestStore()
 
   return (
-    <div className="card rounded-2xl shadow-card p-5">
+    <div className="card rounded-2xl  p-5">
       {/* Header */}
       <div className="flex items-center gap-2 mb-4">
         <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center">
@@ -119,7 +119,7 @@ export function BacktestParams() {
             />
           </svg>
         </div>
-        <h3 className="text-sm font-sans font-semibold text-gray-800">Parameters</h3>
+        <h3 className="text-sm font-sans font-semibold text-zinc-100">Parameters</h3>
       </div>
 
       <div className="grid grid-cols-2 gap-3">
