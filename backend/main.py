@@ -70,6 +70,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
+# eventkit (bundled with ib_insync) calls asyncio.get_event_loop() at import
+# time, which raises RuntimeError on Python 3.14 when no loop exists yet.
+# Create one so the import succeeds; uvicorn replaces it with its own loop.
+asyncio.set_event_loop(asyncio.new_event_loop())
+
 from config import cfg
 from database import (
     delete_rule, get_rule, get_rules, get_trades, init_db, save_rule, save_trade,
@@ -218,11 +223,27 @@ async def lifespan(app: FastAPI):
         )
     on_fill(lambda t: asyncio.create_task(_on_trade_fill(t)))
 
+    # Register order-fill → position tracker (exit management)
+    async def _on_trade_fill_register(trade: Trade) -> None:
+        if trade.action != "BUY" or not trade.fill_price:
+            return
+        try:
+            from position_tracker import register_position
+            from market_data import get_historical_bars
+            df = await get_historical_bars(trade.symbol, duration="60 D", bar_size="1D")
+            if df is not None and len(df) >= 14:
+                await register_position(trade, df, trade.rule_name)
+        except Exception as exc:
+            log.error("Position registration failed for %s: %s", trade.id, exc)
+    on_fill(lambda t: asyncio.create_task(_on_trade_fill_register(t)))
+
     # Attempt IBKR connection (non-blocking)
     connected = await ibkr.connect()
     if connected:
         log.info("IBKR connected on startup")
         await ibkr.start_reconnect_loop()
+        from order_executor import reconcile_pending_orders
+        asyncio.create_task(reconcile_pending_orders())
     else:
         log.warning("IBKR not connected  --  auto-reconnect running in background")
         await ibkr.start_reconnect_loop()
@@ -1007,6 +1028,42 @@ async def get_positions():
     if not ibkr.is_connected():
         raise HTTPException(503, "IBKR not connected")
     return [p.model_dump() for p in await ibkr.get_positions()]
+
+
+@app.get("/api/positions/tracked")
+async def get_tracked_positions():
+    """Open positions monitored by the exit manager, enriched with live stop levels."""
+    from database import get_open_positions
+    from position_tracker import compute_trail_stop
+    from market_data import get_latest_price, get_historical_bars
+    from indicators import _atr
+
+    positions = await get_open_positions()
+    result = []
+    for pos in positions:
+        try:
+            price = await get_latest_price(pos.symbol) or pos.entry_price
+            df = await get_historical_bars(pos.symbol, "60 D", "1D")
+            if df is not None and len(df) >= 14:
+                current_atr = float(_atr(df["high"], df["low"], df["close"], 14).iloc[-1])
+            else:
+                current_atr = pos.atr_at_entry
+            trail_stop = compute_trail_stop(pos, current_atr)
+            effective_stop = max(pos.hard_stop_price, trail_stop)
+        except Exception:
+            price = pos.entry_price
+            trail_stop = pos.hard_stop_price
+            effective_stop = pos.hard_stop_price
+
+        result.append({
+            **pos.model_dump(),
+            "current_price": round(price, 4),
+            "trail_stop_price": round(trail_stop, 4),
+            "effective_stop_price": round(effective_stop, 4),
+            "unrealized_pnl": round((price - pos.entry_price) * pos.quantity, 2),
+            "unrealized_pct": round(((price - pos.entry_price) / pos.entry_price) * 100, 2),
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------

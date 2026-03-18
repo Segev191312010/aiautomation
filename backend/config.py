@@ -30,10 +30,20 @@ class Config:
     RECONNECT_INTERVAL: int = int(os.getenv("RECONNECT_INTERVAL", "30"))
 
     # ── Bot behaviour ────────────────────────────────────────────────────────
-    BOT_INTERVAL_SECONDS: int = int(os.getenv("BOT_INTERVAL_SECONDS", "60"))
+    BOT_INTERVAL_SECONDS: int = int(os.getenv("BOT_INTERVAL_SECONDS", "900"))  # 15 min default; fits ~1000-stock scans
 
     # ── Alert engine ──────────────────────────────────────────────────────────
     ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
+
+    # ── Exit logic (position tracker) ────────────────────────────────────────
+    # Hard stop: entry_price - ATR_STOP_MULT × ATR(14) — never moves after entry
+    ATR_STOP_MULT: float = float(os.getenv("ATR_STOP_MULT", "3.0"))
+    # Trailing stop: high_watermark - ATR_TRAIL_MULT × ATR(14)_current
+    ATR_TRAIL_MULT: float = float(os.getenv("ATR_TRAIL_MULT", "2.0"))
+
+    # ── Position sizing ───────────────────────────────────────────────────────
+    # Each trade = POSITION_SIZE_PCT × NetLiquidation / price
+    POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.005"))  # 0.5%
 
     # ── Database ─────────────────────────────────────────────────────────────
     DB_PATH: str = os.getenv("DB_PATH", "trading_bot.db")

@@ -37,6 +37,7 @@ _UNIVERSE_NAMES = {
     "sp500": "S&P 500",
     "nasdaq100": "NASDAQ 100",
     "etfs": "ETFs",
+    "us_all": "All US Stocks",
 }
 
 
