@@ -8,6 +8,36 @@ import { useAccountStore, useBotStore } from '@/store'
 import { useToast } from '@/components/ui/ToastProvider'
 import type { Position, SimPosition } from '@/types'
 
+function PositionSparkline({ symbol, avgCost }: { symbol: string; avgCost: number }) {
+  const [prices, setPrices] = useState<number[]>([])
+  useEffect(() => {
+    fetch(`/api/yahoo/${symbol}/bars?timeframe=1d&limit=20`)
+      .then(r => r.json())
+      .then((bars: any[]) => {
+        if (Array.isArray(bars) && bars.length > 0) {
+          setPrices(bars.map(b => b.close))
+        }
+      })
+      .catch(() => {})
+  }, [symbol])
+
+  if (prices.length < 2) return <span className="text-zinc-700 text-xs">-</span>
+
+  const min = Math.min(...prices)
+  const max = Math.max(...prices)
+  const range = max - min || 1
+  const path = prices
+    .map((p, i) => `${i === 0 ? 'M' : 'L'} ${i * (120 / (prices.length - 1))} ${30 - ((p - min) / range) * 28}`)
+    .join(' ')
+  const color = prices[prices.length - 1] >= avgCost ? 'text-emerald-400' : 'text-red-400'
+
+  return (
+    <svg className={`w-20 h-8 ${color}`} viewBox="0 0 120 30" preserveAspectRatio="none">
+      <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  )
+}
+
 function fmtUSD(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
@@ -77,6 +107,7 @@ function PositionRow({ pos, onModifyOrder }: {
   return (
     <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/20 transition-colors">
       <td className="py-2 px-2 font-mono text-sm text-zinc-100 font-semibold">{pos.symbol}</td>
+      <td className="py-2 px-2"><PositionSparkline symbol={pos.symbol} avgCost={pos.avg_cost} /></td>
       <td className="py-2 px-2 font-mono text-xs text-zinc-400 tabular-nums text-right">{pos.qty}</td>
       <td className="py-2 px-2 font-mono text-xs text-zinc-500 tabular-nums text-right">{fmtUSD(pos.avg_cost)}</td>
       <td className="py-2 px-2 font-mono text-xs text-zinc-200 tabular-nums text-right">{fmtUSD(price)}</td>
@@ -166,7 +197,7 @@ export default function PositionsTable() {
   const totalValue = enriched.reduce((s, p) => s + (isSimPos(p) ? p.market_value : p.market_value), 0)
   const totalPnl = enriched.reduce((s, p) => s + p.unrealized_pnl, 0)
 
-  const cols = ['Symbol', 'Qty', 'Avg Cost', 'Price', 'P&L', 'SL', 'TP', '% Acct']
+  const cols = ['Symbol', 'Chart', 'Qty', 'Avg Cost', 'Price', 'P&L', 'SL', 'TP', '% Acct']
 
   return (
     <div className="overflow-x-auto">
@@ -187,7 +218,7 @@ export default function PositionsTable() {
         </tbody>
         <tfoot>
           <tr className="border-t border-zinc-700">
-            <td colSpan={3} className="py-2 px-2 text-[10px] font-mono text-zinc-500">
+            <td colSpan={4} className="py-2 px-2 text-[10px] font-mono text-zinc-500">
               TOTAL ({enriched.length} positions)
             </td>
             <td className="py-2 px-2 font-mono text-xs text-zinc-300 tabular-nums text-right">

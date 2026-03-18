@@ -1030,6 +1030,71 @@ async def get_positions():
     return [p.model_dump() for p in await ibkr.get_positions()]
 
 
+@app.get("/api/positions/summary")
+async def get_positions_summary():
+    """EOD summary: reasoning for each position — P&L, rule, hold time, signals."""
+    if not ibkr.is_connected():
+        raise HTTPException(503, "IBKR not connected")
+
+    positions = await ibkr.get_positions()
+    trades = await get_trades(limit=500)
+    acct = await ibkr.get_account_summary()
+
+    # Map trades to positions by symbol (most recent BUY)
+    trade_by_sym: dict[str, Any] = {}
+    for t in trades:
+        if t.action == "BUY" and t.status == "FILLED" and t.symbol not in trade_by_sym:
+            trade_by_sym[t.symbol] = t
+
+    # Get open bracket orders
+    bracket_orders: dict[str, dict] = {}
+    for ib_trade in ibkr.ib.openTrades():
+        sym = ib_trade.contract.symbol
+        if sym not in bracket_orders:
+            bracket_orders[sym] = {}
+        if ib_trade.order.orderType == "STP":
+            bracket_orders[sym]["sl"] = ib_trade.order.auxPrice
+        elif ib_trade.order.orderType == "LMT" and ib_trade.order.action == "SELL":
+            bracket_orders[sym]["tp"] = ib_trade.order.lmtPrice
+
+    summaries = []
+    for pos in positions:
+        sym = pos.symbol
+        entry_trade = trade_by_sym.get(sym)
+        entry_date = entry_trade.timestamp if entry_trade else None
+        rule_name = entry_trade.rule_name if entry_trade else "Unknown"
+
+        hold_days = 0
+        if entry_date:
+            try:
+                from datetime import datetime as dt
+                entry_dt = dt.fromisoformat(entry_date.replace("Z", "+00:00"))
+                hold_days = (dt.now(entry_dt.tzinfo) - entry_dt).days
+            except Exception:
+                pass
+
+        brackets = bracket_orders.get(sym, {})
+        pnl = pos.unrealized_pnl
+        pnl_pct = ((pos.market_price / pos.avg_cost) - 1) * 100 if pos.avg_cost > 0 else 0
+
+        summaries.append({
+            "symbol": sym,
+            "entry_date": entry_date,
+            "hold_time_days": hold_days,
+            "qty": pos.qty,
+            "avg_cost": round(pos.avg_cost, 2),
+            "current_price": round(pos.market_price, 2),
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "rule_trigger": rule_name,
+            "sl_price": brackets.get("sl"),
+            "tp_price": brackets.get("tp"),
+            "pct_of_account": round(abs(pos.market_value) / acct.balance * 100, 2) if acct.balance > 0 else 0,
+        })
+
+    return {"positions_summary": summaries, "account": acct.model_dump()}
+
+
 @app.get("/api/positions/tracked")
 async def get_tracked_positions():
     """Open positions monitored by the exit manager, enriched with live stop levels."""
@@ -1575,7 +1640,10 @@ def _cache_prices_from_quotes(quotes: list[dict]) -> None:
         _ws_last_yahoo_quote_ts = ts
 
 
+_position_push_counter = 0
+
 async def _market_heartbeat_loop() -> None:
+    global _position_push_counter
     while True:
         await asyncio.sleep(_MARKET_HEARTBEAT_INTERVAL_SECONDS)
         symbols = _all_heartbeat_symbols()
@@ -1589,6 +1657,20 @@ async def _market_heartbeat_loop() -> None:
             raise
         except Exception as exc:
             log.debug("Market heartbeat fetch failed: %s", exc)
+
+        # Push live position + account updates every 3rd cycle (~15s)
+        _position_push_counter += 1
+        if _position_push_counter % 3 == 0 and ibkr.is_connected() and not cfg.SIM_MODE:
+            try:
+                positions = [p.model_dump() for p in await ibkr.get_positions()]
+                acct = await ibkr.get_account_summary()
+                await _broadcast({
+                    "type": "positions_update",
+                    "positions": positions,
+                    "account": acct.model_dump(),
+                })
+            except Exception:
+                pass
 
 
 async def _start_market_heartbeat() -> None:
