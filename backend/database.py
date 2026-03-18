@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 import aiosqlite
 from datetime import datetime, timezone
 from config import cfg
-from models import Rule, Trade, ScreenerPreset, ScanFilter, FilterValue, Alert, AlertHistory
+from models import Rule, Trade, ScreenerPreset, ScanFilter, FilterValue, Alert, AlertHistory, OpenPosition
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +208,26 @@ CREATE TABLE IF NOT EXISTS alert_history (
 """
 
 
+_CREATE_OPEN_POSITIONS = """
+CREATE TABLE IF NOT EXISTS open_positions (
+    id              TEXT PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    quantity        REAL NOT NULL,
+    entry_price     REAL NOT NULL,
+    entry_time      TEXT NOT NULL,
+    atr_at_entry    REAL NOT NULL,
+    hard_stop_price REAL NOT NULL,
+    atr_stop_mult   REAL NOT NULL,
+    atr_trail_mult  REAL NOT NULL,
+    high_watermark  REAL NOT NULL,
+    rule_id         TEXT NOT NULL,
+    rule_name       TEXT NOT NULL,
+    user_id         TEXT NOT NULL DEFAULT 'demo',
+    data            TEXT NOT NULL
+);
+"""
+
 _ALLOWED_COLUMNS: set[tuple[str, str]] = {
     ("rules", "user_id"),
     ("trades", "user_id"),
@@ -258,6 +278,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_DIAG_REFRESH_RUNS)
         await db.execute(_CREATE_ALERTS)
         await db.execute(_CREATE_ALERT_HISTORY)
+        await db.execute(_CREATE_OPEN_POSITIONS)
         await db.commit()
 
         # Migrate: add user_id column to existing tables
@@ -283,6 +304,8 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alerts_enabled_symbol ON alerts(enabled, symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_user_fired ON alert_history(user_id, fired_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_alert ON alert_history(alert_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_user ON open_positions(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_symbol ON open_positions(symbol, user_id)")
         await db.commit()
 
         # Seed demo user
@@ -707,3 +730,56 @@ async def save_alert_history(entry: AlertHistory, user_id: str = "demo") -> None
              entry.fired_at, entry.model_dump_json()),
         )
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Open positions CRUD (exit tracker)
+# ---------------------------------------------------------------------------
+
+async def save_open_position(pos: OpenPosition, user_id: str = "demo") -> None:
+    """Upsert an open position (insert on entry, replace on watermark update)."""
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO open_positions "
+            "(id, symbol, side, quantity, entry_price, entry_time, atr_at_entry, "
+            " hard_stop_price, atr_stop_mult, atr_trail_mult, high_watermark, "
+            " rule_id, rule_name, user_id, data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (pos.id, pos.symbol, pos.side, pos.quantity, pos.entry_price,
+             pos.entry_time, pos.atr_at_entry, pos.hard_stop_price,
+             pos.atr_stop_mult, pos.atr_trail_mult, pos.high_watermark,
+             pos.rule_id, pos.rule_name, user_id, pos.model_dump_json()),
+        )
+        await db.commit()
+
+
+async def get_open_positions(user_id: str = "demo") -> list[OpenPosition]:
+    """Return all tracked open positions for a user."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT data FROM open_positions WHERE user_id=?", (user_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [OpenPosition.model_validate(json.loads(r[0])) for r in rows]
+
+
+async def get_open_position(trade_id: str, user_id: str = "demo") -> OpenPosition | None:
+    """Return a single tracked position by trade_id."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT data FROM open_positions WHERE id=? AND user_id=?",
+            (trade_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+    return OpenPosition.model_validate(json.loads(row[0])) if row else None
+
+
+async def delete_open_position(trade_id: str, user_id: str = "demo") -> bool:
+    """Remove a tracked position on exit. Returns True if a row was deleted."""
+    async with get_db() as db:
+        cur = await db.execute(
+            "DELETE FROM open_positions WHERE id=? AND user_id=?",
+            (trade_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0

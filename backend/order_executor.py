@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
-from ib_insync import MarketOrder, LimitOrder, StopOrder, Trade as IBTrade
+from ib_insync import MarketOrder, LimitOrder, Trade as IBTrade
 from ibkr_client import ibkr
 from database import save_trade, update_trade_status
 from models import Rule, Trade
@@ -20,27 +20,40 @@ class OrderError(Exception):
     """Raised when an order cannot be placed."""
 
 
-# Positions snapshot — updated by bot_runner each cycle for cash-only guard
-_current_positions: dict[str, float] = {}
-
-
-def update_positions_snapshot(positions: list[dict]) -> None:
-    global _current_positions
-    _current_positions = {p["symbol"]: p.get("qty", 0) for p in positions}
-
-
-def _compute_atr(bars, fallback_price: float, period: int = 14) -> float:
-    """ATR from bars DataFrame. Falls back to 2% of price."""
-    if bars is None or len(bars) < period + 1:
-        return fallback_price * 0.02
+async def _get_limit_price(symbol: str, action: str, slip_pct: float = 0.005,
+                           contract=None) -> float | None:
+    """
+    Get a limit price for extended-hours order placement.
+    Returns last price + 0.5% for BUY, - 0.5% for SELL.
+    Uses IBKR snapshot first (no rate-limit risk), falls back to yfinance.
+    """
+    # Try IBKR snapshot ticker
     try:
-        import pandas as pd
-        h, l, c = bars["high"], bars["low"], bars["close"]
-        tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-        val = float(tr.rolling(period).mean().iloc[-1])
-        return val if val > 0 else fallback_price * 0.02
+        from ib_insync import Stock
+        c = contract or ibkr.make_stock_contract(symbol)
+        [ticker] = await asyncio.wait_for(
+            ibkr.ib.reqTickersAsync(c), timeout=5
+        )
+        price = ticker.last or ticker.close or ticker.bid or ticker.ask
+        if price and price > 0:
+            multiplier = 1 + slip_pct if action == "BUY" else 1 - slip_pct
+            return round(float(price) * multiplier, 2)
     except Exception:
-        return fallback_price * 0.02
+        pass
+
+    # Fall back to yfinance
+    try:
+        import yfinance as yf
+        info = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: yf.Ticker(symbol).fast_info
+        )
+        price = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
+        if price and price > 0:
+            multiplier = 1 + slip_pct if action == "BUY" else 1 - slip_pct
+            return round(float(price) * multiplier, 2)
+    except Exception:
+        pass
+    return None
 
 
 # ── Pre-flight order validation ──────────────────────────────────────────────
@@ -48,7 +61,7 @@ MAX_ORDER_QTY = 10_000
 MIN_PRICE = 0.01
 MAX_PRICE = 1_000_000
 MIN_ORDER_VALUE = 100  # minimum notional value
-DEDUP_WINDOW = 60  # seconds — prevent duplicate fills in slow markets
+DEDUP_WINDOW = 5  # seconds
 _recent_orders: dict[str, float] = {}  # "symbol:action" -> timestamp
 
 
@@ -61,12 +74,6 @@ def _pre_flight_check(rule: Rule, price_estimate: float | None = None) -> str | 
     if rule.action.limit_price is not None:
         if not (MIN_PRICE <= rule.action.limit_price <= MAX_PRICE):
             return f"Limit price {rule.action.limit_price} outside [{MIN_PRICE}, {MAX_PRICE}]"
-
-    # Cash-only guard: reject SELL if no long position held
-    if rule.action.type == "SELL" and not cfg.SHORT_ALLOWED:
-        held = _current_positions.get(rule.symbol, 0)
-        if held <= 0:
-            return f"SELL rejected for {rule.symbol}: no long position (cash account)"
 
     # Min order value check
     if price_estimate and rule.action.limit_price:
@@ -96,7 +103,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def place_order(rule: Rule, bars=None) -> Optional[Trade]:
+async def place_order(rule: Rule) -> Optional[Trade]:
     """
     Place an order for the given rule's action.
 
@@ -137,16 +144,17 @@ async def place_order(rule: Rule, bars=None) -> Optional[Trade]:
     if rule.action.order_type == "LMT" and rule.action.limit_price is not None:
         ib_order = LimitOrder(action_str, qty, rule.action.limit_price)
     else:
-        ib_order = MarketOrder(action_str, qty)
+        # IBKR rejects MKT orders outside regular hours — use LIMIT at current price
+        limit_px = await _get_limit_price(rule.symbol, action_str)
+        if limit_px:
+            ib_order = LimitOrder(action_str, qty, limit_px)
+            log.info("MKT→LIMIT conversion: %s %s lmt=%.4f (extended hours)", action_str, rule.symbol, limit_px)
+        else:
+            ib_order = MarketOrder(action_str, qty)
 
-    # Regular hours only, DAY orders (re-evaluate daily, don't hold stale orders)
-    ib_order.outsideRth = False
-    ib_order.tif = "DAY"
-
-    # Multi-account: must set account on every order
-    accounts = ibkr.ib.managedAccounts()
-    if accounts:
-        ib_order.account = accounts[0]
+    # Extended hours + GTC so orders work outside regular trading hours
+    ib_order.outsideRth = True
+    ib_order.tif = "GTC"
 
     # Record trade in DB (PENDING status)
     trade_rec = Trade(
@@ -176,7 +184,7 @@ async def place_order(rule: Rule, bars=None) -> Optional[Trade]:
                  action_str, qty, rule.symbol, trade_rec.order_id)
 
         # Watch for fill asynchronously
-        asyncio.create_task(_watch_fill(ib_trade, trade_rec, contract, rule, bars=bars))
+        asyncio.create_task(_watch_fill(ib_trade, trade_rec, contract, rule))
 
         return trade_rec
 
@@ -187,7 +195,7 @@ async def place_order(rule: Rule, bars=None) -> Optional[Trade]:
         return trade_rec
 
 
-async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule, timeout: int = 60, bars=None) -> None:
+async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule, timeout: int = 60) -> None:
     """Poll the IBKR trade object until it fills or times out."""
     elapsed = 0
     while elapsed < timeout:
@@ -218,45 +226,9 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule,
             except Exception:
                 pass
 
-            # -- ATR-based bracket orders (2×ATR stop, 2.2:1 R/R) --
-            if trade_rec.action == "BUY" and trade_rec.fill_price:
-                fill = trade_rec.fill_price
-                atr = _compute_atr(bars, fill)
-                sl_dist = 2.0 * atr
-                tp_dist = 2.2 * sl_dist  # 2.2:1 reward/risk
-                sl_price = round(fill - sl_dist, 2)
-                tp_price = round(fill + tp_dist, 2)
-                log.info("ATR=%.2f → SL=%.2f (-%s) TP=%.2f (+%s)",
-                         atr, sl_price, f"{sl_dist:.2f}", tp_price, f"{tp_dist:.2f}")
-                oca_group = f"OCA_{trade_rec.id[:8]}"
-
-                sl_order = StopOrder("SELL", trade_rec.quantity, sl_price)
-                sl_order.outsideRth = True
-                sl_order.tif = "GTC"
-                sl_order.ocaGroup = oca_group
-                sl_order.ocaType = 1  # cancel all others when one fills
-
-                tp_order = LimitOrder("SELL", trade_rec.quantity, tp_price)
-                tp_order.outsideRth = True
-                tp_order.tif = "GTC"
-                tp_order.ocaGroup = oca_group
-                tp_order.ocaType = 1
-
-                accounts = ibkr.ib.managedAccounts()
-                if accounts:
-                    sl_order.account = accounts[0]
-                    tp_order.account = accounts[0]
-
-                try:
-                    ibkr.ib.placeOrder(contract, sl_order)
-                    ibkr.ib.placeOrder(contract, tp_order)
-                    log.info(
-                        "Bracket placed for %s: SL=$%.2f TP=$%.2f",
-                        rule.symbol, sl_price, tp_price,
-                    )
-                except Exception as e:
-                    log.error("Failed to place bracket for %s: %s", rule.symbol, e)
-
+            # Exit management is handled by position_tracker (ATR stops + MA exits)
+            log.info("Fill ready for exit tracker: %s %s @ %.4f",
+                     trade_rec.action, trade_rec.symbol, fill_price)
             return
         if status in ("Cancelled", "ApiCancelled", "Inactive"):
             await update_trade_status(trade_rec.id, "CANCELLED")
@@ -277,6 +249,132 @@ async def cancel_order(order_id: int) -> bool:
             return True
     log.warning("Order %d not found among open trades", order_id)
     return False
+
+
+async def reconcile_pending_orders() -> None:
+    """
+    Called once on startup. Subscribes to IBKR orderStatusEvent so that
+    any PENDING orders in the DB are updated when IBKR reports a fill or
+    cancellation — even if the fill happened while the server was down.
+    """
+    from database import get_trades, update_trade_status
+
+    if not ibkr.is_connected():
+        log.warning("reconcile_pending_orders: IBKR not connected, skipping")
+        return
+
+    # Load our PENDING trades and build a lookup by IBKR order_id
+    pending = [t for t in await get_trades(limit=500) if t.status == "PENDING" and t.order_id]
+    if not pending:
+        return
+
+    pending_by_oid: dict[int, Trade] = {t.order_id: t for t in pending}
+    log.info("Reconciling %d PENDING order(s) with IBKR", len(pending))
+
+    # Check current IBKR open trades for immediate status
+    for ib_trade in ibkr.ib.openTrades():
+        oid = ib_trade.order.orderId
+        if oid not in pending_by_oid:
+            continue
+        rec = pending_by_oid[oid]
+        status = ib_trade.orderStatus.status
+        if status == "Filled":
+            fill_price = ib_trade.orderStatus.avgFillPrice
+            await update_trade_status(rec.id, "FILLED", fill_price)
+            log.info("Reconciled FILLED: %s %s @ %.4f", rec.action, rec.symbol, fill_price)
+        elif status in ("Cancelled", "ApiCancelled", "Inactive"):
+            await update_trade_status(rec.id, "CANCELLED")
+            log.info("Reconciled CANCELLED: %s %s", rec.action, rec.symbol)
+
+    # Subscribe to live events for orders still open in IBKR
+    def _on_order_status(ib_trade: IBTrade) -> None:
+        oid = ib_trade.order.orderId
+        if oid not in pending_by_oid:
+            return
+        rec = pending_by_oid[oid]
+        status = ib_trade.orderStatus.status
+        if status == "Filled":
+            fill_price = ib_trade.orderStatus.avgFillPrice
+            asyncio.create_task(_handle_fill(rec, fill_price))
+        elif status in ("Cancelled", "ApiCancelled", "Inactive"):
+            asyncio.create_task(update_trade_status(rec.id, "CANCELLED"))
+            log.info("Order CANCELLED via event: %s %s", rec.action, rec.symbol)
+
+    ibkr.ib.orderStatusEvent += _on_order_status
+    log.info("Subscribed to IBKR orderStatusEvent for pending order reconciliation")
+
+    # Convert any stuck MKT orders to LIMIT so they can trade pre-market
+    await _convert_mkt_orders_to_limit()
+
+
+async def _convert_mkt_orders_to_limit() -> None:
+    """
+    Cancel stuck MKT orders and resubmit as LIMIT so they can execute
+    during pre-market / after-hours (IBKR rejects MKT→LMT type changes).
+    """
+    from database import get_trades
+    if not ibkr.is_connected():
+        return
+
+    pending_db = {t.order_id: t for t in await get_trades(limit=500)
+                  if t.status == "PENDING" and t.order_id}
+
+    resubmitted = 0
+    for ib_trade in list(ibkr.ib.openTrades()):
+        order = ib_trade.order
+        status = ib_trade.orderStatus.status
+        if order.orderType != "MKT" or status not in ("PreSubmitted", "Submitted"):
+            continue
+
+        symbol = ib_trade.contract.symbol
+        action = order.action
+        qty = order.totalQuantity
+
+        limit_px = await _get_limit_price(symbol, action, contract=ib_trade.contract)
+        if not limit_px:
+            log.warning("Cannot resubmit %s %s as LIMIT — no price available", action, symbol)
+            continue
+
+        # Cancel the existing MKT order
+        ibkr.ib.cancelOrder(order)
+        await asyncio.sleep(0.5)
+
+        # Place fresh LIMIT order
+        from ib_insync import LimitOrder as _LimitOrder
+        new_order = _LimitOrder(action, qty, limit_px)
+        new_order.outsideRth = True
+        new_order.tif = "GTC"
+        new_ib_trade = ibkr.ib.placeOrder(ib_trade.contract, new_order)
+        log.info("Resubmitted %s %s as LIMIT lmt=%.2f (was MKT order %d)",
+                 action, symbol, limit_px, order.orderId)
+
+        # Update DB: mark old trade cancelled, save new order_id
+        if order.orderId in pending_db:
+            old_rec = pending_db[order.orderId]
+            await update_trade_status(old_rec.id, "CANCELLED")
+            old_rec.order_id = new_ib_trade.order.orderId
+            old_rec.status = "PENDING"  # type: ignore[assignment]
+            old_rec.order_type = "LMT"
+            old_rec.limit_price = limit_px
+            await save_trade(old_rec)
+            asyncio.create_task(_watch_fill(new_ib_trade, old_rec, ib_trade.contract, None))
+
+        resubmitted += 1
+
+    if resubmitted:
+        log.info("Resubmitted %d MKT order(s) as LIMIT for extended hours trading", resubmitted)
+
+
+async def _handle_fill(trade_rec: Trade, fill_price: float) -> None:
+    """Process a fill from IBKR event — update DB and fire callbacks."""
+    from database import update_trade_status
+    await update_trade_status(trade_rec.id, "FILLED", fill_price)
+    trade_rec.status = "FILLED"  # type: ignore[assignment]
+    trade_rec.fill_price = fill_price
+    log.info("Order FILLED (reconciled): %s %d %s @ %.4f",
+             trade_rec.action, trade_rec.quantity, trade_rec.symbol, fill_price)
+    for cb in _fill_callbacks:
+        cb(trade_rec)
 
 
 async def get_open_orders() -> list[dict]:

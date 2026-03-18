@@ -1,87 +1,50 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState } from 'react'
+import { fetchAuthToken, setAuthToken } from '@/services/api'
 import { useToast } from '@/components/ui/ToastProvider'
 
 interface Props {
   onShowLogin: () => void
 }
 
-// ── Password strength ─────────────────────────────────────────────────────────
-
-interface StrengthResult {
-  score: 0 | 1 | 2 | 3 | 4   // 0=empty, 1=weak, 2=fair, 3=good, 4=strong
-  label: string
-  color: string
-}
-
-function getStrength(pw: string): StrengthResult {
-  if (!pw) return { score: 0, label: '', color: '' }
-  let score = 0
-  if (pw.length >= 8)                          score++
-  if (/[A-Z]/.test(pw))                        score++
-  if (/[0-9]/.test(pw))                        score++
-  if (/[^A-Za-z0-9]/.test(pw))                score++
-  const map: StrengthResult[] = [
-    { score: 0, label: '',       color: '' },
-    { score: 1, label: 'Weak',   color: '#ef4444' },
-    { score: 2, label: 'Fair',   color: '#f59e0b' },
-    { score: 3, label: 'Good',   color: '#22c55e' },
-    { score: 4, label: 'Strong', color: '#16a34a' },
-  ]
-  return map[score] as StrengthResult
-}
-
-/**
- * Registration form with password strength meter.
- * Submits to POST /api/auth/register (stub — returns success toast then routes to login).
- */
 export default function RegisterPage({ onShowLogin }: Props) {
   const toast = useToast()
   const [username,  setUsername]  = useState('')
-  const [email,     setEmail]     = useState('')
   const [password,  setPassword]  = useState('')
   const [confirm,   setConfirm]   = useState('')
   const [loading,   setLoading]   = useState(false)
-  const [errors,    setErrors]    = useState<Record<string, string>>({})
+  const [error,     setError]     = useState<string | null>(null)
   const [showPwd,   setShowPwd]   = useState(false)
-
-  const strength = useMemo(() => getStrength(password), [password])
-
-  const validate = () => {
-    const e: Record<string, string> = {}
-    if (!username.trim())            e.username  = 'Username is required.'
-    if (username.length < 3)         e.username  = 'Username must be at least 3 characters.'
-    if (!email.includes('@'))        e.email     = 'Enter a valid email address.'
-    if (password.length < 8)         e.password  = 'Password must be at least 8 characters.'
-    if (!/[A-Z]/.test(password))     e.password  = 'Password must include an uppercase letter.'
-    if (!/[0-9]/.test(password))     e.password  = 'Password must include a number.'
-    if (password !== confirm)        e.confirm   = 'Passwords do not match.'
-    return e
-  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const errs = validate()
-    setErrors(errs)
-    if (Object.keys(errs).length > 0) return
-
+    if (!username.trim() || !password.trim()) {
+      setError('Username and password are required.')
+      return
+    }
+    if (password !== confirm) {
+      setError('Passwords do not match.')
+      return
+    }
+    setError(null)
     setLoading(true)
     try {
-      // Stub — in production: POST /api/auth/register
-      await new Promise((r) => setTimeout(r, 800))
-      toast.success('Account created! Please sign in.')
+      // Demo flow: registration obtains a token immediately.
+      // In production this would POST /api/auth/register then login.
+      const { access_token } = await fetchAuthToken()
+      setAuthToken(access_token)
+      toast.success('Account created! Welcome.')
       onShowLogin()
     } catch {
-      toast.error('Registration failed. Please try again.')
+      setError('Registration failed. Please try again.')
     } finally {
       setLoading(false)
     }
   }
 
-  const inputCls = (hasErr: boolean) =>
+  const inputCls =
     'w-full rounded-xl border px-4 py-2.5 text-sm font-sans outline-none ' +
     'transition-all duration-150 bg-[var(--bg-input)] text-[var(--text-primary)] ' +
-    `${hasErr ? 'border-[var(--danger)]' : 'border-[var(--border)]'} ` +
-    'placeholder:text-[var(--text-muted)] ' +
+    'border-[var(--border)] placeholder:text-[var(--text-muted)] ' +
     'focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20'
 
   return (
@@ -105,27 +68,41 @@ export default function RegisterPage({ onShowLogin }: Props) {
               TradeBot
             </p>
             <h1 className="text-xl font-mono font-bold" style={{ color: 'var(--text-primary)' }}>
-              Create Account
+              Market Desk
             </h1>
           </div>
         </div>
 
         {/* Card */}
         <div
-          className="card rounded-2xl -lg p-6 flex flex-col gap-5"
+          className="card rounded-2xl shadow-card-lg p-6 flex flex-col gap-5"
           style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
         >
           <div>
             <h2 className="text-sm font-sans font-semibold" style={{ color: 'var(--text-primary)' }}>
-              Create your account
+              Create an account
             </h2>
             <p className="text-xs font-sans mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-              Set up your trading workspace
+              Fill in the details below to get started
             </p>
           </div>
 
+          {error && (
+            <div
+              className="flex items-start gap-2.5 rounded-xl px-3.5 py-3 text-xs font-sans"
+              style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)', color: 'var(--danger)' }}
+              role="alert"
+            >
+              <svg viewBox="0 0 24 24" fill="none" className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" />
+                <line x1="12" y1="8" x2="12" y2="12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                <line x1="12" y1="16" x2="12.01" y2="16" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+              </svg>
+              {error}
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
-            {/* Username */}
             <div>
               <label className="block text-[11px] font-sans font-medium uppercase tracking-wide mb-1.5"
                 style={{ color: 'var(--text-secondary)' }}
@@ -140,39 +117,12 @@ export default function RegisterPage({ onShowLogin }: Props) {
                 autoFocus
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="tradername"
-                className={inputCls(!!errors.username)}
+                placeholder="Choose a username"
+                className={inputCls}
                 disabled={loading}
               />
-              {errors.username && (
-                <p className="text-[10px] font-sans mt-1" style={{ color: 'var(--danger)' }}>{errors.username}</p>
-              )}
             </div>
 
-            {/* Email */}
-            <div>
-              <label className="block text-[11px] font-sans font-medium uppercase tracking-wide mb-1.5"
-                style={{ color: 'var(--text-secondary)' }}
-                htmlFor="reg-email"
-              >
-                Email
-              </label>
-              <input
-                id="reg-email"
-                type="email"
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                className={inputCls(!!errors.email)}
-                disabled={loading}
-              />
-              {errors.email && (
-                <p className="text-[10px] font-sans mt-1" style={{ color: 'var(--danger)' }}>{errors.email}</p>
-              )}
-            </div>
-
-            {/* Password */}
             <div>
               <label className="block text-[11px] font-sans font-medium uppercase tracking-wide mb-1.5"
                 style={{ color: 'var(--text-secondary)' }}
@@ -188,7 +138,7 @@ export default function RegisterPage({ onShowLogin }: Props) {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className={`${inputCls(!!errors.password)} pr-10`}
+                  className={`${inputCls} pr-10`}
                   disabled={loading}
                 />
                 <button
@@ -199,77 +149,22 @@ export default function RegisterPage({ onShowLogin }: Props) {
                   tabIndex={-1}
                   aria-label={showPwd ? 'Hide password' : 'Show password'}
                 >
-                  <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
-                    {showPwd ? (
-                      <>
-                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
-                        <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
-                        <line x1="1" y1="1" x2="23" y2="23" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-                      </>
-                    ) : (
-                      <>
-                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
-                        <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.75" />
-                      </>
-                    )}
-                  </svg>
-                </button>
-              </div>
-              {errors.password && (
-                <p className="text-[10px] font-sans mt-1" style={{ color: 'var(--danger)' }}>{errors.password}</p>
-              )}
-
-              {/* Strength meter */}
-              {password && (
-                <div className="mt-2 flex items-center gap-2">
-                  <div className="flex-1 flex gap-1">
-                    {[1, 2, 3, 4].map((level) => (
-                      <div
-                        key={level}
-                        className="h-1 flex-1 rounded-full transition-all duration-300"
-                        style={{
-                          background: strength.score >= level ? strength.color : 'var(--border)',
-                        }}
-                      />
-                    ))}
-                  </div>
-                  {strength.label && (
-                    <span className="text-[10px] font-sans font-medium shrink-0" style={{ color: strength.color }}>
-                      {strength.label}
-                    </span>
+                  {showPwd ? (
+                    <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                      <line x1="1" y1="1" x2="23" y2="23" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" fill="none" className="w-4 h-4" aria-hidden="true">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round" />
+                      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.75" />
+                    </svg>
                   )}
-                </div>
-              )}
-
-              {/* Requirements */}
-              <div className="mt-2 grid grid-cols-2 gap-1">
-                {[
-                  { ok: password.length >= 8,      label: '8+ characters' },
-                  { ok: /[A-Z]/.test(password),    label: 'Uppercase letter' },
-                  { ok: /[0-9]/.test(password),    label: 'Number' },
-                  { ok: /[^A-Za-z0-9]/.test(password), label: 'Special character' },
-                ].map(({ ok, label }) => (
-                  <div key={label} className="flex items-center gap-1.5">
-                    <span style={{ color: ok ? 'var(--success)' : 'var(--text-muted)' }}>
-                      {ok ? (
-                        <svg viewBox="0 0 24 24" fill="none" className="w-3 h-3" aria-hidden="true">
-                          <polyline points="20 6 9 17 4 12" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      ) : (
-                        <svg viewBox="0 0 24 24" fill="none" className="w-3 h-3" aria-hidden="true">
-                          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
-                        </svg>
-                      )}
-                    </span>
-                    <span className="text-[10px] font-sans" style={{ color: ok ? 'var(--success)' : 'var(--text-muted)' }}>
-                      {label}
-                    </span>
-                  </div>
-                ))}
+                </button>
               </div>
             </div>
 
-            {/* Confirm password */}
             <div>
               <label className="block text-[11px] font-sans font-medium uppercase tracking-wide mb-1.5"
                 style={{ color: 'var(--text-secondary)' }}
@@ -284,30 +179,25 @@ export default function RegisterPage({ onShowLogin }: Props) {
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 placeholder="••••••••"
-                className={inputCls(!!errors.confirm)}
+                className={inputCls}
                 disabled={loading}
               />
-              {errors.confirm && (
-                <p className="text-[10px] font-sans mt-1" style={{ color: 'var(--danger)' }}>{errors.confirm}</p>
-              )}
             </div>
 
-            {/* Submit */}
             <button
               type="submit"
               disabled={loading}
-              className="w-full rounded-xl px-4 py-2.5 text-sm font-sans font-semibold text-white transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mt-1"
+              className="w-full rounded-xl px-4 py-2.5 text-sm font-sans font-semibold text-white transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               style={{ background: 'var(--accent)' }}
             >
               {loading && (
                 <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
               )}
-              {loading ? 'Creating account…' : 'Create Account'}
+              {loading ? 'Creating account…' : 'Create account'}
             </button>
           </form>
         </div>
 
-        {/* Sign-in link */}
         <p className="text-center text-xs font-sans mt-5" style={{ color: 'var(--text-secondary)' }}>
           Already have an account?{' '}
           <button

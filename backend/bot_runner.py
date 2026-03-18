@@ -16,15 +16,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 from config import cfg
-from database import get_rules, save_rule, get_trades
-from market_data import get_historical_bars, clear_bar_cache
-
-# Bar cache — reused across cycles, refreshed every 5 minutes
-_bars_cache: dict = {}
-_bars_cache_ts: float = 0
+from database import get_rules, save_rule, get_trades, get_open_positions, save_open_position, delete_open_position
+from market_data import get_historical_bars, clear_bar_cache, get_latest_price
 from rule_engine import evaluate_all
 from order_executor import OrderError, place_order
-from models import Rule
+from models import Rule, TradeAction
+from position_tracker import check_exits, update_watermarks
 from screener import load_universe
 
 log = logging.getLogger(__name__)
@@ -36,6 +33,15 @@ _running = False
 _task: Optional[asyncio.Task] = None
 _last_run: Optional[str] = None
 _next_run: Optional[str] = None
+
+# ── Liquidity pre-screen cache ─────────────────────────────────────────────
+# Rebuilt once per day from the full us_all universe.
+# Filters: last close > $5, average 5-day volume > 500k shares.
+_PRESCREEN_MIN_PRICE  = 5.0
+_PRESCREEN_MIN_VOLUME = 500_000
+_PRESCREEN_TTL        = 86_400          # refresh every 24 h
+_screened_symbols: list[str] = []
+_screened_at: float = 0.0               # epoch timestamp of last refresh
 
 
 def set_broadcast(cb: Callable) -> None:
@@ -62,7 +68,93 @@ def _expand_universe(universe_id: str) -> list[str]:
         for uid in ("sp500", "nasdaq100", "etfs"):
             symbols.update(load_universe(uid))
         return sorted(symbols)
+    # us_all and any other named universe load directly from their JSON file
     return load_universe(universe_id)
+
+
+async def _prescreen_universe(candidates: list[str]) -> list[str]:
+    """
+    Rapidly filter a large symbol list down to liquid, in-range stocks.
+
+    Downloads 5 days of daily bars for all candidates in one batch call,
+    then keeps only symbols where:
+      - last close  > _PRESCREEN_MIN_PRICE  (default $5  — filters penny stocks)
+      - avg volume  > _PRESCREEN_MIN_VOLUME (default 500k — filters illiquid names)
+
+    Results are cached for _PRESCREEN_TTL seconds (24 h by default).
+    """
+    global _screened_symbols, _screened_at
+    import time as _time_mod
+    import asyncio as _asyncio
+
+    now = _time_mod.time()
+    if _screened_symbols and (now - _screened_at) < _PRESCREEN_TTL:
+        log.info("Pre-screen cache hit — %d liquid symbols", len(_screened_symbols))
+        return _screened_symbols
+
+    log.info("Pre-screening %d symbols (price>$%.0f, vol>%s) …",
+             len(candidates), _PRESCREEN_MIN_PRICE,
+             f"{_PRESCREEN_MIN_VOLUME:,}")
+
+    try:
+        import yfinance as yf
+        import pandas as pd
+
+        liquid: list[str] = []
+        BATCH = 1000
+
+        loop = _asyncio.get_running_loop()
+        for i in range(0, len(candidates), BATCH):
+            batch = candidates[i:i + BATCH]
+            try:
+                raw = await loop.run_in_executor(
+                    None,
+                    lambda b=batch: yf.download(
+                        b, period="5d", interval="1d",
+                        auto_adjust=True, progress=False,
+                        group_by="ticker", threads=True,
+                    )
+                )
+                if raw.empty:
+                    continue
+
+                if isinstance(raw.columns, pd.MultiIndex):
+                    for sym in batch:
+                        try:
+                            sym_df = raw[sym].dropna(how="all")
+                            if sym_df.empty:
+                                continue
+                            last_close  = float(sym_df["Close"].iloc[-1])
+                            avg_volume  = float(sym_df["Volume"].mean())
+                            if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
+                                liquid.append(sym.upper())
+                        except Exception:
+                            pass
+                else:
+                    # Single symbol returned as flat df
+                    sym = batch[0]
+                    try:
+                        last_close = float(raw["Close"].iloc[-1])
+                        avg_volume = float(raw["Volume"].mean())
+                        if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
+                            liquid.append(sym.upper())
+                    except Exception:
+                        pass
+
+                log.info("Pre-screen batch %d/%d done — %d liquid so far",
+                         i // BATCH + 1, -(-len(candidates) // BATCH), len(liquid))
+            except Exception as exc:
+                log.warning("Pre-screen batch %d failed: %s", i // BATCH, exc)
+
+        _screened_symbols = sorted(liquid)
+        _screened_at = now
+        log.info("Pre-screen complete: %d / %d symbols pass liquidity filter",
+                 len(_screened_symbols), len(candidates))
+        return _screened_symbols
+
+    except Exception as exc:
+        log.error("Pre-screen failed, falling back to full list: %s", exc)
+        return candidates
 
 
 async def start() -> None:
@@ -103,93 +195,34 @@ async def _loop() -> None:
         await asyncio.sleep(cfg.BOT_INTERVAL_SECONDS)
 
 
-_peak_equity: float = 0.0
-
 async def _run_cycle() -> None:
-    global _peak_equity
-    from zoneinfo import ZoneInfo
-    from datetime import time as dtime
-    from risk_manager import get_account_state, check_drawdown_live, check_daily_loss, check_trade_risk, get_sector
-    from order_executor import update_positions_snapshot
-    from rule_engine import clear_indicator_cache
-
-    # ── Market hours info (log only, don't skip — user wants 24/7 scanning) ──
-    now_et = datetime.now(ZoneInfo("America/New_York"))
-    market_open = now_et.weekday() < 5 and dtime(9, 30) <= now_et.time() <= dtime(16, 0)
-
-    # ── Account state (one IBKR query per cycle) ─────────────────────────────
-    from ibkr_client import ibkr
-    if ibkr.is_connected():
-        try:
-            summary = await ibkr.get_account_summary()
-            eq = summary.balance
-            ca = summary.cash
-            log.info("Account: equity=%.2f cash=%.2f", eq, ca)
-            if eq <= 0:
-                # Fallback: try accountValues directly
-                for av in ibkr.ib.accountValues():
-                    if av.tag == "NetLiquidation" and av.currency == "USD":
-                        eq = float(av.value)
-                    elif av.tag == "TotalCashValue" and av.currency == "USD":
-                        ca = float(av.value)
-                log.info("Account fallback: equity=%.2f cash=%.2f", eq, ca)
-            acct = {
-                "equity": eq if eq > 0 else 5000,  # safety fallback
-                "cash": ca if ca > 0 else 2000,
-                "daily_pnl": summary.realized_pnl,
-                "positions": [{"symbol": p.contract.symbol, "qty": p.position, "avg_cost": p.avgCost,
-                                "market_price": p.avgCost, "sector": get_sector(p.contract.symbol)}
-                               for p in ibkr.ib.positions() if p.position != 0],
-            }
-        except Exception as e:
-            log.warning("Account fetch failed: %s — using $5000 fallback", e)
-            acct = {"equity": 5000, "cash": 2000, "daily_pnl": 0, "positions": []}
-    else:
-        acct = {"equity": 0, "cash": 0, "daily_pnl": 0, "positions": []}
-    equity = acct["equity"]
-
-    # Update positions snapshot for cash-only guard in order_executor
-    update_positions_snapshot(acct["positions"])
-
-    # ── Peak equity + drawdown circuit breaker ────────────────────────────────
-    if equity > _peak_equity:
-        _peak_equity = equity
-    if _peak_equity > 0 and check_drawdown_live(equity, _peak_equity):
-        log.critical("DRAWDOWN BREAKER: equity=%.2f peak=%.2f (%.1f%%) — PAUSING BOT",
-                     equity, _peak_equity, ((_peak_equity - equity) / _peak_equity) * 100)
-        await _emit({"type": "bot", "status": "paused_drawdown"})
-        await stop()
-        return
-
-    # ── Daily loss cap (>3% → no new BUYs, but still manage exits) ────────────
-    daily_loss_hit = check_daily_loss(acct["daily_pnl"], equity)
-    if daily_loss_hit:
-        log.warning("DAILY LOSS CAP: pnl=%.2f — entry signals disabled", acct["daily_pnl"])
-
-    # ── Clear indicator cache ─────────────────────────────────────────────────
-    clear_indicator_cache()
-
     rules = await get_rules()
     enabled = [r for r in rules if r.enabled]
 
-    if not enabled:
-        log.debug("No enabled rules — skipping cycle")
-        await _emit({"type": "bot", "status": "running", "rules_enabled": 0, "rules_checked": 0, "signals": 0})
-        return
+    # Load open positions BEFORE bar fetch so their symbols are included
+    open_positions = await get_open_positions()
 
     # ── Collect all symbols needed ────────────────────────────────────────────
     # Single-symbol rules: just use rule.symbol
     # Universe rules: expand the universe to its symbol list
+    # Open positions: always fetch bars so exit checks work
     all_symbols: set[str] = set()
     universe_cache: dict[str, list[str]] = {}  # universe_id -> [symbols]
 
     for r in enabled:
         if r.universe:
             if r.universe not in universe_cache:
-                universe_cache[r.universe] = _expand_universe(r.universe)
+                raw_list = _expand_universe(r.universe)
+                # For large universes (us_all), pre-screen to liquid names only
+                if len(raw_list) > 500:
+                    raw_list = await _prescreen_universe(raw_list)
+                universe_cache[r.universe] = raw_list
             all_symbols.update(s.upper() for s in universe_cache[r.universe])
         elif r.symbol:
             all_symbols.add(r.symbol.upper())
+
+    for pos in open_positions:
+        all_symbols.add(pos.symbol.upper())
 
     log.info(
         "Cycle: %d rules (%d single-symbol, %d universe), %d unique symbols to fetch",
@@ -199,170 +232,199 @@ async def _run_cycle() -> None:
         len(all_symbols),
     )
 
-    # ── Fetch bars (batched yfinance download, cached 5 min) ────────────────────
-    import time as _time
-    global _bars_cache, _bars_cache_ts
+    # ── Fetch bars ────────────────────────────────────────────────────────────
+    clear_bar_cache()
+    bars_by_symbol: dict = {}
     symbol_list = sorted(all_symbols)
-    cache_age = _time.time() - _bars_cache_ts if _bars_cache_ts else 999
-    if _bars_cache and cache_age < 300:  # reuse cache if < 5 min old
-        bars_by_symbol = _bars_cache
-        log.info("Using cached bars (%d symbols, %.0fs old)", len(bars_by_symbol), cache_age)
-    else:
-        clear_bar_cache()
 
-        # Use IBKR for bars if connected, yfinance as fallback
-        from ibkr_client import ibkr as _ibkr
-        if _ibkr.is_connected():
-            log.info("Fetching bars via IBKR for %d symbols...", len(symbol_list))
-            sem = asyncio.Semaphore(20)
-            async def _fetch_ibkr(sym):
-                async with sem:
-                    try:
-                        df = await get_historical_bars(sym, duration="90 D", bar_size="1 day")
-                        return sym, df
-                    except Exception:
-                        return sym, None
-            results = await asyncio.gather(*[_fetch_ibkr(s) for s in symbol_list])
-            bars_by_symbol = {s: df for s, df in results if df is not None and len(df) >= 20}
-        else:
-            log.info("IBKR not connected — falling back to yfinance batch")
-            def _batch_download():
-                import yfinance as yf
+    if len(symbol_list) > 50:
+        # Bulk-fetch via yfinance.download() for large universes — single HTTP call
+        # per batch of up to 1000 symbols, far fewer requests than one-by-one.
+        log.info("Bulk fetching %d symbols via yfinance.download()", len(symbol_list))
+        try:
+            import yfinance as yf
+            import pandas as pd
+
+            BATCH = 800  # yfinance handles ~800 symbols per call reliably
+            for i in range(0, len(symbol_list), BATCH):
+                batch = symbol_list[i:i + BATCH]
                 try:
-                    raw = yf.download(symbol_list, period="90d", interval="1d",
-                                      group_by="ticker", progress=False, threads=True)
-                    result = {}
-                    for sym in symbol_list:
-                        try:
-                            df = raw.copy() if len(symbol_list) == 1 else raw[sym].copy()
-                            df = df.dropna(subset=["Close"])
-                            if df.empty or len(df) < 20:
-                                continue
-                            df.columns = [c.lower() for c in df.columns]
+                    raw = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda b=batch: yf.download(
+                            b, period="1y", interval="1d",
+                            auto_adjust=True, progress=False,
+                            group_by="ticker", threads=True,
+                        )
+                    )
+                    if raw.empty:
+                        continue
+                    # When multiple tickers: columns are (field, symbol)
+                    if isinstance(raw.columns, pd.MultiIndex):
+                        for sym in batch:
+                            try:
+                                df = raw[sym].copy().dropna(how="all")
+                                if df.empty or len(df) < 2:
+                                    continue
+                                df.index.name = "time"
+                                df = df.reset_index()
+                                df.columns = [c.lower() for c in df.columns]
+                                if "adj close" in df.columns:
+                                    df = df.rename(columns={"adj close": "close"})
+                                bars_by_symbol[sym.upper()] = df
+                            except Exception:
+                                pass
+                    else:
+                        # Single ticker returned as flat df
+                        sym = batch[0]
+                        df = raw.copy().dropna(how="all")
+                        if not df.empty and len(df) >= 2:
+                            df.index.name = "time"
                             df = df.reset_index()
-                            if "Date" in df.columns:
-                                df = df.rename(columns={"Date": "date"})
-                            elif "Datetime" in df.columns:
-                                df = df.rename(columns={"Datetime": "date"})
-                            result[sym] = df
-                        except Exception:
-                            continue
-                    return result
-                except Exception as e:
-                    log.error("Batch download failed: %s", e)
-                    return {}
-            bars_by_symbol = await asyncio.to_thread(_batch_download)
+                            df.columns = [c.lower() for c in df.columns]
+                            if "adj close" in df.columns:
+                                df = df.rename(columns={"adj close": "close"})
+                            bars_by_symbol[sym.upper()] = df
+                except Exception as exc:
+                    log.warning("Bulk fetch batch %d failed: %s", i // BATCH, exc)
+        except Exception as exc:
+            log.error("yfinance bulk fetch failed: %s", exc)
+    else:
+        # Small symbol list — fetch individually (IBKR or yfinance fallback)
+        sem = asyncio.Semaphore(15)
 
-        log.info("Fetched bars for %d / %d symbols", len(bars_by_symbol), len(symbol_list))
-        _bars_cache = bars_by_symbol
-        _bars_cache_ts = _time.time()
+        async def _fetch_one(sym: str):
+            async with sem:
+                try:
+                    return sym, await get_historical_bars(sym, duration="60 D", bar_size="1D")
+                except Exception as exc:
+                    log.error("Failed to fetch bars for %s: %s", sym, exc)
+                    return sym, None
 
-    # ── Evaluate rules ────────────────────────────────────────────────────────
+        results = await asyncio.gather(*[_fetch_one(s) for s in symbol_list])
+        for sym, df in results:
+            if df is not None:
+                bars_by_symbol[sym] = df
+
+    log.info("Fetched bars for %d / %d symbols", len(bars_by_symbol), len(all_symbols))
+
+    # ── Phase 1: Process exits for tracked positions ──────────────────────────
+    try:
+        await _process_exits(open_positions, bars_by_symbol)
+    except Exception as exc:
+        log.exception("Exit processing failed: %s", exc)
+
+    if not enabled:
+        log.debug("No enabled rules — skipping entry evaluation")
+        await _emit({
+            "type": "bot",
+            "status": "running",
+            "rules_enabled": 0,
+            "rules_checked": 0,
+            "signals": 0,
+        })
+        return
+
+    # ── Phase 2: Evaluate entry rules ─────────────────────────────────────────
     triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
 
-    # ── Run custom 9 scans (21EMA, Pocket Pivot, VCS, etc.) ──────────────────
-    try:
-        from custom_indicators import run_all_scans
-        from models import Rule, Condition, TradeAction
-        scan_hits = 0
-        for sym, df in bars_by_symbol.items():
-            matches = run_all_scans(df)
-            if matches:
-                scan_hits += 1
-                # Create a synthetic BUY rule for each scan match
-                for scan_name in matches:
-                    fake_rule = Rule(
-                        name=f"Scan: {scan_name}",
-                        symbol=sym,
-                        enabled=True,
-                        conditions=[Condition(indicator="PRICE", params={}, operator=">", value=0)],
-                        action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
-                        cooldown_minutes=720,
-                    )
-                    triggered.append((fake_rule, sym))
-        if scan_hits:
-            log.info("Custom scans matched %d symbols", scan_hits)
-    except Exception as exc:
-        log.warning("Custom scan error: %s", exc)
-
-    # ── Score and rank signals (regime-aware) ───────────────────────────────
+    # ── Score and rank signals ───────────────────────────────────────────────
     try:
         from signal_scorer import signal_scorer
         scored = []
         for rule, sym in triggered:
             if sym in bars_by_symbol:
-                result = signal_scorer.score_signal(sym, bars_by_symbol[sym], rule.action.type,
-                                                    bars_cache=bars_by_symbol)
-                # Boost custom scan signals (they passed multi-factor filters)
-                if rule.name.startswith("Scan: "):
-                    result["composite_score"] = min(100, result["composite_score"] + 15)
+                result = signal_scorer.score_signal(sym, bars_by_symbol[sym], rule.action.type)
                 result["_rule"] = rule
                 result["_symbol"] = sym
                 scored.append(result)
-        ranked = signal_scorer.rank_signals(scored, top_n=cfg.MAX_TRADES_PER_CYCLE, min_score=50)
+        ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=50)
         if ranked:
-            log.info("Signals (regime-scored): %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
+            log.info("Signal scores: %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
         triggered = [(r["_rule"], r["_symbol"]) for r in ranked]
     except Exception as exc:
         log.warning("Signal scoring failed, using unranked: %s", exc)
 
-    # ── Execute triggered rules (dynamic sizing, risk-checked) ────────────────
+    # ── Execute triggered rules ───────────────────────────────────────────────
     total_signals = 0
     orders_placed = 0
-    available_cash = acct["cash"]
-    log.info("Executing %d signals (max %d per cycle)...", len(triggered), cfg.MAX_TRADES_PER_CYCLE)
+    max_orders_per_cycle = 5
     for rule, trigger_symbol in triggered:
-      try:
         total_signals += 1
-        if orders_placed >= cfg.MAX_TRADES_PER_CYCLE:
-            log.info("Max orders/cycle (%d) reached", cfg.MAX_TRADES_PER_CYCLE)
+        if orders_placed >= max_orders_per_cycle:
+            log.info("Max orders per cycle (%d) reached — deferring remaining signals", max_orders_per_cycle)
             break
 
-        # Skip BUY if daily loss cap hit
-        if daily_loss_hit and rule.action.type == "BUY":
-            log.info("Skipping BUY %s — daily loss cap active", trigger_symbol)
-            continue
-
-        # For universe rules, set symbol on copy
+        # For universe rules, set the symbol on the rule copy for order placement
         order_rule = rule.model_copy()
         if rule.universe:
             order_rule.symbol = trigger_symbol
 
-        # Get real price from bars
-        bars_df = bars_by_symbol.get(order_rule.symbol)
-        if bars_df is not None and len(bars_df) > 0:
-            current_price = float(bars_df["close"].iloc[-1])
-        else:
-            current_price = 100.0
+        # Cash check — skip if we can't afford it
+        available_cash = 0.0
+        try:
+            if cfg.SIM_MODE:
+                from simulation import sim_engine
+                sim_acct = await sim_engine.get_account()
+                available_cash = float(sim_acct.net_liquidation)
+            else:
+                from ibkr_client import ibkr
+                acct = await ibkr.get_account_summary()
+                available_cash = float(acct.balance) if acct else 0.0
+            if available_cash < 100:
+                log.warning("Insufficient cash ($%.2f) — skipping remaining signals", available_cash)
+                break
+        except Exception as exc:
+            log.debug("Cash check failed, proceeding: %s", exc)
 
-        # Dynamic position sizing: 1% risk, ATR-based stop
-        atr_val = signal_scorer._atr(bars_df, 14) if bars_df is not None else current_price * 0.02
-        sl_price = current_price - 2.0 * atr_val
-        from risk_manager import calculate_position_size
-        size_result = calculate_position_size(current_price, sl_price, equity, cfg.RISK_PER_TRADE_PCT)
-        qty = size_result["shares"]
-        if qty < 1:
-            log.info("Skip %s: cannot size (price=%.2f, atr=%.2f, equity=%.0f)", order_rule.symbol, current_price, atr_val, equity)
-            continue
-        order_rule.action.quantity = qty
+        # Risk check
+        try:
+            from risk_manager import check_trade_risk
+            from risk_config import DEFAULT_LIMITS
+            positions = []
+            try:
+                positions = [p.__dict__ if hasattr(p, '__dict__') else p for p in (await ibkr.get_positions() or [])]
+            except Exception:
+                pass
+            risk_result = check_trade_risk(
+                order_rule.symbol, order_rule.action.quantity,
+                order_rule.action.type, positions,
+                available_cash, DEFAULT_LIMITS
+            )
+            if risk_result.status == "BLOCK":
+                log.warning("Risk BLOCKED %s %s: %s", order_rule.action.type, order_rule.symbol, risk_result.reasons)
+                continue
+        except Exception as e:
+            log.debug("Risk check skipped: %s", e)
 
-        # Cash check
-        order_cost = qty * current_price + 1.0
-        if order_cost > available_cash:
-            log.info("Insufficient cash for %s ($%.2f needed, $%.2f available)", order_rule.symbol, order_cost, available_cash)
-            break
-
-        # Risk check (sector, position count, duplicate, cash-only)
-        risk_result = check_trade_risk(
-            order_rule.symbol, qty, order_rule.action.type,
-            acct["positions"], equity, est_price=current_price,
-        )
-        if risk_result.status == "BLOCK":
-            log.warning("Risk BLOCKED %s %s: %s", order_rule.action.type, order_rule.symbol, risk_result.reasons)
-            continue
+        # ── Dynamic position sizing: 0.5% of account NetLiquidation ─────────
+        try:
+            sym_upper = order_rule.symbol.upper()
+            if sym_upper in bars_by_symbol:
+                price = float(bars_by_symbol[sym_upper]["close"].iloc[-1])
+            else:
+                price = await get_latest_price(sym_upper) or 0.0
+            if price > 0:
+                if cfg.SIM_MODE:
+                    from simulation import sim_engine
+                    account_val = (await sim_engine.get_account()).net_liquidation
+                else:
+                    from ibkr_client import ibkr as _ibkr
+                    account_val = (await _ibkr.get_account_summary()).balance
+                computed_qty = max(1, int(account_val * cfg.POSITION_SIZE_PCT / price))
+                order_rule = order_rule.model_copy()
+                order_rule.action = order_rule.action.model_copy(
+                    update={"quantity": computed_qty}
+                )
+                log.info(
+                    "Sizing %s: $%.0f × %.1f%% / $%.4f = %d shares",
+                    sym_upper, account_val, cfg.POSITION_SIZE_PCT * 100, price, computed_qty,
+                )
+        except Exception as exc:
+            log.warning("Position sizing failed, using rule quantity: %s", exc)
 
         try:
-            trade = await place_order(order_rule, bars=bars_df)
+            trade = await place_order(order_rule)
             orders_placed += 1
         except OrderError as exc:
             log.error("Order failed for rule '%s' on %s: %s", rule.name, trigger_symbol, exc)
@@ -400,10 +462,7 @@ async def _run_cycle() -> None:
                 "trade_id": trade.id,
                 "order_id": trade.order_id,
             })
-      except Exception as exc:
-        log.error("Execution error for %s: %s", trigger_symbol, exc)
 
-    log.info("Cycle done: %d signals, %d orders placed", total_signals, orders_placed)
     await _emit({
         "type": "bot",
         "status": "running",
@@ -419,6 +478,86 @@ async def _run_cycle() -> None:
         "Cycle complete — %d rules, %d symbols scanned, %d signals",
         len(enabled), len(bars_by_symbol), total_signals,
     )
+
+
+async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
+    """
+    Check all tracked positions for exit conditions each cycle.
+
+    Order of operations:
+      1. Update watermarks (price moved up → raise the ATR trail floor)
+      2. Evaluate each position for hard stop / trail stop / MA / indicator exits
+      3. Place exit order (MKT SELL) and remove from tracker
+    """
+    if not open_positions:
+        return
+
+    # Update watermarks first — if price rose, the trail stop rises too
+    for pos in update_watermarks(open_positions, bars_by_symbol):
+        await save_open_position(pos)
+
+    for pos in open_positions:
+        sym = pos.symbol.upper()
+        df = bars_by_symbol.get(sym)
+        if df is None:
+            try:
+                df = await get_historical_bars(sym, duration="60 D", bar_size="1D")
+            except Exception as exc:
+                log.warning("Cannot fetch bars for exit check %s: %s", sym, exc)
+                continue
+        if df is None or len(df) < 2:
+            log.debug("Insufficient bars for exit check %s", sym)
+            continue
+
+        current_price = float(df["close"].iloc[-1])
+        should_exit, reason = check_exits(pos, df, current_price)
+        if not should_exit:
+            continue
+
+        qty = int(pos.quantity)
+        if qty < 1:
+            await delete_open_position(pos.id)
+            continue
+
+        exit_action = "SELL" if pos.side == "BUY" else "BUY"
+        exit_rule = Rule(
+            id=pos.rule_id,
+            name=f"EXIT:{pos.rule_name}",
+            symbol=sym,
+            enabled=True,
+            conditions=[],
+            logic="AND",
+            action=TradeAction(
+                type=exit_action,  # type: ignore[arg-type]
+                asset_type="STK",
+                quantity=qty,
+                order_type="MKT",
+            ),
+            cooldown_minutes=0,
+        )
+        try:
+            exit_trade = await place_order(exit_rule)
+            if exit_trade:
+                pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+                await _emit({
+                    "type": "exit",
+                    "symbol": sym,
+                    "reason": reason,
+                    "action": exit_action,
+                    "qty": qty,
+                    "entry_price": pos.entry_price,
+                    "exit_price": current_price,
+                    "pnl": pnl,
+                })
+                log.info(
+                    "EXIT %s qty=%d reason='%s' entry=%.4f exit=%.4f pnl=%.2f",
+                    sym, qty, reason, pos.entry_price, current_price, pnl,
+                )
+        except Exception as exc:
+            log.error("Exit order failed for %s: %s", sym, exc)
+        finally:
+            # Always remove — never get stuck trying to exit the same position forever
+            await delete_open_position(pos.id)
 
 
 async def _emit(payload: dict) -> None:

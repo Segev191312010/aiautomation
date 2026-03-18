@@ -30,7 +30,7 @@ class TradeAction(BaseModel):
 
 
 # Valid universe identifiers ("all" expands to sp500 + nasdaq100 + etfs)
-_VALID_UNIVERSES = frozenset(["sp500", "nasdaq100", "etfs", "all"])
+_VALID_UNIVERSES = frozenset(["sp500", "nasdaq100", "etfs", "all", "us_all"])
 
 
 class Rule(BaseModel):
@@ -123,6 +123,28 @@ class Position(BaseModel):
     market_value: float
     unrealized_pnl: float
     realized_pnl: float
+
+
+# ---------------------------------------------------------------------------
+# Open position tracker model
+# ---------------------------------------------------------------------------
+
+class OpenPosition(BaseModel):
+    """Tracks an open position for exit management (ATR stops + MA/indicator exits)."""
+    id: str                          # equals entry Trade.id — 1-to-1 link
+    symbol: str                      # stored UPPERCASE
+    side: Literal["BUY", "SELL"]
+    quantity: float                  # float to match sim engine
+    entry_price: float
+    entry_time: str                  # ISO datetime
+    atr_at_entry: float              # ATR(14) at entry — used to compute hard_stop_price
+    hard_stop_price: float           # entry_price - ATR_STOP_MULT × atr_at_entry (never moves)
+    atr_stop_mult: float             # snapshot of cfg.ATR_STOP_MULT at entry
+    atr_trail_mult: float            # snapshot of cfg.ATR_TRAIL_MULT at entry
+    high_watermark: float            # highest close since entry (BUY) / lowest (SELL)
+    rule_id: str
+    rule_name: str
+    user_id: str = "demo"
 
 
 # ---------------------------------------------------------------------------

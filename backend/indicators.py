@@ -222,6 +222,21 @@ def resolve_value(
     if v == "PRICE":
         return df["close"]
 
+    # Special multi-output indicator line selectors
+    if v == "MACD_SIGNAL":
+        cache_key = "MACD_SIGNAL"
+        if cache_key not in indicator_cache:
+            _, sig, _ = _macd(df["close"])
+            indicator_cache[cache_key] = sig
+        return indicator_cache[cache_key]
+
+    if v == "MACD_HIST":
+        cache_key = "MACD_HIST"
+        if cache_key not in indicator_cache:
+            _, _, hist = _macd(df["close"])
+            indicator_cache[cache_key] = hist
+        return indicator_cache[cache_key]
+
     if "_" in v:
         parts = v.split("_", 1)
         ind_name = parts[0]
