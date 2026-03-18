@@ -26,12 +26,13 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
     options: {
       ...PANEL_THEME,
       rightPriceScale: {
-        borderColor: '#1c2e4a',
+        borderColor: '#E5E7EB',
         scaleMargins: { top: 0.1, bottom: 0 },
       },
     },
   })
   const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const fittedRef = useRef(false)
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
   const bars = useMarketStore((s) => s.bars[symbol] ?? [])
@@ -42,7 +43,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
     if (!chart) return
 
     const vol = chart.addHistogramSeries({
-      color:       '#1c2e4a',
+      color:       '#CBD5E1',
       priceFormat: { type: 'volume' },
     } as AnyData)
     volumeRef.current = vol
@@ -53,17 +54,24 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
     }
   }, [chartRef])
 
+  useEffect(() => {
+    fittedRef.current = false
+  }, [symbol])
+
   // Set data when bars change
   useEffect(() => {
     if (!volumeRef.current || !bars.length) return
     const data = bars.slice(-5000).map((b: OHLCVBar) => ({
       time:  b.time as unknown,
       value: b.volume,
-      color: b.close >= b.open ? '#00874a55' : '#99243855',
+      color: b.close >= b.open ? 'rgba(22, 163, 74, 0.28)' : 'rgba(220, 38, 38, 0.28)',
     }))
     try {
       volumeRef.current.setData(data as AnyData)
-      chartRef.current?.timeScale().fitContent()
+      if (!fittedRef.current) {
+        chartRef.current?.timeScale().fitContent()
+        fittedRef.current = true
+      }
     } catch { /* ignore stale */ }
   }, [bars, chartRef])
 
@@ -105,7 +113,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
   return (
     <div className={clsx('w-full', className)} style={{ touchAction: 'none' }}>
       <div className="flex items-center px-3 py-0.5">
-        <span className="text-[10px] font-mono text-terminal-ghost">Volume</span>
+        <span className="text-[10px] font-mono text-gray-400">Volume</span>
       </div>
       <div ref={containerRef} className="w-full" style={{ height: 'calc(100% - 20px)' }} />
     </div>

@@ -13,9 +13,11 @@ import type {
   Alert,
   AlertFiredEvent,
   AlertHistory,
+  AlertStats,
   AnyAccount,
   AppRoute,
   BacktestHistoryItem,
+  NotificationPrefs,
   BacktestResult,
   BotStatus,
   DiagnosticIndicator,
@@ -35,6 +37,10 @@ import type {
   PlaybackState,
   Position,
   Rule,
+  RuleTemplate,
+  RuleVersion,
+  ValidationResult,
+  RulePerformanceStats,
   ScanFilter,
   ScanResultRow,
   ScreenerPreset,
@@ -61,10 +67,25 @@ import type {
   UniverseInfo,
   UserSettings,
   Watchlist,
+  // Stage 7
+  PortfolioAnalytics,
+  DailyPnL,
+  ExposureBreakdown,
+  RiskLimits,
+  TradeHistoryRow,
+  CorrelationMatrix,
+  PnLSummary,
+  MatchedTrade,
+  SectorExposureRow,
+  PortfolioRisk,
+  RiskCheckResult,
+  RiskEvent,
+  RiskSettings,
 } from '@/types'
 import type { IndicatorId } from '@/utils/indicators'
 import { DEFAULT_DRAWING_COLOR } from '@/utils/drawingEngine'
 import { validateDrawingsMap, validateDrawingsExport } from '@/utils/drawingSchema'
+import { DEFAULT_NOTIFICATION_PREFS } from '@/types'  // value import (const)
 import * as api from '@/services/api'
 
 // ── Market store ─────────────────────────────────────────────────────────────
@@ -296,6 +317,15 @@ export const useAccountStore = create<AccountState>((set) => ({
 
 // ── Bot store ─────────────────────────────────────────────────────────────────
 
+interface BotCycleStats {
+  rulesEnabled:   number
+  rulesChecked:   number
+  symbolsScanned: number
+  signals:        number
+  lastRun:        string | null
+  nextRun:        string | null
+}
+
 interface BotState {
   status:        SystemStatus | null
   botStatus:     BotStatus
@@ -303,6 +333,7 @@ interface BotState {
   ibkrConnected: boolean
   simMode:       boolean
   botRunning:    boolean
+  cycleStats:    BotCycleStats
 
   setStatus:     (s: SystemStatus) => void
   setBotStatus:  (s: BotStatus) => void
@@ -310,6 +341,7 @@ interface BotState {
   updateRule:    (r: Rule) => void
   setIBKR:       (v: boolean) => void
   setBotRunning: (v: boolean) => void
+  setCycleStats: (s: Partial<BotCycleStats>) => void
 }
 
 export const useBotStore = create<BotState>((set) => ({
@@ -319,6 +351,7 @@ export const useBotStore = create<BotState>((set) => ({
   ibkrConnected: false,
   simMode:       false,
   botRunning:    false,
+  cycleStats:    { rulesEnabled: 0, rulesChecked: 0, symbolsScanned: 0, signals: 0, lastRun: null, nextRun: null },
 
   setStatus: (s) =>
     set({
@@ -333,6 +366,7 @@ export const useBotStore = create<BotState>((set) => ({
     set((s) => ({ rules: s.rules.map((x) => (x.id === r.id ? r : x)) })),
   setIBKR:       (v) => set({ ibkrConnected: v }),
   setBotRunning: (v) => set({ botRunning: v }),
+  setCycleStats: (s) => set((prev) => ({ cycleStats: { ...prev.cycleStats, ...s } })),
 }))
 
 // ── Simulation store ──────────────────────────────────────────────────────────
@@ -377,17 +411,32 @@ export const useSimStore = create<SimState>((set) => ({
 
 // ── UI store ──────────────────────────────────────────────────────────────────
 
+export type ThemePreference = 'light' | 'dark' | 'system'
+
 interface UIState {
   sidebarCollapsed: boolean
   activeRoute:      AppRoute
   showOrderModal:   boolean
   orderModalSymbol: string
+  /** The user's chosen preference — 'system' means follow OS */
+  theme:            ThemePreference
 
   setSidebarCollapsed: (v: boolean) => void
   toggleSidebar:       () => void
   setRoute:            (r: AppRoute) => void
   openOrderModal:      (symbol?: string) => void
   closeOrderModal:     () => void
+  setTheme:            (t: ThemePreference) => void
+}
+
+/** Apply a theme preference, persisting to localStorage and updating the DOM. */
+function applyTheme(pref: ThemePreference) {
+  localStorage.setItem('theme', pref)
+  const resolved: 'light' | 'dark' =
+    pref === 'system'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+      : pref
+  document.documentElement.setAttribute('data-theme', resolved)
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -395,12 +444,23 @@ export const useUIStore = create<UIState>((set) => ({
   activeRoute:      'dashboard',
   showOrderModal:   false,
   orderModalSymbol: '',
+  theme: ((): ThemePreference => {
+    try {
+      const stored = localStorage.getItem('theme')
+      if (stored === 'dark' || stored === 'light' || stored === 'system') return stored
+    } catch { /* SSR / test env */ }
+    return 'system'
+  })(),
 
   setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
   toggleSidebar:       () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setRoute:            (r) => set({ activeRoute: r }),
   openOrderModal:      (symbol = '') => set({ showOrderModal: true, orderModalSymbol: symbol }),
   closeOrderModal:     () => set({ showOrderModal: false }),
+  setTheme: (t) => {
+    applyTheme(t)
+    set({ theme: t })
+  },
 }))
 
 // ── Settings store ───────────────────────────────────────────────────────
@@ -503,7 +563,7 @@ export const useDiagnosticsStore = create<DiagnosticsState>((set, get) => ({
         set({
           refreshRun: {
             run_id: resp.data.run_id,
-            status: 'running',
+            status: 'locked',
             locked_by: resp.data.locked_by,
             lock_expires_at: resp.data.lock_expires_at,
           },
@@ -539,8 +599,7 @@ export const useDiagnosticsStore = create<DiagnosticsState>((set, get) => ({
       })
       if (done && status === 'completed') {
         await get().loadAll()
-      }
-      if (done && lockExpired) {
+      } else if (done && lockExpired) {
         await get().loadAll()
       }
     } catch (err) {
@@ -913,7 +972,9 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
     const { clipboard } = get()
     if (!clipboard) return
 
-    const [symbol, timeframe] = key.split('_')
+    const lastUnderscore = key.lastIndexOf('_')
+    const symbol = key.slice(0, lastUnderscore)
+    const timeframe = key.slice(lastUnderscore + 1)
     const newDrawing: Drawing = {
       ...JSON.parse(JSON.stringify(clipboard)) as Drawing,
       id: crypto.randomUUID(),
@@ -977,8 +1038,7 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
     const timer = setTimeout(async () => {
       set({ saveStatus: 'saving' })
       try {
-        const { updateSettings } = await import('@/services/api')
-        await updateSettings({ drawings: get().drawings } as Partial<UserSettings>)
+        await api.updateSettings({ drawings: get().drawings } as Partial<UserSettings>)
         set({ saveStatus: 'saved' })
         // Reset to idle after 2s
         setTimeout(() => {
@@ -997,15 +1057,18 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
       clearTimeout(s._saveTimer)
       set({ _saveTimer: null })
     }
-    // Synchronous-ish save via sendBeacon for beforeunload
+    // Synchronous XHR is allowed in beforeunload and supports Authorization headers.
+    // sendBeacon cannot send custom headers so it would fail on authenticated endpoints.
     try {
       const body = JSON.stringify({ drawings: s.drawings })
-      const blob = new Blob([body], { type: 'application/json' })
-      if (!navigator.sendBeacon('/api/settings', blob)) {
-        console.warn('sendBeacon failed')
-      }
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', '/api/settings', false) // false = synchronous
+      xhr.setRequestHeader('Content-Type', 'application/json')
+      const token = api.getAuthToken()
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+      xhr.send(body)
     } catch {
-      // Best effort
+      // Best effort — page is unloading anyway
     }
   },
 }))
@@ -1104,35 +1167,48 @@ export const useBacktestStore = create<BacktestState>((set) => ({
     takeProfitPct: 0,
     result: null,
     error: null,
+    loading: false,
   }),
 }))
 
 // ── Alert store ──────────────────────────────────────────────────────────────
 
 interface AlertState {
-  alerts: Alert[]
-  history: AlertHistory[]
-  unreadCount: number
-  recentFired: AlertFiredEvent[]
-  loading: boolean
+  alerts:            Alert[]
+  history:           AlertHistory[]
+  unreadCount:       number
+  recentFired:       AlertFiredEvent[]
+  loading:           boolean
+  notificationPrefs: NotificationPrefs
+  alertStats:        AlertStats | null
 
-  setAlerts: (a: Alert[]) => void
-  setHistory: (h: AlertHistory[]) => void
-  pushFired: (e: AlertFiredEvent) => void
-  markRead: () => void
-  updateAlert: (a: Alert) => void
-  removeAlert: (id: string) => void
-  setLoading: (v: boolean) => void
-  loadAlerts: () => Promise<void>
-  loadHistory: () => Promise<void>
+  setAlerts:                (a: Alert[]) => void
+  setHistory:               (h: AlertHistory[]) => void
+  pushFired:                (e: AlertFiredEvent) => void
+  markRead:                 () => void
+  updateAlert:              (a: Alert) => void
+  removeAlert:              (id: string) => void
+  setLoading:               (v: boolean) => void
+  loadAlerts:               () => Promise<void>
+  loadHistory:              () => Promise<void>
+  fetchAlertStats:          () => Promise<void>
+  updateNotificationPrefs:  (partial: Partial<NotificationPrefs>) => void
 }
 
 export const useAlertStore = create<AlertState>((set) => ({
-  alerts: [],
-  history: [],
-  unreadCount: 0,
-  recentFired: [],
-  loading: false,
+  alerts:            [],
+  history:           [],
+  unreadCount:       0,
+  recentFired:       [],
+  loading:           false,
+  notificationPrefs: (() => {
+    try {
+      const stored = localStorage.getItem('alertNotificationPrefs')
+      if (stored) return { ...DEFAULT_NOTIFICATION_PREFS, ...JSON.parse(stored) as Partial<NotificationPrefs> }
+    } catch { /* ignore */ }
+    return { ...DEFAULT_NOTIFICATION_PREFS }
+  })(),
+  alertStats: null,
 
   setAlerts: (a) => set({ alerts: a }),
   setHistory: (h) => set({ history: h }),
@@ -1163,6 +1239,52 @@ export const useAlertStore = create<AlertState>((set) => ({
       // backend offline
     }
   },
+  fetchAlertStats: async () => {
+    try {
+      const stats = await api.fetchAlertStats()
+      set({ alertStats: stats })
+    } catch {
+      // backend offline — compute client-side fallback below
+      set((s) => {
+        const now = Date.now()
+        const dayMs   = 86_400_000
+        const weekMs  = 7 * dayMs
+        const monthMs = 30 * dayMs
+
+        const total_today = s.history.filter((h) => now - new Date(h.fired_at).getTime() < dayMs).length
+        const total_week  = s.history.filter((h) => now - new Date(h.fired_at).getTime() < weekMs).length
+        const total_month = s.history.filter((h) => now - new Date(h.fired_at).getTime() < monthMs).length
+
+        const symbolCounts: Record<string, number> = {}
+        for (const h of s.history) {
+          symbolCounts[h.symbol] = (symbolCounts[h.symbol] ?? 0) + 1
+        }
+        const top_symbols = Object.entries(symbolCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([symbol, count]) => ({ symbol, count }))
+
+        // Daily counts: last 14 days
+        const daily_counts: { date: string; count: number }[] = []
+        for (let i = 13; i >= 0; i--) {
+          const d = new Date(now - i * dayMs)
+          const dateStr = d.toISOString().slice(0, 10)
+          const count = s.history.filter((h) => h.fired_at.startsWith(dateStr)).length
+          daily_counts.push({ date: dateStr, count })
+        }
+
+        return {
+          alertStats: { total_today, total_week, total_month, top_symbols, daily_counts },
+        }
+      })
+    }
+  },
+  updateNotificationPrefs: (partial) =>
+    set((s) => {
+      const next = { ...s.notificationPrefs, ...partial }
+      try { localStorage.setItem('alertNotificationPrefs', JSON.stringify(next)) } catch { /* ignore */ }
+      return { notificationPrefs: next }
+    }),
 }))
 
 // ── Stock Profile store ──────────────────────────────────────────────────
@@ -1222,40 +1344,30 @@ export const useStockProfileStore = create<StockProfileState>((set) => ({
   }),
 
   loadAll: async (symbol: string) => {
-    set({ loading: true, error: null, symbol })
+    set({
+      loading: true, error: null, symbol,
+      overview: null, keyStats: null, financials: null,
+      analyst: null, ownership: null, events: null, narrative: null,
+      financialStatements: null, analystDetail: null, ratingScorecard: null,
+      companyInfo: null, stockSplits: null, earningsDetail: null,
+      lastFetched: null,
+    })
     try {
-      const api = await import('@/services/api')
-      const results = await Promise.allSettled([
-        api.fetchStockOverview(symbol),
-        api.fetchStockKeyStats(symbol),
-        api.fetchStockFinancials(symbol),
-        api.fetchStockAnalyst(symbol),
-        api.fetchStockOwnership(symbol),
-        api.fetchStockEvents(symbol),
-        api.fetchStockNarrative(symbol),
-        api.fetchStockFinancialStatements(symbol),
-        api.fetchStockAnalystDetail(symbol),
-        api.fetchStockRatingScorecard(symbol),
-        api.fetchStockCompanyInfo(symbol),
-        api.fetchStockSplits(symbol),
-        api.fetchStockEarningsDetail(symbol),
-      ])
-      const val = <T,>(r: PromiseSettledResult<T>): T | null =>
-        r.status === 'fulfilled' ? r.value : null
+      const profile = await api.fetchStockProfile(symbol)
       set({
-        overview: val(results[0]),
-        keyStats: val(results[1]),
-        financials: val(results[2]),
-        analyst: val(results[3]),
-        ownership: val(results[4]),
-        events: val(results[5]),
-        narrative: val(results[6]),
-        financialStatements: val(results[7]),
-        analystDetail: val(results[8]),
-        ratingScorecard: val(results[9]),
-        companyInfo: val(results[10]),
-        stockSplits: val(results[11]),
-        earningsDetail: val(results[12]),
+        overview: profile.overview,
+        keyStats: profile.key_stats,
+        financials: profile.financials,
+        analyst: profile.analyst,
+        ownership: profile.ownership,
+        events: profile.events,
+        narrative: profile.narrative,
+        financialStatements: profile.financial_statements,
+        analystDetail: profile.analyst_detail,
+        ratingScorecard: profile.rating_scorecard,
+        companyInfo: profile.company_info,
+        stockSplits: profile.stock_splits,
+        earningsDetail: profile.earnings_detail,
         lastFetched: Date.now(),
       })
     } catch (err) {
@@ -1264,5 +1376,250 @@ export const useStockProfileStore = create<StockProfileState>((set) => ({
     } finally {
       set({ loading: false })
     }
+  },
+}))
+
+// ── Analytics store (Stage 7) ────────────────────────────────────────────────
+
+interface AnalyticsState {
+  analytics:         PortfolioAnalytics | null
+  pnlSummary:        PnLSummary | null
+  dailyPnL:          DailyPnL[]
+  matchedTrades:     MatchedTrade[]
+  exposure:          ExposureBreakdown | null
+  sectorExposure:    SectorExposureRow[]
+  correlationMatrix: CorrelationMatrix | null
+  tradeHistory:      TradeHistoryRow[]
+  range:             '1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL'
+  loading:           boolean
+  error:             string | null
+
+  setRange:                (r: '1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL') => void
+  fetchPortfolioAnalytics: () => Promise<void>
+  fetchPnL:                () => Promise<void>
+  fetchSectorExposure:     () => Promise<void>
+  fetchCorrelation:        () => Promise<void>
+  fetchTradeHistory:       (limit?: number) => Promise<void>
+  fetchAll:                () => Promise<void>
+}
+
+export const useAnalyticsStore = create<AnalyticsState>((set, get) => ({
+  analytics:         null,
+  pnlSummary:        null,
+  dailyPnL:          [],
+  matchedTrades:     [],
+  exposure:          null,
+  sectorExposure:    [],
+  correlationMatrix: null,
+  tradeHistory:      [],
+  range:             '3M',
+  loading:           false,
+  error:             null,
+
+  setRange: (r) => set({ range: r }),
+
+  fetchPortfolioAnalytics: async () => {
+    const { range } = get()
+    try {
+      const data = await api.fetchPortfolioAnalytics(range)
+      const { tradeHistory } = get()
+      const wins = tradeHistory.filter((t) => (t.pnl ?? 0) > 0)
+      const losses = tradeHistory.filter((t) => (t.pnl ?? 0) < 0)
+      const grossProfit = wins.reduce((s, t) => s + (t.pnl ?? 0), 0)
+      const grossLoss = Math.abs(losses.reduce((s, t) => s + (t.pnl ?? 0), 0))
+      const bestTrade = tradeHistory.reduce(
+        (best, t) => (!best || (t.pnl ?? 0) > (best.pnl ?? 0) ? t : best),
+        tradeHistory[0] as TradeHistoryRow | undefined,
+      )
+      const worstTrade = tradeHistory.reduce(
+        (worst, t) => (!worst || (t.pnl ?? 0) < (worst.pnl ?? 0) ? t : worst),
+        tradeHistory[0] as TradeHistoryRow | undefined,
+      )
+      const summary: PnLSummary = {
+        realized_pnl:      data.total_pnl,
+        realized_pnl_pct:  data.total_pnl_pct,
+        unrealized_pnl:    0,
+        today_pnl:         data.day_pnl,
+        today_pnl_pct:     data.day_pnl_pct,
+        win_rate:          data.win_rate,
+        profit_factor:     grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0,
+        best_trade_pnl:    bestTrade?.pnl ?? 0,
+        best_trade_symbol: bestTrade?.symbol ?? '—',
+        worst_trade_pnl:   worstTrade?.pnl ?? 0,
+        worst_trade_symbol:worstTrade?.symbol ?? '—',
+        total_trades:      tradeHistory.length,
+      }
+      set({ analytics: data, pnlSummary: summary })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Analytics load failed' })
+    }
+  },
+
+  fetchPnL: async () => {
+    try {
+      const data = await api.fetchDailyPnL(90)
+      set({ dailyPnL: data })
+    } catch { /* backend offline */ }
+  },
+
+  fetchSectorExposure: async () => {
+    try {
+      const data = await api.fetchExposureBreakdown()
+      set({ exposure: data })
+      const sectorMap: Record<string, SectorExposureRow> = {}
+      for (const pos of data.positions) {
+        const s = pos.sector || 'Unknown'
+        if (!sectorMap[s]) {
+          sectorMap[s] = { sector: s, weight_pct: 0, value: 0, position_count: 0, pnl: 0 }
+        }
+        sectorMap[s].weight_pct += pos.weight_pct
+        sectorMap[s].value      += pos.value
+        sectorMap[s].position_count += 1
+        sectorMap[s].pnl        += pos.pnl
+      }
+      set({ sectorExposure: Object.values(sectorMap).sort((a, b) => b.weight_pct - a.weight_pct) })
+    } catch { /* backend offline */ }
+  },
+
+  fetchCorrelation: async () => {
+    try {
+      const data = await api.fetchCorrelationMatrix()
+      set({ correlationMatrix: data })
+    } catch { /* backend offline */ }
+  },
+
+  fetchTradeHistory: async (limit = 200) => {
+    try {
+      const data = await api.fetchTradeHistory(limit)
+      // FIFO-match BUY/SELL pairs per symbol
+      const bySymbol: Record<string, TradeHistoryRow[]> = {}
+      for (const t of data) {
+        if (!bySymbol[t.symbol]) bySymbol[t.symbol] = []
+        bySymbol[t.symbol].push(t)
+      }
+      const matched: MatchedTrade[] = []
+      for (const rows of Object.values(bySymbol)) {
+        const sorted = [...rows].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+        let i = 0
+        while (i < sorted.length - 1) {
+          const entry = sorted[i]
+          const exit  = sorted[i + 1]
+          if (entry.action === 'BUY' && exit.action === 'SELL') {
+            const entryMs = new Date(entry.timestamp).getTime()
+            const exitMs  = new Date(exit.timestamp).getTime()
+            const holdDays = Math.max(0, Math.round((exitMs - entryMs) / 86_400_000))
+            const pnl = exit.pnl ?? (exit.fill_price - entry.fill_price) * entry.quantity
+            const pnlPct = entry.fill_price > 0
+              ? ((exit.fill_price - entry.fill_price) / entry.fill_price) * 100
+              : 0
+            matched.push({
+              id: `${entry.id}_${exit.id}`,
+              symbol:      entry.symbol,
+              entry_date:  entry.timestamp,
+              exit_date:   exit.timestamp,
+              entry_price: entry.fill_price,
+              exit_price:  exit.fill_price,
+              qty:         entry.quantity,
+              pnl,
+              pnl_pct: pnlPct,
+              hold_days: holdDays,
+            })
+            i += 2
+          } else {
+            i++
+          }
+        }
+      }
+      set({ tradeHistory: data, matchedTrades: matched })
+    } catch { /* backend offline */ }
+  },
+
+  fetchAll: async () => {
+    set({ loading: true, error: null })
+    try {
+      await get().fetchTradeHistory(200)
+      await Promise.all([
+        get().fetchPortfolioAnalytics(),
+        get().fetchPnL(),
+        get().fetchSectorExposure(),
+        get().fetchCorrelation(),
+      ])
+    } finally {
+      set({ loading: false })
+    }
+  },
+}))
+
+// ── Risk store (Stage 7) ─────────────────────────────────────────────────────
+
+const DEFAULT_RISK_SETTINGS: RiskSettings = {
+  max_position_size_pct: 20,
+  daily_loss_limit:      2_000,
+  drawdown_limit_pct:    10,
+  max_open_positions:    10,
+  max_sector_pct:        30,
+  max_corr_threshold:    0.8,
+}
+
+interface RiskState {
+  riskLimits:    RiskLimits | null
+  riskChecks:    RiskCheckResult[]
+  riskEvents:    RiskEvent[]
+  portfolioRisk: PortfolioRisk | null
+  riskSettings:  RiskSettings
+  loading:       boolean
+  error:         string | null
+
+  fetchRiskLimits:    () => Promise<void>
+  fetchRiskEvents:    () => Promise<void>
+  updateRiskSettings: (partial: Partial<RiskSettings>) => void
+  computeRiskChecks:  (limits: RiskLimits) => void
+}
+
+export const useRiskStore = create<RiskState>((set, get) => ({
+  riskLimits:    null,
+  riskChecks:    [],
+  riskEvents:    [],
+  portfolioRisk: null,
+  riskSettings:  DEFAULT_RISK_SETTINGS,
+  loading:       false,
+  error:         null,
+
+  fetchRiskLimits: async () => {
+    set({ loading: true })
+    try {
+      const limits = await api.fetchRiskLimits()
+      set({ riskLimits: limits })
+      get().computeRiskChecks(limits)
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Risk load failed' })
+    } finally {
+      set({ loading: false })
+    }
+  },
+
+  fetchRiskEvents: async () => {
+    // Backend endpoint not yet implemented — stub returns empty array
+    set({ riskEvents: [] })
+  },
+
+  updateRiskSettings: (partial) =>
+    set((s) => ({ riskSettings: { ...s.riskSettings, ...partial } })),
+
+  computeRiskChecks: (limits) => {
+    const checks: RiskCheckResult[] = limits.limits.map((item) => {
+      const ratio = item.limit > 0 ? item.used / item.limit : 0
+      const status: RiskCheckResult['status'] =
+        ratio >= 1 ? 'BREACH' : ratio >= 0.8 ? 'WARN' : 'OK'
+      return {
+        name:        item.label,
+        current:     item.used,
+        limit:       item.limit,
+        unit:        item.unit,
+        status,
+        description: `${item.label}: ${item.used}${item.unit} of ${item.limit}${item.unit} limit`,
+      }
+    })
+    set({ riskChecks: checks })
   },
 }))

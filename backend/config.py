@@ -37,8 +37,8 @@ class Config:
 
     # ── Database ─────────────────────────────────────────────────────────────
     DB_PATH: str = os.getenv("DB_PATH", "trading_bot.db")
-    WS_PUSH_INTERVAL_SECONDS: float = float(os.getenv("WS_PUSH_INTERVAL_SECONDS", "1.0"))
-    WS_CACHE_TTL_SECONDS: float = float(os.getenv("WS_CACHE_TTL_SECONDS", "1.0"))
+    WS_PUSH_INTERVAL_SECONDS: float = float(os.getenv("WS_PUSH_INTERVAL_SECONDS", "0.5"))
+    WS_CACHE_TTL_SECONDS: float = float(os.getenv("WS_CACHE_TTL_SECONDS", "0.5"))
     WS_STALE_WARN_SECONDS: int = int(os.getenv("WS_STALE_WARN_SECONDS", "10"))
     WS_STALE_CRITICAL_SECONDS: int = int(os.getenv("WS_STALE_CRITICAL_SECONDS", "30"))
     ENABLE_MARKET_DIAGNOSTICS: bool = os.getenv("ENABLE_MARKET_DIAGNOSTICS", "false").lower() == "true"
@@ -64,6 +64,15 @@ class Config:
     # ── React dashboard build directory ──────────────────────────────────────
     # After `npm run build` in dashboard/, serve the SPA from /app
     DASHBOARD_BUILD_DIR: str = os.getenv("DASHBOARD_BUILD_DIR", "../dashboard/dist")
+
+    # ── Logging ──────────────────────────────────────────────────────────────
+    # LOG_LEVEL: DEBUG | INFO | WARNING | ERROR  (default: INFO)
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+    # LOG_FILE: optional path for a rotating file handler (empty = stdout only)
+    LOG_FILE: str = os.getenv("LOG_FILE", "")
+
+    # ── Application version ───────────────────────────────────────────────────
+    APP_VERSION: str = os.getenv("APP_VERSION", "2.0.0")
 
 
 cfg = Config()

@@ -1,0 +1,57 @@
+# =============================================================================
+# Trading Platform — docker-compose
+#
+# Usage:
+#   docker compose up --build          # first run / after code changes
+#   docker compose up -d               # background
+#   docker compose logs -f trading-app # tail logs
+#   docker compose down                # stop
+# =============================================================================
+
+services:
+  trading-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-app
+    restart: unless-stopped
+
+    ports:
+      - "${PORT:-8000}:8000"
+
+    # All secrets and config come from .env (never baked into the image)
+    env_file:
+      - .env
+    environment:
+      # Production safety defaults — override in .env if you need live trading
+      IS_PAPER: "${IS_PAPER:-true}"
+      SIM_MODE: "${SIM_MODE:-true}"
+      # Point database at the persistent volume path
+      DB_PATH: "/data/trading_bot.db"
+      # Dashboard dist is embedded in the image at /app/dashboard/dist
+      DASHBOARD_BUILD_DIR: "./dashboard/dist"
+      # Uvicorn tuning
+      WORKERS: "${WORKERS:-2}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+
+    volumes:
+      # Persist SQLite database across container restarts / rebuilds
+      - trading-data:/data
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+    # Structured JSON logs to stdout — use `docker compose logs` to tail
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  trading-data:
+    driver: local

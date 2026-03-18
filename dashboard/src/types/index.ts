@@ -120,21 +120,25 @@ export interface TradeAction {
   limit_price?: number
 }
 
+export type RuleUniverse = 'sp500' | 'nasdaq100' | 'etfs' | 'all'
+
 export interface Rule {
   id: string
   name: string
   symbol: string
+  universe?: RuleUniverse | null
   enabled: boolean
   conditions: Condition[]
   logic: 'AND' | 'OR'
   action: TradeAction
   cooldown_minutes: number
-  last_triggered?: string
+  last_triggered?: string | null
 }
 
 export interface RuleCreate {
   name: string
   symbol: string
+  universe?: RuleUniverse | null
   enabled?: boolean
   conditions: Condition[]
   logic?: 'AND' | 'OR'
@@ -205,6 +209,43 @@ export interface AlertTestResult {
   condition_summary: string
 }
 
+// ── Alert notifications & stats ──────────────────────────────────────────────
+
+export type AlertSoundId = 'ding' | 'chime' | 'alarm' | 'cash_register'
+
+export interface NotificationPrefs {
+  /** Play a sound when an alert fires. */
+  sound_enabled:    boolean
+  /** Which sound to play. */
+  sound:            AlertSoundId
+  /** Master volume 0–1. */
+  volume:           number
+  /** Silence all sounds regardless of other settings. */
+  muted:            boolean
+  /** Show a native browser (OS-level) push notification. */
+  browser_push:     boolean
+  /** Show an in-app toast when an alert fires. */
+  in_app:           boolean
+}
+
+export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
+  sound_enabled: true,
+  sound:         'chime',
+  volume:        0.6,
+  muted:         false,
+  browser_push:  false,
+  in_app:        true,
+}
+
+export interface AlertStats {
+  total_today:      number
+  total_week:       number
+  total_month:      number
+  top_symbols:      { symbol: string; count: number }[]
+  /** Fired counts bucketed by day, most-recent last, length ≤ 30. */
+  daily_counts:     { date: string; count: number }[]
+}
+
 // ── Trade log ────────────────────────────────────────────────────────────────
 
 export type TradeStatus = 'PENDING' | 'FILLED' | 'CANCELLED' | 'ERROR'
@@ -229,8 +270,6 @@ export interface Trade {
 
 export interface SystemStatus {
   ibkr_connected: boolean
-  ibkr_host: string
-  ibkr_port: number
   is_paper: boolean
   sim_mode: boolean
   bot_running: boolean
@@ -393,7 +432,7 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'rotation' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics'
 
 // ── Chart types ─────────────────────────────────────────────────────────────
 
@@ -628,6 +667,13 @@ export interface StockFinancials {
 export interface StockAnalyst {
   recommendation_mean: number | null
   recommendation_key: string | null
+  recommendation_period: string | null
+  strong_buy: number | null
+  buy: number | null
+  hold: number | null
+  sell: number | null
+  strong_sell: number | null
+  current_price: number | null
   target_mean_price: number | null
   target_high_price: number | null
   target_low_price: number | null
@@ -639,7 +685,9 @@ export interface StockAnalyst {
 export interface StockOwnership {
   held_pct_institutions: number | null
   held_pct_insiders: number | null
-  top_holders: { name: string; shares: number; pct: number }[] | null
+  top_holders: { name: string; shares: number; pct: number; value?: number; date_reported?: string }[] | null
+  mutual_fund_holders: { name: string; shares: number; pct: number; value?: number; date_reported?: string }[] | null
+  total_institutional_holders: number | null
   fetched_at: number
 }
 
@@ -669,8 +717,18 @@ export interface StockFinancialStatements {
 }
 
 export interface StockAnalystDetail {
-  upgrades_downgrades: { date: string; firm: string; to_grade: string; from_grade: string; action: string }[] | null
+  upgrades_downgrades: {
+    date: string
+    firm: string
+    to_grade: string
+    from_grade: string
+    action: string
+    price_target_action?: string | null
+    price_target?: number | null
+    prior_price_target?: number | null
+  }[] | null
   recommendation_trend: { period: string; strong_buy: number; buy: number; hold: number; sell: number; strong_sell: number }[] | null
+  latest_recommendation: { period: string; strong_buy: number; buy: number; hold: number; sell: number; strong_sell: number } | null
   fetched_at: number
 }
 
@@ -734,4 +792,294 @@ export interface StockEarningsDetail {
   eps_estimate: number | null
   revenue_estimate: number | null
   fetched_at: number
+}
+
+// ── Portfolio Analytics & Risk ───────────────────────────────────────────────
+
+export interface PortfolioEquityPoint {
+  time: number   // Unix seconds
+  value: number
+}
+
+export interface PortfolioAnalytics {
+  total_value: number
+  day_pnl: number
+  day_pnl_pct: number
+  total_pnl: number
+  total_pnl_pct: number
+  win_rate: number
+  sharpe_ratio: number
+  max_drawdown_pct: number
+  equity_curve: PortfolioEquityPoint[]
+  benchmark_curve: PortfolioEquityPoint[]   // SPY
+}
+
+export interface DailyPnL {
+  date: string   // ISO date
+  pnl: number
+  trades: number
+}
+
+export interface ExposureBreakdown {
+  positions: {
+    symbol: string
+    sector: string
+    value: number
+    weight_pct: number
+    pnl: number
+    pnl_pct: number
+  }[]
+  sector_weights: Record<string, number>
+}
+
+export interface RiskLimitItem {
+  label: string
+  used: number
+  limit: number
+  unit: '$' | '%' | 'count'
+}
+
+export interface RiskLimits {
+  limits: RiskLimitItem[]
+  max_position_size_pct: number
+  daily_loss_limit: number
+  drawdown_limit_pct: number
+  max_open_positions: number
+}
+
+export interface TradeHistoryRow {
+  id: string
+  symbol: string
+  action: 'BUY' | 'SELL'
+  quantity: number
+  fill_price: number
+  pnl?: number
+  timestamp: string
+  holding_days?: number
+}
+
+export interface CorrelationMatrix {
+  symbols: string[]
+  matrix: number[][]   // [i][j] = correlation between symbols[i] and symbols[j]
+}
+
+// ── Sector Rotation ──────────────────────────────────────────────────────────
+
+export interface SectorRotation {
+  symbol: string
+  name: string
+  quadrant: 'LEADING' | 'WEAKENING' | 'LAGGING' | 'IMPROVING'
+  rs_ratio: number
+  rs_momentum: number
+  rs_sma: number
+  perf_1w: number
+  perf_1m: number
+  perf_3m: number
+  perf_6m: number
+  perf_1y: number
+  price: number
+  volume: number
+}
+
+export interface SectorLeader {
+  symbol: string
+  name: string
+  perf: number
+  price: number
+  volume: number
+  rs_vs_sector: number
+}
+
+export interface SectorLeadersResponse {
+  sector: string
+  sector_name: string
+  leaders: SectorLeader[]
+}
+
+export interface SectorHeatmapRow {
+  symbol: string
+  name: string
+  '1w': number
+  '1m': number
+  '3m': number
+  '6m': number
+  '1y': number
+  ytd: number
+}
+
+// ── Rule Builder (Stage 6) ───────────────────────────────────────────────
+
+export type TemplateCategory =
+  | 'all'
+  | 'trend_following'
+  | 'mean_reversion'
+  | 'momentum'
+  | 'breakout'
+  | 'composite'
+
+export interface RuleTemplate {
+  id: string
+  name: string
+  description: string
+  category: TemplateCategory
+  indicators_used: string[]
+  entry_conditions: Condition[]
+  exit_conditions: Condition[]
+  logic: 'AND' | 'OR'
+  action_type: 'BUY' | 'SELL'
+  cooldown_minutes: number
+  built_in: boolean
+  tags: string[]
+}
+
+export interface RuleVersion {
+  version: number
+  rule_id: string
+  name: string
+  conditions: Condition[]
+  logic: 'AND' | 'OR'
+  action: TradeAction
+  cooldown_minutes: number
+  created_at: string
+  note?: string
+}
+
+export interface ValidationError {
+  field: string
+  message: string
+  severity: 'error' | 'warning'
+}
+
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationError[]
+  warnings: ValidationError[]
+  summary?: string
+}
+
+export interface RulePerformanceTrade {
+  id: string
+  symbol: string
+  entry_date: string
+  exit_date: string
+  entry_price: number
+  exit_price: number
+  pnl: number
+  pnl_pct: number
+  duration_days: number
+}
+
+export interface RulePerformanceStats {
+  rule_id: string
+  win_rate: number
+  total_trades: number
+  avg_return_pct: number
+  profit_factor: number
+  max_drawdown_pct: number
+  equity_curve: { time: number; value: number }[]
+  recent_trades: RulePerformanceTrade[]
+  last_computed: string
+}
+
+export interface StockProfileBundle {
+  overview: StockOverview | null
+  key_stats: StockKeyStats | null
+  financials: StockFinancials | null
+  analyst: StockAnalyst | null
+  ownership: StockOwnership | null
+  events: StockEvents | null
+  narrative: StockNarrative | null
+  financial_statements: StockFinancialStatements | null
+  analyst_detail: StockAnalystDetail | null
+  rating_scorecard: StockRatingScorecard | null
+  company_info: StockCompanyInfo | null
+  stock_splits: StockSplits | null
+  earnings_detail: StockEarningsDetail | null
+}
+
+// ── Stage 7 — extended risk & analytics types ────────────────────────────────
+
+export interface PnLSummary {
+  realized_pnl: number
+  realized_pnl_pct: number
+  unrealized_pnl: number
+  today_pnl: number
+  today_pnl_pct: number
+  win_rate: number
+  profit_factor: number
+  best_trade_pnl: number
+  best_trade_symbol: string
+  worst_trade_pnl: number
+  worst_trade_symbol: string
+  total_trades: number
+}
+
+export interface MatchedTrade {
+  id: string
+  symbol: string
+  entry_date: string
+  exit_date: string
+  entry_price: number
+  exit_price: number
+  qty: number
+  pnl: number
+  pnl_pct: number
+  hold_days: number
+}
+
+export interface SectorExposureRow {
+  sector: string
+  weight_pct: number
+  value: number
+  position_count: number
+  pnl: number
+}
+
+export interface PortfolioRisk {
+  current_drawdown_pct: number
+  max_drawdown_pct: number
+  max_drawdown_date: string | null
+  sharpe_ratio: number | null
+  sortino_ratio: number | null
+  var_95: number | null
+}
+
+export type RiskCheckStatus = 'OK' | 'WARN' | 'BREACH'
+
+export interface RiskCheckResult {
+  name: string
+  current: number
+  limit: number
+  unit: '$' | '%' | 'count'
+  status: RiskCheckStatus
+  description: string
+}
+
+export type RiskEventType = 'WARN' | 'BLOCK' | 'BREACH'
+
+export interface RiskEvent {
+  id: string
+  timestamp: string
+  type: RiskEventType
+  symbol: string | null
+  description: string
+  resolved: boolean
+}
+
+export interface PositionSizeResult {
+  shares: number
+  dollar_amount: number
+  portfolio_pct: number
+  risk_amount: number
+}
+
+export type PositionSizeMethod = 'fixed_fractional' | 'kelly' | 'equal_weight'
+
+export interface RiskSettings {
+  max_position_size_pct: number
+  daily_loss_limit: number
+  drawdown_limit_pct: number
+  max_open_positions: number
+  max_sector_pct: number
+  max_corr_threshold: number
 }

@@ -7,13 +7,17 @@ import type {
   Alert,
   AlertCreate,
   AlertHistory,
+  AlertStats,
   AlertTestResult,
   AlertUpdate,
   BacktestHistoryItem,
   BacktestRequest,
   BacktestResult,
   BotStatus,
+  CorrelationMatrix,
+  DailyPnL,
   EnrichResult,
+  ExposureBreakdown,
   DiagnosticIndicator,
   DiagnosticIndicatorHistoryPoint,
   DiagnosticMarketMap,
@@ -25,12 +29,17 @@ import type {
   OHLCVBar,
   OpenOrder,
   PlaybackState,
+  PortfolioAnalytics,
   Position,
+  RiskLimits,
   Rule,
   RuleCreate,
   ScanFilter,
   ScanResponse,
   ScreenerPreset,
+  SectorHeatmapRow,
+  SectorLeadersResponse,
+  SectorRotation,
   SimAccountState,
   SimOrderRecord,
   SimPosition,
@@ -45,10 +54,12 @@ import type {
   StockNarrative,
   StockOverview,
   StockOwnership,
+  StockProfileBundle,
   StockRatingScorecard,
   StockSplits,
   SystemStatus,
   Trade,
+  TradeHistoryRow,
   UniverseInfo,
   User,
   UserSettings,
@@ -203,12 +214,13 @@ export const setReplaySpeed      = (speed: number) =>
 
 // ── Rules ─────────────────────────────────────────────────────────────────────
 
-export const fetchRules    = () => get<Rule[]>('/api/rules')
-export const fetchRule     = (id: string) => get<Rule>(`/api/rules/${id}`)
-export const createRule    = (body: RuleCreate) => post<Rule>('/api/rules', body)
-export const updateRule    = (id: string, body: Partial<Rule>) => put<Rule>(`/api/rules/${id}`, body)
-export const deleteRule    = (id: string) => del<{ deleted: boolean }>(`/api/rules/${id}`)
-export const toggleRule    = (id: string) => post<{ id: string; enabled: boolean }>(`/api/rules/${id}/toggle`)
+export const fetchRules         = () => get<Rule[]>('/api/rules')
+export const fetchRule          = (id: string) => get<Rule>(`/api/rules/${id}`)
+export const createRule         = (body: RuleCreate) => post<Rule>('/api/rules', body)
+export const updateRule         = (id: string, body: Partial<Rule>) => put<Rule>(`/api/rules/${id}`, body)
+export const deleteRule         = (id: string) => del<{ deleted: boolean }>(`/api/rules/${id}`)
+export const toggleRule         = (id: string) => post<{ id: string; enabled: boolean }>(`/api/rules/${id}/toggle`)
+export const fetchRuleTemplates = () => get<import('@/types').RuleTemplate[]>('/api/rules/templates')
 
 // ── Bot ───────────────────────────────────────────────────────────────────────
 
@@ -276,6 +288,11 @@ export const deleteAlert       = (id: string) => del<{ deleted: boolean }>(`/api
 export const toggleAlert       = (id: string) => post<{ id: string; enabled: boolean }>(`/api/alerts/${id}/toggle`)
 export const fetchAlertHistory = (limit = 100) => get<AlertHistory[]>(`/api/alerts/history?limit=${limit}`)
 export const testAlertNotification = (body: AlertCreate) => post<AlertTestResult>('/api/alerts/test', body)
+export const fetchAlertStats   = () => get<AlertStats>('/api/alerts/stats')
+
+/** Subscribe this browser to Web Push notifications. */
+export const subscribePush = (subscription: PushSubscriptionJSON) =>
+  post<{ subscribed: boolean }>('/api/push/subscribe', subscription)
 
 // ── Indicators ──────────────────────────────────────────────────────────
 
@@ -285,13 +302,13 @@ export const fetchIndicatorData = (
   params: { length?: number; period?: string; interval?: string; fast?: number; slow?: number; signal?: number; band?: string } = {},
 ) => {
   const qs = new URLSearchParams({ indicator })
-  if (params.length)   qs.set('length',   String(params.length))
-  if (params.period)   qs.set('period',   params.period)
-  if (params.interval) qs.set('interval', params.interval)
-  if (params.fast)     qs.set('fast',     String(params.fast))
-  if (params.slow)     qs.set('slow',     String(params.slow))
-  if (params.signal)   qs.set('signal',   String(params.signal))
-  if (params.band)     qs.set('band',     params.band)
+  if (params.length != null)   qs.set('length',   String(params.length))
+  if (params.period)           qs.set('period',   params.period)
+  if (params.interval)         qs.set('interval', params.interval)
+  if (params.fast != null)     qs.set('fast',     String(params.fast))
+  if (params.slow != null)     qs.set('slow',     String(params.slow))
+  if (params.signal != null)   qs.set('signal',   String(params.signal))
+  if (params.band)             qs.set('band',     params.band)
   return get<Array<{ time: number; value: number }>>(`/api/market/${symbol}/indicators?${qs}`)
 }
 
@@ -335,3 +352,37 @@ export const fetchStockSplits = (symbol: string) =>
 
 export const fetchStockEarningsDetail = (symbol: string) =>
   get<StockEarningsDetail>(`/api/stock/${symbol}/earnings-detail`)
+
+export const fetchStockProfile = (symbol: string) =>
+  get<StockProfileBundle>(`/api/stock/${symbol}/profile`)
+
+// ── Sector Rotation ─────────────────────────────────────────────────────────
+
+export const fetchSectorRotation = (lookbackDays = 90): Promise<SectorRotation[]> =>
+  get<SectorRotation[]>(`/api/sectors/rotation?lookback_days=${lookbackDays}`)
+
+export const fetchSectorLeaders = (sectorEtf: string, topN = 10, period = '3mo'): Promise<SectorLeadersResponse> =>
+  get<SectorLeadersResponse>(`/api/sectors/${sectorEtf}/leaders?top_n=${topN}&period=${period}`)
+
+export const fetchSectorHeatmap = (): Promise<SectorHeatmapRow[]> =>
+  get<SectorHeatmapRow[]>('/api/sectors/heatmap')
+
+// ── Portfolio Analytics & Risk ───────────────────────────────────────────────
+
+export const fetchPortfolioAnalytics = (range: '1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL' = '3M') =>
+  get<PortfolioAnalytics>(`/api/risk/portfolio?range=${range}`)
+
+export const fetchDailyPnL = (days = 90) =>
+  get<DailyPnL[]>(`/api/risk/pnl/daily?days=${days}`)
+
+export const fetchExposureBreakdown = () =>
+  get<ExposureBreakdown>('/api/risk/exposure')
+
+export const fetchRiskLimits = () =>
+  get<RiskLimits>('/api/risk/limits')
+
+export const fetchTradeHistory = (limit = 20) =>
+  get<TradeHistoryRow[]>(`/api/risk/trades?limit=${limit}`)
+
+export const fetchCorrelationMatrix = () =>
+  get<CorrelationMatrix>('/api/risk/correlation')

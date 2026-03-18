@@ -5,22 +5,24 @@ import FreshnessTag from './FreshnessTag'
 
 function ModuleSkeleton() {
   return (
-    <section className="glass rounded-2xl shadow-glass p-6 animate-pulse">
+    <section className="card rounded-lg shadow-card p-6 animate-pulse">
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="flex items-center gap-3 flex-wrap">
-          <div className="h-9 w-28 bg-terminal-muted rounded-xl" />
-          <div className="h-5 w-48 bg-terminal-muted rounded-xl" />
-          <div className="h-5 w-20 bg-terminal-muted rounded-xl" />
+          <div className="h-12 w-12 bg-gray-100 rounded-lg shrink-0" />
+          <div className="h-9 w-28 bg-gray-100 rounded-lg" />
+          <div className="h-5 w-48 bg-gray-100 rounded-lg" />
+          <div className="h-5 w-20 bg-gray-100 rounded-lg" />
         </div>
-        <div className="h-8 w-36 bg-terminal-muted rounded-xl shrink-0" />
+        <div className="h-8 w-36 bg-gray-100 rounded-lg shrink-0" />
       </div>
-      <div className="flex items-baseline gap-4 mb-4">
-        <div className="h-11 w-40 bg-terminal-muted rounded-xl" />
-        <div className="h-7 w-32 bg-terminal-muted rounded-xl" />
+      <div className="flex items-baseline gap-4 mb-3">
+        <div className="h-14 w-44 bg-gray-100 rounded-lg" />
+        <div className="h-8 w-36 bg-gray-100 rounded-lg" />
       </div>
+      <div className="h-1 w-full bg-gray-100 rounded-full mb-4" />
       <div className="flex items-center gap-2">
-        <div className="h-5 w-24 bg-terminal-muted rounded-full" />
-        <div className="h-5 w-32 bg-terminal-muted rounded-full" />
+        <div className="h-5 w-24 bg-gray-100 rounded-full" />
+        <div className="h-5 w-32 bg-gray-100 rounded-full" />
       </div>
     </section>
   )
@@ -35,9 +37,9 @@ function ExchangeBadge({ exchange }: { exchange: string }) {
     <span
       className={clsx(
         'inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold tracking-wider border',
-        isNasdaq && 'bg-indigo-500/10 text-indigo-400 border-indigo-500/25',
-        isNyse && 'bg-sky-500/10 text-sky-400 border-sky-500/25',
-        !isNasdaq && !isNyse && 'bg-terminal-muted text-terminal-ghost border-white/[0.06]',
+        isNasdaq && 'bg-gray-100 text-gray-700 border-gray-200',
+        isNyse && 'bg-sky-50 text-sky-600 border-sky-100',
+        !isNasdaq && !isNyse && 'bg-gray-100 text-gray-500 border-gray-200',
       )}
     >
       {isNasdaq ? 'NASDAQ' : isNyse ? 'NYSE' : upper}
@@ -66,14 +68,19 @@ function WatchlistButton({ symbol }: { symbol: string }) {
     <button
       onClick={handleClick}
       className={clsx(
-        'inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-sans font-medium',
-        'border transition-all duration-150',
+        'inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-sans font-medium border transition-colors',
         isWatched
-          ? 'bg-terminal-green/10 text-terminal-green border-terminal-green/30 hover:bg-terminal-red/10 hover:text-terminal-red hover:border-terminal-red/30'
-          : 'bg-terminal-muted text-terminal-dim border-white/[0.08] hover:bg-indigo-500/10 hover:text-terminal-text hover:border-indigo-500/30',
+          ? 'bg-green-50 text-green-700 border-green-200 hover:bg-red-50 hover:text-red-700 hover:border-red-200'
+          : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50 hover:text-gray-900',
       )}
     >
-      <svg viewBox="0 0 16 16" className="w-3.5 h-3.5 shrink-0" fill={isWatched ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={isWatched ? 0 : 1.5}>
+      <svg
+        viewBox="0 0 16 16"
+        className="w-3.5 h-3.5 shrink-0"
+        fill={isWatched ? 'currentColor' : 'none'}
+        stroke="currentColor"
+        strokeWidth={isWatched ? 0 : 1.5}
+      >
         <path d="M8 1.5l1.854 3.756 4.146.603-3 2.922.708 4.127L8 10.786l-3.708 1.95.708-4.127-3-2.922 4.146-.603L8 1.5z" />
       </svg>
       {isWatched ? 'Watching' : 'Add to Watchlist'}
@@ -81,9 +88,14 @@ function WatchlistButton({ symbol }: { symbol: string }) {
   )
 }
 
-interface Props { data: StockOverview | null; loading: boolean }
+interface Props {
+  data: StockOverview | null
+  loading: boolean
+  fiftyTwoWeekHigh?: number | null
+  fiftyTwoWeekLow?: number | null
+}
 
-export default function HeroModule({ data, loading }: Props) {
+export default function HeroModule({ data, loading, fiftyTwoWeekHigh, fiftyTwoWeekLow }: Props) {
   if (!data && loading) return <ModuleSkeleton />
   if (!data) return null
 
@@ -91,75 +103,95 @@ export default function HeroModule({ data, loading }: Props) {
   const changePct = data.change_pct ?? 0
   const up = changePct >= 0
   const sign = up ? '+' : ''
+  const avatarLetter = (data.name?.trim() || data.symbol).charAt(0).toUpperCase()
+
+  const has52w =
+    data.price != null &&
+    fiftyTwoWeekLow != null &&
+    fiftyTwoWeekHigh != null &&
+    fiftyTwoWeekHigh > fiftyTwoWeekLow
+
+  const rangePct = has52w
+    ? Math.min(
+        100,
+        Math.max(
+          0,
+          ((data.price! - fiftyTwoWeekLow!) / (fiftyTwoWeekHigh! - fiftyTwoWeekLow!)) * 100,
+        ),
+      )
+    : 0
 
   return (
-    <section id="section-overview" className="glass rounded-2xl shadow-glass px-6 py-5">
-      {/* Row 1: identity + watchlist */}
-      <div className="flex items-start justify-between gap-4 flex-wrap mb-3">
+    <section id="section-overview" className="card rounded-lg shadow-card px-6 py-5">
+      <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
         <div className="flex items-center gap-3 flex-wrap min-w-0">
-          <span className="text-3xl font-mono font-bold tracking-tight text-terminal-text leading-none">
-            {data.symbol}
-          </span>
-          {data.name && (
-            <span className="text-base font-sans text-terminal-dim leading-none truncate max-w-xs">
-              {data.name}
-            </span>
-          )}
-          {data.exchange && <ExchangeBadge exchange={data.exchange} />}
+          <div className="h-12 w-12 rounded-lg shrink-0 flex items-center justify-center bg-gray-900" aria-hidden="true">
+            <span className="text-xl font-bold text-white leading-none select-none">{avatarLetter}</span>
+          </div>
+
+          <div className="flex items-center gap-3 flex-wrap min-w-0">
+            <span className="text-3xl font-mono font-bold tracking-tight text-gray-800 leading-none">{data.symbol}</span>
+            {data.name && <span className="text-base font-sans text-gray-600 leading-none truncate max-w-xs">{data.name}</span>}
+            {data.exchange && <ExchangeBadge exchange={data.exchange} />}
+          </div>
         </div>
+
         <div className="flex items-center gap-3 shrink-0">
           <FreshnessTag fetchedAt={data.fetched_at} />
           <WatchlistButton symbol={data.symbol} />
         </div>
       </div>
 
-      {/* Row 2: price + change */}
-      <div className="flex items-baseline gap-4 mb-4">
+      <div className="flex items-baseline gap-4 mb-3">
         {data.price != null ? (
-          <span className="text-4xl font-mono font-bold tabular-nums tracking-tight text-terminal-text leading-none">
+          <span className="text-5xl font-mono font-bold tabular-nums tracking-tight text-gray-800 leading-none">
             ${data.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         ) : (
-          <span className="text-4xl font-mono font-bold text-terminal-ghost leading-none">—</span>
+          <span className="text-5xl font-mono font-bold text-gray-400 leading-none">--</span>
         )}
 
         {data.change != null && data.change_pct != null && (
           <span
             className={clsx(
-              'inline-flex items-center gap-1.5 px-3 py-1 rounded-xl',
-              'text-sm font-mono font-semibold tabular-nums ring-1',
-              up
-                ? 'bg-terminal-green/10 text-terminal-green ring-terminal-green/20'
-                : 'bg-terminal-red/10 text-terminal-red ring-terminal-red/20',
+              'inline-flex items-center gap-2 px-4 py-1.5 rounded-lg text-base font-mono font-bold tabular-nums border',
+              up ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200',
             )}
           >
-            <svg viewBox="0 0 10 10" className="w-2.5 h-2.5 shrink-0" fill="currentColor">
-              {up ? <path d="M5 1l4 8H1L5 1z" /> : <path d="M5 9L1 1h8L5 9z" />}
-            </svg>
             {sign}{Math.abs(change).toFixed(2)}
-            <span className="opacity-60">({sign}{Math.abs(changePct).toFixed(2)}%)</span>
+            <span className="opacity-80 text-sm font-semibold">({sign}{Math.abs(changePct).toFixed(2)}%)</span>
           </span>
         )}
       </div>
 
-      {/* Row 3: sector, industry, employees, website */}
+      {has52w && (
+        <div className="mb-4 flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[10px] font-mono text-gray-500 tabular-nums">
+            <span>52W: ${fiftyTwoWeekLow!.toFixed(2)}</span>
+            <span className="text-gray-500">52-week range</span>
+            <span>${fiftyTwoWeekHigh!.toFixed(2)}</span>
+          </div>
+          <div className="relative h-1 w-full rounded-full bg-gray-200 overflow-hidden">
+            <div className="absolute left-0 top-0 h-full rounded-full bg-green-600" style={{ width: `${rangePct}%` }} />
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-2 flex-wrap">
         {data.sector && (
-          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-sans font-medium bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-sans font-medium bg-gray-100 text-gray-700 border border-gray-200">
             {data.sector}
           </span>
         )}
         {data.industry && (
-          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-sans font-medium bg-terminal-muted text-terminal-dim border border-white/[0.06]">
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-sans font-medium bg-gray-100 text-gray-600 border border-gray-200">
             {data.industry}
           </span>
         )}
         {data.employees != null && (
           <>
-            <span className="text-terminal-ghost text-[11px]">·</span>
-            <span className="text-[11px] font-sans text-terminal-ghost tabular-nums">
-              {data.employees.toLocaleString()} employees
-            </span>
+            <span className="text-gray-400 text-[11px]">-</span>
+            <span className="text-[11px] font-sans text-gray-500 tabular-nums">{data.employees.toLocaleString()} employees</span>
           </>
         )}
         {data.website && (
@@ -167,7 +199,7 @@ export default function HeroModule({ data, loading }: Props) {
             href={data.website}
             target="_blank"
             rel="noopener noreferrer"
-            className="ml-auto text-[11px] font-sans text-terminal-ghost hover:text-indigo-400 transition-colors truncate max-w-[200px]"
+            className="ml-auto text-[11px] font-sans text-gray-500 hover:text-gray-900 transition-colors truncate max-w-[220px]"
           >
             {data.website.replace(/^https?:\/\//, '').replace(/\/$/, '')}
           </a>

@@ -37,6 +37,7 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
   const rsiRef  = useRef<ISeriesApi<'Line'> | null>(null)
   const ob70Ref = useRef<ISeriesApi<'Line'> | null>(null)
   const os30Ref = useRef<ISeriesApi<'Line'> | null>(null)
+  const fittedRef = useRef(false)
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
 
@@ -70,6 +71,10 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
     }
   }, [chartRef])
 
+  useEffect(() => {
+    fittedRef.current = false
+  }, [symbol])
+
   // Set data when bars change
   useEffect(() => {
     if (!rsiRef.current || !bars.length) return
@@ -80,7 +85,10 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
       const os30 = rsiData.map((p) => ({ time: p.time as unknown, value: 30 }))
       ob70Ref.current?.setData(ob70 as Parameters<typeof ob70Ref.current.setData>[0])
       os30Ref.current?.setData(os30 as Parameters<typeof os30Ref.current.setData>[0])
-      chartRef.current?.timeScale().fitContent()
+      if (!fittedRef.current) {
+        chartRef.current?.timeScale().fitContent()
+        fittedRef.current = true
+      }
     } catch { /* ignore */ }
   }, [bars, chartRef])
 
@@ -121,12 +129,12 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
 
   return (
     <div className={clsx('w-full', className)}>
-      <div className="flex items-center gap-2 px-3 py-1 border-b border-terminal-border">
-        <span className="text-[10px] font-mono text-terminal-ghost">RSI (14)</span>
-        <span className="text-[10px] font-mono text-terminal-ghost ml-auto">
-          <span className="text-terminal-red">70</span>
-          <span className="text-terminal-ghost mx-1">/</span>
-          <span className="text-terminal-green">30</span>
+      <div className="flex items-center gap-2 px-3 py-1 border-b border-gray-200">
+        <span className="text-[10px] font-mono text-gray-400">RSI (14)</span>
+        <span className="text-[10px] font-mono text-gray-400 ml-auto">
+          <span className="text-red-600">70</span>
+          <span className="text-gray-400 mx-1">/</span>
+          <span className="text-green-600">30</span>
         </span>
       </div>
       <div ref={containerRef} className="w-full h-full" />
@@ -148,6 +156,7 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
   const macdRef = useRef<ISeriesApi<'Line'> | null>(null)
   const sigRef  = useRef<ISeriesApi<'Line'> | null>(null)
   const histRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const fittedRef = useRef(false)
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
 
@@ -178,6 +187,10 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
     }
   }, [chartRef])
 
+  useEffect(() => {
+    fittedRef.current = false
+  }, [symbol])
+
   // Set data when bars change
   useEffect(() => {
     if (!macdRef.current || !bars.length) return
@@ -189,10 +202,13 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
         histogram.map((p) => ({
           time:  p.time as unknown,
           value: p.value,
-          color: p.value >= 0 ? '#00874a66' : '#99243866',
+          color: p.value >= 0 ? 'rgba(22, 163, 74, 0.4)' : 'rgba(220, 38, 38, 0.4)',
         })) as Parameters<typeof histRef.current.setData>[0],
       )
-      chartRef.current?.timeScale().fitContent()
+      if (!fittedRef.current) {
+        chartRef.current?.timeScale().fitContent()
+        fittedRef.current = true
+      }
     } catch { /* ignore */ }
   }, [bars, chartRef])
 
@@ -233,13 +249,13 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
 
   return (
     <div className={clsx('w-full', className)}>
-      <div className="flex items-center gap-3 px-3 py-1 border-b border-terminal-border">
-        <span className="text-[10px] font-mono text-terminal-ghost">MACD (12,26,9)</span>
+      <div className="flex items-center gap-3 px-3 py-1 border-b border-gray-200">
+        <span className="text-[10px] font-mono text-gray-400">MACD (12,26,9)</span>
         <span className="inline-flex items-center gap-1.5 ml-auto">
           <span className="w-3 h-px bg-[#38bdf8] inline-block" />
-          <span className="text-[9px] font-mono text-terminal-ghost">MACD</span>
+          <span className="text-[9px] font-mono text-gray-400">MACD</span>
           <span className="w-3 h-px bg-[#fb923c] inline-block ml-1" />
-          <span className="text-[9px] font-mono text-terminal-ghost">Signal</span>
+          <span className="text-[9px] font-mono text-gray-400">Signal</span>
         </span>
       </div>
       <div ref={containerRef} className="w-full h-full" />
@@ -272,7 +288,7 @@ export default function IndicatorPanel({ symbol, mainChart, className, style, on
       {showRSI && (
         <div
           className={clsx(
-            'bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden flex flex-col',
+            'bg-white border border-gray-200 rounded-lg overflow-hidden flex flex-col',
             both ? 'flex-1' : 'w-full',
           )}
         >
@@ -282,7 +298,7 @@ export default function IndicatorPanel({ symbol, mainChart, className, style, on
       {showMACD && (
         <div
           className={clsx(
-            'bg-terminal-surface border border-terminal-border rounded-lg overflow-hidden flex flex-col',
+            'bg-white border border-gray-200 rounded-lg overflow-hidden flex flex-col',
             both ? 'flex-1' : 'w-full',
           )}
         >

@@ -75,6 +75,7 @@ from database import (
     delete_rule, get_rule, get_rules, get_trades, init_db, save_rule, save_trade,
     get_screener_presets, save_screener_preset, delete_screener_preset,
     save_backtest, get_backtests, get_backtest, delete_backtest,
+    get_alerts, get_alert, save_alert, delete_alert, get_alert_history,
 )
 from ibkr_client import ibkr
 from market_data import (
@@ -85,20 +86,28 @@ from market_data import (
 from models import (
     AccountSummary, PlaybackState, Rule, RuleCreate, RuleUpdate,
     Trade, TradeAction, ScanRequest, ScanFilter, ScreenerPreset, EnrichRequest,
-    BacktestRequest, BacktestSaveRequest,
+    BacktestRequest, BacktestSaveRequest, Alert, AlertCreate, AlertUpdate,
 )
-from order_executor import cancel_order, get_open_orders, on_fill, place_order
+from order_executor import OrderError, cancel_order, get_open_orders, on_fill, place_order
 from simulation import replay_engine, sim_engine
 from auth import create_token, get_current_user
 from indicators import calculate as ind_calculate, series_to_json
 from settings import get_settings, update_settings
 from data_health import DataFreshnessMonitor
+from diagnostics_api import create_diagnostics_router
+from diagnostics_service import DiagnosticsService
 from screener import (
     run_scan, list_universes, validate_timeframe, enrich_symbols,
 )
 import bot_runner
+import alert_engine
+from sector_rotation import get_sector_rotation, get_sector_leaders, get_rotation_heatmap
 from stock_profile_service import StockProfileService
 from stock_profile_api import create_stock_profile_router
+from rule_builder_api import router as rule_builder_router
+from risk_api import router as risk_router
+from health import router as health_router
+from notification_service import notification_service
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +124,11 @@ _data_health = DataFreshnessMonitor(
         "ws_yahoo_quotes": float(cfg.WS_STALE_WARN_SECONDS),
         "yahoo_bars": 300.0,
         "heartbeat_quotes": 45.0,
+        "diag_indicators": 3600.0,
+        "diag_market_map": 3600.0,
+        "diag_sector_projections": 3600.0,
+        "diag_news_cache": 3600.0,
+        "diag_refresh_jobs": 3600.0,
     }
 )
 
@@ -125,6 +139,12 @@ def _record_data_success(source: str, *, count: int = 0, duration_ms: float | No
 
 def _record_data_failure(source: str, error: str, *, duration_ms: float | None = None) -> None:
     _data_health.record_failure(source, error, duration_ms=duration_ms)
+
+
+_diag_service = DiagnosticsService(
+    record_success=lambda source: _record_data_success(source),
+    record_failure=lambda source, error: _record_data_failure(source, error),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +190,18 @@ async def _broadcast(payload: dict) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # â"€â"€ Startup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    from startup import validate_startup
+    await validate_startup()
     await init_db()
     await sim_engine.initialize()
+    await _diag_service.ensure_catalog_seeded()
 
     bot_runner.set_broadcast(_broadcast)
     sim_engine.set_broadcast(_broadcast)
     replay_engine.set_broadcast(_broadcast)
     ibkr.set_broadcast(_broadcast)
+    alert_engine.set_broadcast(_broadcast)
+    notification_service.set_ws_broadcast(_broadcast)
 
     # Register order-fill â†’ WS broadcast
     async def _on_trade_fill(trade: Trade) -> None:
@@ -203,11 +228,13 @@ async def lifespan(app: FastAPI):
         await ibkr.start_reconnect_loop()
 
     await _start_market_heartbeat()
+    await alert_engine.start()
 
     yield
 
     # â"€â"€ Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     await _stop_market_heartbeat()
+    await alert_engine.stop()
     await bot_runner.stop()
     await replay_engine.stop()
     await ibkr.disconnect()
@@ -221,6 +248,10 @@ app = FastAPI(title="Trading Dashboard", version="2.0.0", lifespan=lifespan)
 
 # ── Stock profile router
 app.include_router(create_stock_profile_router(StockProfileService()))
+app.include_router(create_diagnostics_router(_diag_service))
+app.include_router(rule_builder_router)
+app.include_router(risk_router)
+app.include_router(health_router)
 
 # â"€â"€ CORS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
@@ -283,7 +314,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
     log.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
-        content={"error": type(exc).__name__, "detail": str(exc)},
+        content={"error": "InternalServerError", "detail": "An unexpected error occurred."},
     )
 
 
@@ -552,17 +583,40 @@ def _fetch_coinbase_spot(symbol: str) -> tuple[float, int, str] | None:
     sym = _normalize_symbol(symbol)
     if not _is_crypto_usd_symbol(sym):
         return None
-    url = f"https://api.coinbase.com/v2/prices/{sym}/spot"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "trading-dashboard/1.0"})
-        with urllib.request.urlopen(req, timeout=2.5) as resp:  # nosec B310
+        exchange_req = urllib.request.Request(
+            f"https://api.exchange.coinbase.com/products/{sym}/ticker",
+            headers={"User-Agent": "trading-dashboard/1.0"},
+        )
+        with urllib.request.urlopen(exchange_req, timeout=2.5) as resp:  # nosec B310
+            payload = json.loads(resp.read().decode("utf-8"))
+        exchange_price = payload.get("price")
+        if exchange_price is not None:
+            price = float(exchange_price)
+            if price > 0:
+                raw_time = payload.get("time")
+                quote_ts = int(_time.time())
+                if isinstance(raw_time, str):
+                    try:
+                        quote_ts = int(datetime.fromisoformat(raw_time.replace("Z", "+00:00")).timestamp())
+                    except ValueError:
+                        pass
+                return (round(price, 4), quote_ts, "open")
+    except Exception:
+        pass
+
+    try:
+        spot_req = urllib.request.Request(
+            f"https://api.coinbase.com/v2/prices/{sym}/spot",
+            headers={"User-Agent": "trading-dashboard/1.0"},
+        )
+        with urllib.request.urlopen(spot_req, timeout=2.5) as resp:  # nosec B310
             payload = json.loads(resp.read().decode("utf-8"))
         amount = payload.get("data", {}).get("amount")
         price = float(amount)
         if price <= 0:
             return None
-        ts = int(_time.time())
-        return (round(price, 4), ts, "open")
+        return (round(price, 4), int(_time.time()), "open")
     except Exception:
         return None
 
@@ -803,7 +857,7 @@ async def ws_market_data(ws: WebSocket):
         while True:
             raw = await ws.receive_text()
             msg = json.loads(raw)
-            action = msg.get("action", "")
+            action = msg.get("action") or msg.get("type") or ""
             symbols = [_normalize_symbol(s) for s in msg.get("symbols", []) if s]
             if action == "subscribe":
                 fresh = [sym for sym in symbols if sym and sym not in subscribed]
@@ -836,14 +890,29 @@ async def ws_market_data(ws: WebSocket):
 async def get_status():
     return {
         "ibkr_connected":       ibkr.is_connected(),
-        "ibkr_host":            cfg.IBKR_HOST,
-        "ibkr_port":            cfg.IBKR_PORT,
         "is_paper":             cfg.IS_PAPER,
         "sim_mode":             cfg.SIM_MODE,
         "bot_running":          bot_runner.is_running(),
         "last_run":             bot_runner.get_last_run(),
         "next_run":             bot_runner.get_next_run(),
         "bot_interval_seconds": cfg.BOT_INTERVAL_SECONDS,
+    }
+
+
+@app.get("/api/health")
+async def health_check():
+    """Lightweight health probe for Docker / load balancers."""
+    import aiosqlite
+    db_ok = True
+    try:
+        async with aiosqlite.connect(cfg.DB_PATH) as db:
+            await db.execute("SELECT 1")
+    except Exception:
+        db_ok = False
+    return {
+        "status": "healthy" if db_ok else "degraded",
+        "db": "ok" if db_ok else "unreachable",
+        "version": app.version,
     }
 
 
@@ -866,6 +935,9 @@ async def get_data_health():
         "ibkr_connected": ibkr.is_connected(),
         "ibkr_last_quote_age_s": ibkr_age,
         "yahoo_last_quote_age_s": yahoo_age,
+    }
+    snapshot["diagnostics"] = {
+        "enabled": _diag_service.enabled,
     }
     return snapshot
 
@@ -999,9 +1071,9 @@ async def playback_state():
 
 
 class LoadReplayRequest(BaseModel):
-    symbol: str
-    period: str = "1y"    # Yahoo Finance period
-    interval: str = "1d"  # Yahoo Finance interval
+    symbol: str = Field(..., min_length=1, max_length=10, pattern=r'^[A-Za-z0-9.\-]+$')
+    period: Literal["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"] = "1y"
+    interval: Literal["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo"] = "1d"
 
 
 @app.post("/api/simulation/playback/load")
@@ -1117,9 +1189,12 @@ async def place_manual_order(body: ManualOrderRequest):
         ),
         cooldown_minutes=0,
     )
-    trade = await place_order(rule)
+    try:
+        trade = await place_order(rule)
+    except OrderError as exc:
+        raise HTTPException(400, str(exc))
     if not trade:
-        raise HTTPException(502, "Order placement failed  --  check IBKR logs")
+        raise HTTPException(502, "Order placement failed — check IBKR logs")
     return trade.model_dump()
 
 
@@ -1144,6 +1219,9 @@ async def list_rules():
 
 @app.get("/api/rules/{rule_id}")
 async def get_rule_route(rule_id: str):
+    # Skip reserved sub-paths handled by rule_builder_router
+    if rule_id in ("templates", "validate", "from-template", "export", "import"):
+        raise HTTPException(404, "Use the specific endpoint")
     rule = await get_rule(rule_id)
     if not rule:
         raise HTTPException(404, "Rule not found")
@@ -1666,6 +1744,28 @@ async def screener_enrich(body: EnrichRequest):
 
 
 # ---------------------------------------------------------------------------
+# Sector Rotation endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sectors/rotation")
+async def sector_rotation(lookback_days: int = 90):
+    """Sector RS ratio, momentum, and quadrant placement vs SPY."""
+    return await get_sector_rotation(lookback_days)
+
+
+@app.get("/api/sectors/heatmap")
+async def sector_heatmap():
+    """Multi-timeframe sector performance grid."""
+    return await get_rotation_heatmap()
+
+
+@app.get("/api/sectors/{sector_etf}/leaders")
+async def sector_leaders(sector_etf: str, top_n: int = 10, period: str = "3mo"):
+    """Top performing stocks within a sector."""
+    return await get_sector_leaders(sector_etf.upper(), top_n, period)
+
+
+# ---------------------------------------------------------------------------
 # Backtesting endpoints
 # ---------------------------------------------------------------------------
 
@@ -1740,6 +1840,137 @@ async def api_backtest_delete(backtest_id: str):
     """Delete a saved backtest."""
     deleted = await delete_backtest(backtest_id)
     return {"deleted": deleted}
+
+
+# ---------------------------------------------------------------------------
+# Alerts endpoints
+# ---------------------------------------------------------------------------
+
+def _alert_condition_summary(alert: Alert | AlertCreate) -> str:
+    params = getattr(alert.condition, "params", {}) or {}
+    params_str = ", ".join(str(value) for value in params.values())
+    indicator = f"{alert.condition.indicator}({params_str})" if params_str else alert.condition.indicator
+    return f"{indicator} {alert.condition.operator} {alert.condition.value}"
+
+
+async def _resolve_alert_test_price(symbol: str, fallback: float | None = None) -> float:
+    sym = symbol.upper()
+    price = await get_latest_price(sym)
+    if price is not None:
+        return float(price)
+    try:
+        quotes = await _yf_quotes(sym, source="price_fallback")
+        if quotes and isinstance(quotes[0].get("price"), (int, float)):
+            return float(quotes[0]["price"])
+    except Exception:
+        pass
+    if fallback is not None:
+        return float(fallback)
+    return 0.0
+
+
+@app.get("/api/alerts")
+async def api_alerts_list(user=Depends(get_current_user)):
+    alerts = await get_alerts(user.id)
+    return [alert.model_dump() for alert in alerts]
+
+
+@app.post("/api/alerts", status_code=201)
+async def api_alerts_create(body: AlertCreate, user=Depends(get_current_user)):
+    alert = Alert(
+        user_id=user.id,
+        name=body.name,
+        symbol=body.symbol.upper(),
+        condition=body.condition,
+        alert_type=body.alert_type,
+        cooldown_minutes=body.cooldown_minutes,
+        enabled=body.enabled,
+    )
+    await save_alert(alert, user.id)
+    return alert.model_dump()
+
+
+@app.get("/api/alerts/history")
+async def api_alerts_history(limit: int = 100, alert_id: str | None = None, user=Depends(get_current_user)):
+    history = await get_alert_history(user.id, limit=limit, alert_id=alert_id)
+    return [entry.model_dump() for entry in history]
+
+
+@app.post("/api/alerts/test")
+async def api_alerts_test(body: AlertCreate, user=Depends(get_current_user)):
+    fallback = None
+    if isinstance(body.condition.value, (int, float)):
+        fallback = float(body.condition.value)
+    price = await _resolve_alert_test_price(body.symbol, fallback=fallback)
+    temp_alert = Alert(
+        user_id=user.id,
+        name=body.name,
+        symbol=body.symbol.upper(),
+        condition=body.condition,
+        alert_type=body.alert_type,
+        cooldown_minutes=body.cooldown_minutes,
+        enabled=body.enabled,
+    )
+    summary = _alert_condition_summary(temp_alert)
+    now = datetime.now(timezone.utc).isoformat()
+    await _broadcast(
+        {
+            "type": "alert_fired",
+            "alert_id": temp_alert.id,
+            "name": temp_alert.name,
+            "symbol": temp_alert.symbol,
+            "condition_summary": summary,
+            "price": price,
+            "timestamp": now,
+        }
+    )
+    return {
+        "alert_id": temp_alert.id,
+        "symbol": temp_alert.symbol,
+        "price": price,
+        "triggered": True,
+        "condition_summary": summary,
+    }
+
+
+@app.get("/api/alerts/{alert_id}")
+async def api_alerts_get(alert_id: str, user=Depends(get_current_user)):
+    alert = await get_alert(alert_id, user.id)
+    if not alert:
+        raise HTTPException(404, "Alert not found")
+    return alert.model_dump()
+
+
+@app.put("/api/alerts/{alert_id}")
+async def api_alerts_update(alert_id: str, body: AlertUpdate, user=Depends(get_current_user)):
+    alert = await get_alert(alert_id, user.id)
+    if not alert:
+        raise HTTPException(404, "Alert not found")
+
+    patch = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "symbol" in patch:
+        patch["symbol"] = str(patch["symbol"]).upper()
+    updated = alert.model_copy(update=patch)
+    await save_alert(updated, user.id)
+    return updated.model_dump()
+
+
+@app.delete("/api/alerts/{alert_id}")
+async def api_alerts_delete(alert_id: str, user=Depends(get_current_user)):
+    deleted = await delete_alert(alert_id, user.id)
+    if not deleted:
+        raise HTTPException(404, "Alert not found")
+    return {"deleted": True}
+
+
+@app.post("/api/alerts/{alert_id}/toggle")
+async def api_alerts_toggle(alert_id: str, user=Depends(get_current_user)):
+    alert = await get_alert(alert_id, user.id)
+    if not alert:
+        raise HTTPException(404, "Alert not found")
+    alert.enabled = not alert.enabled
+    await save_alert(alert, user.id)
+    return {"id": alert.id, "enabled": alert.enabled}
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,17 @@ import type { OHLCVBar, ChartType } from '@/types'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyData = any
 
+const CHART_COLORS = {
+  up: '#16A34A',
+  upDim: '#15803D',
+  down: '#DC2626',
+  downDim: '#B91C1C',
+  primary: '#4F46E5',
+  primaryFillStrong: 'rgba(79, 70, 229, 0.18)',
+  primaryFillSoft: 'rgba(79, 70, 229, 0.04)',
+  compare: '#D97706',
+}
+
 // â”€â”€ Normalization for comparison overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function normalizeBars(bars: OHLCVBar[]): OHLCVBar[] {
@@ -83,54 +94,54 @@ function createMainSeries(chart: IChartApi, chartType: ChartType): ISeriesApi<An
     case 'candlestick':
     case 'heikin-ashi':
       return chart.addCandlestickSeries({
-        upColor:         '#00e07a',
-        downColor:       '#ff3d5a',
-        borderUpColor:   '#00e07a',
-        borderDownColor: '#ff3d5a',
-        wickUpColor:     '#00874a',
-        wickDownColor:   '#992438',
+        upColor:         CHART_COLORS.up,
+        downColor:       CHART_COLORS.down,
+        borderUpColor:   CHART_COLORS.up,
+        borderDownColor: CHART_COLORS.down,
+        wickUpColor:     CHART_COLORS.upDim,
+        wickDownColor:   CHART_COLORS.downDim,
       } as Partial<CandlestickSeriesOptions>)
 
     case 'ohlc':
       return chart.addBarSeries({
-        upColor:   '#00e07a',
-        downColor: '#ff3d5a',
+        upColor:   CHART_COLORS.up,
+        downColor: CHART_COLORS.down,
       } as Partial<BarSeriesOptions>)
 
     case 'line':
       return chart.addLineSeries({
-        color:            '#4f91ff',
+        color:            CHART_COLORS.primary,
         lineWidth:        2,
         priceLineVisible: true,
       } as Partial<LineSeriesOptions>)
 
     case 'area':
       return chart.addAreaSeries({
-        topColor:    '#4f91ff33',
-        bottomColor: '#4f91ff05',
-        lineColor:   '#4f91ff',
+        topColor:    CHART_COLORS.primaryFillStrong,
+        bottomColor: CHART_COLORS.primaryFillSoft,
+        lineColor:   CHART_COLORS.primary,
         lineWidth:   2,
       } as Partial<AreaSeriesOptions>)
 
     case 'baseline':
       return chart.addBaselineSeries({
-        topFillColor1:    '#00e07a33',
-        topFillColor2:    '#00e07a05',
-        topLineColor:     '#00e07a',
-        bottomFillColor1: '#ff3d5a05',
-        bottomFillColor2: '#ff3d5a33',
-        bottomLineColor:  '#ff3d5a',
+        topFillColor1:    'rgba(22, 163, 74, 0.18)',
+        topFillColor2:    'rgba(22, 163, 74, 0.04)',
+        topLineColor:     CHART_COLORS.up,
+        bottomFillColor1: 'rgba(220, 38, 38, 0.04)',
+        bottomFillColor2: 'rgba(220, 38, 38, 0.18)',
+        bottomLineColor:  CHART_COLORS.down,
         baseValue:        { type: 'price', price: 0 },
       } as Partial<BaselineSeriesOptions>)
 
     default:
       return chart.addCandlestickSeries({
-        upColor:         '#00e07a',
-        downColor:       '#ff3d5a',
-        borderUpColor:   '#00e07a',
-        borderDownColor: '#ff3d5a',
-        wickUpColor:     '#00874a',
-        wickDownColor:   '#992438',
+        upColor:         CHART_COLORS.up,
+        downColor:       CHART_COLORS.down,
+        borderUpColor:   CHART_COLORS.up,
+        borderDownColor: CHART_COLORS.down,
+        wickUpColor:     CHART_COLORS.upDim,
+        wickDownColor:   CHART_COLORS.downDim,
       } as Partial<CandlestickSeriesOptions>)
   }
 }
@@ -390,10 +401,15 @@ export default function TradingChart({
       compRef.current = null
     }
 
-    if (!compMode || !compBars.length || !bars.length) return
+    if (!mainSeriesRef.current || !bars.length) return
+
+    if (!compMode || !compBars.length) {
+      loadDataIntoSeries(mainSeriesRef.current, bars, chartTypeRef.current)
+      return
+    }
 
     const comp = chartRef.current.addLineSeries({
-      color:       '#f59e0b',
+      color:       CHART_COLORS.compare,
       lineWidth:   2,
       priceFormat: { type: 'percent' },
     } as Partial<LineSeriesOptions>)
@@ -406,17 +422,7 @@ export default function TradingChart({
     } catch { /* */ }
 
     const normMain = normalizeBars(bars)
-    if (mainSeriesRef.current) {
-      if (isSingleValue(chartTypeRef.current)) {
-        const mainData = normMain.map((b) => ({ time: b.time as unknown, value: b.close }))
-        try { mainSeriesRef.current.setData(mainData as AnyData) } catch { /* */ }
-      } else {
-        const mainData = normMain.map((b) => ({
-          time: b.time as unknown, open: b.open, high: b.high, low: b.low, close: b.close,
-        }))
-        try { mainSeriesRef.current.setData(mainData as AnyData) } catch { /* */ }
-      }
-    }
+    loadDataIntoSeries(mainSeriesRef.current, normMain, chartTypeRef.current)
   }, [compMode, compBars, bars]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (

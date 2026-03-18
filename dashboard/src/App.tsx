@@ -1,29 +1,31 @@
-import React, { useEffect } from 'react'
+import React, { Suspense, lazy, useEffect } from 'react'
 import Layout from '@/components/layout/Layout'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import Dashboard from '@/pages/Dashboard'
-import TradeBotPage from '@/pages/TradeBotPage'
-import MarketPage from '@/pages/MarketPage'
-import SimulationPage from '@/pages/SimulationPage'
-import ScreenerPage from '@/pages/ScreenerPage'
-import BacktestPage from '@/pages/BacktestPage'
-import AlertsPage from '@/pages/AlertsPage'
-import SettingsPage from '@/pages/SettingsPage'
-import StockProfilePage from '@/pages/StockProfilePage'
 import { useUIStore, useBotStore } from '@/store'
 import { fetchStatus, fetchAuthToken, setAuthToken } from '@/services/api'
 
-// ── Lazy pages (rules) ──────────────────────────────────────────────────────
+const TradeBotPage = lazy(() => import('@/pages/TradeBotPage'))
+const MarketPage = lazy(() => import('@/pages/MarketPage'))
+const MarketRotationPage = lazy(() => import('@/pages/MarketRotationPage'))
+const SimulationPage = lazy(() => import('@/pages/SimulationPage'))
+const ScreenerPage = lazy(() => import('@/pages/ScreenerPage'))
+const BacktestPage = lazy(() => import('@/pages/BacktestPage'))
+const AlertsPage = lazy(() => import('@/pages/AlertsPage'))
+const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
+const StockProfilePage = lazy(() => import('@/pages/StockProfilePage'))
+const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
+const RulesPage = lazy(() => import('@/pages/RulesPage'))
 
-function RulesPage() {
+function PageFallback() {
   return (
     <div className="flex items-center justify-center h-64">
-      <div className="glass rounded-2xl shadow-glass px-8 py-6 text-center">
-        <p className="gradient-text font-sans text-lg font-semibold tracking-wide">
-          Rules Engine
+      <div className="card rounded-lg shadow-card px-6 py-5 text-center">
+        <p className="text-gray-800 font-sans text-sm font-semibold tracking-wide">
+          Loading view
         </p>
-        <p className="text-terminal-ghost font-sans text-sm mt-1">
-          Coming soon
+        <p className="text-gray-500 font-sans text-xs mt-1">
+          Preparing market workspace...
         </p>
       </div>
     </div>
@@ -34,20 +36,25 @@ function RulesPage() {
 
 function PageSwitch() {
   const route = useUIStore((s) => s.activeRoute)
+  let page: React.ReactNode
 
   switch (route) {
-    case 'dashboard':  return <Dashboard />
-    case 'tradebot':   return <TradeBotPage />
-    case 'market':     return <MarketPage />
-    case 'screener':   return <ScreenerPage />
-    case 'stock':      return <StockProfilePage />
-    case 'simulation': return <SimulationPage />
-    case 'backtest':   return <BacktestPage />
-    case 'rules':      return <RulesPage />
-    case 'alerts':     return <AlertsPage />
-    case 'settings':   return <SettingsPage />
-    default:           return <Dashboard />
+    case 'dashboard':  page = <Dashboard />; break
+    case 'tradebot':   page = <TradeBotPage />; break
+    case 'market':     page = <MarketPage />; break
+    case 'rotation':   page = <MarketRotationPage />; break
+    case 'screener':   page = <ScreenerPage />; break
+    case 'stock':      page = <StockProfilePage />; break
+    case 'simulation': page = <SimulationPage />; break
+    case 'backtest':   page = <BacktestPage />; break
+    case 'rules':      page = <RulesPage />; break
+    case 'alerts':     page = <AlertsPage />; break
+    case 'analytics':  page = <AnalyticsPage />; break
+    case 'settings':   page = <SettingsPage />; break
+    default:           page = <Dashboard />
   }
+
+  return <Suspense fallback={<PageFallback />}>{page}</Suspense>
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────

@@ -2,7 +2,8 @@
  * WatchlistGrid — the scrollable grid of TickerCards at the top of Dashboard.
  *
  * Features:
- *  • Watchlist tabs + sort controls
+ *  • Watchlist header with label and settings icon
+ *  • Watchlist tabs with symbol count badge + indigo active state
  *  • Bulk symbol add: paste comma-separated or TradingView export format
  *  • Remove symbols by hovering a card and clicking ✕
  *  • Live prices via WS (handled in useMarketData hook)
@@ -53,6 +54,25 @@ const SORT_OPTIONS: { field: SortField; label: string }[] = [
   { field: 'symbol',     label: 'Symbol'  },
 ]
 
+// ── Settings icon (inline SVG, no external dep) ───────────────────────────────
+
+function IconSettings({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="8" cy="8" r="2.2" />
+      <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M2.93 2.93l1.06 1.06M12.01 12.01l1.06 1.06M2.93 13.07l1.06-1.06M12.01 3.99l1.06-1.06" />
+    </svg>
+  )
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function WatchlistGrid() {
@@ -70,11 +90,11 @@ export default function WatchlistGrid() {
     loading,
   } = useMarketStore()
 
-  const [showAdd, setShowAdd]     = useState(false)
-  const [addInput, setAddInput]   = useState('')
+  const [showAdd, setShowAdd]       = useState(false)
+  const [addInput, setAddInput]     = useState('')
   const [addLoading, setAddLoading] = useState(false)
   const [addFeedback, setFeedback]  = useState('')
-  const textareaRef               = useRef<HTMLTextAreaElement>(null)
+  const textareaRef                 = useRef<HTMLTextAreaElement>(null)
 
   const watchlist = watchlists.find((w) => w.id === activeWatchlist)
   const symbols   = watchlist?.symbols ?? []
@@ -143,144 +163,170 @@ export default function WatchlistGrid() {
   }
 
   return (
-    <div>
-      {/* ── Watchlist tabs + sort + add button ──────────────────────── */}
-      <div className="flex items-center gap-1 mb-3 overflow-x-auto pb-1 flex-wrap">
-        {watchlists.map((wl) => (
-          <button
-            key={wl.id}
-            onClick={() => setActiveWatchlist(wl.id)}
-            className={clsx(
-              'shrink-0 text-[11px] font-mono px-3 py-1 rounded-xl border transition-colors',
-              activeWatchlist === wl.id
-                ? 'border-indigo-500/30 bg-indigo-500/15 text-indigo-400'
-                : 'border-terminal-border text-terminal-dim hover:text-terminal-text hover:border-terminal-muted',
-            )}
-          >
-            {wl.name}
-          </button>
-        ))}
-
-        {/* Add symbols button */}
-        <button
-          onClick={openAdd}
-          title="Add symbols (paste from TradingView or type manually)"
-          className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded-xl border border-dashed border-terminal-border text-terminal-ghost hover:text-terminal-green hover:border-terminal-green/50 transition-colors"
-        >
-          + Add
-        </button>
-
-        {/* Sync pulse */}
-        <span className="ml-1 flex items-center gap-1 text-[10px] font-mono text-terminal-ghost">
-          <span className="w-1.5 h-1.5 rounded-full bg-terminal-green animate-pulse" />
-          LIVE
-        </span>
-
-        {/* Sort controls */}
-        <div className="ml-auto flex items-center gap-1">
-          <span className="text-[10px] font-mono text-terminal-ghost mr-1">Sort:</span>
-          {SORT_OPTIONS.map(({ field, label }) => (
-            <button
-              key={field}
-              onClick={() => handleSort(field)}
-              className={clsx(
-                'text-[10px] font-mono px-2 py-0.5 rounded-lg border transition-colors',
-                sortField === field
-                  ? 'border-indigo-500/30 text-indigo-400 bg-indigo-500/10'
-                  : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
-              )}
-            >
-              {label}
-              {sortField === field && (
-                <span className="ml-0.5">{sortDir === 'desc' ? '↓' : '↑'}</span>
-              )}
-            </button>
-          ))}
+    <div className="bg-white border border-[#E8E4DF] rounded-lg overflow-hidden">
+      {/* Watchlist header */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#E8E4DF]">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-mono font-semibold text-gray-900 uppercase tracking-wider">
+            Watchlist
+          </span>
+          <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
+            <span className="w-1 h-1 rounded-full bg-green-500" />
+            LIVE
+          </span>
         </div>
+        <button
+          title="Watchlist settings"
+          className="p-1 rounded text-gray-400 hover:text-gray-600 transition-colors"
+        >
+          <IconSettings className="w-3.5 h-3.5" />
+        </button>
       </div>
 
-      {/* ── Bulk add panel ───────────────────────────────────────────── */}
-      {showAdd && (
-        <div className="mb-3 glass rounded-2xl shadow-glass p-3 flex flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-mono text-terminal-text font-semibold">
-              Add Symbols
-            </span>
-            <button
-              onClick={() => { setShowAdd(false); setAddInput(''); setFeedback('') }}
-              className="text-[10px] font-mono text-terminal-ghost hover:text-terminal-red transition-colors"
-            >
-              ✕ Cancel
-            </button>
-          </div>
+      <div className="px-4 pt-3 pb-4">
+        {/* Watchlist tabs + sort + add button */}
+        <div className="flex items-center gap-1 mb-3 overflow-x-auto pb-1 flex-wrap">
+          {watchlists.map((wl) => {
+            const isActive = activeWatchlist === wl.id
+            const count    = wl.symbols?.length ?? 0
+            return (
+              <button
+                key={wl.id}
+                onClick={() => setActiveWatchlist(wl.id)}
+                className={clsx(
+                  'shrink-0 flex items-center gap-1.5',
+                  'text-[11px] font-mono px-2.5 py-1 rounded border transition-colors',
+                  isActive
+                    ? 'border-gray-900 bg-gray-900 text-white'
+                    : 'border-[#E8E4DF] text-gray-500 hover:text-gray-900 hover:border-gray-400',
+                )}
+              >
+                {wl.name}
+                <span
+                  className={clsx(
+                    'text-[9px] font-mono tabular-nums',
+                    isActive ? 'text-gray-300' : 'text-gray-400',
+                  )}
+                >
+                  {count}
+                </span>
+              </button>
+            )
+          })}
 
-          <p className="text-[10px] font-sans text-terminal-ghost leading-relaxed">
-            Paste comma-separated symbols or TradingView export (e.g.{' '}
-            <span className="text-terminal-dim font-mono">AAPL, TSLA</span> or{' '}
-            <span className="text-terminal-dim font-mono">NASDAQ:AAPL</span>).
-            Crypto: <span className="text-terminal-dim font-mono">BTCUSDT → BTC-USD</span> auto-converted.
-          </p>
+          <button
+            onClick={openAdd}
+            title="Add symbols"
+            className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-dashed border-[#E8E4DF] text-gray-400 hover:text-gray-900 hover:border-gray-400 transition-colors"
+          >
+            + Add
+          </button>
 
-          <textarea
-            ref={textareaRef}
-            value={addInput}
-            onChange={(e) => { setAddInput(e.target.value); setFeedback('') }}
-            placeholder={'AAPL, TSLA, NVDA\nNASDAQ:MSFT\nBINANCE:BTCUSDT'}
-            rows={4}
-            className="w-full text-xs font-sans bg-terminal-bg border border-terminal-border rounded-xl px-3 py-2 text-terminal-text focus:border-indigo-500/50 focus:outline-none resize-none"
-          />
-
-          {addFeedback && (
-            <span className="text-[10px] font-sans text-terminal-ghost">{addFeedback}</span>
-          )}
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleBulkAdd}
-              disabled={addLoading || parsedCount === 0}
-              className="text-xs font-mono px-4 py-1.5 rounded-xl bg-terminal-green/20 border border-terminal-green/40 text-terminal-green hover:bg-terminal-green/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {addLoading
-                ? 'Loading…'
-                : parsedCount > 0
-                  ? `Add ${parsedCount} symbol${parsedCount !== 1 ? 's' : ''}`
-                  : 'Add'}
-            </button>
-            {parsedCount > 0 && (
-              <span className="text-[10px] font-sans text-terminal-ghost">
-                {parseSymbols(addInput)
-                  .filter((s) => !symbols.includes(s))
-                  .slice(0, 5)
-                  .join(', ')}
-                {parsedCount > 5 ? ` +${parsedCount - 5} more` : ''}
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Card grid ───────────────────────────────────────────────── */}
-      {loading && sorted.length === 0 ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7 gap-3">
-          {symbols.map((sym) => (
-            <SkeletonCard key={sym} />
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7 gap-3">
-          {sorted.map((q) => (
-            <RemovableCard key={q.symbol} symbol={q.symbol} onRemove={handleRemove}>
-              <TickerCard quote={q} />
-            </RemovableCard>
-          ))}
-          {/* Placeholders for symbols without quotes yet */}
-          {symbols
-            .filter((s) => !quotes[s])
-            .map((s) => (
-              <SkeletonCard key={s} label={s} />
+          <div className="ml-auto flex items-center gap-1">
+            <span className="text-[10px] font-mono text-gray-400 mr-1">Sort:</span>
+            {SORT_OPTIONS.map(({ field, label }) => (
+              <button
+                key={field}
+                onClick={() => handleSort(field)}
+                className={clsx(
+                  'text-[10px] font-mono px-2 py-0.5 rounded border transition-colors',
+                  sortField === field
+                    ? 'border-gray-900 text-gray-900 bg-gray-50'
+                    : 'border-[#E8E4DF] text-gray-400 hover:text-gray-600 hover:border-gray-400',
+                )}
+              >
+                {label}
+                {sortField === field && (
+                  <span className="ml-0.5">{sortDir === 'desc' ? '↓' : '↑'}</span>
+                )}
+              </button>
             ))}
+          </div>
         </div>
-      )}
+
+        {/* ── Bulk add panel ───────────────────────────────────────── */}
+        {showAdd && (
+          <div className="mb-3 rounded-xl border border-gray-200 bg-white/60 shadow-card p-3 flex flex-col gap-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-mono text-gray-800 font-semibold">
+                Add Symbols
+              </span>
+              <button
+                onClick={() => { setShowAdd(false); setAddInput(''); setFeedback('') }}
+                className="text-[10px] font-mono text-gray-400 hover:text-red-600 transition-colors"
+              >
+                ✕ Cancel
+              </button>
+            </div>
+
+            <p className="text-[10px] font-sans text-gray-400 leading-relaxed">
+              Paste comma-separated symbols or TradingView export (e.g.{' '}
+              <span className="text-gray-500 font-mono">AAPL, TSLA</span> or{' '}
+              <span className="text-gray-500 font-mono">NASDAQ:AAPL</span>).
+              Crypto: <span className="text-gray-500 font-mono">BTCUSDT → BTC-USD</span> auto-converted.
+            </p>
+
+            <textarea
+              ref={textareaRef}
+              value={addInput}
+              onChange={(e) => { setAddInput(e.target.value); setFeedback('') }}
+              placeholder={'AAPL, TSLA, NVDA\nNASDAQ:MSFT\nBINANCE:BTCUSDT'}
+              rows={4}
+              className="w-full text-xs font-sans bg-[#FAF8F5] border border-gray-200 rounded-xl px-3 py-2 text-gray-800 focus:border-indigo-600/50 focus:outline-none resize-none"
+            />
+
+            {addFeedback && (
+              <span className="text-[10px] font-sans text-gray-400">{addFeedback}</span>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleBulkAdd}
+                disabled={addLoading || parsedCount === 0}
+                className="text-xs font-mono px-4 py-1.5 rounded-xl bg-green-50 border border-green-600/40 text-green-600 hover:bg-green-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {addLoading
+                  ? 'Loading…'
+                  : parsedCount > 0
+                    ? `Add ${parsedCount} symbol${parsedCount !== 1 ? 's' : ''}`
+                    : 'Add'}
+              </button>
+              {parsedCount > 0 && (
+                <span className="text-[10px] font-sans text-gray-400">
+                  {parseSymbols(addInput)
+                    .filter((s) => !symbols.includes(s))
+                    .slice(0, 5)
+                    .join(', ')}
+                  {parsedCount > 5 ? ` +${parsedCount - 5} more` : ''}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Card grid ───────────────────────────────────────────── */}
+        {loading && sorted.length === 0 ? (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7 gap-3">
+            {symbols.map((sym) => (
+              <SkeletonCard key={sym} />
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-7 gap-3">
+            {sorted.map((q) => (
+              <RemovableCard key={q.symbol} symbol={q.symbol} onRemove={handleRemove}>
+                <TickerCard quote={q} />
+              </RemovableCard>
+            ))}
+            {/* Placeholders for symbols without quotes yet */}
+            {symbols
+              .filter((s) => !quotes[s])
+              .map((s) => (
+                <SkeletonCard key={s} label={s} />
+              ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -308,7 +354,7 @@ function RemovableCard({
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(symbol) }}
           title={`Remove ${symbol}`}
-          className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-terminal-bg/80 border border-terminal-border text-terminal-ghost hover:text-terminal-red hover:border-terminal-red/30 text-[9px] flex items-center justify-center transition-colors z-10"
+          className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-[#FAF8F5]/80 border border-gray-200 text-gray-400 hover:text-red-600 hover:border-red-300 text-[9px] flex items-center justify-center transition-colors z-10"
         >
           ✕
         </button>
@@ -321,20 +367,20 @@ function RemovableCard({
 
 function SkeletonCard({ label }: { label?: string }) {
   return (
-    <div className="glass rounded-2xl p-3 animate-pulse">
+    <div className="card rounded-2xl p-3 animate-pulse border-l-2 border-l-gray-100 border-t border-r border-b border-gray-200">
       <div className="flex justify-between mb-2">
-        <div className="h-3 w-16 bg-terminal-muted rounded" />
-        <div className="h-3 w-12 bg-terminal-muted rounded" />
+        <div className="h-3 w-16 bg-gray-100 rounded" />
+        <div className="h-3 w-12 bg-gray-100 rounded" />
       </div>
-      <div className="h-6 w-24 bg-terminal-muted rounded mb-1" />
-      <div className="h-2 w-16 bg-terminal-muted rounded mb-3" />
-      <div className="h-1 w-full bg-terminal-muted rounded mb-2" />
+      <div className="h-6 w-24 bg-gray-100 rounded mb-1" />
+      <div className="h-2 w-16 bg-gray-100 rounded mb-3" />
+      <div className="h-1 w-full bg-gray-100 rounded mb-2" />
       <div className="flex gap-4">
-        <div className="h-2 w-12 bg-terminal-muted rounded" />
-        <div className="h-2 w-12 bg-terminal-muted rounded" />
+        <div className="h-2 w-12 bg-gray-100 rounded" />
+        <div className="h-2 w-12 bg-gray-100 rounded" />
       </div>
       {label && (
-        <div className="mt-1 text-[10px] font-mono text-terminal-ghost">{label}</div>
+        <div className="mt-1 text-[10px] font-mono text-gray-400">{label}</div>
       )}
     </div>
   )

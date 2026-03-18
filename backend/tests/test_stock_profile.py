@@ -65,6 +65,49 @@ MOCK_INFO = {
     "exDividendDate": 1699574400,
 }
 
+MOCK_RECOMMENDATION_SUMMARY = {
+    "period": "0m",
+    "strong_buy": 8,
+    "buy": 12,
+    "hold": 4,
+    "sell": 1,
+    "strong_sell": 0,
+}
+
+MOCK_ANALYST_PRICE_TARGETS = {
+    "current": 185.42,
+    "high": 250.00,
+    "low": 180.00,
+    "mean": 210.50,
+    "median": 212.00,
+}
+
+MOCK_MAJOR_HOLDERS = {
+    "held_pct_institutions": 0.6118,
+    "held_pct_insiders": 0.0007,
+    "total_institutional_holders": 4825,
+}
+
+MOCK_INSTITUTIONAL_HOLDERS = [
+    {
+        "name": "Vanguard Group, Inc.",
+        "shares": 1312312312,
+        "pct": 0.0832,
+        "value": 242123123123.0,
+        "date_reported": "2025-12-31",
+    }
+]
+
+MOCK_FUND_HOLDERS = [
+    {
+        "name": "Vanguard Total Stock Market Index Fund",
+        "shares": 401231231,
+        "pct": 0.0254,
+        "value": 74123123123.0,
+        "date_reported": "2025-12-31",
+    }
+]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -425,6 +468,157 @@ class TestGetNarrative:
 
         assert "revenue momentum" in result["outlook"].lower()
 
+    @pytest.mark.asyncio
+    async def test_narrative_uses_real_recommendation_summary_when_info_mean_missing(self):
+        _clear_profile_cache()
+        info = {**MOCK_INFO, "recommendationMean": None}
+        summary = {
+            "period": "0m",
+            "strong_buy": 0,
+            "buy": 1,
+            "hold": 3,
+            "sell": 7,
+            "strong_sell": 5,
+        }
+        with (
+            patch("stock_profile_service._fetch_info", return_value=info),
+            patch("stock_profile_service._fetch_recommendation_summary", return_value=summary),
+        ):
+            from stock_profile_service import StockProfileService
+            result = await StockProfileService().get_narrative("AAPL")
+
+        assert "weak analyst sentiment" in " ".join(result["risks"]).lower()
+
+
+class TestGetAnalyst:
+    @pytest.mark.asyncio
+    async def test_prefers_real_summary_and_price_target_tables(self):
+        _clear_profile_cache()
+        info = {
+            **MOCK_INFO,
+            "recommendationMean": 4.7,
+            "recommendationKey": "sell",
+            "targetMeanPrice": 150.0,
+            "targetHighPrice": 160.0,
+            "targetLowPrice": 120.0,
+            "targetMedianPrice": 145.0,
+            "numberOfAnalystOpinions": 3,
+        }
+        with (
+            patch("stock_profile_service._fetch_info", return_value=info),
+            patch("stock_profile_service._fetch_recommendation_summary", return_value=MOCK_RECOMMENDATION_SUMMARY),
+            patch("stock_profile_service._fetch_analyst_price_targets", return_value=MOCK_ANALYST_PRICE_TARGETS),
+        ):
+            from stock_profile_service import StockProfileService
+            result = await StockProfileService().get_analyst("AAPL")
+
+        assert result["recommendation_period"] == "0m"
+        assert result["strong_buy"] == 8
+        assert result["buy"] == 12
+        assert result["hold"] == 4
+        assert result["sell"] == 1
+        assert result["strong_sell"] == 0
+        assert result["num_analyst_opinions"] == 25
+        assert result["recommendation_mean"] == pytest.approx(1.92)
+        assert result["recommendation_key"] == "buy"
+        assert result["current_price"] == pytest.approx(185.42)
+        assert result["target_mean_price"] == pytest.approx(210.50)
+        assert result["target_high_price"] == pytest.approx(250.00)
+        assert result["target_low_price"] == pytest.approx(180.00)
+        assert result["target_median_price"] == pytest.approx(212.00)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_info_when_analyst_tables_are_missing(self):
+        _clear_profile_cache()
+        with (
+            patch("stock_profile_service._fetch_info", return_value=MOCK_INFO),
+            patch("stock_profile_service._fetch_recommendation_summary", return_value=None),
+            patch("stock_profile_service._fetch_analyst_price_targets", return_value={}),
+        ):
+            from stock_profile_service import StockProfileService
+            result = await StockProfileService().get_analyst("AAPL")
+
+        assert result["recommendation_key"] == "buy"
+        assert result["recommendation_mean"] == pytest.approx(2.0)
+        assert result["recommendation_period"] is None
+        assert result["strong_buy"] is None
+        assert result["current_price"] is None
+        assert result["target_mean_price"] == pytest.approx(210.50)
+        assert result["num_analyst_opinions"] == 42
+
+
+class TestGetAnalystDetail:
+    @pytest.mark.asyncio
+    async def test_includes_latest_recommendation_snapshot_and_target_revisions(self):
+        _clear_profile_cache()
+        upgrades = [{
+            "date": "2026-03-03",
+            "firm": "Wedbush",
+            "to_grade": "Outperform",
+            "from_grade": "Outperform",
+            "action": "main",
+            "price_target_action": "Raises",
+            "price_target": 300.0,
+            "prior_price_target": 230.0,
+        }]
+        trend = [
+            {"period": "-1m", "strong_buy": 7, "buy": 11, "hold": 4, "sell": 1, "strong_sell": 0},
+            {"period": "0m", "strong_buy": 8, "buy": 12, "hold": 4, "sell": 1, "strong_sell": 0},
+        ]
+        with (
+            patch("stock_profile_service._fetch_upgrades_downgrades", return_value=upgrades),
+            patch("stock_profile_service._fetch_recommendation_trend", return_value=trend),
+        ):
+            from stock_profile_service import StockProfileService
+            result = await StockProfileService().get_analyst_detail("NVDA")
+
+        assert result["latest_recommendation"]["period"] == "0m"
+        assert result["latest_recommendation"]["buy"] == 12
+        assert result["upgrades_downgrades"][0]["price_target_action"] == "Raises"
+        assert result["upgrades_downgrades"][0]["price_target"] == pytest.approx(300.0)
+        assert result["upgrades_downgrades"][0]["prior_price_target"] == pytest.approx(230.0)
+
+
+class TestGetOwnership:
+    @pytest.mark.asyncio
+    async def test_preserves_holder_metadata_and_fund_holders(self):
+        _clear_profile_cache()
+        with (
+            patch("stock_profile_service._fetch_info", return_value=MOCK_INFO),
+            patch("stock_profile_service._fetch_institutional_holders", return_value=MOCK_INSTITUTIONAL_HOLDERS),
+            patch("stock_profile_service._fetch_mutual_fund_holders", return_value=MOCK_FUND_HOLDERS),
+            patch("stock_profile_service._fetch_major_holders_summary", return_value=MOCK_MAJOR_HOLDERS),
+        ):
+            from stock_profile_service import StockProfileService
+            result = await StockProfileService().get_ownership("NVDA")
+
+        assert result["top_holders"][0]["value"] == pytest.approx(242123123123.0)
+        assert result["top_holders"][0]["date_reported"] == "2025-12-31"
+        assert result["mutual_fund_holders"][0]["name"] == "Vanguard Total Stock Market Index Fund"
+        assert result["mutual_fund_holders"][0]["date_reported"] == "2025-12-31"
+        assert result["total_institutional_holders"] == 4825
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_major_holders_when_info_ownership_is_missing(self):
+        _clear_profile_cache()
+        sparse_info = {
+            "heldPercentInstitutions": None,
+            "heldPercentInsiders": None,
+            "institutionCount": None,
+        }
+        with (
+            patch("stock_profile_service._fetch_info", return_value=sparse_info),
+            patch("stock_profile_service._fetch_institutional_holders", return_value=[]),
+            patch("stock_profile_service._fetch_mutual_fund_holders", return_value=[]),
+            patch("stock_profile_service._fetch_major_holders_summary", return_value=MOCK_MAJOR_HOLDERS),
+        ):
+            from stock_profile_service import StockProfileService
+            result = await StockProfileService().get_ownership("NVDA")
+
+        assert result["held_pct_institutions"] == pytest.approx(0.6118)
+        assert result["held_pct_insiders"] == pytest.approx(0.0007)
+        assert result["total_institutional_holders"] == 4825
+
 
 # ---------------------------------------------------------------------------
 # 4. Cache hit/miss
@@ -531,13 +725,38 @@ def _mock_service(**overrides):
     }
     analyst_data = {
         "recommendation_mean": 2.0, "recommendation_key": "buy",
+        "recommendation_period": "0m",
+        "strong_buy": 8, "buy": 12, "hold": 4, "sell": 1, "strong_sell": 0,
+        "current_price": 185.42,
         "target_mean_price": 210.50, "target_high_price": 250.00,
         "target_low_price": 180.00, "target_median_price": 212.00,
         "num_analyst_opinions": 42, "fetched_at": 1700000000.0,
     }
+    analyst_detail_data = {
+        "upgrades_downgrades": [{
+            "date": "2026-03-03", "firm": "Wedbush", "to_grade": "Outperform",
+            "from_grade": "Outperform", "action": "main",
+            "price_target_action": "Raises", "price_target": 300.0,
+            "prior_price_target": 230.0,
+        }],
+        "recommendation_trend": [{
+            "period": "0m", "strong_buy": 8, "buy": 12, "hold": 4, "sell": 1, "strong_sell": 0,
+        }],
+        "latest_recommendation": {
+            "period": "0m", "strong_buy": 8, "buy": 12, "hold": 4, "sell": 1, "strong_sell": 0,
+        },
+        "fetched_at": 1700000000.0,
+    }
+    rating_scorecard_data = {
+        "overall_score": 71.5, "overall_grade": "B",
+        "categories": [], "fetched_at": 1700000000.0,
+    }
     ownership_data = {
         "held_pct_institutions": 0.623, "held_pct_insiders": 0.0007,
-        "top_holders": None, "fetched_at": 1700000000.0,
+        "top_holders": MOCK_INSTITUTIONAL_HOLDERS,
+        "mutual_fund_holders": MOCK_FUND_HOLDERS,
+        "total_institutional_holders": 4825,
+        "fetched_at": 1700000000.0,
     }
     events_data = {
         "next_earnings_date": "2024-01-25", "ex_dividend_date": "2023-11-10",
@@ -553,7 +772,8 @@ def _mock_service(**overrides):
         "overview": overview_data, "key_stats": key_stats_data,
         "financials": financials_data, "analyst": analyst_data,
         "ownership": ownership_data, "events": events_data,
-        "narrative": narrative_data,
+        "narrative": narrative_data, "analyst_detail": analyst_detail_data,
+        "rating_scorecard": rating_scorecard_data,
     }
 
     svc.get_overview = AsyncMock(return_value={**overview_data, **overrides})
@@ -563,6 +783,8 @@ def _mock_service(**overrides):
     svc.get_ownership = AsyncMock(return_value=ownership_data)
     svc.get_events = AsyncMock(return_value=events_data)
     svc.get_narrative = AsyncMock(return_value=narrative_data)
+    svc.get_analyst_detail = AsyncMock(return_value=analyst_detail_data)
+    svc.get_rating_scorecard = AsyncMock(return_value=rating_scorecard_data)
     svc.get_all = AsyncMock(return_value=all_data)
     return svc
 
@@ -633,6 +855,18 @@ class TestStockProfileAPI:
         body = resp.json()
         assert body["recommendation_key"] == "buy"
         assert body["num_analyst_opinions"] == 42
+        assert body["strong_buy"] == 8
+        assert body["recommendation_period"] == "0m"
+
+    def test_analyst_detail_200(self):
+        resp = self.client.get("/api/stock/AAPL/analyst-detail")
+        assert resp.status_code == 200
+
+    def test_analyst_detail_contains_recommendation_snapshot(self):
+        resp = self.client.get("/api/stock/AAPL/analyst-detail")
+        body = resp.json()
+        assert body["latest_recommendation"]["period"] == "0m"
+        assert body["upgrades_downgrades"][0]["price_target_action"] == "Raises"
 
     # --- /ownership ----------------------------------------------------------
 
@@ -644,6 +878,13 @@ class TestStockProfileAPI:
         resp = self.client.get("/api/stock/AAPL/ownership")
         body = resp.json()
         assert body["held_pct_institutions"] == pytest.approx(0.623)
+
+    def test_ownership_contains_holder_and_fund_metadata(self):
+        resp = self.client.get("/api/stock/AAPL/ownership")
+        body = resp.json()
+        assert body["top_holders"][0]["date_reported"] == "2025-12-31"
+        assert body["mutual_fund_holders"][0]["value"] == pytest.approx(74123123123.0)
+        assert body["total_institutional_holders"] == 4825
 
     # --- /events -------------------------------------------------------------
 

@@ -27,22 +27,22 @@ function PositionRow({ pos }: RowProps) {
   const up = pnl >= 0
 
   return (
-    <tr className="border-b border-terminal-border hover:bg-terminal-muted/30 transition-colors">
-      <td className="py-2 px-3 font-mono text-sm text-terminal-text font-semibold">{pos.symbol}</td>
-      <td className="py-2 px-3 font-mono text-sm text-terminal-dim tabular-nums text-right">{pos.qty}</td>
-      <td className="py-2 px-3 font-mono text-sm text-terminal-dim tabular-nums text-right">
+    <tr className="border-b border-gray-200 hover:bg-gray-100/30 transition-colors">
+      <td className="py-2 px-3 font-mono text-sm text-gray-800 font-semibold">{pos.symbol}</td>
+      <td className="py-2 px-3 font-mono text-sm text-gray-500 tabular-nums text-right">{pos.qty}</td>
+      <td className="py-2 px-3 font-mono text-sm text-gray-500 tabular-nums text-right">
         {fmtUSD(pos.avg_cost)}
       </td>
-      <td className="py-2 px-3 font-mono text-sm text-terminal-text tabular-nums text-right">
+      <td className="py-2 px-3 font-mono text-sm text-gray-800 tabular-nums text-right">
         {fmtUSD(price)}
       </td>
       <td className="py-2 px-3 font-mono text-sm tabular-nums text-right">
-        <span className={up ? 'text-terminal-green' : 'text-terminal-red'}>
+        <span className={up ? 'text-green-600' : 'text-red-600'}>
           {fmtUSD(value)}
         </span>
       </td>
       <td className="py-2 px-3 font-mono text-sm tabular-nums text-right">
-        <div className={clsx('flex flex-col items-end', up ? 'text-terminal-green' : 'text-terminal-red')}>
+        <div className={clsx('flex flex-col items-end', up ? 'text-green-600' : 'text-red-600')}>
           <span>{up ? '+' : ''}{fmtUSD(pnl)}</span>
           <span className="text-[10px] opacity-80">
             {up ? '+' : ''}{pnlPct.toFixed(2)}%
@@ -60,7 +60,7 @@ export default function PositionsTable() {
     return (
       <div className="animate-pulse space-y-2">
         {[...Array(3)].map((_, i) => (
-          <div key={i} className="h-10 bg-terminal-muted rounded" />
+          <div key={i} className="h-10 bg-gray-100 rounded" />
         ))}
       </div>
     )
@@ -68,7 +68,7 @@ export default function PositionsTable() {
 
   if (positions.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-terminal-ghost">
+      <div className="flex flex-col items-center justify-center py-12 text-gray-400">
         <svg viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 mb-2 opacity-30">
           <path d="M11.8 10.9c-2.27-.59-3-1.2-3-2.15 0-1.09 1.01-1.85 2.7-1.85 1.78 0 2.44.85 2.5 2.1h2.21c-.07-1.72-1.12-3.3-3.21-3.81V3h-3v2.16c-1.94.42-3.5 1.68-3.5 3.61 0 2.31 1.91 3.46 4.7 4.13 2.5.6 3 1.48 3 2.41 0 .69-.49 1.79-2.7 1.79-2.06 0-2.87-.92-2.98-2.1h-2.2c.12 2.19 1.76 3.42 3.68 3.83V21h3v-2.15c1.95-.37 3.5-1.5 3.5-3.55 0-2.84-2.43-3.81-4.7-4.4z" />
         </svg>
@@ -81,11 +81,11 @@ export default function PositionsTable() {
     <div className="overflow-x-auto">
       <table className="w-full min-w-[560px]">
         <thead>
-          <tr className="border-b border-terminal-border">
+          <tr className="border-b border-gray-200">
             {['Symbol', 'Qty', 'Avg Cost', 'Mkt Price', 'Value', 'Unrealized P&L'].map((col) => (
               <th
                 key={col}
-                className="py-2 px-3 text-[10px] font-mono uppercase tracking-widest text-terminal-ghost font-normal text-right first:text-left"
+                className="py-2 px-3 text-[10px] font-mono uppercase tracking-widest text-gray-400 font-normal text-right first:text-left"
               >
                 {col}
               </th>
@@ -98,18 +98,18 @@ export default function PositionsTable() {
           ))}
         </tbody>
         <tfoot>
-          <tr className="border-t border-terminal-muted">
-            <td colSpan={4} className="py-2 px-3 text-[10px] font-mono text-terminal-ghost">
+          <tr className="border-t border-gray-200">
+            <td colSpan={4} className="py-2 px-3 text-[10px] font-mono text-gray-400">
               TOTAL
             </td>
-            <td className="py-2 px-3 font-mono text-sm text-terminal-text tabular-nums text-right">
+            <td className="py-2 px-3 font-mono text-sm text-gray-800 tabular-nums text-right">
               {fmtUSD(positions.reduce((s, p) => s + (isSimPos(p) ? p.market_value : p.market_value), 0))}
             </td>
             <td className="py-2 px-3 font-mono text-sm tabular-nums text-right">
               {(() => {
                 const total = positions.reduce((s, p) => s + p.unrealized_pnl, 0)
                 return (
-                  <span className={total >= 0 ? 'text-terminal-green' : 'text-terminal-red'}>
+                  <span className={total >= 0 ? 'text-green-600' : 'text-red-600'}>
                     {total >= 0 ? '+' : ''}{fmtUSD(total)}
                   </span>
                 )

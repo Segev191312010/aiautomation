@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useStockProfileStore, useMarketStore } from '@/store'
 import { useStockProfile } from '@/hooks/useStockProfile'
 import { useToast } from '@/components/ui/ToastProvider'
@@ -49,6 +49,10 @@ export default function StockProfilePage() {
 
   const [searchInput, setSearch] = useState(symbol)
 
+  useEffect(() => {
+    setSearch(symbol)
+  }, [symbol])
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault()
     const sym = searchInput.trim().toUpperCase()
@@ -61,56 +65,69 @@ export default function StockProfilePage() {
 
   return (
     <div className="flex flex-col gap-4 h-full overflow-y-auto">
-      {/* Search bar — wider with indigo button */}
-      <div className="flex items-center gap-4">
-        <form onSubmit={handleSearch} className="flex items-center gap-0 flex-1 max-w-lg">
-          <input
-            value={searchInput}
-            onChange={(e) => setSearch(e.target.value.toUpperCase())}
-            placeholder="Enter ticker symbol..."
-            className="flex-1 text-sm font-mono bg-terminal-input border border-terminal-border rounded-l-xl px-4 py-2.5 text-terminal-text placeholder:text-terminal-ghost focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500/30 transition-colors"
-          />
-          <button
-            type="submit"
-            className="text-sm font-sans font-semibold px-6 py-2.5 rounded-r-xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 border border-indigo-500 text-white transition-colors shrink-0"
-          >
-            Search
-          </button>
-        </form>
-        <span className="text-xs font-sans text-terminal-dim hidden sm:block">Stock Intelligence</span>
-        {loading && (
-          <span className="text-xs font-sans text-terminal-amber animate-pulse ml-auto">
-            Loading...
-          </span>
-        )}
-      </div>
+      <section className="card rounded-lg p-5 shadow-card">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-gray-400">Stock Analysis</div>
+            <h1 className="mt-1 text-3xl font-sans font-semibold tracking-tight text-gray-900">
+              {overview?.symbol ?? symbol}
+            </h1>
+            <p className="mt-2 text-sm font-sans text-gray-600">
+              Fundamentals-first company profile with statements, narrative context, analyst opinion, catalysts, and ownership.
+            </p>
+          </div>
 
-      {/* Sticky section nav */}
+          <div className="flex flex-col gap-3 lg:min-w-[420px]">
+            <form onSubmit={handleSearch} className="flex items-center gap-0">
+              <input
+                value={searchInput}
+                onChange={(e) => setSearch(e.target.value.toUpperCase())}
+                placeholder="Enter ticker symbol..."
+                className="flex-1 text-sm font-mono bg-white border border-gray-200 rounded-l-lg px-4 py-2.5 text-gray-800 placeholder:text-gray-400 focus:border-gray-400 focus:outline-none transition-colors"
+              />
+              <button
+                type="submit"
+                className="text-sm font-sans font-semibold px-5 py-2.5 rounded-r-lg bg-gray-900 hover:bg-gray-800 border border-gray-900 text-white transition-colors shrink-0"
+              >
+                Search
+              </button>
+            </form>
+
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+                {overview?.exchange ?? 'Profile'}
+              </span>
+              {overview?.sector && (
+                <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+                  {overview.sector}
+                </span>
+              )}
+              {loading && (
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-amber-700">
+                  Loading
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       <SectionNav />
 
-      {/* Error banner */}
       {error && (
-        <div className="rounded-xl border border-terminal-red/40 bg-terminal-red/10 px-4 py-2.5 text-[11px] font-sans text-terminal-red">
+        <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-2.5 text-[11px] font-sans text-red-600">
           {error}
         </div>
       )}
 
-      {/* 1. Hero */}
       <ErrorBoundary>
-        <HeroModule data={overview} loading={loading} />
+        <HeroModule data={overview} loading={loading} fiftyTwoWeekHigh={keyStats?.fifty_two_week_high} fiftyTwoWeekLow={keyStats?.fifty_two_week_low} />
       </ErrorBoundary>
 
-      {/* 2. Key stats strip */}
       <ErrorBoundary>
-        <KeyStatsStrip data={keyStats} companyInfo={companyInfo} loading={loading} />
+        <KeyStatsStrip data={keyStats} companyInfo={companyInfo} loading={loading} currentPrice={overview?.price} />
       </ErrorBoundary>
 
-      {/* 3. Rating scorecard */}
-      <ErrorBoundary>
-        <RatingScorecardModule data={ratingScorecard} loading={loading} />
-      </ErrorBoundary>
-
-      {/* 4. Financial statements (falls back to financial health) */}
       <ErrorBoundary>
         {financialStatements != null ? (
           <FinancialStatementsModule data={financialStatements} loading={loading} />
@@ -119,7 +136,6 @@ export default function StockProfilePage() {
         )}
       </ErrorBoundary>
 
-      {/* 5. Company overview */}
       <ErrorBoundary>
         <CompanyOverviewModule
           data={companyInfo}
@@ -129,39 +145,37 @@ export default function StockProfilePage() {
         />
       </ErrorBoundary>
 
-      {/* 6. Stock splits */}
       <ErrorBoundary>
-        <StockSplitsModule data={stockSplits} loading={loading} />
+        <NarrativeModule data={narrative} loading={loading} />
       </ErrorBoundary>
 
-      {/* 7. Analyst sentiment */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ErrorBoundary>
+          <EventsModule data={events} earningsDetail={earningsDetail} loading={loading} />
+        </ErrorBoundary>
+        <ErrorBoundary>
+          <StockSplitsModule data={stockSplits} loading={loading} />
+        </ErrorBoundary>
+      </div>
+
+      <ErrorBoundary>
+        <RatingScorecardModule data={ratingScorecard} loading={loading} />
+      </ErrorBoundary>
+
       <ErrorBoundary>
         <AnalystSentimentModule data={analyst} loading={loading} />
       </ErrorBoundary>
 
-      {/* 8. Price targets */}
-      <ErrorBoundary>
-        <PriceTargetsModule analyst={analyst} overview={overview} />
-      </ErrorBoundary>
-
-      {/* 9. Analyst detail */}
       <ErrorBoundary>
         <AnalystDetailModule data={analystDetail} loading={loading} />
       </ErrorBoundary>
 
-      {/* 10. Ownership + Events side by side */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <ErrorBoundary>
-          <OwnershipModule data={ownership} loading={loading} />
-        </ErrorBoundary>
-        <ErrorBoundary>
-          <EventsModule data={events} loading={loading} />
-        </ErrorBoundary>
-      </div>
-
-      {/* 11. Narrative */}
       <ErrorBoundary>
-        <NarrativeModule data={narrative} loading={loading} />
+        <PriceTargetsModule analyst={analyst} overview={overview} loading={loading} />
+      </ErrorBoundary>
+
+      <ErrorBoundary>
+        <OwnershipModule data={ownership} loading={loading} />
       </ErrorBoundary>
     </div>
   )

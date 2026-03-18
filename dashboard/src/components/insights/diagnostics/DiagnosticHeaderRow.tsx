@@ -27,7 +27,7 @@ export default function DiagnosticHeaderRow({
   const conflictRun = running && Boolean(refreshRun?.locked_by)
 
   return (
-    <div className="flex flex-wrap items-center gap-2 glass rounded-2xl shadow-glass p-3">
+    <div className="flex flex-wrap items-center gap-2 card rounded-2xl shadow-card p-3">
       <div className="flex items-center gap-1">
         {[
           { label: '90D', value: 90 as const },
@@ -39,8 +39,8 @@ export default function DiagnosticHeaderRow({
             onClick={() => onSetLookback(item.value)}
             className={`text-[10px] font-sans px-2 py-1 rounded-xl border transition-colors ${
               lookbackDays === item.value
-                ? 'border-indigo-500/40 text-indigo-400 bg-indigo-500/10'
-                : 'border-white/[0.06] text-terminal-ghost hover:text-terminal-text'
+                ? 'border-indigo-50 text-indigo-600 bg-indigo-50'
+                : 'border-gray-200 text-gray-400 hover:text-gray-800'
             }`}
           >
             {item.label}
@@ -51,12 +51,12 @@ export default function DiagnosticHeaderRow({
       <button
         onClick={onRefresh}
         disabled={refreshing}
-        className="text-[10px] font-sans px-2.5 py-1 rounded-xl border border-terminal-green/40 text-terminal-green bg-terminal-green/10 hover:bg-terminal-green/20 disabled:opacity-50"
+        className="text-[10px] font-sans px-2.5 py-1 rounded-xl border border-green-300/40 text-green-600 bg-green-50 hover:bg-green-50/80 disabled:opacity-50"
       >
         {conflictRun ? 'Refresh already running' : refreshing ? 'Refreshing...' : 'Manual Refresh'}
       </button>
 
-      <div className="ml-auto text-[10px] font-mono text-terminal-ghost flex items-center gap-3">
+      <div className="ml-auto text-[10px] font-mono text-gray-400 flex items-center gap-3">
         <span>Last run: {fmtTs(lastRunTs)}</span>
         {refreshRun && (
           <span>

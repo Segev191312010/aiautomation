@@ -13,17 +13,17 @@ export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0] as const
 
 export const FIB_LABELS = ['0%', '23.6%', '38.2%', '50%', '61.8%', '78.6%', '100%'] as const
 
-export const DEFAULT_DRAWING_COLOR = '#4f91ff'
+export const DEFAULT_DRAWING_COLOR = '#4F46E5'
 
 export const DRAWING_COLORS = [
-  '#4f91ff',  // blue  (terminal-blue)
-  '#00e07a',  // green (terminal-green)
-  '#ff3d5a',  // red   (terminal-red)
-  '#f59e0b',  // amber
-  '#a78bfa',  // purple
-  '#38bdf8',  // cyan
-  '#f472b6',  // pink
-  '#dce8f5',  // white (terminal-text)
+  '#4F46E5',
+  '#16A34A',
+  '#DC2626',
+  '#D97706',
+  '#0F172A',
+  '#0891B2',
+  '#BE185D',
+  '#6B7280',
 ] as const
 
 export const HIT_TOLERANCE = 8 // pixels

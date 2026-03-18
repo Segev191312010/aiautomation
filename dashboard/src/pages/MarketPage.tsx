@@ -18,8 +18,8 @@ import TickerCard from '@/components/ticker/TickerCard'
 import Skeleton from '@/components/ui/Skeleton'
 import AlertForm from '@/components/alerts/AlertForm'
 import { useToast } from '@/components/ui/ToastProvider'
-import { useMarketStore, useDrawingStore, useBotStore } from '@/store'
-import { fetchYahooBars, fetchSettings } from '@/services/api'
+import { useMarketStore, useDrawingStore, useUIStore, useBotStore } from '@/store'
+import { fetchYahooBars, fetchIBKRBars, fetchSettings } from '@/services/api'
 import { calcRSI, calcMACD } from '@/utils/indicators'
 import { useCrosshairSync, type ChartPane } from '@/hooks/useCrosshairSync'
 
@@ -40,6 +40,8 @@ const AUTO_REFRESH_MS: Record<string, number> = {
 
 export default function MarketPage() {
   const toast = useToast()
+  const setRoute = useUIStore((s) => s.setRoute)
+  const ibkrConnected = useBotStore((s) => s.ibkrConnected)
   const {
     selectedSymbol,
     setSelectedSymbol,
@@ -52,7 +54,7 @@ export default function MarketPage() {
     toggleCompMode,
   } = useMarketStore()
 
-  const [tfIdx, setTfIdx]         = useState(6)   // default 1D
+  const [tfIdx, setTfIdx]         = useState(5)   // default 1D
   const [searchInput, setSearch]   = useState(selectedSymbol)
   const [loading, setLoading]      = useState(false)
   const [showAlertForm, setShowAlertForm] = useState(false)
@@ -77,6 +79,10 @@ export default function MarketPage() {
   const quote      = quotes[selectedSymbol]
   const currentTF  = TOOLBAR_TIMEFRAMES[tfIdx]
   const bars       = useMarketStore((s) => s.bars[selectedSymbol] ?? [])
+  const isStockLike = (symbol: string) => {
+    const normalized = symbol.trim().toUpperCase()
+    return !!normalized && !normalized.endsWith('-USD')
+  }
   const staleAgeS = (() => {
     if (quote?.stale_s != null) return quote.stale_s
     if (!quote?.last_update) return Number.POSITIVE_INFINITY
@@ -89,25 +95,28 @@ export default function MarketPage() {
       return {
         label: 'LIVE',
         age: '',
-        dotClass: 'bg-terminal-green animate-pulse',
-        textClass: 'text-terminal-green',
+        dotClass: 'bg-green-600',
+        textClass: 'text-green-600',
       }
     }
     if (marketState === 'extended' && staleAgeS <= 10) {
       return {
         label: 'EXTENDED',
         age: '',
-        dotClass: 'bg-terminal-blue animate-pulse',
-        textClass: 'text-terminal-blue',
+        dotClass: 'bg-sky-600',
+        textClass: 'text-sky-600',
       }
     }
     return {
       label: 'CLOSED / STALE',
       age: Number.isFinite(staleAgeS) ? `${Math.floor(staleAgeS)}s` : '--',
-      dotClass: staleAgeS > 30 ? 'bg-terminal-red' : 'bg-terminal-amber',
-      textClass: staleAgeS > 30 ? 'text-terminal-red' : 'text-terminal-amber',
+      dotClass: staleAgeS > 30 ? 'bg-red-600' : 'bg-amber-600',
+      textClass: staleAgeS > 30 ? 'text-red-600' : 'text-amber-600',
     }
   })()
+  const feedLabel = quote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback'
+  const historyFeedLabel =
+    ibkrConnected && isStockLike(selectedSymbol) ? 'IBKR history + Yahoo fallback' : 'Yahoo history'
 
   // Build time→price data maps for crosshair sync
   const mainDataMap = useMemo(() => {
@@ -208,7 +217,18 @@ export default function MarketPage() {
     setLoading(true)
     const tf = TOOLBAR_TIMEFRAMES[idx]
     try {
-      const bars = await fetchYahooBars(sym, tf.period, tf.interval)
+      let bars
+      if (ibkrConnected && isStockLike(sym)) {
+        try {
+          const barSize = tf.interval === '1d' ? '1 day' : tf.interval === '1wk' ? '1 week' : tf.interval === '1mo' ? '1 month' : '1 hour'
+          const duration = tf.interval === '1d' ? '1 Y' : tf.interval === '1wk' ? '2 Y' : tf.interval === '1mo' ? '5 Y' : '30 D'
+          bars = await fetchIBKRBars(sym, barSize, duration)
+        } catch {
+          bars = await fetchYahooBars(sym, tf.period, tf.interval)
+        }
+      } else {
+        bars = await fetchYahooBars(sym, tf.period, tf.interval)
+      }
       setBars(sym, bars)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to load bars'
@@ -224,7 +244,18 @@ export default function MarketPage() {
   const loadCompBars = async (sym: string, idx: number) => {
     const tf = TOOLBAR_TIMEFRAMES[idx]
     try {
-      const bars = await fetchYahooBars(sym, tf.period, tf.interval)
+      let bars
+      if (ibkrConnected && isStockLike(sym)) {
+        try {
+          const barSize = tf.interval === '1d' ? '1 day' : tf.interval === '1wk' ? '1 week' : tf.interval === '1mo' ? '1 month' : '1 hour'
+          const duration = tf.interval === '1d' ? '1 Y' : tf.interval === '1wk' ? '2 Y' : tf.interval === '1mo' ? '5 Y' : '30 D'
+          bars = await fetchIBKRBars(sym, barSize, duration)
+        } catch {
+          bars = await fetchYahooBars(sym, tf.period, tf.interval)
+        }
+      } else {
+        bars = await fetchYahooBars(sym, tf.period, tf.interval)
+      }
       setCompBars(sym, bars)
     } catch (err) {
       console.warn('[MarketPage] Comp bar load failed:', err)
@@ -300,8 +331,94 @@ export default function MarketPage() {
     }
   }
 
+  const formatCompact = (value?: number): string => {
+    if (value == null) return '--'
+    if (value >= 1e12) return `$${(value / 1e12).toFixed(2)}T`
+    if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`
+    if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`
+    return `$${value.toLocaleString('en-US')}`
+  }
+
+  const formatPrice = (value?: number): string => {
+    if (value == null) return '--'
+    return value >= 1000
+      ? value.toLocaleString('en-US', { maximumFractionDigits: 2 })
+      : value.toFixed(2)
+  }
+
   return (
     <div className="flex flex-col h-full gap-2">
+      <section className="card rounded-lg shadow-card px-4 py-4">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="min-w-0">
+            <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-gray-500">
+              Market Workspace
+            </div>
+            <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
+              <div className="text-3xl font-mono font-bold tracking-tight text-gray-900">
+                {selectedSymbol}
+              </div>
+              <div className="text-2xl font-mono font-semibold tabular-nums text-gray-800">
+                {formatPrice(quote?.price)}
+              </div>
+              {quote && (
+                <div
+                  className={clsx(
+                    'text-sm font-mono font-semibold tabular-nums',
+                    quote.change_pct >= 0 ? 'text-green-600' : 'text-red-600',
+                  )}
+                >
+                  {quote.change_pct >= 0 ? '+' : ''}{quote.change?.toFixed(2) ?? '--'} / {quote.change_pct >= 0 ? '+' : ''}{quote.change_pct.toFixed(2)}%
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+                {feedLabel}
+              </span>
+              <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+                {historyFeedLabel}
+              </span>
+              <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em] text-gray-600">
+                {TOOLBAR_TIMEFRAMES[tfIdx]?.label ?? '1D'}
+              </span>
+              <span
+                className={clsx(
+                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-sans uppercase tracking-[0.18em]',
+                  badge.label === 'CLOSED / STALE'
+                    ? 'border-amber-200 bg-amber-50 text-amber-700'
+                    : 'border-green-200 bg-green-50 text-green-700',
+                )}
+              >
+                <span className={clsx('h-1.5 w-1.5 rounded-full', badge.dotClass)} />
+                {badge.label}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[360px]">
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">Market Cap</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">{formatCompact(quote?.market_cap)}</div>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">Volume</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">
+                {quote?.volume?.toLocaleString('en-US') ?? '--'}
+              </div>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">52W Range</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-gray-900">
+                {quote?.year_low != null && quote?.year_high != null
+                  ? `$${quote.year_low.toFixed(0)} - $${quote.year_high.toFixed(0)}`
+                  : '--'}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
       {/* ── Row 1: symbol search + compare ─────────────────────────── */}
       <div className="flex items-center gap-3 flex-wrap">
         {/* Symbol search */}
@@ -309,12 +426,12 @@ export default function MarketPage() {
           <input
             value={searchInput}
             onChange={(e) => setSearch(e.target.value.toUpperCase())}
-            placeholder="Enter symbol…"
-            className="w-28 text-sm font-mono bg-terminal-input border border-terminal-border rounded-l-xl px-3 py-1.5 text-terminal-text focus:border-indigo-500 focus:outline-none"
+            placeholder="Enter symbol..."
+            className="w-28 text-sm font-mono bg-white border border-gray-200 rounded-l-lg px-3 py-1.5 text-gray-800 focus:border-gray-400 focus:outline-none"
           />
           <button
             type="submit"
-            className="text-xs font-sans px-3 py-1.5 rounded-r-xl bg-indigo-500/15 border border-l-0 border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/25 transition-colors"
+            className="text-xs font-sans px-3 py-1.5 rounded-r-lg bg-gray-900 border border-l-0 border-gray-900 text-white hover:bg-gray-800 transition-colors"
           >
             Go
           </button>
@@ -336,11 +453,11 @@ export default function MarketPage() {
                 name="comp"
                 defaultValue={compSymbol}
                 placeholder="vs. MSFT"
-                className="w-24 text-xs font-mono bg-terminal-input border border-terminal-border rounded-l-xl px-2 py-1 text-terminal-text focus:border-terminal-amber focus:outline-none"
+                className="w-24 text-xs font-mono bg-white border border-gray-200 rounded-l-lg px-2 py-1 text-gray-800 focus:border-gray-400 focus:outline-none"
               />
               <button
                 type="submit"
-                className="text-xs font-sans px-2 py-1 rounded-r-xl bg-terminal-amber/10 border border-l-0 border-terminal-amber/40 text-terminal-amber"
+                className="text-xs font-sans px-2 py-1 rounded-r-lg bg-gray-100 border border-l-0 border-gray-200 text-gray-700"
               >
                 Set
               </button>
@@ -349,13 +466,13 @@ export default function MarketPage() {
           <button
             onClick={toggleCompMode}
             className={clsx(
-              'text-[11px] font-sans px-2.5 py-1 rounded-xl border transition-colors',
+              'text-[11px] font-sans px-2.5 py-1 rounded-lg border transition-colors',
               compMode
-                ? 'border-terminal-amber/40 text-terminal-amber bg-terminal-amber/5'
-                : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim',
+                ? 'border-gray-900 text-gray-900 bg-gray-100'
+                : 'border-gray-200 text-gray-500 hover:text-gray-700',
             )}
           >
-            ⊕ Compare
+            + Compare
           </button>
         </div>
       </div>
@@ -378,26 +495,29 @@ export default function MarketPage() {
         {/* Main chart + volume + oscillator panels stacked */}
         <div className="flex-1 min-w-0 flex flex-col gap-1 min-h-0" ref={chartContainerRef}>
           {/* Main chart */}
-          <div className="flex-1 min-h-0 glass rounded-2xl shadow-glass-lg overflow-hidden relative">
+          <div className="flex-1 min-h-0 card rounded-lg shadow-card-lg overflow-hidden relative">
             {loading && (
-              <div className="absolute inset-0 bg-terminal-bg/50 flex items-center justify-center z-10">
-                <span className="text-xs font-sans text-terminal-dim animate-pulse">Loading…</span>
+              <div className="absolute inset-0 bg-[#FAF8F5]/50 flex items-center justify-center z-10">
+                <span className="text-xs font-sans text-gray-500">Loading...</span>
               </div>
             )}
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/[0.06]">
-              <span className="font-mono font-bold text-terminal-text">{selectedSymbol}</span>
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-200">
+              <span className="font-mono font-bold text-gray-800">{selectedSymbol}</span>
+              <span className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-gray-500">
+                {historyFeedLabel}
+              </span>
               {compMode && compSymbol && (
                 <>
-                  <span className="text-terminal-ghost font-mono text-xs">vs.</span>
-                  <span className="font-mono font-bold text-terminal-amber">{compSymbol}</span>
-                  <span className="text-[11px] font-sans text-terminal-dim ml-1">[normalized %]</span>
+                  <span className="text-gray-400 font-mono text-xs">vs.</span>
+                  <span className="font-mono font-bold text-amber-600">{compSymbol}</span>
+                  <span className="text-[11px] font-sans text-gray-500 ml-1">[normalized %]</span>
                 </>
               )}
               {/* Live pulse indicator */}
               <span className={clsx('ml-auto flex items-center gap-1.5 text-[11px] font-sans', badge.textClass)}>
                 <span className={clsx('w-1.5 h-1.5 rounded-full', badge.dotClass)} />
                 {badge.label}
-                {badge.age && <span className="text-terminal-ghost">({badge.age})</span>}
+                {badge.age && <span className="text-gray-400">({badge.age})</span>}
               </span>
             </div>
             <div className="h-[calc(100%-44px)]">
@@ -416,7 +536,7 @@ export default function MarketPage() {
 
           {/* Volume pane */}
           <div
-            className="shrink-0 glass rounded-2xl overflow-hidden"
+            className="shrink-0 card rounded-lg overflow-hidden"
             style={{ height: volumeHeight }}
           >
             <VolumePanel
@@ -442,17 +562,62 @@ export default function MarketPage() {
         </div>
 
         {/* Quote card sidebar */}
-        <aside className="w-52 shrink-0">
+        <aside className="w-64 shrink-0 space-y-3">
           {quote ? (
             <TickerCard quote={quote} />
           ) : (
-            <div className="glass rounded-2xl shadow-glass p-4 space-y-3">
+            <div className="card rounded-lg shadow-card p-4 space-y-3">
               <Skeleton className="h-4 w-20" />
               <Skeleton className="h-8 w-28" />
               <Skeleton className="h-3 w-16" />
               <Skeleton className="h-3 w-24" />
             </div>
           )}
+
+          <div className="card rounded-lg border border-gray-200 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-[11px] font-sans font-semibold tracking-wide text-gray-600 uppercase">
+                Fundamentals Preview
+              </h3>
+              <button
+                type="button"
+                onClick={() => setRoute('stock')}
+                className="text-[10px] font-sans text-gray-700 hover:text-gray-900"
+              >
+                Open full stock analysis
+              </button>
+            </div>
+            <div className="space-y-2 text-[11px]">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">Live Feed</span>
+                <span className="font-mono text-gray-800">{feedLabel}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">History Feed</span>
+                <span className="font-mono text-gray-800">{historyFeedLabel}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">Market Cap</span>
+                <span className="font-mono text-gray-800">{formatCompact(quote?.market_cap)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">Volume</span>
+                <span className="font-mono text-gray-800">{quote?.volume?.toLocaleString('en-US') ?? '--'}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">52W High</span>
+                <span className="font-mono text-gray-800">
+                  {quote?.year_high != null ? `$${quote.year_high.toFixed(2)}` : '--'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-500">52W Low</span>
+                <span className="font-mono text-gray-800">
+                  {quote?.year_low != null ? `$${quote.year_low.toFixed(2)}` : '--'}
+                </span>
+              </div>
+            </div>
+          </div>
 
           {compMode && compSymbol && quotes[compSymbol] && (
             <div className="mt-3">

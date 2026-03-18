@@ -100,6 +100,7 @@ interface ResolvedRow {
   label: string
   values: (number | null)[]
   isPercent: boolean
+  computed?: boolean
 }
 
 function resolveCuratedRows(
@@ -138,6 +139,7 @@ function resolveCuratedRows(
       label:     def.label,
       values,
       isPercent: !!def.isPercent,
+      computed:  def.computed,
     })
   }
 
@@ -170,7 +172,7 @@ interface TableProps {
 function StatementTable({ periods, rows, periodMode }: TableProps) {
   if (!periods.length || !rows.length) {
     return (
-      <p className="text-[11px] text-terminal-ghost py-4 text-center">
+      <p className="text-[11px] text-gray-400 py-4 text-center">
         No data available
       </p>
     )
@@ -180,7 +182,7 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
   const hasAnyData = rows.some((r) => r.values.some((v) => v != null))
   if (!hasAnyData) {
     return (
-      <p className="text-[11px] text-terminal-ghost py-4 text-center">
+      <p className="text-[11px] text-gray-400 py-4 text-center">
         Data not available for this statement
       </p>
     )
@@ -189,51 +191,83 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
   return (
     <div className="overflow-x-auto -mx-1">
       <table className="w-full text-[11px] min-w-[480px]">
+
+        {/* ── Header row ── */}
         <thead>
-          <tr className="border-b border-white/[0.08]">
-            <th className="text-left font-sans font-medium text-terminal-ghost py-2.5 pr-4 min-w-[160px]">
+          <tr className="bg-gray-100/60 border-b-2 border-gray-200">
+            <th className="text-left font-sans font-medium text-gray-400 py-2.5 pr-4 min-w-[160px] text-[11.5px]">
               {/* row label column — no header text */}
             </th>
             {periods.map((p) => (
               <th
                 key={p}
-                className="text-right font-sans font-medium text-terminal-ghost py-2.5 px-3 min-w-[96px] whitespace-nowrap"
+                className="text-right font-sans font-semibold text-gray-500 py-2.5 px-3 min-w-[96px] whitespace-nowrap text-[11.5px]"
               >
                 {formatPeriod(p, periodMode)}
               </th>
             ))}
           </tr>
         </thead>
+
+        {/* ── Data rows ── */}
         <tbody>
-          {rows.map((row) => (
-            <tr
-              key={row.label}
-              className="border-b border-white/[0.04] hover:bg-white/[0.025] transition-colors"
-            >
-              <td className="font-sans text-terminal-dim py-2 pr-4 whitespace-nowrap">
-                {row.label}
-              </td>
-              {row.values.map((v, colIdx) => {
-                const dir = getDir(row.values, colIdx)
-                return (
-                  <td
-                    key={colIdx}
-                    className="text-right font-mono tabular-nums text-terminal-text py-2 px-3 whitespace-nowrap"
-                  >
-                    <span className="inline-flex items-center justify-end gap-1">
-                      {fmtCompact(v, row.isPercent)}
-                      {dir === 'up' && (
-                        <span className="text-terminal-green text-[9px] leading-none">▲</span>
+          {rows.map((row, rowIdx) => {
+            const isEven = rowIdx % 2 === 0
+            const isComputed = row.computed === true
+
+            return (
+              <tr
+                key={row.label}
+                className={clsx(
+                  'border-b border-gray-100 hover:bg-gray-50 transition-colors',
+                  isEven ? 'bg-gray-50/60' : 'bg-transparent',
+                )}
+              >
+                {/* Row label */}
+                <td
+                  className={clsx(
+                    'font-sans font-medium py-2 pr-4 whitespace-nowrap',
+                    isComputed
+                      ? 'text-gray-400 italic'
+                      : 'text-gray-500',
+                  )}
+                >
+                  {row.label}
+                </td>
+
+                {/* Value cells */}
+                {row.values.map((v, colIdx) => {
+                  const dir = getDir(row.values, colIdx)
+                  const isNegative = v != null && v < 0
+
+                  return (
+                    <td
+                      key={colIdx}
+                      className={clsx(
+                        'text-right font-mono tabular-nums py-2 px-3 whitespace-nowrap',
+                        isNegative ? 'text-red-600' : 'text-gray-800',
                       )}
-                      {dir === 'down' && (
-                        <span className="text-terminal-red text-[9px] leading-none">▼</span>
-                      )}
-                    </span>
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
+                    >
+                      <span className="inline-flex items-center justify-end gap-1">
+                        {fmtCompact(v, row.isPercent)}
+
+                        {dir === 'up' && (
+                          <span className="inline-flex items-center bg-green-50 px-1 rounded leading-none">
+                            <span className="text-green-600 text-[10px] leading-none">▲</span>
+                          </span>
+                        )}
+                        {dir === 'down' && (
+                          <span className="inline-flex items-center bg-red-50 px-1 rounded leading-none">
+                            <span className="text-red-600 text-[10px] leading-none">▼</span>
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                  )
+                })}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -244,22 +278,22 @@ function StatementTable({ periods, rows, periodMode }: TableProps) {
 
 function LoadingSkeleton() {
   return (
-    <section className="glass rounded-2xl shadow-glass p-6 animate-pulse">
+    <section className="card rounded-lg shadow-card p-6 animate-pulse">
       <div className="flex items-center justify-between mb-5">
-        <div className="h-3 w-44 bg-terminal-muted rounded-lg" />
-        <div className="h-3 w-12 bg-terminal-muted rounded-lg" />
+        <div className="h-3 w-44 bg-gray-100 rounded-lg" />
+        <div className="h-3 w-12 bg-gray-100 rounded-lg" />
       </div>
       <div className="flex items-center justify-between mb-5">
         <div className="flex gap-1.5">
           {[140, 112, 96].map((w) => (
-            <div key={w} className="h-7 bg-terminal-muted rounded-lg" style={{ width: w }} />
+            <div key={w} className="h-7 bg-gray-100 rounded-lg" style={{ width: w }} />
           ))}
         </div>
-        <div className="h-7 w-28 bg-terminal-muted rounded-lg" />
+        <div className="h-7 w-28 bg-gray-100 rounded-lg" />
       </div>
       <div className="space-y-2.5">
         {[1, 2, 3, 4, 5, 6].map((i) => (
-          <div key={i} className="h-8 bg-terminal-muted rounded-lg" />
+          <div key={i} className="h-8 bg-gray-100 rounded-lg" />
         ))}
       </div>
     </section>
@@ -289,11 +323,11 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
   if (!data) return null
 
   return (
-    <section id="section-financials" className="glass rounded-2xl shadow-glass p-6">
+    <section id="section-financials" className="card rounded-lg shadow-card p-6">
 
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
-        <h3 className="text-xs font-sans font-semibold text-terminal-dim tracking-wide uppercase">
+        <h3 className="text-xs font-sans font-semibold text-gray-500 tracking-wide uppercase">
           Financial Statements
         </h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
@@ -302,40 +336,46 @@ export default function FinancialStatementsModule({ data, loading }: Props) {
       {/* Controls row: tabs left, period toggle right */}
       <div className="flex items-center justify-between flex-wrap gap-2 mb-5">
 
-        {/* Statement tabs */}
-        <div className="flex gap-1">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={clsx(
-                'text-[10px] font-sans px-3 py-1.5 rounded-lg transition-all duration-150',
-                activeTab === tab.key
-                  ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/40'
-                  : 'text-terminal-ghost hover:text-terminal-dim border border-transparent hover:border-white/[0.08]',
-              )}
-            >
-              {tab.label}
-            </button>
-          ))}
+        {/* Statement tabs — proper tab bar with bottom-border active indicator */}
+        <div className="flex gap-0 border-b border-gray-200">
+          {TABS.map((tab) => {
+            const isActive = activeTab === tab.key
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={clsx(
+                  'text-[10px] font-sans px-3.5 py-1.5 -mb-px transition-all duration-150 border-b-2',
+                  isActive
+                    ? 'bg-indigo-50 text-indigo-600 border-indigo-600 rounded-t-md'
+                    : 'text-gray-400 border-transparent hover:text-gray-500 hover:underline',
+                )}
+              >
+                {tab.label}
+              </button>
+            )
+          })}
         </div>
 
-        {/* Quarterly / Annual pill toggle */}
-        <div className="flex gap-0.5 bg-terminal-muted rounded-lg p-0.5">
-          {(['quarterly', 'annual'] as const).map((mode) => (
-            <button
-              key={mode}
-              onClick={() => setPeriodMode(mode)}
-              className={clsx(
-                'text-[10px] font-sans capitalize px-3 py-1 rounded-md transition-all duration-150',
-                periodMode === mode
-                  ? 'bg-indigo-500/25 text-indigo-400'
-                  : 'text-terminal-ghost hover:text-terminal-dim',
-              )}
-            >
-              {mode.charAt(0).toUpperCase() + mode.slice(1)}
-            </button>
-          ))}
+        {/* Quarterly / Annual — sharper segmented control */}
+        <div className="flex gap-0 bg-gray-100 rounded-md p-0.5 border border-gray-200">
+          {(['quarterly', 'annual'] as const).map((mode) => {
+            const isActive = periodMode === mode
+            return (
+              <button
+                key={mode}
+                onClick={() => setPeriodMode(mode)}
+                className={clsx(
+                  'text-[10px] font-sans capitalize px-3 py-1 rounded transition-all duration-200',
+                  isActive
+                    ? 'bg-indigo-100 text-indigo-600 shadow-sm ring-1 ring-indigo-300'
+                    : 'text-gray-400 hover:text-gray-500',
+                )}
+              >
+                {mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            )
+          })}
         </div>
       </div>
 

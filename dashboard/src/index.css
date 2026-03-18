@@ -2,21 +2,71 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Theme CSS custom properties ──────────────────────────────────────── */
+
+/* Light theme (default — matches existing warm-cream palette) */
+:root,
+:root[data-theme="light"] {
+  --bg-primary:    #FAF8F5;
+  --bg-secondary:  #FAFAF8;
+  --bg-card:       #FFFFFF;
+  --bg-hover:      #F5F3F0;
+  --bg-input:      #FFFFFF;
+  --bg-sidebar:    #FFFFFF;
+  --bg-header:     #FFFFFF;
+  --text-primary:  #1A1A2E;
+  --text-secondary:#6B7280;
+  --text-muted:    #9CA3AF;
+  --border:        #E8E4DF;
+  --accent:        #4F46E5;
+  --accent-hover:  #4338CA;
+  --success:       #16A34A;
+  --danger:        #DC2626;
+  --warning:       #D97706;
+  color-scheme: light;
+}
+
+/* Dark theme */
+:root[data-theme="dark"] {
+  --bg-primary:    #0a0a0f;
+  --bg-secondary:  #0d0d14;
+  --bg-card:       #16161e;
+  --bg-hover:      #1e1e2a;
+  --bg-input:      #111118;
+  --bg-sidebar:    #111118;
+  --bg-header:     #111118;
+  --text-primary:  #e4e4e7;
+  --text-secondary:#a1a1aa;
+  --text-muted:    #71717a;
+  --border:        #27272a;
+  --accent:        #3b82f6;
+  --accent-hover:  #2563eb;
+  --success:       #22c55e;
+  --danger:        #ef4444;
+  --warning:       #f59e0b;
+  color-scheme: dark;
+}
+
 /* ── Scrollbars — modern subtle ───────────────────────────────────────── */
 ::-webkit-scrollbar              { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track        { background: transparent; }
-::-webkit-scrollbar-thumb        { background: rgba(148,163,184,0.15); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover  { background: rgba(148,163,184,0.25); }
+::-webkit-scrollbar-thumb        { background: rgba(128,128,128,0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover  { background: rgba(128,128,128,0.35); }
 
 /* ── Base resets ──────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+}
 
 html, body, #root {
   height: 100%;
   margin: 0;
   padding: 0;
-  background: #0b0f1a;
-  color: #f1f5f9;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 /* ── Tabular numerics inside font-mono ────────────────────────────────── */
@@ -25,44 +75,92 @@ html, body, #root {
 /* ── Lightweight-charts canvas fix ────────────────────────────────────── */
 canvas { display: block; }
 
-/* ── Glass utilities ──────────────────────────────────────────────────── */
-.glass {
-  background: rgba(17, 24, 39, 0.6);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(148, 163, 184, 0.08);
+/* ── Card utilities (replaces glass) ─────────────────────────────────── */
+.glass,
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
-.glass-elevated {
-  background: rgba(30, 41, 59, 0.7);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(148, 163, 184, 0.1);
+.glass-elevated,
+.card-elevated {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 /* ── Gradient utilities ───────────────────────────────────────────────── */
 .gradient-text {
-  background: linear-gradient(135deg, #6366f1, #a78bfa);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--text-primary);
+  font-weight: 700;
 }
 
 .gradient-surface {
-  background: linear-gradient(135deg, rgba(99,102,241,0.05), rgba(167,139,250,0.03));
+  background: var(--bg-secondary);
 }
 
-/* ── Toast slide-in animation ─────────────────────────────────────────── */
-@keyframes slide-in {
-  from { transform: translateX(100%); opacity: 0; }
-  to   { transform: translateX(0);    opacity: 1; }
+/* ── Table rows with dotted borders (editorial style) ────────────────── */
+.table-editorial tbody tr {
+  border-bottom: 1px dotted var(--border);
 }
-.animate-slide-in { animation: slide-in 0.2s ease-out; }
+.table-editorial tbody tr:last-child {
+  border-bottom: none;
+}
+
+/* ── Toast slide-in / slide-out animations ────────────────────────────── */
+@keyframes slide-in {
+  from { transform: translateX(calc(100% + 1.25rem)); opacity: 0; }
+  to   { transform: translateX(0);                   opacity: 1; }
+}
+.animate-slide-in { animation: slide-in 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+
+@keyframes toast-out {
+  from { transform: translateX(0);                   opacity: 1; }
+  to   { transform: translateX(calc(100% + 1.25rem)); opacity: 0; }
+}
+.animate-toast-out { animation: toast-out 0.18s ease-in forwards; }
+
+/* ── Thin scrollbar for overflow-y-auto panels (stock profile, etc.) ─── */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 4px;
+}
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.18);
+  border-radius: 2px;
+}
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.3);
+}
+
+/* ── Section fade-in-up animation ─────────────────────────────────────── */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.3s ease-out forwards;
+}
+
+/* ── Smooth table row hover transitions ───────────────────────────────── */
+table tbody tr {
+  transition: background-color 0.15s ease;
+}
 
 /* ── Chart fullscreen CSS fallback ────────────────────────────────────── */
 .chart-fullscreen {
   position: fixed !important;
   inset: 0 !important;
   z-index: 50 !important;
-  background: #0b0f1a;
+  background: var(--bg-primary);
 }

@@ -29,31 +29,71 @@ class TradeAction(BaseModel):
     limit_price: Optional[float] = None
 
 
+# Valid universe identifiers ("all" expands to sp500 + nasdaq100 + etfs)
+_VALID_UNIVERSES = frozenset(["sp500", "nasdaq100", "etfs", "all"])
+
+
 class Rule(BaseModel):
     id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
     name: str
-    symbol: str
+    # Single-symbol rule: set symbol, leave universe=None.
+    # Universe rule: set universe ("sp500"/"nasdaq100"/"etfs"/"all"), leave symbol="".
+    symbol: str = ""
+    universe: Optional[str] = None  # "sp500", "nasdaq100", "etfs", "all", or None
     enabled: bool = False
     conditions: list[Condition]
     logic: Literal["AND", "OR"] = "AND"
     action: TradeAction
     cooldown_minutes: int = 60
     last_triggered: Optional[str] = None  # ISO datetime string
+    # Per-symbol cooldown for universe rules: {"AAPL": "<ISO>", ...}
+    # Stored as part of the JSON blob; ignored for single-symbol rules.
+    symbol_cooldowns: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_symbol_or_universe(self) -> "Rule":
+        has_symbol = bool(self.symbol and self.symbol.strip())
+        has_universe = bool(self.universe and self.universe.strip())
+        if not has_symbol and not has_universe:
+            raise ValueError("Rule must have either 'symbol' or 'universe' set.")
+        if has_symbol and has_universe:
+            raise ValueError("Rule cannot have both 'symbol' and 'universe' set.")
+        if has_universe and self.universe not in _VALID_UNIVERSES:
+            raise ValueError(
+                f"Invalid universe '{self.universe}'. Must be one of: {sorted(_VALID_UNIVERSES)}"
+            )
+        return self
 
 
 class RuleCreate(BaseModel):
     name: str
-    symbol: str
+    symbol: str = ""
+    universe: Optional[str] = None
     enabled: bool = False
     conditions: list[Condition]
     logic: Literal["AND", "OR"] = "AND"
     action: TradeAction
     cooldown_minutes: int = 60
 
+    @model_validator(mode="after")
+    def _check_symbol_or_universe(self) -> "RuleCreate":
+        has_symbol = bool(self.symbol and self.symbol.strip())
+        has_universe = bool(self.universe and self.universe.strip())
+        if not has_symbol and not has_universe:
+            raise ValueError("RuleCreate must have either 'symbol' or 'universe' set.")
+        if has_symbol and has_universe:
+            raise ValueError("RuleCreate cannot have both 'symbol' and 'universe' set.")
+        if has_universe and self.universe not in _VALID_UNIVERSES:
+            raise ValueError(
+                f"Invalid universe '{self.universe}'. Must be one of: {sorted(_VALID_UNIVERSES)}"
+            )
+        return self
+
 
 class RuleUpdate(BaseModel):
     name: Optional[str] = None
     symbol: Optional[str] = None
+    universe: Optional[str] = None
     enabled: Optional[bool] = None
     conditions: Optional[list[Condition]] = None
     logic: Optional[Literal["AND", "OR"]] = None
@@ -480,6 +520,13 @@ class StockFinancials(BaseModel):
 class StockAnalyst(BaseModel):
     recommendation_mean: Optional[float] = None
     recommendation_key: Optional[str] = None
+    recommendation_period: Optional[str] = None
+    strong_buy: Optional[int] = None
+    buy: Optional[int] = None
+    hold: Optional[int] = None
+    sell: Optional[int] = None
+    strong_sell: Optional[int] = None
+    current_price: Optional[float] = None
     target_mean_price: Optional[float] = None
     target_high_price: Optional[float] = None
     target_low_price: Optional[float] = None
@@ -488,10 +535,40 @@ class StockAnalyst(BaseModel):
     fetched_at: float
 
 
+class StockAnalystDetailGrade(BaseModel):
+    date: str
+    firm: str
+    to_grade: str
+    from_grade: str
+    action: str
+    price_target_action: Optional[str] = None
+    price_target: Optional[float] = None
+    prior_price_target: Optional[float] = None
+
+
+class StockRecommendationSnapshot(BaseModel):
+    period: str
+    strong_buy: int
+    buy: int
+    hold: int
+    sell: int
+    strong_sell: int
+
+
+class StockHolder(BaseModel):
+    name: str
+    shares: int
+    pct: float
+    value: Optional[float] = None
+    date_reported: Optional[str] = None
+
+
 class StockOwnership(BaseModel):
     held_pct_institutions: Optional[float] = None
     held_pct_insiders: Optional[float] = None
-    top_holders: Optional[list[dict]] = None
+    top_holders: Optional[list[StockHolder]] = None
+    mutual_fund_holders: Optional[list[StockHolder]] = None
+    total_institutional_holders: Optional[int] = None
     fetched_at: float
 
 

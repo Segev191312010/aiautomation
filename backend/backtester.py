@@ -94,7 +94,15 @@ def _compute_metrics(
     total_return_pct = ((final_equity - initial_capital) / initial_capital) * 100
 
     # -- Trading days for annualization --
-    trading_days = len(equity_curve) if equity_curve else 1
+    # Use actual calendar days between first and last bar (works for any interval),
+    # then scale to trading-year equivalent at 252 days/year.
+    if len(equity_curve) >= 2:
+        first_ts = equity_curve[0]["time"]
+        last_ts = equity_curve[-1]["time"]
+        calendar_days = (last_ts - first_ts) / 86400
+        trading_days = max(calendar_days * (252 / 365), 1)
+    else:
+        trading_days = 1
 
     # -- CAGR --
     if trading_days > 1 and final_equity > 0 and initial_capital > 0:
@@ -265,6 +273,7 @@ async def run_backtest(
     tp_price = 0.0
     commission = cfg.SIM_COMMISSION
 
+    just_exited = False  # prevents same-bar re-entry after an exit
     trades: list[dict] = []
     equity_curve: list[dict] = []
     buy_hold_curve: list[dict] = []
@@ -284,6 +293,7 @@ async def run_backtest(
         # Slice for condition evaluation — only data up to current bar
         df_slice = df.iloc[: i + 1]
 
+        just_exited = False
         exit_price = 0.0
         exit_reason = ""
 
@@ -340,9 +350,10 @@ async def run_backtest(
                 entry_price = 0.0
                 sl_price = 0.0
                 tp_price = 0.0
+                just_exited = True
 
-        # -- Check entry conditions (only if not in position) --
-        if position_qty == 0:
+        # -- Check entry conditions (only if not in position and no exit this bar) --
+        if position_qty == 0 and not just_exited:
             if evaluate_conditions(entry_conditions, df_slice, condition_logic):
                 # BUY at current close
                 available = cash * (position_size_pct / 100)

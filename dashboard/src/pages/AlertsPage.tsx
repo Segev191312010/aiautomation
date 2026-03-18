@@ -14,10 +14,25 @@ import AlertForm from '@/components/alerts/AlertForm'
 function AlertsPageSkeleton() {
   return (
     <div className="flex flex-col gap-3 animate-pulse">
-      <div className="h-8 w-48 bg-terminal-elevated rounded-xl" />
-      <div className="h-10 w-full bg-terminal-elevated rounded-xl" />
-      <div className="h-10 w-full bg-terminal-elevated rounded-xl" />
-      <div className="h-10 w-full bg-terminal-elevated rounded-xl" />
+      <div className="h-10 w-full bg-gray-50 rounded-xl" />
+      <div className="h-10 w-full bg-gray-50 rounded-xl" />
+      <div className="h-10 w-full bg-gray-50 rounded-xl" />
+    </div>
+  )
+}
+
+// ── Status pill ───────────────────────────────────────────────────────────────
+
+function StatusPill({ count, label, color }: { count: number; label: string; color: 'green' | 'amber' | 'ghost' }) {
+  const colorMap = {
+    green: 'bg-green-600/10 text-green-600 border-green-300/20',
+    amber: 'bg-amber-600/10 text-amber-600 border-amber-300/20',
+    ghost: 'bg-gray-100/60 text-gray-500 border-gray-200',
+  }
+  return (
+    <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-sans font-medium ${colorMap[color]}`}>
+      <span className="tabular-nums font-semibold">{count}</span>
+      <span>{label}</span>
     </div>
   )
 }
@@ -30,6 +45,8 @@ export default function AlertsPage() {
   const loading     = useAlertStore((s) => s.loading)
   const loadAlerts  = useAlertStore((s) => s.loadAlerts)
   const loadHistory = useAlertStore((s) => s.loadHistory)
+  const alerts      = useAlertStore((s) => s.alerts)
+  const history     = useAlertStore((s) => s.history)
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('active')
   const [showForm, setShowForm]   = useState(false)
@@ -55,49 +72,86 @@ export default function AlertsPage() {
     setShowForm(true)
   }
 
+  // ── Derived summary stats ───────────────────────────────────────────────
+
+  const activeCount  = alerts.filter((a) => a.enabled).length
+  const disabledCount = alerts.filter((a) => !a.enabled).length
+
+  // Triggered today = history rows fired within the last 24h
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000
+  const todayCount = history.filter((h) => new Date(h.fired_at).getTime() >= oneDayAgo).length
+
   return (
-    <div className="flex flex-col h-full p-4">
-      {/* Page header */}
-      <div className="flex items-center justify-between mb-5">
-        <h1 className="text-base font-sans font-semibold text-terminal-text tracking-wide">
-          Alerts
-        </h1>
+    <div className="flex flex-col h-full p-5">
+
+      {/* ── Page header ─────────────────────────────────────────────────── */}
+      <div className="flex items-start justify-between mb-5 gap-4">
+        <div>
+          <div className="flex items-center gap-2.5 mb-1">
+            {/* Bell icon */}
+            <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 shrink-0">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 text-indigo-600">
+                <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
+              </svg>
+            </div>
+            <h1 className="text-base font-sans font-semibold text-gray-800 tracking-wide">
+              Alerts
+            </h1>
+          </div>
+          <p className="text-xs font-sans text-gray-400 ml-9">
+            Price and indicator triggers with browser notifications
+          </p>
+        </div>
+
         {activeTab === 'active' && (
           <button
             onClick={handleCreateNew}
-            className="bg-indigo-500/15 text-indigo-400 hover:bg-indigo-500/25 px-3 py-1.5 rounded-xl text-sm font-sans font-medium transition-colors"
+            className={[
+              'flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-sans font-semibold shrink-0',
+              'bg-indigo-100 text-indigo-600 border border-indigo-100',
+              'hover:bg-indigo-100 hover:border-indigo-600/50 hover:shadow-glow-blue',
+              'transition-all duration-150',
+            ].join(' ')}
           >
-            + Create Alert
+            <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5">
+              <path d="M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z" />
+            </svg>
+            Create Alert
           </button>
         )}
       </div>
 
-      {/* Tab bar */}
-      <div className="flex border-b border-white/[0.06] mb-4">
-        <button
-          onClick={() => setActiveTab('active')}
-          className={`text-sm font-sans font-medium px-4 py-2 border-b-2 transition-colors ${
-            activeTab === 'active'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-terminal-ghost hover:text-terminal-dim'
-          }`}
-        >
-          Active Alerts
-        </button>
-        <button
-          onClick={() => setActiveTab('history')}
-          className={`text-sm font-sans font-medium px-4 py-2 border-b-2 transition-colors ${
-            activeTab === 'history'
-              ? 'border-indigo-500 text-indigo-400'
-              : 'border-transparent text-terminal-ghost hover:text-terminal-dim'
-          }`}
-        >
-          History
-        </button>
+      {/* ── Status summary bar ──────────────────────────────────────────── */}
+      {!loading && (
+        <div className="flex items-center gap-2 mb-4 flex-wrap">
+          <StatusPill count={activeCount}   label={activeCount === 1 ? 'active' : 'active alerts'} color="green" />
+          <StatusPill count={todayCount}    label={todayCount === 1 ? 'triggered today' : 'triggered today'} color="amber" />
+          {disabledCount > 0 && (
+            <StatusPill count={disabledCount} label="disabled" color="ghost" />
+          )}
+        </div>
+      )}
+
+      {/* ── Tab bar ─────────────────────────────────────────────────────── */}
+      <div className="flex border-b border-gray-200 mb-4">
+        {(['active', 'history'] as ActiveTab[]).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={[
+              'text-sm font-sans font-medium px-4 py-2 border-b-2 transition-colors',
+              activeTab === tab
+                ? 'border-indigo-600 text-indigo-600'
+                : 'border-transparent text-gray-400 hover:text-gray-500',
+            ].join(' ')}
+          >
+            {tab === 'active' ? 'Active Alerts' : 'History'}
+          </button>
+        ))}
       </div>
 
-      {/* Tab content */}
-      <div className="mt-0 flex-1 min-h-0 overflow-y-auto">
+      {/* ── Tab content ─────────────────────────────────────────────────── */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {loading ? (
           <AlertsPageSkeleton />
         ) : activeTab === 'active' ? (
@@ -107,7 +161,7 @@ export default function AlertsPage() {
         )}
       </div>
 
-      {/* Create / Edit modal */}
+      {/* ── Create / Edit modal ─────────────────────────────────────────── */}
       {showForm && (
         <AlertForm
           onClose={handleCloseForm}

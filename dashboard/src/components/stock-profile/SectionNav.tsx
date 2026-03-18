@@ -1,18 +1,18 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 
 const SECTIONS = [
   { id: 'section-overview', label: 'Overview' },
   { id: 'section-stats', label: 'Key Stats' },
-  { id: 'section-rating', label: 'Rating' },
   { id: 'section-financials', label: 'Financials' },
   { id: 'section-company', label: 'Company' },
+  { id: 'section-narrative', label: 'Narrative' },
+  { id: 'section-events', label: 'Events' },
   { id: 'section-splits', label: 'Splits' },
-  { id: 'section-analyst', label: 'Analyst' },
+  { id: 'section-rating', label: 'Fundamentals' },
+  { id: 'section-analyst', label: 'Analysts' },
   { id: 'section-targets', label: 'Targets' },
-  { id: 'section-analyst-detail', label: 'Grades' },
   { id: 'section-ownership', label: 'Ownership' },
-  { id: 'section-narrative', label: 'Analysis' },
 ]
 
 export default function SectionNav() {
@@ -24,17 +24,17 @@ export default function SectionNav() {
         for (const entry of entries) {
           if (entry.isIntersecting) {
             setActive(entry.target.id)
+            break
           }
         }
       },
-      { rootMargin: '-20% 0px -70% 0px' },
+      { rootMargin: '-25% 0px -60% 0px', threshold: 0.15 },
     )
 
-    for (const s of SECTIONS) {
-      const el = document.getElementById(s.id)
+    for (const section of SECTIONS) {
+      const el = document.getElementById(section.id)
       if (el) observer.observe(el)
     }
-
     return () => observer.disconnect()
   }, [])
 
@@ -43,21 +43,23 @@ export default function SectionNav() {
   }
 
   return (
-    <nav className="sticky top-0 z-10 glass-elevated backdrop-blur-sm border-b border-white/[0.06] py-2 -mx-4 px-4 flex gap-1 overflow-x-auto">
-      {SECTIONS.map((s) => (
-        <button
-          key={s.id}
-          onClick={() => scrollTo(s.id)}
-          className={clsx(
-            'shrink-0 text-[10px] font-sans px-2.5 py-1 rounded-xl transition-colors',
-            active === s.id
-              ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30'
-              : 'text-terminal-ghost hover:text-terminal-dim border border-transparent',
-          )}
-        >
-          {s.label}
-        </button>
-      ))}
+    <nav className="sticky top-0 z-10 -mx-4 px-4 py-2 bg-[#FAF8F5]/95 border-b border-gray-200 overflow-x-auto">
+      <div className="flex items-center gap-1.5 min-w-max">
+        {SECTIONS.map((section) => (
+          <button
+            key={section.id}
+            onClick={() => scrollTo(section.id)}
+            className={clsx(
+              'shrink-0 text-[11px] font-sans px-2.5 py-1 rounded-lg border transition-colors',
+              active === section.id
+                ? 'bg-gray-900 text-white border-gray-900'
+                : 'bg-white text-gray-500 border-gray-200 hover:text-gray-900 hover:border-gray-300',
+            )}
+          >
+            {section.label}
+          </button>
+        ))}
+      </div>
     </nav>
   )
 }

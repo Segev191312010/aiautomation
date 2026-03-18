@@ -146,29 +146,109 @@ def evaluate_conditions(
 # Evaluate all rules
 # ---------------------------------------------------------------------------
 
+def _check_symbol_cooldown(rule: Rule, symbol: str) -> bool:
+    """
+    Check if a specific symbol is within cooldown for a universe rule.
+
+    Returns True if the symbol is still in cooldown (should NOT fire).
+    """
+    last_str = rule.symbol_cooldowns.get(symbol)
+    if not last_str:
+        return False
+    try:
+        last = datetime.fromisoformat(last_str)
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        cooldown_end = last + timedelta(minutes=rule.cooldown_minutes)
+        return datetime.now(timezone.utc) < cooldown_end
+    except (ValueError, TypeError):
+        return False
+
+
 def evaluate_all(
     rules: list[Rule],
     bars_by_symbol: dict[str, pd.DataFrame],
-) -> list[Rule]:
+    universe_cache: dict[str, list[str]] | None = None,
+) -> list[tuple[Rule, str]]:
     """
     Evaluate all enabled rules and return those that fired.
+
+    For single-symbol rules: evaluates against rule.symbol.
+    For universe rules: evaluates against every symbol in the universe.
 
     Args:
         rules:           All rules from the database.
         bars_by_symbol:  Dict mapping symbol → OHLCV DataFrame.
+        universe_cache:  Pre-expanded universe symbol lists.
 
     Returns:
-        List of rules that fired (conditions met, not in cooldown).
+        List of (rule, symbol) tuples for each firing. For single-symbol
+        rules, symbol == rule.symbol. For universe rules, symbol is the
+        specific stock that triggered.
     """
-    triggered: list[Rule] = []
+    if universe_cache is None:
+        universe_cache = {}
+
+    triggered: list[tuple[Rule, str]] = []
+
     for rule in rules:
         if not rule.enabled:
             continue
+
+        # ── Universe rule: evaluate against every symbol in the universe ──
+        if rule.universe:
+            universe_symbols = universe_cache.get(rule.universe, [])
+            if not universe_symbols:
+                log.warning("Universe '%s' is empty (rule: %s)", rule.universe, rule.name)
+                continue
+
+            fires_count = 0
+            for sym in universe_symbols:
+                sym_upper = sym.upper()
+                df = bars_by_symbol.get(sym_upper)
+                if df is None or df.empty:
+                    continue
+
+                # Per-symbol cooldown check
+                if _check_symbol_cooldown(rule, sym_upper):
+                    continue
+
+                if _evaluate_conditions_for_rule(rule, df):
+                    log.info(
+                        "Universe rule TRIGGERED: '%s' on %s (universe=%s)",
+                        rule.name, sym_upper, rule.universe,
+                    )
+                    triggered.append((rule, sym_upper))
+                    fires_count += 1
+
+            if fires_count > 0:
+                log.info(
+                    "Universe rule '%s' fired on %d / %d symbols",
+                    rule.name, fires_count, len(universe_symbols),
+                )
+            continue
+
+        # ── Single-symbol rule ───────────────────────────────────────────
         df = bars_by_symbol.get(rule.symbol.upper())
         if df is None or df.empty:
             log.warning("No bars available for symbol '%s' (rule: %s)", rule.symbol, rule.name)
             continue
         if evaluate_rule(rule, df):
             log.info("Rule TRIGGERED: '%s' on %s", rule.name, rule.symbol)
-            triggered.append(rule)
+            triggered.append((rule, rule.symbol))
+
     return triggered
+
+
+def _evaluate_conditions_for_rule(rule: Rule, df: pd.DataFrame) -> bool:
+    """
+    Evaluate rule conditions against a DataFrame, without cooldown
+    check (caller handles cooldown for universe rules).
+    """
+    if df.empty or len(df) < 2:
+        return False
+    cache: dict = {}
+    results = [_evaluate_condition(c, df, cache) for c in rule.conditions]
+    if rule.logic == "AND":
+        return all(results)
+    return any(results)

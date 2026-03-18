@@ -1,59 +1,17 @@
 /**
- * TickerCard — Bloomberg-style asset card.
+ * TickerCard — Clean editorial-style asset card.
  *
- * Displays:
- *  • Symbol + price (large, monospace)
- *  • Daily change $ and % (colored pill)
- *  • 52-week range progress bar with position marker
- *  • Market cap and volume labels
- *  • Click → select symbol for chart
+ * Minimal chrome, monospace data, dotted separators.
+ * Inspired by StockTaper's clean data presentation.
  */
 import React, { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import type { MarketQuote } from '@/types'
 import { useMarketStore, useUIStore } from '@/store'
 
-// ── 52-Week Range Bar ─────────────────────────────────────────────────────────
-
-function RangeBar({ price, low, high }: { price: number; low: number; high: number }) {
-  const pct = high > low ? ((price - low) / (high - low)) * 100 : 50
-  const clamped = Math.max(0, Math.min(100, pct))
-
-  return (
-    <div className="mt-2">
-      <div className="flex justify-between text-[10px] font-sans text-terminal-ghost mb-0.5">
-        <span className="font-mono">{low.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-        <span className="text-terminal-dim text-[10px]">52W</span>
-        <span className="font-mono">{high.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-      </div>
-      <div className="relative h-1 bg-terminal-muted rounded-full overflow-visible">
-        <div
-          className="absolute h-full bg-gradient-to-r from-terminal-red-dim to-terminal-green-dim rounded-full"
-          style={{ width: '100%' }}
-        />
-        <div
-          className="absolute w-2 h-2 bg-terminal-text border border-terminal-bg rounded-full -top-0.5 shadow"
-          style={{ left: `calc(${clamped}% - 4px)` }}
-        />
-      </div>
-    </div>
-  )
-}
-
-// ── Metric mini-label ─────────────────────────────────────────────────────────
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col">
-      <span className="text-[10px] font-sans text-terminal-ghost uppercase tracking-wider">{label}</span>
-      <span className="text-[11px] font-mono text-terminal-dim">{value}</span>
-    </div>
-  )
-}
-
 // ── Formatters ────────────────────────────────────────────────────────────────
 
-function fmtPrice(v: number, symbol: string): string {
+function fmtPrice(v: number): string {
   if (v >= 1_000) return v.toLocaleString('en-US', { maximumFractionDigits: 2 })
   if (v >= 1)     return v.toFixed(2)
   return v.toFixed(4)
@@ -85,13 +43,19 @@ interface Props {
 export default function TickerCard({ quote, compact = false }: Props) {
   const { symbol, price, change, change_pct, year_high, year_low, market_cap, avg_volume } = quote
   const up = change_pct >= 0
+  const liveSource = quote.live_source === 'ibkr' ? 'IBKR' : 'Yahoo'
+  const freshness = quote.stale_s != null && Number.isFinite(quote.stale_s)
+    ? `${Math.floor(quote.stale_s)}s`
+    : quote.last_update
+      ? `${Math.max(0, Math.floor((Date.now() - new Date(quote.last_update).getTime()) / 1000))}s`
+      : '--'
 
   const setSelectedSymbol = useMarketStore((s) => s.setSelectedSymbol)
   const setRoute          = useUIStore((s) => s.setRoute)
 
   // Flash animation on price change
   const prevPrice = useRef(price)
-  const [flash, setFlash]   = useState<'up' | 'down' | null>(null)
+  const [flash, setFlash] = useState<'up' | 'down' | null>(null)
 
   useEffect(() => {
     if (price !== prevPrice.current) {
@@ -110,65 +74,110 @@ export default function TickerCard({ quote, compact = false }: Props) {
   return (
     <button
       onClick={handleClick}
-      className={clsx(
-        'group w-full text-left glass rounded-2xl p-4',
-        'hover:shadow-glass-lg hover:bg-white/[0.03] transition-all duration-200',
-        'focus:outline-none focus:ring-1 focus:ring-indigo-500/40',
-      )}
+      className="group w-full text-left bg-white border border-[#E8E4DF] rounded-lg p-3.5 hover:shadow-md transition-shadow duration-150 focus:outline-none"
     >
-      {/* ── Header row: symbol + change pill ─────────────────── */}
-      <div className="flex items-start justify-between mb-1">
-        <div>
-          <span className="text-xs font-mono font-semibold text-terminal-text">{symbol}</span>
-        </div>
+      {/* Symbol + change */}
+      <div className="flex items-baseline justify-between mb-1">
+        <span className="text-sm font-mono font-bold text-gray-900 tracking-wide">
+          {symbol}
+        </span>
         <span
           className={clsx(
-            'text-[10px] font-mono px-1.5 py-0.5 rounded-lg font-semibold tabular-nums',
-            up
-              ? 'bg-terminal-green/15 text-terminal-green'
-              : 'bg-terminal-red/15 text-terminal-red',
+            'text-[11px] font-mono font-medium tabular-nums',
+            up ? 'text-green-600' : 'text-red-600',
           )}
         >
-          {up ? '+' : ''}{change_pct.toFixed(2)}%
+          {up ? '▲' : '▼'} {up ? '+' : ''}{change_pct.toFixed(2)}%
         </span>
       </div>
 
-      {/* ── Price ─────────────────────────────────────────────── */}
+      <div className="mb-1.5 flex items-center justify-between text-[10px] font-mono uppercase tracking-[0.16em] text-gray-400">
+        <span>{liveSource}</span>
+        <span>{quote.market_state ?? 'unknown'} / {freshness}</span>
+      </div>
+
+      {/* Price */}
       <div
         className={clsx(
           'font-mono font-bold tabular-nums leading-none transition-colors duration-300',
-          compact ? 'text-lg' : 'text-2xl',
-          flash === 'up'   ? 'text-terminal-green' :
-          flash === 'down' ? 'text-terminal-red'   : 'text-terminal-text',
+          compact ? 'text-lg' : 'text-xl',
+          flash === 'up'   ? 'text-green-600' :
+          flash === 'down' ? 'text-red-600'   : 'text-gray-900',
         )}
       >
-        {fmtPrice(price, symbol)}
+        {fmtPrice(price)}
       </div>
 
-      {/* ── Daily change ──────────────────────────────────────── */}
+      {/* Change $ */}
       <div
         className={clsx(
-          'text-xs font-mono tabular-nums mt-0.5',
-          up ? 'text-terminal-green' : 'text-terminal-red',
+          'text-[11px] font-mono tabular-nums mt-0.5',
+          up ? 'text-green-600' : 'text-red-600',
         )}
       >
         {up ? '+' : ''}{change.toFixed(2)}
       </div>
 
-      {/* ── 52-Week range ──────────────────────────────────────── */}
-      {year_low != null && year_high != null && (
-        <RangeBar price={price} low={year_low} high={year_high} />
-      )}
-
-      {/* ── Market cap / volume ────────────────────────────────── */}
-      {!compact && (
-        <div className="flex gap-4 mt-2">
-          <Metric label="Mkt Cap" value={fmtCompact(market_cap)} />
-          <Metric label="Vol"     value={fmtVol(avg_volume)} />
+      {/* Day range bar */}
+      {!compact && quote.bid != null && quote.ask != null && quote.ask > quote.bid && (
+        <div className="mt-2.5">
+          <div className="flex justify-between text-[10px] font-mono text-gray-400 mb-0.5 tabular-nums">
+            <span>{quote.bid.toFixed(2)}</span>
+            <span className="text-gray-300">Day</span>
+            <span>{quote.ask.toFixed(2)}</span>
+          </div>
+          <div className="h-px bg-[#E8E4DF] relative">
+            <div
+              className={clsx('absolute h-px', up ? 'bg-green-500' : 'bg-red-500')}
+              style={{
+                width: `${Math.max(0, Math.min(100, quote.ask > quote.bid ? ((price - quote.bid) / (quote.ask - quote.bid)) * 100 : 50))}%`,
+              }}
+            />
+          </div>
         </div>
       )}
 
-      {/* ── View Profile CTA ───────────────────────────────────── */}
+      {/* 52W range */}
+      {year_low != null && year_high != null && (
+        <div className="mt-2">
+          <div className="flex justify-between text-[10px] font-mono text-gray-400 mb-0.5 tabular-nums">
+            <span>{year_low.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+            <span className="text-gray-300">52W</span>
+            <span>{year_high.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+          </div>
+          <div className="h-px bg-[#E8E4DF] relative">
+            <div
+              className="absolute h-px bg-gray-400"
+              style={{
+                width: `${Math.max(0, Math.min(100, year_high > year_low ? ((price - year_low) / (year_high - year_low)) * 100 : 50))}%`,
+              }}
+            />
+            <div
+              className="absolute w-1.5 h-1.5 bg-gray-900 rounded-full -top-[2px]"
+              style={{
+                left: `${Math.max(0, Math.min(100, year_high > year_low ? ((price - year_low) / (year_high - year_low)) * 100 : 50))}%`,
+                transform: 'translateX(-50%)',
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Mkt Cap / Volume — dotted separator */}
+      {!compact && (
+        <div className="flex gap-4 mt-2.5 pt-2 border-t border-dotted border-[#E8E4DF]">
+          <div>
+            <span className="text-[9px] font-mono text-gray-400 uppercase tracking-wider">MKT CAP</span>
+            <div className="text-[11px] font-mono text-gray-600 tabular-nums">{fmtCompact(market_cap)}</div>
+          </div>
+          <div>
+            <span className="text-[9px] font-mono text-gray-400 uppercase tracking-wider">VOL</span>
+            <div className="text-[11px] font-mono text-gray-600 tabular-nums">{fmtVol(avg_volume)}</div>
+          </div>
+        </div>
+      )}
+
+      {/* View Profile — simple text link */}
       {!compact && (
         <div
           onClick={(e) => {
@@ -176,7 +185,7 @@ export default function TickerCard({ quote, compact = false }: Props) {
             setSelectedSymbol(symbol)
             setRoute('stock')
           }}
-          className="mt-2 w-full text-center text-[10px] font-sans px-2 py-1 rounded-xl bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 border-0 transition-colors cursor-pointer"
+          className="mt-2 text-center text-[11px] font-mono text-gray-400 hover:text-gray-900 border border-[#E8E4DF] rounded py-1 transition-colors cursor-pointer"
         >
           View Profile
         </div>

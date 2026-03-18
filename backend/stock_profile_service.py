@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 
 CACHE_TTL = 900        # 15 minutes
 MAX_CACHE_ENTRIES = 500
+YF_FETCH_CONCURRENCY = 2
 
 
 @dataclass
@@ -28,6 +30,7 @@ class _CacheEntry:
 
 
 _cache: dict[tuple[str, str], _CacheEntry] = {}
+_yf_fetch_semaphores: dict[int, asyncio.Semaphore] = {}
 
 
 def _get_cached(symbol: str, module: str) -> dict[str, Any] | None:
@@ -67,6 +70,96 @@ def _safe(info: dict, key: str, cast: type = float) -> Any:
 
 def _now_ts() -> float:
     return time.time()
+
+
+async def _run_fetch(fetcher, *args):
+    # Yahoo starts throttling when the profile page fans out too aggressively.
+    loop_id = id(asyncio.get_running_loop())
+    semaphore = _yf_fetch_semaphores.setdefault(loop_id, asyncio.Semaphore(YF_FETCH_CONCURRENCY))
+    async with semaphore:
+        return await asyncio.to_thread(fetcher, *args)
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(result) or math.isinf(result):
+        return None
+    return result
+
+
+def _finite_int(value: Any) -> int | None:
+    try:
+        if isinstance(value, str):
+            value = value.replace(",", "").strip()
+        result = int(value)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return result
+
+
+def _clean_bucket_count(value: Any) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, result)
+
+
+def _parse_pct_text(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).replace("%", "").replace(",", "").strip()
+    parsed = _finite_float(text)
+    if parsed is None:
+        return None
+    return parsed / 100.0
+
+
+def _recommendation_total(summary: dict[str, Any] | None) -> int:
+    if not summary:
+        return 0
+    return sum(
+        _clean_bucket_count(summary.get(key))
+        for key in ("strong_buy", "buy", "hold", "sell", "strong_sell")
+    )
+
+
+def _derive_recommendation_mean(summary: dict[str, Any] | None) -> float | None:
+    total = _recommendation_total(summary)
+    if total <= 0 or not summary:
+        return None
+    weighted = (
+        (1 * _clean_bucket_count(summary.get("strong_buy")))
+        + (2 * _clean_bucket_count(summary.get("buy")))
+        + (3 * _clean_bucket_count(summary.get("hold")))
+        + (4 * _clean_bucket_count(summary.get("sell")))
+        + (5 * _clean_bucket_count(summary.get("strong_sell")))
+    )
+    return round(weighted / total, 2)
+
+
+def _recommendation_key_from_mean(value: float | None) -> str | None:
+    if value is None:
+        return None
+    if value <= 1.5:
+        return "strong_buy"
+    if value <= 2.5:
+        return "buy"
+    if value <= 3.5:
+        return "hold"
+    if value <= 4.5:
+        return "sell"
+    return "strong_sell"
+
+
+def _recommendation_period_sort_key(period: str) -> tuple[int, str]:
+    match = re.fullmatch(r"(-?\d+)m", str(period).strip())
+    if match:
+        return (int(match.group(1)), str(period))
+    return (0, str(period))
 
 
 # ── Fetchers (run in thread) ────────────────────────────────────────────────
@@ -110,15 +203,111 @@ def _fetch_institutional_holders(symbol: str) -> list[dict]:
             return []
         holders = []
         for _, row in df.head(10).iterrows():
-            holders.append({
+            entry = {
                 "name": str(row.get("Holder", "")),
                 "shares": int(row["Shares"]) if "Shares" in row and row["Shares"] else 0,
                 "pct": float(row["% Out"]) if "% Out" in row and row["% Out"] else 0.0,
-            })
+            }
+            if "Value" in row and row["Value"]:
+                try:
+                    entry["value"] = float(row["Value"])
+                except (TypeError, ValueError):
+                    pass
+            if "Date Reported" in row and row["Date Reported"]:
+                try:
+                    entry["date_reported"] = str(row["Date Reported"])[:10]
+                except Exception:
+                    pass
+            holders.append(entry)
         return holders
     except Exception as exc:
         log.warning("yfinance institutional_holders failed for %s: %s", symbol, exc)
         return []
+
+
+def _fetch_mutual_fund_holders(symbol: str) -> list[dict]:
+    """Fetch top mutual fund/ETF holders."""
+    import yfinance as yf
+    try:
+        df = yf.Ticker(symbol).mutualfund_holders
+        if df is None or df.empty:
+            return []
+        holders = []
+        for _, row in df.head(10).iterrows():
+            entry = {
+                "name": str(row.get("Holder", "")),
+                "shares": int(row["Shares"]) if "Shares" in row and row["Shares"] else 0,
+                "pct": float(row["% Out"]) if "% Out" in row and row["% Out"] else 0.0,
+            }
+            if "Value" in row and row["Value"]:
+                try:
+                    entry["value"] = float(row["Value"])
+                except (TypeError, ValueError):
+                    pass
+            if "Date Reported" in row and row["Date Reported"]:
+                try:
+                    entry["date_reported"] = str(row["Date Reported"])[:10]
+                except Exception:
+                    pass
+            holders.append(entry)
+        return holders
+    except Exception as exc:
+        log.warning("yfinance mutualfund_holders failed for %s: %s", symbol, exc)
+        return []
+
+
+def _fetch_major_holders_summary(symbol: str) -> dict[str, Any]:
+    """Parse Yahoo's major holders table for fallback ownership stats."""
+    import yfinance as yf
+    try:
+        df = yf.Ticker(symbol).major_holders
+        if df is None or df.empty:
+            return {}
+
+        summary: dict[str, Any] = {}
+        for _, row in df.iterrows():
+            raw_parts = [str(value).strip() for value in row.tolist() if value is not None and str(value).strip()]
+            if not raw_parts:
+                continue
+
+            label = ""
+            value_text = None
+            if len(raw_parts) >= 2:
+                pct_like = next((part for part in raw_parts if "%" in part), None)
+                int_like = next((part for part in raw_parts if _finite_int(part) is not None), None)
+                label = next((part for part in raw_parts if part not in {pct_like, int_like}), raw_parts[-1]).lower()
+                value_text = pct_like or int_like
+            else:
+                text = raw_parts[0]
+                pct_match = re.match(r"^\s*([0-9.,]+%)\s+(.*)$", text)
+                int_match = re.match(r"^\s*([0-9,]+)\s+(.*)$", text)
+                if pct_match:
+                    value_text = pct_match.group(1)
+                    label = pct_match.group(2).strip().lower()
+                elif int_match:
+                    value_text = int_match.group(1)
+                    label = int_match.group(2).strip().lower()
+                else:
+                    label = text.lower()
+
+            if not label or value_text is None:
+                continue
+            if "all insider" in label:
+                pct = _parse_pct_text(value_text)
+                if pct is not None:
+                    summary["held_pct_insiders"] = pct
+            elif "held by institutions" in label and "float" not in label:
+                pct = _parse_pct_text(value_text)
+                if pct is not None:
+                    summary["held_pct_institutions"] = pct
+            elif "number of institutions" in label:
+                count = _finite_int(value_text)
+                if count is not None:
+                    summary["total_institutional_holders"] = count
+        return summary
+    except Exception as exc:
+        log.warning("yfinance major_holders failed for %s: %s", symbol, exc)
+        return {}
 
 
 def _fetch_financial_statements(symbol: str) -> dict[str, Any]:
@@ -177,39 +366,92 @@ def _fetch_upgrades_downgrades(symbol: str) -> list[dict]:
         if df is None or df.empty:
             return []
         rows = []
-        for idx, row in df.head(20).iterrows():
+        for idx, row in df.sort_index(ascending=False).head(20).iterrows():
             date_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-            rows.append({
+            entry = {
                 "date": date_str,
                 "firm": str(row.get("Firm", "")),
                 "to_grade": str(row.get("ToGrade", "")),
                 "from_grade": str(row.get("FromGrade", "")),
                 "action": str(row.get("Action", "")),
-            })
+            }
+            price_target_action = row.get("priceTargetAction")
+            if price_target_action:
+                entry["price_target_action"] = str(price_target_action)
+            price_target = _finite_float(row.get("currentPriceTarget"))
+            if price_target is not None:
+                entry["price_target"] = price_target
+            prior_price_target = _finite_float(row.get("priorPriceTarget"))
+            if prior_price_target is not None:
+                entry["prior_price_target"] = prior_price_target
+            rows.append(entry)
         return rows
     except Exception as exc:
         log.warning("yfinance upgrades_downgrades failed for %s: %s", symbol, exc)
         return []
 
 
+def _fetch_analyst_price_targets(symbol: str) -> dict[str, float]:
+    """Fetch current analyst target range/consensus values."""
+    import yfinance as yf
+    try:
+        raw = yf.Ticker(symbol).analyst_price_targets or {}
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, float] = {}
+        for key in ("current", "high", "low", "mean", "median"):
+            value = _finite_float(raw.get(key))
+            if value is not None:
+                result[key] = value
+        return result
+    except Exception as exc:
+        log.warning("yfinance analyst_price_targets failed for %s: %s", symbol, exc)
+        return {}
+
+
+def _normalize_recommendation_rows(df) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    rows = []
+    for _, row in df.iterrows():
+        rows.append({
+            "period": str(row.get("period", "")),
+            "strong_buy": _clean_bucket_count(row.get("strongBuy")),
+            "buy": _clean_bucket_count(row.get("buy")),
+            "hold": _clean_bucket_count(row.get("hold")),
+            "sell": _clean_bucket_count(row.get("sell")),
+            "strong_sell": _clean_bucket_count(row.get("strongSell")),
+        })
+    rows.sort(key=lambda item: _recommendation_period_sort_key(item["period"]))
+    return rows
+
+
+def _fetch_recommendation_summary(symbol: str) -> dict[str, Any] | None:
+    """Fetch the latest analyst recommendation bucket snapshot."""
+    import yfinance as yf
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.recommendations_summary
+        if df is None or df.empty:
+            df = ticker.recommendations
+        rows = _normalize_recommendation_rows(df)
+        if not rows:
+            return None
+        return rows[-1]
+    except Exception as exc:
+        log.warning("yfinance recommendations_summary failed for %s: %s", symbol, exc)
+        return None
+
+
 def _fetch_recommendation_trend(symbol: str) -> list[dict]:
     """Fetch monthly recommendation trend (strongBuy/buy/hold/sell/strongSell)."""
     import yfinance as yf
     try:
-        df = yf.Ticker(symbol).recommendations
+        ticker = yf.Ticker(symbol)
+        df = ticker.recommendations_summary
         if df is None or df.empty:
-            return []
-        rows = []
-        for _, row in df.tail(12).iterrows():
-            rows.append({
-                "period": str(row.get("period", "")),
-                "strong_buy": int(row.get("strongBuy", 0)),
-                "buy": int(row.get("buy", 0)),
-                "hold": int(row.get("hold", 0)),
-                "sell": int(row.get("sell", 0)),
-                "strong_sell": int(row.get("strongSell", 0)),
-            })
-        return rows
+            df = ticker.recommendations
+        return _normalize_recommendation_rows(df)
     except Exception as exc:
         log.warning("yfinance recommendations failed for %s: %s", symbol, exc)
         return []
@@ -321,7 +563,7 @@ class StockProfileService:
         cached = _get_cached(symbol, "_info")
         if cached is not None:
             return cached
-        info = await asyncio.to_thread(_fetch_info, symbol)
+        info = await _run_fetch(_fetch_info, symbol)
         _put_cache(symbol, "_info", info)
         return info
 
@@ -384,7 +626,7 @@ class StockProfileService:
             return cached
 
         info = await self._info(symbol)
-        quarterly = await asyncio.to_thread(_fetch_quarterly_financials, symbol)
+        quarterly = await _run_fetch(_fetch_quarterly_financials, symbol)
 
         data = {
             "total_revenue": _safe(info, "totalRevenue"),
@@ -413,15 +655,34 @@ class StockProfileService:
         if cached is not None:
             return cached
 
-        info = await self._info(symbol)
+        info, summary, targets = await asyncio.gather(
+            self._info(symbol),
+            _run_fetch(_fetch_recommendation_summary, symbol),
+            _run_fetch(_fetch_analyst_price_targets, symbol),
+        )
+        recommendation_mean = _derive_recommendation_mean(summary) or _safe(info, "recommendationMean")
+        recommendation_key = (
+            _recommendation_key_from_mean(recommendation_mean)
+            or info.get("recommendationKey")
+        )
+        num_analyst_opinions = _recommendation_total(summary) or _safe(
+            info, "numberOfAnalystOpinions", int
+        )
         data = {
-            "recommendation_mean": _safe(info, "recommendationMean"),
-            "recommendation_key": info.get("recommendationKey"),
-            "target_mean_price": _safe(info, "targetMeanPrice"),
-            "target_high_price": _safe(info, "targetHighPrice"),
-            "target_low_price": _safe(info, "targetLowPrice"),
-            "target_median_price": _safe(info, "targetMedianPrice"),
-            "num_analyst_opinions": _safe(info, "numberOfAnalystOpinions", int),
+            "recommendation_mean": recommendation_mean,
+            "recommendation_key": recommendation_key,
+            "recommendation_period": summary.get("period") if summary else None,
+            "strong_buy": summary.get("strong_buy") if summary else None,
+            "buy": summary.get("buy") if summary else None,
+            "hold": summary.get("hold") if summary else None,
+            "sell": summary.get("sell") if summary else None,
+            "strong_sell": summary.get("strong_sell") if summary else None,
+            "current_price": targets.get("current"),
+            "target_mean_price": targets.get("mean", _safe(info, "targetMeanPrice")),
+            "target_high_price": targets.get("high", _safe(info, "targetHighPrice")),
+            "target_low_price": targets.get("low", _safe(info, "targetLowPrice")),
+            "target_median_price": targets.get("median", _safe(info, "targetMedianPrice")),
+            "num_analyst_opinions": num_analyst_opinions,
             "fetched_at": _now_ts(),
         }
         _put_cache(symbol, "analyst", data)
@@ -433,12 +694,18 @@ class StockProfileService:
             return cached
 
         info = await self._info(symbol)
-        holders = await asyncio.to_thread(_fetch_institutional_holders, symbol)
+        holders, fund_holders, major_summary = await asyncio.gather(
+            _run_fetch(_fetch_institutional_holders, symbol),
+            _run_fetch(_fetch_mutual_fund_holders, symbol),
+            _run_fetch(_fetch_major_holders_summary, symbol),
+        )
 
         data = {
-            "held_pct_institutions": _safe(info, "heldPercentInstitutions"),
-            "held_pct_insiders": _safe(info, "heldPercentInsiders"),
+            "held_pct_institutions": _safe(info, "heldPercentInstitutions") or major_summary.get("held_pct_institutions"),
+            "held_pct_insiders": _safe(info, "heldPercentInsiders") or major_summary.get("held_pct_insiders"),
             "top_holders": holders or None,
+            "mutual_fund_holders": fund_holders or None,
+            "total_institutional_holders": _safe(info, "institutionCount", int) or major_summary.get("total_institutional_holders"),
             "fetched_at": _now_ts(),
         }
         _put_cache(symbol, "ownership", data)
@@ -450,7 +717,7 @@ class StockProfileService:
             return cached
 
         info = await self._info(symbol)
-        next_earnings = await asyncio.to_thread(_fetch_earnings_dates, symbol)
+        next_earnings = await _run_fetch(_fetch_earnings_dates, symbol)
 
         ex_div_raw = info.get("exDividendDate")
         ex_div = None
@@ -511,6 +778,9 @@ class StockProfileService:
 
         # Analyst
         rec = _safe(info, "recommendationMean")
+        if rec is None:
+            recommendation_summary = await _run_fetch(_fetch_recommendation_summary, symbol)
+            rec = _derive_recommendation_mean(recommendation_summary)
         if rec is not None:
             if rec <= 2.0:
                 strengths.append("Strong analyst buy consensus")
@@ -564,7 +834,7 @@ class StockProfileService:
         if cached is not None:
             return cached
 
-        raw = await asyncio.to_thread(_fetch_financial_statements, symbol)
+        raw = await _run_fetch(_fetch_financial_statements, symbol)
         data = {**raw, "fetched_at": _now_ts()}
         _put_cache(symbol, "financial_statements", data)
         return data
@@ -575,13 +845,14 @@ class StockProfileService:
             return cached
 
         upgrades, trend = await asyncio.gather(
-            asyncio.to_thread(_fetch_upgrades_downgrades, symbol),
-            asyncio.to_thread(_fetch_recommendation_trend, symbol),
+            _run_fetch(_fetch_upgrades_downgrades, symbol),
+            _run_fetch(_fetch_recommendation_trend, symbol),
         )
 
         data = {
             "upgrades_downgrades": upgrades or None,
             "recommendation_trend": trend or None,
+            "latest_recommendation": trend[-1] if trend else None,
             "fetched_at": _now_ts(),
         }
         _put_cache(symbol, "analyst_detail", data)
@@ -789,7 +1060,7 @@ class StockProfileService:
         if cached is not None:
             return cached
 
-        splits = await asyncio.to_thread(_fetch_stock_splits, symbol)
+        splits = await _run_fetch(_fetch_stock_splits, symbol)
         data = {"splits": splits or [], "fetched_at": _now_ts()}
         _put_cache(symbol, "stock_splits", data)
         return data
@@ -799,7 +1070,7 @@ class StockProfileService:
         if cached is not None:
             return cached
 
-        result = await asyncio.to_thread(_fetch_earnings_with_estimate, symbol)
+        result = await _run_fetch(_fetch_earnings_with_estimate, symbol)
         data = {**result, "fetched_at": _now_ts()}
         _put_cache(symbol, "earnings_detail", data)
         return data

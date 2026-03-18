@@ -2,31 +2,105 @@ import { useBacktestStore } from '@/store'
 
 interface ParamInputProps {
   label: string
+  icon: React.ReactNode
   value: number
   onChange: (v: number) => void
   help?: string
   min?: number
   max?: number
   step?: number
+  isPct?: boolean
+  prefix?: string
 }
 
-function ParamInput({ label, value, onChange, help, min = 0, max, step = 1 }: ParamInputProps) {
+function ParamInput({ label, icon, value, onChange, help, min = 0, max, step = 1, isPct, prefix }: ParamInputProps) {
+  // For percentage inputs, compute fill width for the slider-bar visual
+  const fillPct = (isPct && max != null)
+    ? Math.min(100, Math.max(0, ((value - (min ?? 0)) / (max - (min ?? 0))) * 100))
+    : null
+
   return (
-    <div>
-      <label className="text-xs font-sans font-medium text-terminal-dim block mb-1.5">{label}</label>
-      <input
-        type="number"
-        className="w-full bg-terminal-input border border-white/[0.06] rounded-xl px-3 py-1.5 text-sm font-mono text-terminal-text focus:outline-none focus:border-terminal-blue/40 focus:ring-1 focus:ring-terminal-blue/20 transition-colors"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        min={min}
-        max={max}
-        step={step}
-      />
-      {help && <span className="text-[10px] font-sans text-terminal-ghost mt-1 block">{help}</span>}
+    <div className="bg-gray-50/60 rounded-xl border border-gray-200 p-3.5 hover:border-gray-200 transition-colors group">
+      {/* Label row */}
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-6 h-6 rounded-md bg-white flex items-center justify-center text-gray-500 group-hover:text-gray-800 transition-colors flex-shrink-0">
+          {icon}
+        </div>
+        <label className="text-xs font-sans font-medium text-gray-500 group-hover:text-gray-800 transition-colors">
+          {label}
+        </label>
+      </div>
+
+      {/* Input */}
+      <div className="relative">
+        {prefix && (
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-mono text-gray-400 pointer-events-none select-none">
+            {prefix}
+          </span>
+        )}
+        <input
+          type="number"
+          className={`w-full bg-white border border-gray-200 rounded-lg py-1.5 text-sm font-mono text-gray-800
+            focus:outline-none focus:border-indigo-600/50 focus:ring-1 focus:ring-indigo-600/20
+            hover:border-gray-200 transition-all
+            ${prefix ? 'pl-7 pr-3' : 'px-3'}`}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          min={min}
+          max={max}
+          step={step}
+        />
+      </div>
+
+      {/* Slider-bar visual for percentage inputs */}
+      {fillPct !== null && (
+        <div className="mt-2.5 h-1 bg-white rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-indigo-600/60 to-indigo-600 transition-all duration-300"
+            style={{ width: `${fillPct}%` }}
+          />
+        </div>
+      )}
+
+      {/* Help text */}
+      {help && (
+        <span className="text-[10px] font-sans text-gray-400 mt-1.5 block">{help}</span>
+      )}
     </div>
   )
 }
+
+const IconCapital = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+      d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+    />
+  </svg>
+)
+
+const IconPosition = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+      d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+    />
+  </svg>
+)
+
+const IconStopLoss = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+      d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
+    />
+  </svg>
+)
+
+const IconTakeProfit = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+      d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"
+    />
+  </svg>
+)
 
 export function BacktestParams() {
   const {
@@ -35,41 +109,61 @@ export function BacktestParams() {
   } = useBacktestStore()
 
   return (
-    <div className="glass rounded-2xl shadow-glass p-5">
-      <h3 className="text-sm font-sans font-medium text-terminal-text mb-4">Parameters</h3>
-      <div className="grid grid-cols-2 gap-4">
+    <div className="card rounded-2xl shadow-card p-5">
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-4">
+        <div className="w-7 h-7 rounded-lg bg-indigo-50 flex items-center justify-center">
+          <svg className="w-3.5 h-3.5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"
+            />
+          </svg>
+        </div>
+        <h3 className="text-sm font-sans font-semibold text-gray-800">Parameters</h3>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
         <ParamInput
-          label="Initial Capital ($)"
+          label="Initial Capital"
+          icon={<IconCapital />}
           value={initialCapital}
           onChange={setInitialCapital}
           min={1000}
           step={1000}
+          prefix="$"
+          help="Starting portfolio value"
         />
         <ParamInput
-          label="Position Size (%)"
+          label="Position Size"
+          icon={<IconPosition />}
           value={positionSizePct}
           onChange={setPositionSizePct}
           help="% of equity per trade"
           min={1}
           max={100}
+          isPct
         />
         <ParamInput
-          label="Stop Loss (%)"
+          label="Stop Loss"
+          icon={<IconStopLoss />}
           value={stopLossPct}
           onChange={setStopLossPct}
           help="0 = disabled"
           min={0}
           max={50}
           step={0.5}
+          isPct
         />
         <ParamInput
-          label="Take Profit (%)"
+          label="Take Profit"
+          icon={<IconTakeProfit />}
           value={takeProfitPct}
           onChange={setTakeProfitPct}
           help="0 = disabled"
           min={0}
           max={100}
           step={0.5}
+          isPct
         />
       </div>
     </div>

@@ -28,14 +28,14 @@ function Pill({ id, label, color, active, onToggle }: PillProps) {
       className={clsx(
         'inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded-full border transition-all',
         active
-          ? 'border-transparent text-terminal-bg font-medium'
-          : 'border-terminal-border text-terminal-ghost hover:text-terminal-dim hover:border-terminal-muted',
+          ? 'border-transparent text-[#FAF8F5] font-medium'
+          : 'border-gray-200 text-gray-400 hover:text-gray-500 hover:border-gray-200',
       )}
       style={active ? { background: color, borderColor: color } : {}}
     >
       {active && (
         <span
-          className="w-1.5 h-1.5 rounded-full bg-terminal-bg/60 flex-shrink-0"
+          className="w-1.5 h-1.5 rounded-full bg-[#FAF8F5]/60 flex-shrink-0"
         />
       )}
       {label}
@@ -53,7 +53,7 @@ export default function IndicatorSelector() {
     <div className="flex items-center gap-3 flex-wrap">
       {/* Overlay group */}
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-mono text-terminal-ghost uppercase tracking-wider mr-0.5">
+        <span className="text-[10px] font-mono text-gray-400 uppercase tracking-wider mr-0.5">
           Overlay
         </span>
         {OVERLAYS.map((def) => (
@@ -69,11 +69,11 @@ export default function IndicatorSelector() {
       </div>
 
       {/* Divider */}
-      <div className="w-px h-4 bg-terminal-border" />
+      <div className="w-px h-4 bg-gray-200" />
 
       {/* Oscillator group */}
       <div className="flex items-center gap-1.5">
-        <span className="text-[10px] font-mono text-terminal-ghost uppercase tracking-wider mr-0.5">
+        <span className="text-[10px] font-mono text-gray-400 uppercase tracking-wider mr-0.5">
           Oscillator
         </span>
         {OSCILLATORS.map((def) => (

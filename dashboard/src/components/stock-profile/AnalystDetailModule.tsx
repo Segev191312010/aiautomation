@@ -41,12 +41,12 @@ interface GradeStyle {
 }
 
 const GRADE_STYLES: Record<GradeTier, GradeStyle> = {
-  strong_buy:  { pill: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/25', dot: 'bg-emerald-500', text: 'text-emerald-300' },
-  buy:         { pill: 'bg-green-500/15 text-green-300 border-green-500/25',       dot: 'bg-green-500',   text: 'text-green-300'   },
-  hold:        { pill: 'bg-amber-500/15 text-amber-300 border-amber-500/25',       dot: 'bg-amber-500',   text: 'text-amber-300'   },
-  sell:        { pill: 'bg-orange-500/15 text-orange-300 border-orange-500/25',    dot: 'bg-orange-500',  text: 'text-orange-300'  },
-  strong_sell: { pill: 'bg-red-500/15 text-red-300 border-red-500/25',             dot: 'bg-red-500',     text: 'text-red-300'     },
-  neutral:     { pill: 'bg-white/[0.06] text-terminal-ghost border-white/[0.08]',  dot: 'bg-terminal-ghost', text: 'text-terminal-ghost' },
+  strong_buy:  { pill: 'bg-emerald-50 text-emerald-700 border-emerald-200', dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  buy:         { pill: 'bg-green-50 text-green-700 border-green-200',       dot: 'bg-green-500',   text: 'text-green-700'   },
+  hold:        { pill: 'bg-amber-50 text-amber-700 border-amber-200',       dot: 'bg-amber-500',   text: 'text-amber-700'   },
+  sell:        { pill: 'bg-orange-50 text-orange-700 border-orange-200',    dot: 'bg-orange-500',  text: 'text-orange-700'  },
+  strong_sell: { pill: 'bg-red-50 text-red-700 border-red-200',             dot: 'bg-red-500',     text: 'text-red-700'     },
+  neutral:     { pill: 'bg-gray-100 text-gray-400 border-gray-200',               dot: 'bg-gray-400',    text: 'text-gray-400'    },
 }
 
 function gradePill(grade: string) {
@@ -68,17 +68,17 @@ function gradePill(grade: string) {
 
 function actionStyle(action: string): string {
   const a = action.toLowerCase()
-  if (a === 'upgrade' || a === 'initiated') return 'text-terminal-green'
-  if (a === 'downgrade') return 'text-terminal-red'
-  return 'text-terminal-ghost'
+  if (a === 'upgrade' || a === 'initiated') return 'text-green-600'
+  if (a === 'downgrade') return 'text-red-600'
+  return 'text-gray-400'
 }
 
 function actionBg(action: string): string {
   const a = action.toLowerCase()
-  if (a === 'upgrade') return 'bg-terminal-green/[0.06]'
-  if (a === 'downgrade') return 'bg-terminal-red/[0.06]'
-  if (a === 'initiated') return 'bg-indigo-500/[0.06]'
-  return 'bg-white/[0.02]'
+  if (a === 'upgrade') return 'bg-green-50'
+  if (a === 'downgrade') return 'bg-red-50'
+  if (a === 'initiated') return 'bg-indigo-50'
+  return 'bg-gray-50/70'
 }
 
 // ── Grade summary tally ───────────────────────────────────────────────────────
@@ -117,18 +117,21 @@ interface GradeEntry {
   to_grade: string
   from_grade: string
   action: string
+  price_target_action?: string | null
+  price_target?: number | null
+  prior_price_target?: number | null
 }
 
 function GradeCard({ entry }: { entry: GradeEntry }) {
   return (
     <div
       className={clsx(
-        'flex flex-col gap-1.5 rounded-xl border border-white/[0.06] p-3 transition-colors',
+        'flex flex-col gap-1.5 rounded-xl border border-gray-200 p-3 transition-colors',
         actionBg(entry.action),
       )}
     >
       <div className="flex items-start justify-between gap-1 min-w-0">
-        <span className="text-[10px] font-sans font-medium text-terminal-text leading-snug truncate flex-1">
+        <span className="text-[10px] font-sans font-medium text-gray-800 leading-snug truncate flex-1">
           {entry.firm}
         </span>
         <span className={clsx('text-[8px] font-sans capitalize shrink-0 mt-0.5', actionStyle(entry.action))}>
@@ -139,7 +142,7 @@ function GradeCard({ entry }: { entry: GradeEntry }) {
       <div className="flex items-center gap-1.5 flex-wrap">
         {entry.from_grade && (
           <>
-            <span className="text-[9px] font-sans text-terminal-ghost line-through opacity-60">
+            <span className="text-[9px] font-sans text-gray-400 line-through opacity-60">
               {entry.from_grade}
             </span>
             <span className={clsx('text-[9px]', actionStyle(entry.action))}>→</span>
@@ -148,7 +151,27 @@ function GradeCard({ entry }: { entry: GradeEntry }) {
         {gradePill(entry.to_grade)}
       </div>
 
-      <span className="text-[8px] font-mono text-terminal-ghost">{entry.date}</span>
+      {(entry.price_target != null || entry.prior_price_target != null) && (
+        <div className="flex items-center gap-1.5 flex-wrap text-[9px] font-mono text-gray-500">
+          {entry.price_target_action && (
+            <span className="uppercase tracking-wide text-[8px] text-gray-400">
+              {entry.price_target_action}
+            </span>
+          )}
+          {entry.prior_price_target != null && (
+            <span className="line-through opacity-70">
+              ${entry.prior_price_target.toFixed(0)}
+            </span>
+          )}
+          {entry.price_target != null && (
+            <span className="font-semibold text-gray-700">
+              ${entry.price_target.toFixed(0)}
+            </span>
+          )}
+        </div>
+      )}
+
+      <span className="text-[8px] font-mono text-gray-400">{entry.date}</span>
     </div>
   )
 }
@@ -168,27 +191,29 @@ export default function AnalystDetailModule({ data, loading }: Props) {
   const [showAll, setShowAll] = useState(false)
 
   const tally = useMemo<GradeTally | null>(() => {
-    if (!data?.upgrades_downgrades?.length) return null
-    const t: GradeTally = { strong_buy: 0, buy: 0, hold: 0, sell: 0, strong_sell: 0 }
-    for (const ud of data.upgrades_downgrades) {
-      const tier = classifyGrade(ud.to_grade)
-      if (tier === 'neutral') continue
-      if (tier in t) t[tier as keyof GradeTally]++
+    const latest = data?.latest_recommendation
+      ?? data?.recommendation_trend?.[data.recommendation_trend.length - 1]
+    if (!latest) return null
+    return {
+      strong_buy: latest.strong_buy,
+      buy: latest.buy,
+      hold: latest.hold,
+      sell: latest.sell,
+      strong_sell: latest.strong_sell,
     }
-    return t
   }, [data])
 
   if (!data && loading) {
     return (
-      <section className="glass rounded-2xl shadow-glass p-6 animate-pulse">
-        <div className="h-3 w-32 bg-terminal-muted rounded-xl mb-5" />
+      <section className="card rounded-lg shadow-card p-6 animate-pulse">
+        <div className="h-3 w-32 bg-gray-100 rounded-xl mb-5" />
         <div className="grid grid-cols-2 gap-2 mb-4">
           {[...Array(4)].map((_, i) => (
-            <div key={i} className="h-20 bg-terminal-muted rounded-xl" />
+            <div key={i} className="h-20 bg-gray-100 rounded-xl" />
           ))}
         </div>
-        <div className="h-3 w-48 bg-terminal-muted rounded-xl mb-3" />
-        <div className="h-20 bg-terminal-muted rounded-xl" />
+        <div className="h-3 w-48 bg-gray-100 rounded-xl mb-3" />
+        <div className="h-20 bg-gray-100 rounded-xl" />
       </section>
     )
   }
@@ -205,10 +230,10 @@ export default function AnalystDetailModule({ data, loading }: Props) {
   const hasMore = upgrades.length > INITIAL_SHOWN
 
   return (
-    <section id="section-analyst-detail" className="glass rounded-2xl shadow-glass p-6 flex flex-col gap-5">
+    <section id="section-analyst-detail" className="card rounded-lg shadow-card p-6 flex flex-col gap-5">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-sans font-medium text-terminal-dim tracking-wide">Analyst Grades</h3>
+        <h3 className="text-xs font-sans font-medium text-gray-500 tracking-wide">Analyst Grades</h3>
         <FreshnessTag fetchedAt={data.fetched_at} />
       </div>
 
@@ -233,6 +258,11 @@ export default function AnalystDetailModule({ data, loading }: Props) {
               </span>
             )
           })}
+          {data?.latest_recommendation?.period && (
+            <span className="text-[9px] font-mono text-gray-400 ml-auto">
+              Snapshot {data.latest_recommendation.period}
+            </span>
+          )}
         </div>
       )}
 
@@ -240,7 +270,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
       {hasGrades && (
         <div>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[9px] font-sans text-terminal-ghost uppercase tracking-wide">
+            <span className="text-[9px] font-sans text-gray-400 uppercase tracking-wide">
               {showAll ? `All ${upgrades.length} grades` : `Top ${Math.min(INITIAL_SHOWN, upgrades.length)} of ${upgrades.length}`}
             </span>
           </div>
@@ -254,7 +284,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
           {hasMore && (
             <button
               onClick={() => setShowAll(v => !v)}
-              className="mt-3 text-[10px] font-sans text-indigo-400 hover:text-indigo-300 transition-colors"
+              className="mt-3 text-[10px] font-sans text-indigo-600 hover:text-indigo-600 transition-colors"
             >
               {showAll
                 ? '▾ Show fewer'
@@ -267,7 +297,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
       {/* Recommendation Trend */}
       {hasTrend && (
         <div>
-          <span className="text-[9px] font-sans text-terminal-ghost uppercase tracking-wide">
+          <span className="text-[9px] font-sans text-gray-400 uppercase tracking-wide">
             Recommendation Trend
           </span>
 
@@ -277,7 +307,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
               if (total === 0) return null
               return (
                 <div key={t.period} className="flex items-center gap-2.5">
-                  <span className="text-[9px] font-mono text-terminal-ghost w-12 shrink-0">{t.period}</span>
+                  <span className="text-[9px] font-mono text-gray-400 w-12 shrink-0">{t.period}</span>
                   <div className="flex-1 flex h-5 rounded-lg overflow-hidden">
                     {TREND_SEGMENTS.map(({ key, color, label }) => {
                       const count = t[key]
@@ -297,7 +327,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
                       )
                     })}
                   </div>
-                  <span className="text-[9px] font-mono text-terminal-ghost w-6 text-right shrink-0">
+                  <span className="text-[9px] font-mono text-gray-400 w-6 text-right shrink-0">
                     {total}
                   </span>
                 </div>
@@ -310,7 +340,7 @@ export default function AnalystDetailModule({ data, loading }: Props) {
             {TREND_SEGMENTS.map(({ color, label }) => (
               <div key={label} className="flex items-center gap-1.5">
                 <div className={clsx('w-2 h-2 rounded-sm shrink-0', color)} />
-                <span className="text-[8px] font-sans text-terminal-ghost">{label}</span>
+                <span className="text-[8px] font-sans text-gray-400">{label}</span>
               </div>
             ))}
           </div>

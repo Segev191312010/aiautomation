@@ -7,13 +7,18 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
-from ib_insync import MarketOrder, LimitOrder, Trade as IBTrade
+from ib_insync import MarketOrder, LimitOrder, StopOrder, Trade as IBTrade
 from ibkr_client import ibkr
 from database import save_trade, update_trade_status
 from models import Rule, Trade
 from config import cfg
 
 log = logging.getLogger(__name__)
+
+
+class OrderError(Exception):
+    """Raised when an order cannot be placed."""
+
 
 # ── Pre-flight order validation ──────────────────────────────────────────────
 MAX_ORDER_QTY = 10_000
@@ -68,9 +73,9 @@ async def place_order(rule: Rule) -> Optional[Trade]:
 
     Returns the Trade record (status PENDING), or None on failure.
     """
-    if cfg.IS_PAPER and not cfg.SIM_MODE:
-        log.error("[PAPER] IS_PAPER=true but SIM_MODE=False — aborting order placement")
-        raise RuntimeError("IS_PAPER=true requires SIM_MODE=True for virtual trading")
+    if cfg.SIM_MODE:
+        log.error("[SIM] SIM_MODE=true — no IBKR connection, cannot place live order")
+        raise RuntimeError("SIM_MODE=true: use simulation endpoints instead")
 
     # Pre-flight validation
     err = _pre_flight_check(rule)
@@ -105,6 +110,10 @@ async def place_order(rule: Rule) -> Optional[Trade]:
     else:
         ib_order = MarketOrder(action_str, qty)
 
+    # Extended hours + GTC so orders work outside regular trading hours
+    ib_order.outsideRth = True
+    ib_order.tif = "GTC"
+
     # Record trade in DB (PENDING status)
     trade_rec = Trade(
         rule_id=rule.id,
@@ -133,7 +142,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
                  action_str, qty, rule.symbol, trade_rec.order_id)
 
         # Watch for fill asynchronously
-        asyncio.create_task(_watch_fill(ib_trade, trade_rec))
+        asyncio.create_task(_watch_fill(ib_trade, trade_rec, contract, rule))
 
         return trade_rec
 
@@ -144,7 +153,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         return trade_rec
 
 
-async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, timeout: int = 60) -> None:
+async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule, timeout: int = 60) -> None:
     """Poll the IBKR trade object until it fills or times out."""
     elapsed = 0
     while elapsed < timeout:
@@ -160,6 +169,56 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, timeout: int = 60) ->
                      trade_rec.action, trade_rec.quantity, trade_rec.symbol, fill_price)
             for cb in _fill_callbacks:
                 cb(trade_rec)
+
+            # Notify via WebSocket
+            try:
+                from notification_service import notification_service
+                asyncio.create_task(notification_service.notify_order_filled({
+                    "symbol": trade_rec.symbol,
+                    "action": trade_rec.action,
+                    "qty": trade_rec.quantity,
+                    "fill_price": fill_price,
+                    "rule_name": trade_rec.rule_name,
+                    "trade_id": trade_rec.id,
+                }))
+            except Exception:
+                pass
+
+            # -- Bracket orders (SL + TP) after a BUY fill --
+            # 2.2:1 reward/risk — risk 2%, target 4.4%
+            if trade_rec.action == "BUY" and trade_rec.fill_price:
+                fill = trade_rec.fill_price
+                sl_price = round(fill * 0.98, 2)    # -2% stop loss
+                tp_price = round(fill * 1.044, 2)   # +4.4% take profit (2.2:1 R/R)
+                oca_group = f"OCA_{trade_rec.id[:8]}"
+
+                sl_order = StopOrder("SELL", trade_rec.quantity, sl_price)
+                sl_order.outsideRth = True
+                sl_order.tif = "GTC"
+                sl_order.ocaGroup = oca_group
+                sl_order.ocaType = 1  # cancel all others when one fills
+
+                tp_order = LimitOrder("SELL", trade_rec.quantity, tp_price)
+                tp_order.outsideRth = True
+                tp_order.tif = "GTC"
+                tp_order.ocaGroup = oca_group
+                tp_order.ocaType = 1
+
+                accounts = ibkr.ib.managedAccounts()
+                if accounts:
+                    sl_order.account = accounts[0]
+                    tp_order.account = accounts[0]
+
+                try:
+                    ibkr.ib.placeOrder(contract, sl_order)
+                    ibkr.ib.placeOrder(contract, tp_order)
+                    log.info(
+                        "Bracket placed for %s: SL=$%.2f TP=$%.2f",
+                        rule.symbol, sl_price, tp_price,
+                    )
+                except Exception as e:
+                    log.error("Failed to place bracket for %s: %s", rule.symbol, e)
+
             return
         if status in ("Cancelled", "ApiCancelled", "Inactive"):
             await update_trade_status(trade_rec.id, "CANCELLED")

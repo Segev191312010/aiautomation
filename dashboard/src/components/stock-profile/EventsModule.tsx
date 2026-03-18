@@ -1,74 +1,174 @@
-import type { StockEvents } from '@/types'
+import type { StockEarningsDetail, StockEvents } from '@/types'
 import FreshnessTag from './FreshnessTag'
 
-function daysUntil(dateStr: string): number | null {
-  try {
-    const target = new Date(dateStr + 'T00:00:00Z')
-    const now = new Date()
-    const diff = target.getTime() - now.getTime()
-    return Math.ceil(diff / (1000 * 60 * 60 * 24))
-  } catch {
-    return null
-  }
+const MONTH_NAMES = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+]
+
+function parseYMD(dateStr: string): { year: number; month: number; day: number } | null {
+  const parts = dateStr.split('-')
+  if (parts.length !== 3) return null
+  const year = parseInt(parts[0] ?? '0', 10)
+  const month = parseInt(parts[1] ?? '0', 10)
+  const day = parseInt(parts[2] ?? '0', 10)
+  if (!year || !month || !day) return null
+  return { year, month, day }
 }
 
-function EventRow({ label, date }: { label: string; date: string | null }) {
-  if (!date) return null
+function daysUntil(dateStr: string): number | null {
+  const parsed = parseYMD(dateStr)
+  if (!parsed) return null
+  const today = new Date()
+  const todayMidnight = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+  const targetMidnight = Date.UTC(parsed.year, parsed.month - 1, parsed.day)
+  return Math.round((targetMidnight - todayMidnight) / (1000 * 60 * 60 * 24))
+}
+
+function countdownLabel(days: number): string {
+  if (days === 0) return 'Today'
+  if (days > 0) return `in ${days} day${days === 1 ? '' : 's'}`
+  return `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`
+}
+
+function formatRevenue(value: number | null | undefined): string {
+  if (value == null) return '--'
+  if (value >= 1e12) return `$${(value / 1e12).toFixed(2)}T`
+  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`
+  if (value >= 1e6) return `$${(value / 1e6).toFixed(1)}M`
+  return `$${Math.round(value).toLocaleString('en-US')}`
+}
+
+function EventCard({
+  label,
+  date,
+  accent,
+  details,
+}: {
+  label: string
+  date: string
+  accent: 'indigo' | 'amber'
+  details?: { label: string; value: string }[]
+}) {
+  const parsed = parseYMD(date)
   const days = daysUntil(date)
-  const isPast = days != null && days < 0
-  const countdown = days != null
-    ? isPast ? `${Math.abs(days)}d ago` : days === 0 ? 'Today' : `in ${days}d`
-    : null
+  const monthName = parsed ? MONTH_NAMES[parsed.month - 1] ?? '--' : '--'
+  const dayNum = parsed ? String(parsed.day) : '--'
+  const badgeClass =
+    days != null && days < 0
+      ? 'bg-gray-100 text-gray-500'
+      : accent === 'indigo'
+        ? 'bg-indigo-100 text-indigo-700'
+        : 'bg-amber-100 text-amber-700'
+  const panelClass =
+    accent === 'indigo'
+      ? 'border-indigo-100 bg-indigo-50'
+      : 'border-amber-100 bg-amber-50'
 
   return (
-    <div className="flex justify-between items-center py-2 border-b border-white/[0.06] last:border-0">
-      <span className="text-[11px] font-sans text-terminal-dim">{label}</span>
-      <div className="flex items-center gap-2">
-        <span className="text-[11px] font-mono text-terminal-text">{date}</span>
-        {countdown && (
-          <span className={`text-[10px] font-sans px-1.5 py-0.5 rounded-xl ${
-            isPast ? 'text-terminal-ghost' : 'text-terminal-amber bg-terminal-amber/10'
-          }`}>
-            {countdown}
-          </span>
+    <div className={`rounded-lg border p-4 ${panelClass}`}>
+      <div className="flex items-start gap-4">
+        <div className="flex min-w-[64px] flex-col items-center rounded-lg border border-white bg-white px-3 py-2">
+          <div className="text-[10px] font-sans font-semibold uppercase tracking-wide text-gray-500">{monthName}</div>
+          <div className="text-3xl font-mono font-bold leading-none text-gray-900">{dayNum}</div>
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-gray-500">{label}</div>
+          <div className="mt-1 text-sm font-sans font-semibold text-gray-900">{date}</div>
+
+          {details && details.length > 0 && (
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              {details.map((detail) => (
+                <div key={detail.label} className="rounded-md border border-white bg-white/80 px-3 py-2">
+                  <div className="text-[9px] font-sans uppercase tracking-wide text-gray-500">{detail.label}</div>
+                  <div className="mt-1 text-[11px] font-mono font-semibold text-gray-800">{detail.value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {days != null && (
+          <div className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-sans font-medium ${badgeClass}`}>
+            {countdownLabel(days)}
+          </div>
         )}
       </div>
     </div>
   )
 }
 
-interface Props { data: StockEvents | null; loading: boolean }
+function EmptyEvents() {
+  return (
+    <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-8 text-center text-[11px] font-sans text-gray-500">
+      No upcoming earnings or dividend events available.
+    </div>
+  )
+}
 
-export default function EventsModule({ data, loading }: Props) {
-  if (!data && loading) {
-    return (
-      <section className="glass rounded-2xl shadow-glass p-6 animate-pulse">
-        <div className="h-3 w-32 bg-terminal-muted rounded-xl mb-4" />
-        <div className="h-4 w-full bg-terminal-muted rounded-xl mb-2" />
-        <div className="h-4 w-full bg-terminal-muted rounded-xl" />
-      </section>
-    )
-  }
-  if (!data) return null
+function EventsSkeleton() {
+  return (
+    <section className="card rounded-lg shadow-card p-6 animate-pulse">
+      <div className="mb-4 h-3 w-24 rounded-lg bg-gray-100" />
+      <div className="space-y-3">
+        <div className="h-32 rounded-lg bg-gray-100" />
+        <div className="h-24 rounded-lg bg-gray-100" />
+      </div>
+    </section>
+  )
+}
 
-  const hasAny = data.next_earnings_date || data.ex_dividend_date
-  if (!hasAny) {
-    return (
-      <section id="section-events" className="glass rounded-2xl shadow-glass p-6">
-        <h3 className="text-xs font-sans font-medium text-terminal-dim tracking-wide mb-2">Events</h3>
-        <span className="text-[11px] font-sans text-terminal-ghost">No upcoming events found</span>
-      </section>
-    )
-  }
+interface Props {
+  data: StockEvents | null
+  earningsDetail: StockEarningsDetail | null
+  loading: boolean
+}
+
+export default function EventsModule({ data, earningsDetail, loading }: Props) {
+  if (!data && !earningsDetail && loading) return <EventsSkeleton />
+  if (!data && !earningsDetail) return null
+
+  const nextEarningsDate = data?.next_earnings_date ?? earningsDetail?.next_date ?? null
+  const earningsDetails = [
+    earningsDetail?.day_of_week ? { label: 'Day', value: earningsDetail.day_of_week } : null,
+    earningsDetail?.eps_estimate != null ? { label: 'EPS Est.', value: `$${earningsDetail.eps_estimate.toFixed(2)}` } : null,
+    earningsDetail?.revenue_estimate != null ? { label: 'Revenue Est.', value: formatRevenue(earningsDetail.revenue_estimate) } : null,
+  ].filter((value): value is { label: string; value: string } => value != null)
+
+  const hasAny = nextEarningsDate || data?.ex_dividend_date
+  const freshness = data?.fetched_at ?? earningsDetail?.fetched_at ?? Date.now() / 1000
 
   return (
-    <section id="section-events" className="glass rounded-2xl shadow-glass p-6">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-sans font-medium text-terminal-dim tracking-wide">Events</h3>
-        <FreshnessTag fetchedAt={data.fetched_at} />
+    <section id="section-events" className="card rounded-lg shadow-card p-6">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-xs font-sans font-medium tracking-wide text-gray-500">Events</h3>
+        <FreshnessTag fetchedAt={freshness} />
       </div>
-      <EventRow label="Next Earnings" date={data.next_earnings_date} />
-      <EventRow label="Ex-Dividend" date={data.ex_dividend_date} />
+
+      <div className="mt-4 space-y-3">
+        {hasAny ? (
+          <>
+            {nextEarningsDate && (
+              <EventCard
+                label="Next Earnings"
+                date={nextEarningsDate}
+                accent="indigo"
+                details={earningsDetails}
+              />
+            )}
+            {data?.ex_dividend_date && (
+              <EventCard
+                label="Ex-Dividend Date"
+                date={data.ex_dividend_date}
+                accent="amber"
+              />
+            )}
+          </>
+        ) : (
+          <EmptyEvents />
+        )}
+      </div>
     </section>
   )
 }

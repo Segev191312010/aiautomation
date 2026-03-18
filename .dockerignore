@@ -1,0 +1,76 @@
+# =============================================================================
+# .dockerignore — keep the build context lean and secure
+# =============================================================================
+
+# Node
+node_modules/
+dashboard/node_modules/
+**/node_modules/
+
+# Python caches / build artefacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Vite output (Stage 1 builds fresh; don't send local dist into context)
+dashboard/dist/
+
+# Environment secrets — NEVER bake these into the image
+.env
+*.env
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude / project tooling
+.claude/
+.tmp/
+sessions/
+handoffs/
+
+# Databases — use the /data volume instead
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Test artefacts
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Large binaries that ended up in the repo root
+*.exe
+*.msi
+*.webp
+*.webm
+
+# Frontend lock files are NOT excluded — npm ci needs package-lock.json
+# dashboard/package-lock.json  <-- intentionally NOT listed here

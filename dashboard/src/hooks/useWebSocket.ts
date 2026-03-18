@@ -5,18 +5,25 @@
 import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
 import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore } from '@/store'
+import { fetchTrades, fetchPositions } from '@/services/api'
 import type { AlertFiredEvent, WsEvent } from '@/types'
+import { useToast } from '@/components/ui/ToastProvider'
 
 export function useWebSocket(): void {
   const mountedRef = useRef(false)
 
-  const setQuotes     = useMarketStore((s) => s.setQuotes)
+  const setQuotes      = useMarketStore((s) => s.setQuotes)
   const applyLiveQuote = useMarketStore((s) => s.applyLiveQuote)
-  const setBotRunning = useBotStore((s) => s.setBotRunning)
-  const setIBKR       = useBotStore((s) => s.setIBKR)
-  const addTrade      = useAccountStore((s) => s.addTrade)
-  const setPlayback   = useSimStore((s) => s.setPlayback)
-  const pushReplayBar = useSimStore((s) => s.pushReplayBar)
+  const setBotRunning  = useBotStore((s) => s.setBotRunning)
+  const setIBKR        = useBotStore((s) => s.setIBKR)
+  const addTrade       = useAccountStore((s) => s.addTrade)
+  const setPlayback    = useSimStore((s) => s.setPlayback)
+  const pushReplayBar  = useSimStore((s) => s.pushReplayBar)
+
+  // Stable ref so the one-time useEffect closure always reads the latest toast API
+  const toast = useToast()
+  const toastRef = useRef(toast)
+  toastRef.current = toast
 
   useEffect(() => {
     if (mountedRef.current) return
@@ -32,12 +39,29 @@ export function useWebSocket(): void {
     // Bot cycle updates
     const unBot = wsService.subscribe('bot', (ev: WsEvent) => {
       setBotRunning(!!(ev['status'] === 'running' && ev['rules_enabled']))
+      const botStore = useBotStore.getState()
+      botStore.setCycleStats({
+        rulesEnabled:   Number(ev['rules_enabled']   ?? 0),
+        rulesChecked:   Number(ev['rules_checked']   ?? 0),
+        symbolsScanned: Number(ev['symbols_scanned'] ?? 0),
+        signals:        Number(ev['signals']         ?? 0),
+        lastRun:        (ev['last_run'] as string) ?? null,
+        nextRun:        (ev['next_run'] as string) ?? null,
+      })
     })
 
-    // Order filled
+    // Order filled — refresh trades and positions so the UI reflects the fill immediately
     const unFill = wsService.subscribe('filled', (ev: WsEvent) => {
-      // The server sends partial trade data — cast as needed
       console.info('[WS] order filled', ev)
+      const symbol    = String(ev['symbol'] ?? '').toUpperCase()
+      const qty       = ev['qty']    != null ? String(ev['qty'])    : null
+      const fillPrice = ev['price']  != null ? `@${Number(ev['price']).toFixed(2)}` : ''
+      const side      = ev['action'] != null ? String(ev['action']) : 'Order'
+      const label     = [side, qty ? qty + ' ' + symbol : symbol, fillPrice].filter(Boolean).join(' ')
+      toastRef.current.success('Filled: ' + label)
+      const { setTrades, setPositions } = useAccountStore.getState()
+      fetchTrades().then(setTrades).catch(() => { /* best effort */ })
+      fetchPositions().then(setPositions).catch(() => { /* best effort */ })
     })
 
     // Replay bar
@@ -75,17 +99,17 @@ export function useWebSocket(): void {
     // so chart candles keep moving even in sparse-tick periods.
     const unBar = wsService.subscribe('bar', (ev: WsEvent) => {
       const symbol = String(ev['symbol'] ?? '').toUpperCase()
-      const close = Number(ev['close'])
-      const time = Number(ev['time'])
+      const close  = Number(ev['close'])
+      const time   = Number(ev['time'])
       if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(time) || time <= 0) {
         return
       }
-      const store = useMarketStore.getState()
+      const store  = useMarketStore.getState()
       const series = store.bars[symbol] ?? store.compBars[symbol] ?? []
       let barSeconds = 5
       if (series.length >= 2) {
-        const last = series[series.length - 1]
-        const prev = series[series.length - 2]
+        const last  = series[series.length - 1]
+        const prev  = series[series.length - 2]
         const delta = last.time - prev.time
         if (Number.isFinite(delta) && delta > 0) barSeconds = delta
       }

@@ -20,42 +20,42 @@ import {
 
 export const CHART_THEME: DeepPartial<ChartOptions> = {
   layout: {
-    background:  { type: ColorType.Solid, color: '#080d18' },
-    textColor:   '#5f7a9d',
+    background:  { type: ColorType.Solid, color: '#FFFFFF' },
+    textColor:   '#6B7280',
     fontFamily:  '"JetBrains Mono", ui-monospace, monospace',
     fontSize:    11,
   },
   grid: {
-    vertLines: { color: '#111f35' },
-    horzLines: { color: '#111f35' },
+    vertLines: { color: '#F0EDE8' },
+    horzLines: { color: '#F0EDE8' },
   },
   crosshair: {
     mode:     CrosshairMode.Normal,
-    vertLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
-    horzLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
+    vertLine: { color: '#D1D5DB', labelBackgroundColor: '#F3F4F6' },
+    horzLine: { color: '#D1D5DB', labelBackgroundColor: '#F3F4F6' },
   },
-  rightPriceScale: { borderColor: '#1c2e4a' },
-  timeScale:       { borderColor: '#1c2e4a', timeVisible: true, secondsVisible: false },
+  rightPriceScale: { borderColor: '#E5E7EB' },
+  timeScale:       { borderColor: '#E5E7EB', timeVisible: true, secondsVisible: false },
 }
 
 export const PANEL_THEME: DeepPartial<ChartOptions> = {
   layout: {
-    background:  { type: ColorType.Solid, color: '#080d18' },
-    textColor:   '#5f7a9d',
+    background:  { type: ColorType.Solid, color: '#FFFFFF' },
+    textColor:   '#6B7280',
     fontFamily:  '"JetBrains Mono", ui-monospace, monospace',
     fontSize:    10,
   },
   grid: {
-    vertLines: { color: '#111f35' },
-    horzLines: { color: '#0d1a2e' },
+    vertLines: { color: '#F0EDE8' },
+    horzLines: { color: '#F5F3F0' },
   },
   crosshair: {
     mode:     CrosshairMode.Normal,
-    vertLine: { color: '#2b4a7a', labelBackgroundColor: '#0e1726' },
+    vertLine: { color: '#D1D5DB', labelBackgroundColor: '#F3F4F6' },
     horzLine: { visible: false },
   },
-  rightPriceScale: { borderColor: '#1c2e4a' },
-  timeScale:       { borderColor: '#1c2e4a', timeVisible: true, secondsVisible: false, visible: false },
+  rightPriceScale: { borderColor: '#E5E7EB' },
+  timeScale:       { borderColor: '#E5E7EB', timeVisible: true, secondsVisible: false, visible: false },
 }
 
 // ── Hook ────────────────────────────────────────────────────────────────────

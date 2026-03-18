@@ -66,11 +66,11 @@ export default function ResizeHandle({ onDelta, onDoubleClick }: Props) {
 
   return (
     <div
-      className="h-1.5 shrink-0 cursor-row-resize flex items-center justify-center group hover:bg-terminal-blue/10 transition-colors rounded"
+      className="h-1.5 shrink-0 cursor-row-resize flex items-center justify-center group hover:bg-indigo-600/10 transition-colors rounded"
       onMouseDown={onMouseDown}
       onDoubleClick={onDoubleClick}
     >
-      <div className="w-8 h-px bg-terminal-border group-hover:bg-terminal-blue/40 transition-colors" />
+      <div className="w-8 h-px bg-gray-200 group-hover:bg-indigo-600/40 transition-colors" />
     </div>
   )
 }
