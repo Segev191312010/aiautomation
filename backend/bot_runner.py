@@ -23,8 +23,19 @@ from order_executor import OrderError, place_order
 from models import Rule, TradeAction
 from position_tracker import check_exits, update_watermarks
 from screener import load_universe
+from events import (
+    EventBus, EventType, EventQueue,
+    MarketEvent, SignalEvent, OrderEvent, FillEvent, RegimeEvent, MetricEvent,
+    ibkr_bar_to_market_event,
+)
+from event_logger import EventLogger, MetricsCollector
 
 log = logging.getLogger(__name__)
+
+# ── Global event infrastructure ──────────────────────────────────────────────
+event_bus = EventBus()
+event_logger = EventLogger()
+metrics = MetricsCollector()
 
 # WebSocket broadcast callback — set by main.py
 _broadcast: Optional[Callable] = None
@@ -325,6 +336,21 @@ async def _run_cycle() -> None:
         })
         return
 
+    # ── Emit MarketEvents for all fetched bars ─────────────────────────────────
+    now = datetime.now(timezone.utc)
+    for sym, df in bars_by_symbol.items():
+        if len(df) > 0:
+            row = df.iloc[-1]
+            me = MarketEvent(
+                timestamp=now, type=EventType.MARKET, symbol=sym,
+                open=float(row.get("open", 0)), high=float(row.get("high", 0)),
+                low=float(row.get("low", 0)), close=float(row.get("close", 0)),
+                volume=float(row.get("volume", 0)),
+            )
+            event_bus.publish(me)
+            event_logger.log_event(me)
+    metrics.record("bars_fetched", len(bars_by_symbol))
+
     # ── Phase 2: Evaluate entry rules ─────────────────────────────────────────
     triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
 
@@ -341,6 +367,19 @@ async def _run_cycle() -> None:
         ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=50)
         if ranked:
             log.info("Signal scores: %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
+            # Emit SignalEvents
+            for r in ranked:
+                sig_event = SignalEvent(
+                    timestamp=now, type=EventType.SIGNAL,
+                    symbol=r["symbol"], rule_id=r["_rule"].id,
+                    rule_name=r["_rule"].name,
+                    signal_type="LONG" if r["_rule"].action.type == "BUY" else "EXIT",
+                    strength=r["composite_score"] / 100.0,
+                    raw_score=r["composite_score"],
+                )
+                event_bus.publish(sig_event)
+                event_logger.log_event(sig_event)
+            metrics.record("signals_scored", len(ranked))
         triggered = [(r["_rule"], r["_symbol"]) for r in ranked]
     except Exception as exc:
         log.warning("Signal scoring failed, using unranked: %s", exc)
@@ -423,9 +462,32 @@ async def _run_cycle() -> None:
         except Exception as exc:
             log.warning("Position sizing failed, using rule quantity: %s", exc)
 
+        # Emit OrderEvent
+        order_event = OrderEvent(
+            timestamp=now, type=EventType.ORDER,
+            symbol=order_rule.symbol, order_type=order_rule.action.order_type,
+            quantity=order_rule.action.quantity, direction="LONG" if order_rule.action.type == "BUY" else "SHORT",
+            rule_id=rule.id,
+        )
+        event_bus.publish(order_event)
+        event_logger.log_event(order_event)
+
         try:
             trade = await place_order(order_rule)
             orders_placed += 1
+            # Emit FillEvent if trade was placed (PENDING or FILLED)
+            if trade and trade.fill_price:
+                fill_event = FillEvent(
+                    timestamp=now, type=EventType.FILL,
+                    symbol=trade.symbol, quantity=trade.quantity,
+                    fill_price=trade.fill_price, commission=1.0,
+                    direction="LONG" if trade.action == "BUY" else "SHORT",
+                    rule_id=rule.id, order_id=trade.order_id,
+                )
+                event_bus.publish(fill_event)
+                event_logger.log_event(fill_event)
+                metrics.record("fill_price", trade.fill_price)
+            metrics.record("orders_placed", orders_placed)
         except OrderError as exc:
             log.error("Order failed for rule '%s' on %s: %s", rule.name, trigger_symbol, exc)
             trade = None
@@ -474,9 +536,16 @@ async def _run_cycle() -> None:
         "next_run": _next_run,
     })
 
+    # Emit cycle metrics
+    metrics.record("cycle_signals", total_signals)
+    metrics.record("cycle_orders", orders_placed)
+    metrics.record("cycle_symbols", len(bars_by_symbol))
+    metrics.record("event_bus_total", event_bus.event_count)
+    metrics.record("event_log_total", event_logger.event_count)
+
     log.info(
-        "Cycle complete — %d rules, %d symbols scanned, %d signals",
-        len(enabled), len(bars_by_symbol), total_signals,
+        "Cycle complete — %d rules, %d symbols, %d signals, %d orders | events: %d logged",
+        len(enabled), len(bars_by_symbol), total_signals, orders_placed, event_logger.event_count,
     )
 
 
