@@ -110,6 +110,7 @@ from sector_rotation import get_sector_rotation, get_sector_leaders, get_rotatio
 from stock_profile_service import StockProfileService
 from stock_profile_api import create_stock_profile_router
 from rule_builder_api import router as rule_builder_router
+from advisor_api import router as advisor_router
 from risk_api import router as risk_router
 from health import router as health_router
 from notification_service import notification_service
@@ -273,6 +274,7 @@ app.include_router(create_diagnostics_router(_diag_service))
 app.include_router(rule_builder_router)
 app.include_router(risk_router)
 app.include_router(health_router)
+app.include_router(advisor_router)
 
 
 # ── Event system endpoints ───────────────────────────────────────────────────

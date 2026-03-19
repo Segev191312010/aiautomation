@@ -17,6 +17,7 @@ import { useToast } from '@/components/ui/ToastProvider'
 import { useAccountStore, useBotStore, useSimStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, fetchAccountSummary, fetchPositions, placeManualOrder } from '@/services/api'
 import LiveActivityFeed from '@/components/tradebot/LiveActivityFeed'
+import AIAdvisor from '@/components/tradebot/AIAdvisor'
 import type { Trade, SimAccountState, AccountSummary } from '@/types'
 
 function fmtUSD(v: number): string {
@@ -647,6 +648,11 @@ export default function TradeBotPage() {
       {/* ── Live Activity Feed ──────────────────────────────────────────── */}
       <section className="animate-fade-in-up" style={{ animationDelay: '100ms' }}>
         <LiveActivityFeed />
+      </section>
+
+      {/* ── AI Advisor ────────────────────────────────────────────────────── */}
+      <section className="animate-fade-in-up" style={{ animationDelay: '110ms' }}>
+        <AIAdvisor />
       </section>
 
       {/* ── Positions table ───────────────────────────────────────────────── */}

@@ -41,6 +41,11 @@ class Config:
     MAX_POSITIONS_PER_SECTOR: int = int(os.getenv("MAX_POSITIONS_PER_SECTOR", "3"))
     MAX_TRADES_PER_CYCLE: int = int(os.getenv("MAX_TRADES_PER_CYCLE", "50"))
 
+    # ── AI Advisor ─────────────────────────────────────────────────────────────
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    ADVISOR_MIN_TRADES: int = int(os.getenv("ADVISOR_MIN_TRADES", "5"))
+    ADVISOR_LOOKBACK_DAYS: int = int(os.getenv("ADVISOR_LOOKBACK_DAYS", "90"))
+
     # ── Alert engine ──────────────────────────────────────────────────────────
     ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
 
