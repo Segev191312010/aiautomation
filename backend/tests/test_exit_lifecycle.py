@@ -110,12 +110,15 @@ async def test_filled_exit_deletes_position(anyio_backend):
     filled_trade = _make_trade(status="FILLED", fill_price=148.0)
 
     with patch("database.get_trade_by_order_id", new_callable=AsyncMock, return_value=filled_trade), \
+         patch("bot_runner.save_open_position", new_callable=AsyncMock), \
          patch("bot_runner.delete_open_position", new_callable=AsyncMock) as mock_delete, \
          patch("bot_runner._emit", new_callable=AsyncMock) as mock_emit:
 
         await _reconcile_pending_exit(pos)
 
     mock_delete.assert_called_once_with("pos-001")
+    # Pending cleared before delete (B3 fix)
+    assert pos.exit_pending_order_id is None
     # Exit event emitted
     mock_emit.assert_called_once()
     payload = mock_emit.call_args[0][0]

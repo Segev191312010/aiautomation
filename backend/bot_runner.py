@@ -623,6 +623,10 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
 
         qty = int(pos.quantity)
         if qty < 1:
+            log.warning("Position %s has qty=%s (<1) — removing from tracker", pos.symbol, pos.quantity)
+            await _emit({"type": "exit", "symbol": pos.symbol, "reason": "qty_below_1",
+                         "action": "SELL" if pos.side == "BUY" else "BUY",
+                         "qty": 0, "entry_price": pos.entry_price, "exit_price": 0, "pnl": 0})
             await delete_open_position(pos.id)
             continue
 
@@ -635,7 +639,7 @@ async def _reconcile_pending_exit(pos) -> None:
     from database import get_trade_by_order_id
     now = datetime.now(timezone.utc)
 
-    trade = await get_trade_by_order_id(pos.exit_pending_order_id)
+    trade = await get_trade_by_order_id(pos.exit_pending_order_id, symbol=pos.symbol)
     if not trade:
         # Trade record not found — stale order_id, clear and retry
         pos.exit_pending_order_id = None
@@ -645,7 +649,10 @@ async def _reconcile_pending_exit(pos) -> None:
         return
 
     if trade.status == "FILLED":
-        # Success — emit bookkeeping and delete position
+        # B3 FIX: Mark as resolved BEFORE delete — prevents double event on delete failure
+        pos.exit_pending_order_id = None
+        await save_open_position(pos)
+
         current_price = trade.fill_price or pos.entry_price
         if pos.side == "BUY":
             pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
@@ -670,7 +677,7 @@ async def _reconcile_pending_exit(pos) -> None:
         await save_open_position(pos)
         log.warning("Exit %s for %s — attempt %d, retrying next cycle",
                      trade.status, pos.symbol, pos.exit_attempts)
-        _check_retry_cap(pos)
+        await _check_retry_cap(pos)
         return
 
     # Still PENDING — check timeout
@@ -700,7 +707,7 @@ async def _reconcile_pending_exit(pos) -> None:
     pos.last_exit_error = f"Exit order timed out after {EXIT_PENDING_TIMEOUT}s"
     pos.last_exit_attempt_at = now.isoformat()
     await save_open_position(pos)
-    _check_retry_cap(pos)
+    await _check_retry_cap(pos)
 
 
 async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reason: str) -> None:
@@ -732,15 +739,16 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
             return
 
         if exit_trade.status == "FILLED":
-            # Immediate fill — delete position
+            # B8 FIX: Use actual fill_price, not stale bar close
+            fill = exit_trade.fill_price or current_price
             if pos.side == "BUY":
-                pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+                pnl = round((fill - pos.entry_price) * pos.quantity, 2)
             else:
-                pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
+                pnl = round((pos.entry_price - fill) * pos.quantity, 2)
             await _emit({
                 "type": "exit", "symbol": sym, "reason": reason,
                 "action": exit_action, "qty": qty,
-                "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl,
+                "entry_price": pos.entry_price, "exit_price": fill, "pnl": pnl,
             })
             log.info("EXIT %s qty=%d reason='%s' pnl=%.2f", sym, qty, reason, pnl)
             await delete_open_position(pos.id)
@@ -757,26 +765,25 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
         pos.last_exit_attempt_at = now.isoformat()
         await save_open_position(pos)
         log.error("Exit order FAILED for %s (attempt %d): %s", sym, pos.exit_attempts, exc)
-        _check_retry_cap(pos)
+        await _check_retry_cap(pos)
 
 
-def _check_retry_cap(pos) -> None:
-    """Emit notification if retry cap reached."""
+async def _check_retry_cap(pos) -> None:
+    """Emit notification + WebSocket alert if retry cap reached."""
     if pos.exit_attempts >= MAX_EXIT_ATTEMPTS:
-        log.critical(
-            "EXIT RETRY CAP REACHED for %s (rule=%s, attempts=%d, last_error=%s) — MANUAL INTERVENTION REQUIRED",
-            pos.symbol, pos.rule_name, pos.exit_attempts, pos.last_exit_error,
+        msg = (
+            f"Exit failed {pos.exit_attempts}x for {pos.symbol} "
+            f"(rule: {pos.rule_name}). Last error: {pos.last_exit_error}. "
+            f"Manual close required."
         )
-        try:
-            from notification_service import notify_risk_event
-            import asyncio
-            asyncio.create_task(notify_risk_event(
-                symbol=pos.symbol,
-                event_type="EXIT_RETRY_CAP",
-                message=f"Exit failed {pos.exit_attempts}x for {pos.symbol} (rule: {pos.rule_name}). Last error: {pos.last_exit_error}. Manual close required.",
-            ))
-        except Exception:
-            pass  # notification failure should not crash the bot
+        log.critical("EXIT RETRY CAP: %s", msg)
+        # Notify via WebSocket so dashboard shows it
+        await _emit({
+            "type": "error",
+            "message": f"EXIT RETRY CAP: {msg}",
+            "symbol": pos.symbol,
+            "severity": "critical",
+        })
 
 
 async def _emit(payload: dict) -> None:

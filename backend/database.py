@@ -484,8 +484,8 @@ async def get_trades(limit: int = 200, user_id: str = "demo") -> list[Trade]:
     return [Trade.model_validate(json.loads(r[0])) for r in rows]
 
 
-async def get_trade_by_order_id(order_id: int, user_id: str = "demo") -> Trade | None:
-    """Fetch a trade by its IBKR order_id."""
+async def get_trade_by_order_id(order_id: int, symbol: str | None = None, user_id: str = "demo") -> Trade | None:
+    """Fetch a trade by IBKR order_id, optionally filtered by symbol to prevent ID reuse collisions."""
     async with get_db() as db:
         async with db.execute(
             "SELECT data FROM trades WHERE user_id=? ORDER BY timestamp DESC LIMIT 500",
@@ -496,6 +496,8 @@ async def get_trade_by_order_id(order_id: int, user_id: str = "demo") -> Trade |
         try:
             trade = Trade.model_validate(json.loads(r[0]))
             if trade.order_id == order_id:
+                if symbol and trade.symbol.upper() != symbol.upper():
+                    continue  # B5 FIX: skip order ID reuse from different symbol
                 return trade
         except Exception:
             continue
