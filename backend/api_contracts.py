@@ -6,7 +6,7 @@ enforcing consistency between backend, frontend, and the AI optimizer.
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -150,6 +150,7 @@ class AdvisorReportResponse(BaseModel):
 # ── Guardrails ───────────────────────────────────────────────────────────────
 
 class GuardrailConfigResponse(BaseModel):
+    autopilot_mode: Literal["OFF", "PAPER", "LIVE"] = "OFF"
     shadow_mode: bool = True
     ai_autonomy_enabled: bool = False
     max_rules_disabled_per_day: int = 2
@@ -162,6 +163,9 @@ class GuardrailConfigResponse(BaseModel):
     max_changes_per_day: int = 10
     min_hours_between_changes: float = 4.0
     emergency_stop: bool = False
+    daily_loss_locked: bool = False
+    daily_loss_limit: float = -300.0  # USD, auto-lock when daily P&L drops below
+    daily_loss_limit_pct: float = 2.0
     # Shadow → Live gating
     shadow_to_live_min_decisions: int = 100
     shadow_to_live_min_days: int = 15
@@ -209,15 +213,34 @@ class AuditLogResponse(BaseModel):
 # ── AI Status ────────────────────────────────────────────────────────────────
 
 class AIStatusResponse(BaseModel):
+    mode: Literal["OFF", "PAPER", "LIVE"] = "OFF"
     autonomy_active: bool = False
     shadow_mode: bool = True
     emergency_stop: bool = False
+    daily_loss_locked: bool = False
+    daily_loss_limit_pct: float = 2.0
+    broker_connected: bool = False
+    open_positions_count: int = 0
+    active_rules_count: int = 0
+    direct_ai_open_trades_count: int = 0
     last_action_at: Optional[str] = None
     changes_today: int = 0
     next_optimization_at: Optional[str] = None
     daily_budget_remaining: int = 10
     last_optimization_at: Optional[str] = None
     optimizer_running: bool = False
+
+
+class AutopilotConfigResponse(BaseModel):
+    autopilot_mode: Literal["OFF", "PAPER", "LIVE"] = "OFF"
+    emergency_stop: bool = False
+    daily_loss_locked: bool = False
+    daily_loss_limit_pct: float = 2.0
+
+
+class AutopilotModeRequest(BaseModel):
+    mode: Literal["OFF", "PAPER", "LIVE"]
+    reason: str = ""
 
 
 # ── AI Decision Payload (what Claude returns) ────────────────────────────────
@@ -258,15 +281,71 @@ class AIRiskAdjustments(BaseModel):
     risk_per_trade_pct: Optional[UncertainValue] = None
 
 
+class AIRuleAction(BaseModel):
+    action: Literal["create", "update", "enable", "disable", "pause", "retire", "delete"]
+    rule_id: Optional[str] = None
+    rule_payload: Optional[dict[str, Any]] = None
+    reason: str
+    confidence: float = 0.5
+
+
+class AIDirectTrade(BaseModel):
+    symbol: str
+    action: Literal["BUY", "SELL"]
+    order_type: Literal["MKT", "LMT"] = "MKT"
+    limit_price: Optional[float] = None
+    stop_price: float
+    invalidation: str
+    reason: str
+    confidence: float = 0.5
+
+
 class AIDecisionPayload(BaseModel):
     """Structured JSON that Claude returns from the optimizer."""
     signal_weights: Optional[dict[str, AISignalWeights]] = None  # keyed by regime
     exit_params: Optional[dict[str, AIExitParams]] = None        # keyed by symbol or "_default"
     min_score: Optional[UncertainValue] = None
     rule_changes: list[AIRuleChange] = Field(default_factory=list)
+    rule_actions: list[AIRuleAction] = Field(default_factory=list)
+    direct_trades: list[AIDirectTrade] = Field(default_factory=list)
     risk_adjustments: Optional[AIRiskAdjustments] = None
     reasoning: str = ""
     confidence: float = 0.5
+
+
+class RuleVersionResponse(BaseModel):
+    version: int
+    rule_id: str
+    name: str
+    conditions: list[dict[str, Any]] = Field(default_factory=list)
+    logic: Literal["AND", "OR"] = "AND"
+    action: dict[str, Any] = Field(default_factory=dict)
+    cooldown_minutes: int = 60
+    created_at: str
+    note: Optional[str] = None
+    author: str = "ai"
+    status: Literal["draft", "paper", "active", "paused", "retired"] = "active"
+
+
+class SourcePerformanceResponse(BaseModel):
+    source: Literal["rule", "ai_direct", "manual", "combined"]
+    trades_count: int = 0
+    hit_rate: Optional[float] = None
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    total_cost: float = 0.0
+    roi: Optional[float] = None
+
+
+class AutopilotPerformanceResponse(BaseModel):
+    window_days: int
+    total_trades: int = 0
+    hit_rate: Optional[float] = None
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    total_cost: float = 0.0
+    roi: Optional[float] = None
+    by_source: list[SourcePerformanceResponse] = Field(default_factory=list)
 
 
 # ── Shadow Decision ──────────────────────────────────────────────────────────

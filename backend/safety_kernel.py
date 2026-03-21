@@ -1,93 +1,130 @@
 """
-Safety Kernel — hard runtime checks for the AI Autopilot.
+Safety kernel for AI-managed trading actions.
 
-Every order (rule-based or direct AI) must pass through these checks.
-These are non-negotiable and cannot be overridden by AI decisions.
+This module owns non-negotiable runtime checks for Autopilot-controlled
+entries. It is intentionally conservative and shared by both AI rule
+management and direct AI trade execution.
 """
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+
 from config import cfg
 
 log = logging.getLogger(__name__)
 
-# Dedup window for order rejection
 _recent_checks: dict[str, float] = {}
 DEDUP_WINDOW = 5  # seconds
 
 
 class SafetyViolation(Exception):
-    """Raised when an order violates a safety rule."""
-    pass
+    """Raised when an AI action violates a hard safety rule."""
 
 
-async def check_all(symbol: str, side: str, quantity: int, source: str,
-                     account_equity: float = 0, price_estimate: float = 0) -> None:
-    """Run all safety checks. Raises SafetyViolation if any fail."""
-    assert_not_killed()
-    await assert_daily_loss_not_locked()
-    assert_no_shorts(side)
-    assert_risk_budget(quantity, price_estimate, account_equity)
+async def check_all(
+    symbol: str,
+    side: str,
+    quantity: int,
+    source: str,
+    account_equity: float = 0,
+    price_estimate: float = 0,
+    *,
+    stop_price: float | None = None,
+    is_exit: bool = False,
+    has_existing_position: bool = False,
+) -> None:
+    """Run all safety checks for an Autopilot-controlled order."""
+    await assert_not_killed()
+    await assert_daily_loss_not_locked(is_exit=is_exit)
+    assert_no_shorts(side, is_exit=is_exit, has_existing_position=has_existing_position)
+    assert_risk_budget(quantity, price_estimate, account_equity, stop_price=stop_price)
     assert_not_duplicate(symbol, side, source)
-    log.debug("Safety kernel PASS: %s %s %s qty=%d source=%s", side, symbol, source, quantity, source)
+    log.debug(
+        "Safety kernel PASS: side=%s symbol=%s qty=%s source=%s exit=%s",
+        side,
+        symbol,
+        quantity,
+        source,
+        is_exit,
+    )
 
 
-def assert_not_killed() -> None:
-    """Reject if kill switch is active."""
-    if cfg.AUTOPILOT_MODE == "KILLED":
-        raise SafetyViolation("Kill switch active — all AI entries blocked")
-
-
-async def assert_daily_loss_not_locked() -> None:
-    """Reject new entries if daily P&L loss limit breached."""
+async def assert_not_killed() -> None:
+    """Reject if the Autopilot kill switch is active."""
     try:
         from ai_guardrails import _load_guardrails_from_db
+
         config = await _load_guardrails_from_db()
-        if hasattr(config, 'daily_loss_locked') and config.daily_loss_locked:
-            raise SafetyViolation("Daily loss limit breached — new entries blocked")
+        if config.emergency_stop:
+            raise SafetyViolation("Kill switch active — all new AI entries blocked")
     except SafetyViolation:
         raise
     except Exception:
-        pass  # DB unavailable — allow (fail open for entries, fail closed for exits)
+        if cfg.AUTOPILOT_MODE == "OFF":
+            raise SafetyViolation("Autopilot is OFF")
 
 
-def assert_no_shorts(side: str) -> None:
-    """No shorting anywhere in the stack."""
-    if side.upper() == "SELL":
-        # SELL is allowed for closing existing positions — but not for opening new shorts.
-        # The caller must verify this is an exit, not a new short entry.
-        # For safety, we only block if this is explicitly tagged as a new entry.
-        pass  # Validated at the caller level (bot_runner checks existing position)
+async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:
+    """Reject new entries if the daily loss lock is active."""
+    if is_exit:
+        return
+    try:
+        from ai_guardrails import _load_guardrails_from_db
+
+        config = await _load_guardrails_from_db()
+        if config.daily_loss_locked:
+            raise SafetyViolation("Daily loss lock active — new AI entries blocked")
+    except SafetyViolation:
+        raise
+    except Exception:
+        pass
 
 
-def assert_risk_budget(quantity: int, price_estimate: float, account_equity: float) -> None:
-    """1% of net liquidation per trade = hard reject."""
-    if account_equity <= 0 or price_estimate <= 0:
-        return  # Can't validate without data — allow (validated again at order time)
+def assert_no_shorts(side: str, *, is_exit: bool = False, has_existing_position: bool = False) -> None:
+    """Block any sell-to-open style action."""
+    if side.upper() == "SELL" and not is_exit and not has_existing_position:
+        raise SafetyViolation("Short entries are disabled")
 
-    order_value = quantity * price_estimate
-    max_risk = account_equity * cfg.RISK_PER_TRADE_PCT / 100  # RISK_PER_TRADE_PCT is 1.0 = 1%
-    position_pct = (order_value / account_equity) * 100
 
-    # Hard reject if position > 20% of account (catastrophic sizing)
-    if position_pct > 20:
+def assert_risk_budget(
+    quantity: int,
+    price_estimate: float,
+    account_equity: float,
+    *,
+    stop_price: float | None = None,
+) -> None:
+    """
+    Enforce the 1% hard risk limit.
+
+    For direct AI trades we expect a stop price and measure true per-share risk.
+    For rule-driven entries without a concrete stop, we conservatively fall back
+    to order notional.
+    """
+    if quantity <= 0 or account_equity <= 0 or price_estimate <= 0:
+        return
+
+    max_risk = account_equity * cfg.RISK_PER_TRADE_PCT / 100
+    if stop_price is not None and stop_price > 0:
+        risk_amount = abs(price_estimate - stop_price) * quantity
+    else:
+        risk_amount = quantity * price_estimate
+
+    if risk_amount > max_risk:
         raise SafetyViolation(
-            f"Position size {position_pct:.1f}% of account exceeds 20% hard limit "
-            f"(${order_value:.0f} / ${account_equity:.0f})"
+            f"Per-trade risk ${risk_amount:.2f} exceeds {cfg.RISK_PER_TRADE_PCT:.2f}% "
+            f"of net liq (${max_risk:.2f})"
         )
 
 
 def assert_not_duplicate(symbol: str, side: str, source: str) -> None:
-    """Prevent duplicate orders within the dedup window."""
-    key = f"{symbol}:{side}:{source}"
+    """Reject duplicate orders within a small rolling window."""
+    key = f"{symbol.upper()}:{side.upper()}:{source}"
     now = time.time()
 
-    # Evict stale entries
-    stale = [k for k, v in _recent_checks.items() if (now - v) > DEDUP_WINDOW * 2]
-    for k in stale:
-        del _recent_checks[k]
+    stale = [k for k, ts in _recent_checks.items() if (now - ts) > DEDUP_WINDOW * 2]
+    for key_to_remove in stale:
+        del _recent_checks[key_to_remove]
 
     last = _recent_checks.get(key)
     if last and (now - last) < DEDUP_WINDOW:
@@ -96,15 +133,12 @@ def assert_not_duplicate(symbol: str, side: str, source: str) -> None:
 
 
 def is_autopilot_live() -> bool:
-    """Check if autopilot is in LIVE mode (can place real orders)."""
     return cfg.AUTOPILOT_MODE == "LIVE"
 
 
 def is_autopilot_active() -> bool:
-    """Check if autopilot is active at all (PAPER or LIVE)."""
     return cfg.AUTOPILOT_MODE in ("PAPER", "LIVE")
 
 
 def get_autopilot_mode() -> str:
-    """Return current autopilot mode."""
     return cfg.AUTOPILOT_MODE

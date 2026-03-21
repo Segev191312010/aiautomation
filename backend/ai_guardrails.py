@@ -27,15 +27,35 @@ async def _load_guardrails_from_db() -> GuardrailConfigResponse:
             )
             row = await cur.fetchone()
             if row:
-                return GuardrailConfigResponse(**json.loads(row[0]))
+                raw = json.loads(row[0])
+                config = GuardrailConfigResponse(**raw)
+                if "autopilot_mode" not in raw:
+                    if config.ai_autonomy_enabled:
+                        config.autopilot_mode = "PAPER" if config.shadow_mode else "LIVE"
+                    else:
+                        config.autopilot_mode = "OFF"
+                if "daily_loss_limit_pct" not in raw:
+                    config.daily_loss_limit_pct = 2.0
+                return config
     except Exception as e:
         log.warning("Failed to load guardrails from DB: %s", e)
-    return GuardrailConfigResponse()
+    mode = getattr(__import__("config").cfg, "AUTOPILOT_MODE", "OFF")
+    return GuardrailConfigResponse(
+        autopilot_mode=mode if mode in ("OFF", "PAPER", "LIVE") else "OFF",
+        ai_autonomy_enabled=mode in ("PAPER", "LIVE"),
+        shadow_mode=mode == "PAPER",
+    )
 
 
 async def save_guardrails_to_db(config: GuardrailConfigResponse) -> None:
     """Upsert guardrails config to DB."""
     now = datetime.now(timezone.utc).isoformat()
+    mode = config.autopilot_mode if config.autopilot_mode in ("OFF", "PAPER", "LIVE") else "OFF"
+    config = config.model_copy(update={
+        "autopilot_mode": mode,
+        "ai_autonomy_enabled": mode in ("PAPER", "LIVE"),
+        "shadow_mode": mode == "PAPER",
+    })
     data = config.model_dump_json()
     try:
         async with get_db() as db:
@@ -48,6 +68,38 @@ async def save_guardrails_to_db(config: GuardrailConfigResponse) -> None:
     except Exception as e:
         log.error("Failed to save guardrails to DB: %s", e)
         raise
+
+
+async def get_autopilot_config_dict() -> dict:
+    config = await _load_guardrails_from_db()
+    return {
+        "autopilot_mode": config.autopilot_mode,
+        "emergency_stop": config.emergency_stop,
+        "daily_loss_locked": config.daily_loss_locked,
+        "daily_loss_limit_pct": config.daily_loss_limit_pct,
+    }
+
+
+async def update_autopilot_config(
+    *,
+    autopilot_mode: str | None = None,
+    emergency_stop: bool | None = None,
+    daily_loss_locked: bool | None = None,
+    daily_loss_limit_pct: float | None = None,
+) -> GuardrailConfigResponse:
+    config = await _load_guardrails_from_db()
+    updates: dict[str, object] = {}
+    if autopilot_mode is not None:
+        updates["autopilot_mode"] = autopilot_mode
+    if emergency_stop is not None:
+        updates["emergency_stop"] = emergency_stop
+    if daily_loss_locked is not None:
+        updates["daily_loss_locked"] = daily_loss_locked
+    if daily_loss_limit_pct is not None:
+        updates["daily_loss_limit_pct"] = daily_loss_limit_pct
+    config = config.model_copy(update=updates)
+    await save_guardrails_to_db(config)
+    return config
 
 
 async def log_ai_action(
@@ -651,11 +703,42 @@ async def get_ai_status_dict() -> dict:
     enforcer = GuardrailEnforcer()
     changes_today = await enforcer._count_today_changes()
     last_change = await enforcer._last_change_at()
+    mode = config.autopilot_mode if config.autopilot_mode in ("OFF", "PAPER", "LIVE") else "OFF"
+
+    broker_connected = False
+    try:
+        from config import cfg
+        if not cfg.SIM_MODE:
+            from ibkr_client import ibkr
+            broker_connected = ibkr.is_connected()
+    except Exception:
+        broker_connected = False
+
+    open_positions_count = 0
+    active_rules_count = 0
+    direct_ai_open_trades_count = 0
+    try:
+        from database import get_open_positions, get_rules
+
+        positions = await get_open_positions()
+        rules = await get_rules()
+        open_positions_count = len(positions)
+        active_rules_count = len([r for r in rules if r.enabled and r.status == "active"])
+        direct_ai_open_trades_count = len([p for p in positions if p.rule_id.startswith("ai-direct:")])
+    except Exception:
+        pass
 
     return {
-        "autonomy_active": config.ai_autonomy_enabled and not config.emergency_stop,
-        "shadow_mode": config.shadow_mode,  # B1 FIX: read from DB, not env var
+        "mode": mode,
+        "autonomy_active": mode in ("PAPER", "LIVE") and not config.emergency_stop,
+        "shadow_mode": mode == "PAPER",
         "emergency_stop": config.emergency_stop,
+        "daily_loss_locked": config.daily_loss_locked,
+        "daily_loss_limit_pct": config.daily_loss_limit_pct,
+        "broker_connected": broker_connected,
+        "open_positions_count": open_positions_count,
+        "active_rules_count": active_rules_count,
+        "direct_ai_open_trades_count": direct_ai_open_trades_count,
         "last_action_at": last_change.isoformat() if last_change else None,
         "changes_today": changes_today,
         "next_optimization_at": None,

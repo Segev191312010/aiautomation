@@ -287,6 +287,56 @@ CREATE TABLE IF NOT EXISTS ai_shadow_decisions (
 );
 """
 
+_CREATE_AI_RULE_VERSIONS = """
+CREATE TABLE IF NOT EXISTS ai_rule_versions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id      TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    snapshot     TEXT NOT NULL,
+    diff_summary TEXT,
+    created_at   TEXT NOT NULL,
+    author       TEXT NOT NULL DEFAULT 'ai',
+    user_id      TEXT NOT NULL DEFAULT 'demo',
+    UNIQUE(rule_id, version)
+);
+"""
+
+_CREATE_AI_RULE_VALIDATION_RUNS = """
+CREATE TABLE IF NOT EXISTS ai_rule_validation_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id         TEXT NOT NULL,
+    version         INTEGER NOT NULL,
+    validation_mode TEXT NOT NULL,
+    trades_count    INTEGER NOT NULL DEFAULT 0,
+    hit_rate        REAL,
+    net_pnl         REAL,
+    expectancy      REAL,
+    max_drawdown    REAL,
+    overlap_score   REAL,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    notes           TEXT,
+    created_at      TEXT NOT NULL,
+    user_id         TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_MANUAL_INTERVENTIONS = """
+CREATE TABLE IF NOT EXISTS manual_interventions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at       TEXT NOT NULL,
+    severity        TEXT NOT NULL,
+    category        TEXT NOT NULL,
+    symbol          TEXT,
+    source          TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    required_action TEXT NOT NULL,
+    acknowledged_at TEXT,
+    resolved_at     TEXT,
+    resolved_by     TEXT,
+    user_id         TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
 _CREATE_REGIME_SNAPSHOTS = """
 CREATE TABLE IF NOT EXISTS regime_snapshots (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -367,6 +417,9 @@ async def init_db() -> None:
         await db.execute(_CREATE_AI_AUDIT_LOG)
         await db.execute(_CREATE_AI_PARAMETER_SNAPSHOTS)
         await db.execute(_CREATE_AI_SHADOW_DECISIONS)
+        await db.execute(_CREATE_AI_RULE_VERSIONS)
+        await db.execute(_CREATE_AI_RULE_VALIDATION_RUNS)
+        await db.execute(_CREATE_MANUAL_INTERVENTIONS)
         await db.execute(_CREATE_REGIME_SNAPSHOTS)
         await db.commit()
 
@@ -405,6 +458,10 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_audit_log_status ON ai_audit_log(status, timestamp DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_snapshots_ts ON ai_parameter_snapshots(timestamp DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_shadow_ts ON ai_shadow_decisions(timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_rule_versions_rule ON ai_rule_versions(rule_id, version DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_rule_validation_rule ON ai_rule_validation_runs(rule_id, version DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_opened ON manual_interventions(opened_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_resolved ON manual_interventions(resolved_at, opened_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(timestamp DESC)")
         await db.commit()
 
@@ -442,12 +499,69 @@ async def get_rule(rule_id: str, user_id: str = "demo") -> Rule | None:
 
 
 async def save_rule(rule: Rule, user_id: str = "demo") -> None:
+    rule.updated_at = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
             "INSERT OR REPLACE INTO rules (id, data, user_id) VALUES (?, ?, ?)",
             (rule.id, rule.model_dump_json(), user_id),
         )
         await db.commit()
+
+
+async def save_rule_version(
+    rule: Rule,
+    diff_summary: str | None = None,
+    author: str = "ai",
+    user_id: str = "demo",
+) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO ai_rule_versions "
+            "(rule_id, version, snapshot, diff_summary, created_at, author, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                rule.id,
+                rule.version,
+                rule.model_dump_json(),
+                diff_summary,
+                created_at,
+                author,
+                user_id,
+            ),
+        )
+        await db.commit()
+
+
+async def get_rule_versions(rule_id: str, user_id: str = "demo") -> list[dict]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT version, snapshot, diff_summary, created_at, author "
+            "FROM ai_rule_versions WHERE rule_id=? AND user_id=? "
+            "ORDER BY version DESC, created_at DESC",
+            (rule_id, user_id),
+        ) as cur:
+            rows = await cur.fetchall()
+    versions: list[dict] = []
+    for version, snapshot, diff_summary, created_at, author in rows:
+        try:
+            data = json.loads(snapshot)
+        except Exception:
+            data = {}
+        versions.append({
+            "version": version,
+            "rule_id": rule_id,
+            "name": data.get("name", ""),
+            "conditions": data.get("conditions", []),
+            "logic": data.get("logic", "AND"),
+            "action": data.get("action", {}),
+            "cooldown_minutes": data.get("cooldown_minutes", 60),
+            "created_at": created_at,
+            "note": diff_summary,
+            "author": author,
+            "status": data.get("status", "active"),
+        })
+    return versions
 
 
 async def delete_rule(rule_id: str, user_id: str = "demo") -> bool:
@@ -519,6 +633,122 @@ async def update_trade_status(trade_id: str, status: str, fill_price: float | No
                 (trade.model_dump_json(), trade_id),
             )
             await db.commit()
+
+
+async def save_rule_validation_run(
+    *,
+    rule_id: str,
+    version: int,
+    validation_mode: str,
+    trades_count: int,
+    hit_rate: float | None,
+    net_pnl: float | None,
+    expectancy: float | None,
+    max_drawdown: float | None,
+    overlap_score: float | None,
+    passed: bool,
+    notes: str | None = None,
+    user_id: str = "demo",
+) -> None:
+    created_at = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO ai_rule_validation_runs "
+            "(rule_id, version, validation_mode, trades_count, hit_rate, net_pnl, expectancy, "
+            " max_drawdown, overlap_score, passed, notes, created_at, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                rule_id,
+                version,
+                validation_mode,
+                trades_count,
+                hit_rate,
+                net_pnl,
+                expectancy,
+                max_drawdown,
+                overlap_score,
+                1 if passed else 0,
+                notes,
+                created_at,
+                user_id,
+            ),
+        )
+        await db.commit()
+
+
+async def open_manual_intervention(
+    *,
+    severity: str,
+    category: str,
+    source: str,
+    summary: str,
+    required_action: str,
+    symbol: str | None = None,
+    user_id: str = "demo",
+) -> int:
+    opened_at = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        cur = await db.execute(
+            "INSERT INTO manual_interventions "
+            "(opened_at, severity, category, symbol, source, summary, required_action, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (opened_at, severity, category, symbol, source, summary, required_action, user_id),
+        )
+        await db.commit()
+        return int(cur.lastrowid or 0)
+
+
+async def get_manual_interventions(user_id: str = "demo", include_resolved: bool = False) -> list[dict]:
+    where = "" if include_resolved else "WHERE user_id=? AND resolved_at IS NULL"
+    params: tuple[object, ...] = () if include_resolved else (user_id,)
+    async with get_db() as db:
+        async with db.execute(
+            f"SELECT id, opened_at, severity, category, symbol, source, summary, required_action, "
+            f"acknowledged_at, resolved_at, resolved_by FROM manual_interventions {where} "
+            f"ORDER BY opened_at DESC",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "id": row[0],
+            "opened_at": row[1],
+            "severity": row[2],
+            "category": row[3],
+            "symbol": row[4],
+            "source": row[5],
+            "summary": row[6],
+            "required_action": row[7],
+            "acknowledged_at": row[8],
+            "resolved_at": row[9],
+            "resolved_by": row[10],
+        }
+        for row in rows
+    ]
+
+
+async def acknowledge_manual_intervention(intervention_id: int, user_id: str = "demo") -> bool:
+    acknowledged_at = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE manual_interventions SET acknowledged_at=? "
+            "WHERE id=? AND user_id=? AND acknowledged_at IS NULL",
+            (acknowledged_at, intervention_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def resolve_manual_intervention(intervention_id: int, resolved_by: str = "operator", user_id: str = "demo") -> bool:
+    resolved_at = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE manual_interventions SET resolved_at=?, resolved_by=? "
+            "WHERE id=? AND user_id=? AND resolved_at IS NULL",
+            (resolved_at, resolved_by, intervention_id, user_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

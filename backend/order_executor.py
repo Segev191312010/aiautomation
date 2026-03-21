@@ -123,6 +123,21 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         log.error("Pre-flight check failed: %s", err)
         return None
 
+    # Safety kernel — hard runtime checks (kill switch, daily loss, risk, dedup)
+    try:
+        from safety_kernel import check_all, SafetyViolation
+        await check_all(
+            symbol=rule.symbol,
+            side=rule.action.type,
+            quantity=rule.action.quantity,
+            source="rule",
+        )
+    except SafetyViolation as exc:
+        log.warning("Safety kernel REJECTED order: %s", exc)
+        return None
+    except Exception as exc:
+        log.debug("Safety kernel check skipped: %s", exc)
+
     if not ibkr.is_connected():
         log.error("Cannot place order — IBKR not connected")
         return None

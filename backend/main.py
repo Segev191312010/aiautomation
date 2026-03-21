@@ -284,6 +284,8 @@ app.include_router(rule_builder_router)
 app.include_router(risk_router)
 app.include_router(health_router)
 app.include_router(advisor_router)
+from autopilot_api import router as autopilot_router
+app.include_router(autopilot_router)
 
 
 # ── Event system endpoints ───────────────────────────────────────────────────

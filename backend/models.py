@@ -49,6 +49,15 @@ class Rule(BaseModel):
     # Per-symbol cooldown for universe rules: {"AAPL": "<ISO>", ...}
     # Stored as part of the JSON blob; ignored for single-symbol rules.
     symbol_cooldowns: dict[str, str] = Field(default_factory=dict)
+    status: Literal["draft", "paper", "active", "paused", "retired"] = "active"
+    ai_generated: bool = False
+    ai_reason: Optional[str] = None
+    thesis: Optional[str] = None
+    hold_style: Optional[Literal["intraday", "swing"]] = None
+    version: int = 1
+    created_by: str = "human"
+    supersedes_rule_id: Optional[str] = None
+    updated_at: Optional[str] = None
 
     @model_validator(mode="after")
     def _check_symbol_or_universe(self) -> "Rule":
@@ -62,6 +71,10 @@ class Rule(BaseModel):
             raise ValueError(
                 f"Invalid universe '{self.universe}'. Must be one of: {sorted(_VALID_UNIVERSES)}"
             )
+        if self.status != "active":
+            self.enabled = False
+        if not self.updated_at:
+            self.updated_at = datetime.now(timezone.utc).isoformat()
         return self
 
 
@@ -74,6 +87,14 @@ class RuleCreate(BaseModel):
     logic: Literal["AND", "OR"] = "AND"
     action: TradeAction
     cooldown_minutes: int = 60
+    status: Literal["draft", "paper", "active", "paused", "retired"] = "active"
+    ai_generated: bool = False
+    ai_reason: Optional[str] = None
+    thesis: Optional[str] = None
+    hold_style: Optional[Literal["intraday", "swing"]] = None
+    version: int = 1
+    created_by: str = "human"
+    supersedes_rule_id: Optional[str] = None
 
     @model_validator(mode="after")
     def _check_symbol_or_universe(self) -> "RuleCreate":
@@ -87,6 +108,8 @@ class RuleCreate(BaseModel):
             raise ValueError(
                 f"Invalid universe '{self.universe}'. Must be one of: {sorted(_VALID_UNIVERSES)}"
             )
+        if self.status != "active":
+            self.enabled = False
         return self
 
 
@@ -99,6 +122,15 @@ class RuleUpdate(BaseModel):
     logic: Optional[Literal["AND", "OR"]] = None
     action: Optional[TradeAction] = None
     cooldown_minutes: Optional[int] = None
+    status: Optional[Literal["draft", "paper", "active", "paused", "retired"]] = None
+    ai_generated: Optional[bool] = None
+    ai_reason: Optional[str] = None
+    thesis: Optional[str] = None
+    hold_style: Optional[Literal["intraday", "swing"]] = None
+    version: Optional[int] = None
+    created_by: Optional[str] = None
+    supersedes_rule_id: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +202,12 @@ class Trade(BaseModel):
     status: Literal["PENDING", "FILLED", "CANCELLED", "ERROR"] = "PENDING"
     order_id: Optional[int] = None
     timestamp: str  # ISO datetime
+    source: Literal["rule", "ai_direct", "manual"] = "rule"
+    ai_reason: Optional[str] = None
+    ai_confidence: Optional[float] = None
+    stop_price: Optional[float] = None
+    invalidation: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
