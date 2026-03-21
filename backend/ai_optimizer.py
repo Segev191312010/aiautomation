@@ -342,7 +342,9 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
     if rule_actions:
         try:
             from ai_rule_lab import apply_rule_actions
-            lab_results = await apply_rule_actions(rule_actions, author="ai", allow_active=False)
+            # LIVE mode = rules go straight to active. No paper gate.
+            from safety_kernel import is_autopilot_live
+            lab_results = await apply_rule_actions(rule_actions, author="ai", allow_active=is_autopilot_live())
             for lr in lab_results:
                 if lr.get("ok"):
                     results["applied"].append(f"rule_{lr['action']}: {lr.get('rule_id', '?')}")

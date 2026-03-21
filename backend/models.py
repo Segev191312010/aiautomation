@@ -13,7 +13,7 @@ import uuid as _uuid
 # ---------------------------------------------------------------------------
 
 class Condition(BaseModel):
-    indicator: Literal["RSI", "SMA", "EMA", "MACD", "BBANDS", "ATR", "STOCH", "PRICE"]
+    indicator: Literal["RSI", "SMA", "EMA", "MACD", "BBANDS", "ATR", "STOCH", "PRICE", "VOLUME", "CHANGE_PCT"]
     params: dict[str, Any] = Field(default_factory=dict)
     # operators: crosses_above, crosses_below, >, <, >=, <=, ==
     operator: str

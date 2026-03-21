@@ -44,7 +44,27 @@ async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active:
     if action.action == "create":
         if not action.rule_payload:
             raise ValueError("create requires rule_payload")
-        create_payload = RuleCreate(**action.rule_payload)
+        # Normalize Claude's format to match RuleCreate model
+        payload = dict(action.rule_payload)
+        # Fix: Claude sends action_type instead of action dict
+        if "action_type" in payload and "action" not in payload:
+            payload["action"] = {
+                "type": payload.pop("action_type"),
+                "asset_type": "STK",
+                "quantity": 1,
+                "order_type": payload.pop("order_type", "MKT"),
+            }
+        # Fix: normalize indicator names (claude sends lowercase)
+        indicator_map = {"close": "PRICE", "volume": "VOLUME", "rsi": "RSI", "sma": "SMA",
+                         "ema": "EMA", "macd": "MACD", "bbands": "BBANDS", "atr": "ATR",
+                         "stoch": "STOCH", "price": "PRICE"}
+        for cond in payload.get("conditions", []):
+            ind = cond.get("indicator", "")
+            cond["indicator"] = indicator_map.get(ind.lower(), ind.upper())
+        # Default symbol if missing
+        if not payload.get("symbol") and not payload.get("universe"):
+            payload["symbol"] = "SPY"  # safe default
+        create_payload = RuleCreate(**payload)
         rule = Rule(**create_payload.model_dump())
         rule.ai_generated = True
         rule.created_by = author
