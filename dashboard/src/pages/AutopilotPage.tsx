@@ -1,96 +1,180 @@
-/**
- * AutopilotPage — Operator console for the AI autopilot trading system.
- * Replaces AIAdvisorPage with a leaner, tab-driven layout.
- *
- * Three tabs:
- *   Feed        — live activity feed + intervention queue
- *   Performance — AI learning metrics, source/rule P&L, cost report
- *   Rule Lab    — AI-managed rule inventory with version history
- *
- * The AutopilotStatusStrip (mode badge + kill switch) is always visible
- * regardless of the active tab.
- */
-import React, { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import TradeBotTabs from '@/components/tradebot/TradeBotTabs'
-import AutopilotStatusStrip from '@/components/autopilot/AutopilotStatusStrip'
-import FeedTab from '@/components/autopilot/FeedTab'
-import PerformanceTab from '@/components/autopilot/PerformanceTab'
-import RuleLabTab from '@/components/autopilot/RuleLabTab'
-import { useAdvisorStore } from '@/store'
-import { setAutopilotMode } from '@/services/api'
+import AIActivityFeed from '@/components/autopilot/AIActivityFeed'
+import AIStatusBar from '@/components/autopilot/AIStatusBar'
+import AIPerformanceCard from '@/components/autopilot/AIPerformanceCard'
+import CostReportPanel from '@/components/autopilot/CostReportPanel'
+import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
+import { useAutopilotStore } from '@/store'
+import type {
+  AutopilotIntervention,
+  RulePerformanceRow,
+  SourcePerformance,
+} from '@/types/advisor'
+import type { Rule } from '@/types'
+import {
+  acknowledgeAutopilotIntervention,
+  fetchAutopilotInterventions,
+  fetchAutopilotPerformance,
+  fetchAutopilotRulePerformance,
+  fetchAutopilotRules,
+  fetchAutopilotSourcePerformance,
+  postEmergencyStop,
+  resetDailyLossLock,
+  resetEmergencyStop,
+  resolveAutopilotIntervention,
+  setAutopilotMode,
+} from '@/services/api'
 
-type ConsoleTab = 'feed' | 'performance' | 'rules'
+type ConsoleTab = 'feed' | 'performance' | 'rule-lab'
 
-// ── Mode selector ─────────────────────────────────────────────────────────────
-
-function ModeSelector({
-  currentMode,
-  onChange,
-}: {
-  currentMode: 'OFF' | 'PAPER' | 'LIVE' | undefined
-  onChange: (mode: 'OFF' | 'PAPER' | 'LIVE') => void
-}) {
-  return (
-    <div className="flex items-center gap-1 p-1 bg-[var(--bg-hover)] rounded-xl">
-      {(['OFF', 'PAPER', 'LIVE'] as const).map((mode) => (
-        <button
-          key={mode}
-          type="button"
-          onClick={() => onChange(mode)}
-          className={[
-            'px-3 py-1.5 text-xs font-sans font-semibold rounded-lg transition-colors',
-            currentMode === mode
-              ? mode === 'LIVE'
-                ? 'bg-emerald-600 text-white shadow-sm'
-                : mode === 'PAPER'
-                  ? 'bg-amber-500 text-white shadow-sm'
-                  : 'bg-zinc-500 text-white shadow-sm'
-              : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/60',
-          ].join(' ')}
-        >
-          {mode}
-        </button>
-      ))}
-    </div>
-  )
+function fmtUsd(value: number | null | undefined) {
+  if (value == null) return '--'
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(value)
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+function modeButtonClass(active: boolean) {
+  return active
+    ? 'bg-indigo-600 text-white shadow-sm'
+    : 'bg-white text-[var(--text-secondary)] border border-[var(--border)] hover:bg-[var(--bg-hover)]'
+}
 
 export default function AutopilotPage() {
   const {
-    aiStatus,
+    guardrails,
     auditLog,
+    aiStatus,
     error,
+    learningMetrics,
+    costReport,
+    economicReport,
+    learningWindow,
     fetchGuardrails,
+    updateGuardrails,
     fetchAuditLog,
     fetchAIStatus,
     fetchLearningMetrics,
     fetchCostReport,
     fetchEconomicReport,
-  } = useAdvisorStore()
+    revertAction,
+    setLearningWindow,
+  } = useAutopilotStore()
 
-  const [tab, setTab] = useState<ConsoleTab>('feed')
+  const [activeTab, setActiveTab] = useState<ConsoleTab>('feed')
+  const [rules, setRules] = useState<Rule[]>([])
+  const [rulesLoading, setRulesLoading] = useState(false)
+  const [sourcePerformance, setSourcePerformance] = useState<SourcePerformance[]>([])
+  const [rulePerformance, setRulePerformance] = useState<RulePerformanceRow[]>([])
+  const [interventions, setInterventions] = useState<AutopilotIntervention[]>([])
   const [pageError, setPageError] = useState<string | null>(null)
+  const [dailyLossLimitInput, setDailyLossLimitInput] = useState('2.0')
 
-  // Bootstrap all data on mount; poll status + feed every 30 s
-  useEffect(() => {
-    void Promise.all([
+  async function loadRules() {
+    setRulesLoading(true)
+    try {
+      setRules(await fetchAutopilotRules())
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to load rules')
+    } finally {
+      setRulesLoading(false)
+    }
+  }
+
+  async function loadPerformanceData() {
+    try {
+      const [perf, sources, rulesTable] = await Promise.all([
+        fetchAutopilotPerformance(30),
+        fetchAutopilotSourcePerformance(30),
+        fetchAutopilotRulePerformance(30),
+      ])
+      setSourcePerformance(sources.length ? sources : perf.by_source)
+      setRulePerformance(rulesTable)
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to load performance breakdown')
+    }
+  }
+
+  async function loadInterventions() {
+    try {
+      setInterventions(await fetchAutopilotInterventions(false))
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to load interventions')
+    }
+  }
+
+  async function refreshOperatorConsole() {
+    await Promise.all([
       fetchGuardrails(),
       fetchAuditLog(),
       fetchAIStatus(),
       fetchLearningMetrics(),
       fetchCostReport(),
       fetchEconomicReport(),
+      loadRules(),
+      loadPerformanceData(),
+      loadInterventions(),
     ])
+  }
 
+  useEffect(() => {
+    void refreshOperatorConsole()
     const timer = window.setInterval(() => {
-      void Promise.all([fetchAuditLog(), fetchAIStatus()])
-    }, 30_000)
-
+      void Promise.all([fetchAuditLog(), fetchAIStatus(), loadRules(), loadInterventions()])
+    }, 30000)
     return () => window.clearInterval(timer)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (guardrails?.daily_loss_limit_pct != null) {
+      setDailyLossLimitInput(String(guardrails.daily_loss_limit_pct))
+    }
+  }, [guardrails?.daily_loss_limit_pct])
+
+  const tabs = useMemo(() => [
+    { id: 'feed', label: 'Feed', count: auditLog.length },
+    { id: 'performance', label: 'Performance', count: sourcePerformance.reduce((sum, item) => sum + item.trades_count, 0) },
+    { id: 'rule-lab', label: 'Rule Lab', count: rules.length },
+  ], [auditLog.length, sourcePerformance, rules.length])
+
+  async function handleKillToggle() {
+    try {
+      if (aiStatus?.emergency_stop) {
+        await resetEmergencyStop()
+      } else {
+        await postEmergencyStop()
+      }
+      await Promise.all([fetchAIStatus(), fetchGuardrails(), fetchAuditLog()])
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to change kill switch state')
+    }
+  }
+
+  async function handleDailyLossSave() {
+    const value = Number(dailyLossLimitInput)
+    if (!Number.isFinite(value) || value <= 0) {
+      setPageError('Daily loss limit must be a positive percent')
+      return
+    }
+    try {
+      await updateGuardrails({ daily_loss_limit_pct: value })
+      await fetchGuardrails()
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to update daily loss limit')
+    }
+  }
+
+  async function handleDailyLossReset() {
+    try {
+      await resetDailyLossLock()
+      await Promise.all([fetchGuardrails(), fetchAIStatus()])
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to reset daily loss lock')
+    }
+  }
 
   async function handleModeChange(mode: 'OFF' | 'PAPER' | 'LIVE') {
     try {
@@ -101,53 +185,245 @@ export default function AutopilotPage() {
     }
   }
 
-  const tabs = useMemo(() => [
-    { id: 'feed',        label: 'Live Feed',    count: auditLog.length || undefined },
-    { id: 'performance', label: 'Performance' },
-    { id: 'rules',       label: 'Rule Lab' },
-  ], [auditLog.length])
+  async function handleAcknowledgeIntervention(id: number) {
+    try {
+      await acknowledgeAutopilotIntervention(id)
+      await loadInterventions()
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to acknowledge intervention')
+    }
+  }
 
-  const combinedError = pageError ?? error
+  async function handleResolveIntervention(id: number) {
+    try {
+      await resolveAutopilotIntervention(id)
+      await loadInterventions()
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to resolve intervention')
+    }
+  }
 
   return (
-    <div className="space-y-5 pb-8">
-
-      {/* Page header */}
+    <div className="space-y-6 pb-8">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold text-[var(--text-primary)]">AI Autopilot</h1>
           <p className="text-sm text-[var(--text-muted)] mt-1">
-            Autonomous rule management, direct trade execution, live traceability, and emergency controls.
+            Autonomous rule management, direct trade execution, live traceability, and emergency operator controls.
           </p>
         </div>
-        <ModeSelector
-          currentMode={aiStatus?.mode}
-          onChange={(mode) => void handleModeChange(mode)}
-        />
+
+        <div className="flex items-center gap-2 flex-wrap">
+          {(['OFF', 'PAPER', 'LIVE'] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => void handleModeChange(mode)}
+              className={`rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${modeButtonClass(aiStatus?.mode === mode)}`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Error banner */}
-      {combinedError && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-sans text-red-700">
-          {combinedError}
+      {(pageError || error) && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {pageError || error}
         </div>
       )}
 
-      {/* Status strip — always visible */}
-      <AutopilotStatusStrip />
-
-      {/* Tab selector */}
-      <TradeBotTabs
-        tabs={tabs}
-        activeTab={tab}
-        onTabChange={(t) => setTab(t as ConsoleTab)}
+      <AIStatusBar
+        status={aiStatus}
+        onKillToggle={() => void handleKillToggle()}
+        onDailyLossReset={() => void handleDailyLossReset()}
       />
 
-      {/* Tab content */}
-      {tab === 'feed'        && <FeedTab />}
-      {tab === 'performance' && <PerformanceTab />}
-      {tab === 'rules'       && <RuleLabTab />}
+      <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Daily Loss Control</h2>
+            <p className="text-xs text-[var(--text-muted)]">
+              The only editable runtime safety control in the operator console. New AI entries stop when breached.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              value={dailyLossLimitInput}
+              onChange={(event) => setDailyLossLimitInput(event.target.value)}
+              className="w-24 rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
+              inputMode="decimal"
+            />
+            <span className="text-sm text-[var(--text-muted)]">% of net liq</span>
+            <button
+              type="button"
+              onClick={() => void handleDailyLossSave()}
+              className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+            >
+              Save Limit
+            </button>
+          </div>
+        </div>
+      </div>
 
+      <TradeBotTabs activeTab={activeTab} onTabChange={(tab) => setActiveTab(tab as ConsoleTab)} tabs={tabs} />
+
+      {activeTab === 'feed' && (
+        <div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-5">
+          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-[var(--text-primary)]">Live Activity Feed</h2>
+                <p className="text-xs text-[var(--text-muted)]">
+                  Every meaningful autopilot action, rejection, revert, and manual override.
+                </p>
+              </div>
+            </div>
+            <AIActivityFeed entries={auditLog} onRevert={(id) => void revertAction(id)} />
+          </div>
+
+          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <div>
+                <h2 className="text-sm font-semibold text-[var(--text-primary)]">Intervention Queue</h2>
+                <p className="text-xs text-[var(--text-muted)]">
+                  Operational issues that need human acknowledgement, mode changes, or reconciliation.
+                </p>
+              </div>
+              <div className="text-xs text-[var(--text-muted)]">{interventions.length} open</div>
+            </div>
+
+            {interventions.length ? (
+              <div className="space-y-3">
+                {interventions.map((item) => (
+                  <div key={item.id} className="rounded-xl border border-[var(--border)] px-4 py-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-medium text-[var(--text-primary)]">{item.summary}</div>
+                      <span className="text-xs font-semibold uppercase tracking-[0.12em] text-red-700">
+                        {item.severity}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-sm text-[var(--text-secondary)]">{item.required_action}</div>
+                    <div className="mt-3 flex items-center justify-end gap-2">
+                      {!item.acknowledged_at && (
+                        <button
+                          type="button"
+                          onClick={() => void handleAcknowledgeIntervention(item.id)}
+                          className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                        >
+                          Acknowledge
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void handleResolveIntervention(item.id)}
+                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                      >
+                        Resolve
+                      </button>
+                    </div>
+                    <div className="mt-2 text-xs text-[var(--text-muted)]">
+                      {item.category} - {item.source} - {item.symbol ?? 'system'} - {new Date(item.opened_at).toLocaleString()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-[var(--text-muted)]">No open intervention items.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'performance' && (
+        <div className="space-y-5">
+          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+            <AIPerformanceCard
+              metrics={learningMetrics}
+              economicReport={economicReport}
+              activeWindow={learningWindow}
+              onWindowChange={setLearningWindow}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            {sourcePerformance.map((item) => (
+              <div key={item.source} className="rounded-2xl border border-[var(--border)] bg-white p-4">
+                <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)]">{item.source}</div>
+                <div className="mt-2 text-xl font-semibold text-[var(--text-primary)]">{fmtUsd(item.realized_pnl)}</div>
+                <div className="mt-1 text-sm text-[var(--text-secondary)]">
+                  {item.trades_count} trades - {item.hit_rate != null ? `${(item.hit_rate * 100).toFixed(1)}% hit rate` : 'No closed P&L yet'}
+                </div>
+                <div className="mt-2 text-xs text-[var(--text-muted)]">
+                  Cost {fmtUsd(item.total_cost)} - ROI {item.roi != null ? item.roi.toFixed(2) : '--'}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-[1.15fr,0.85fr] gap-5">
+            <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+              <div className="flex items-center justify-between gap-2 mb-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-[var(--text-primary)]">Rule Contribution</h2>
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Separate contribution tracking for rule-driven and direct AI trading.
+                  </p>
+                </div>
+              </div>
+
+              {rulePerformance.length ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[640px]">
+                    <thead>
+                      <tr className="border-b border-[var(--border)] text-left text-[11px] uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                        <th className="py-3 pr-3 font-medium">Rule</th>
+                        <th className="py-3 px-3 font-medium">Source</th>
+                        <th className="py-3 px-3 font-medium">Trades</th>
+                        <th className="py-3 px-3 font-medium">Hit Rate</th>
+                        <th className="py-3 pl-3 text-right font-medium">Net P&L</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rulePerformance.map((row) => (
+                        <tr key={`${row.rule_id}:${row.source}`} className="border-b border-[var(--border)]/60 last:border-b-0">
+                          <td className="py-3 pr-3">
+                            <div className="font-medium text-[var(--text-primary)]">{row.rule_name}</div>
+                            <div className="text-xs text-[var(--text-muted)]">{row.rule_id}</div>
+                          </td>
+                          <td className="py-3 px-3 text-sm text-[var(--text-secondary)]">{row.source}</td>
+                          <td className="py-3 px-3 text-sm text-[var(--text-secondary)]">{row.trades_count}</td>
+                          <td className="py-3 px-3 text-sm text-[var(--text-secondary)]">
+                            {row.hit_rate != null ? `${(row.hit_rate * 100).toFixed(1)}%` : '--'}
+                          </td>
+                          <td className="py-3 pl-3 text-right text-sm font-medium text-[var(--text-primary)]">{fmtUsd(row.net_pnl)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="text-sm text-[var(--text-muted)]">No rule-level performance history yet.</div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+              <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-4">AI Cost Report</h2>
+              <CostReportPanel report={costReport} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'rule-lab' && (
+        rulesLoading && !rules.length ? (
+          <div className="rounded-2xl border border-[var(--border)] bg-white px-5 py-8 text-sm text-[var(--text-muted)]">
+            Loading AI rule inventory...
+          </div>
+        ) : (
+          <AutopilotRuleLab rules={rules} onRefresh={loadRules} />
+        )
+      )}
     </div>
   )
 }
