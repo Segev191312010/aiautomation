@@ -96,6 +96,10 @@ async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active:
         await save_rule_version(updated, diff_summary=action.reason, author=author)
         action_type = "rule_update"
     elif action.action == "enable":
+        if existing.status == "retired":
+            raise ValueError(f"Cannot re-enable retired rule '{existing.id}' — retire is permanent")
+        if not allow_active:
+            raise ValueError(f"Cannot enable rule '{existing.id}' — allow_active=False")
         updated.status = "active"
         updated.enabled = True
         await save_rule(updated)

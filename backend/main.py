@@ -252,6 +252,19 @@ async def lifespan(app: FastAPI):
     await _start_market_heartbeat()
     await alert_engine.start()
 
+    # Sync autopilot mode from DB → cfg on startup (C-4/H-1 FIX)
+    try:
+        from ai_guardrails import _load_guardrails_from_db
+        db_config = await _load_guardrails_from_db()
+        mode = db_config.autopilot_mode
+        if mode in ("OFF", "PAPER", "LIVE"):
+            cfg.AUTOPILOT_MODE = mode
+            from ai_params import ai_params
+            ai_params.shadow_mode = mode != "LIVE"
+            log.info("Autopilot mode synced from DB: %s", mode)
+    except Exception as e:
+        log.warning("Failed to sync autopilot mode from DB: %s", e)
+
     # Start AI optimization background loop (if API key configured)
     if cfg.ANTHROPIC_API_KEY:
         from ai_optimizer import ai_optimization_loop
@@ -952,6 +965,9 @@ async def ws_market_data(ws: WebSocket):
 
 @app.get("/api/status")
 async def get_status():
+    from ai_guardrails import get_autopilot_config_dict
+
+    autopilot = await get_autopilot_config_dict()
     return {
         "ibkr_connected":       ibkr.is_connected(),
         "is_paper":             cfg.IS_PAPER,
@@ -960,6 +976,13 @@ async def get_status():
         "last_run":             bot_runner.get_last_run(),
         "next_run":             bot_runner.get_next_run(),
         "bot_interval_seconds": cfg.BOT_INTERVAL_SECONDS,
+        "autopilot_mode":       autopilot["autopilot_mode"],
+        "autopilot_emergency_stop": autopilot["emergency_stop"],
+        "autopilot_daily_loss_locked": autopilot["daily_loss_locked"],
+        "features": {
+            "market_diagnostics": cfg.ENABLE_MARKET_DIAGNOSTICS,
+            "autopilot_console": True,
+        },
     }
 
 

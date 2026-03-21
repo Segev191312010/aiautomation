@@ -19,7 +19,7 @@ from safety_kernel import (
 @pytest.mark.anyio
 async def test_kill_switch_blocks(anyio_backend):
     with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
-        mock_config = type("C", (), {"emergency_stop": True})()
+        mock_config = type("C", (), {"emergency_stop": True, "autopilot_mode": "LIVE"})()
         mock_load.return_value = mock_config
         with pytest.raises(SafetyViolation, match="Kill switch"):
             await assert_not_killed()
@@ -28,9 +28,36 @@ async def test_kill_switch_blocks(anyio_backend):
 @pytest.mark.anyio
 async def test_kill_switch_allows_when_not_stopped(anyio_backend):
     with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
-        mock_config = type("C", (), {"emergency_stop": False})()
+        mock_config = type("C", (), {"emergency_stop": False, "autopilot_mode": "LIVE"})()
         mock_load.return_value = mock_config
         await assert_not_killed()  # should not raise
+
+
+@pytest.mark.anyio
+async def test_off_mode_blocks_ai_entries(anyio_backend):
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_config = type("C", (), {"emergency_stop": False, "autopilot_mode": "OFF"})()
+        mock_load.return_value = mock_config
+        with pytest.raises(SafetyViolation, match="Autopilot is OFF"):
+            await assert_not_killed()
+
+
+@pytest.mark.anyio
+async def test_daily_loss_lock_blocks_entries(anyio_backend):
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_config = type("C", (), {"daily_loss_locked": True})()
+        mock_load.return_value = mock_config
+        from safety_kernel import assert_daily_loss_not_locked
+
+        with pytest.raises(SafetyViolation, match="Daily loss lock"):
+            await assert_daily_loss_not_locked(is_exit=False)
+
+
+@pytest.mark.anyio
+async def test_daily_loss_lock_allows_exits(anyio_backend):
+    from safety_kernel import assert_daily_loss_not_locked
+
+    await assert_daily_loss_not_locked(is_exit=True)
 
 
 # ── Risk Budget ──────────────────────────────────────────────────────────────

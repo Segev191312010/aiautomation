@@ -56,13 +56,16 @@ async def assert_not_killed() -> None:
         from ai_guardrails import _load_guardrails_from_db
 
         config = await _load_guardrails_from_db()
+        if config.autopilot_mode == "OFF":
+            raise SafetyViolation("Autopilot is OFF")
         if config.emergency_stop:
             raise SafetyViolation("Kill switch active — all new AI entries blocked")
     except SafetyViolation:
         raise
-    except Exception:
-        if cfg.AUTOPILOT_MODE == "OFF":
-            raise SafetyViolation("Autopilot is OFF")
+    except Exception as e:
+        # C-1 FIX: Default to BLOCKED on DB error — fail closed, not open
+        log.error("Kill switch check FAILED (DB unavailable) — blocking for safety: %s", e)
+        raise SafetyViolation("Kill switch check unavailable — blocking for safety")
 
 
 async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:
@@ -77,7 +80,10 @@ async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:
             raise SafetyViolation("Daily loss lock active — new AI entries blocked")
     except SafetyViolation:
         raise
-    except Exception:
+    except Exception as e:
+        # C-2 FIX: Default to BLOCKED on DB error — fail closed, not open
+        log.error("Daily loss check FAILED (DB unavailable) — blocking for safety: %s", e)
+        raise SafetyViolation("Daily loss check unavailable — blocking for safety")
         pass
 
 

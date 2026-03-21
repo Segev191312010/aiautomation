@@ -359,11 +359,12 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
             results["shadow"].append(f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} (shadow)")
     elif direct_trades:
         try:
+            from api_contracts import AIDirectTrade
             from direct_ai_trader import execute_direct_trade
 
             for dt in direct_trades:
                 try:
-                    outcome = await execute_direct_trade(dt)
+                    outcome = await execute_direct_trade(AIDirectTrade(**dt))
                     results["applied"].append(
                         f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} "
                         f"({'paper' if outcome.get('simulated') else 'live'})"
@@ -412,6 +413,14 @@ async def run_full_optimization() -> dict:
     _optimizer_running = True
     start = time.time()
     try:
+        # H-6 FIX: Check emergency_stop before running
+        try:
+            config = await get_autopilot_config_dict()
+            if config.get("emergency_stop"):
+                return {"skipped": True, "reason": "emergency_stop active"}
+        except Exception:
+            pass
+
         log.info("AI optimization cycle starting...")
 
         # Step 1: Gather context

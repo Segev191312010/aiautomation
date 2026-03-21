@@ -6,10 +6,15 @@ from pydantic import ValidationError
 
 from api_contracts import (
     AdvisorReportResponse,
+    AIDirectTrade,
+    AIRuleAction,
     AuditLogEntryResponse,
     AuditLogResponse,
     AutoTuneResultResponse,
     AIStatusResponse,
+    AutopilotConfigResponse,
+    AutopilotPerformanceResponse,
+    AutopilotModeRequest,
     BracketAnalysisResponse,
     CostReportResponse,
     DailyCostEntry,
@@ -18,10 +23,12 @@ from api_contracts import (
     ParamTypeMetrics,
     RecommendationResponse,
     RulePerformanceResponse,
+    RuleVersionResponse,
     ScoreAnalysisResponse,
     ScoreBucket,
     SectorPerformanceResponse,
     ShadowPerformanceResponse,
+    SourcePerformanceResponse,
     TimePatternResponse,
     UncertainValue,
     AIDecisionPayload,
@@ -170,9 +177,11 @@ class TestAutoTuneContract:
 class TestGuardrailConfigContract:
     def test_defaults(self):
         m = GuardrailConfigResponse()
+        assert m.autopilot_mode == "OFF"
         assert m.shadow_mode is True
         assert not m.ai_autonomy_enabled
         assert not m.emergency_stop
+        assert m.daily_loss_limit_pct == 2.0
         assert m.max_changes_per_day == 10
         assert m.min_score_floor == 35
         assert m.min_score_ceiling == 80
@@ -212,9 +221,29 @@ class TestAuditLogContract:
 class TestAIStatusContract:
     def test_defaults(self):
         m = AIStatusResponse()
+        assert m.mode == "OFF"
         assert not m.autonomy_active
         assert m.shadow_mode
+        assert not m.daily_loss_locked
         assert m.daily_budget_remaining == 10
+
+
+class TestAutopilotConfigContract:
+    def test_valid(self):
+        m = AutopilotConfigResponse(
+            autopilot_mode="PAPER",
+            emergency_stop=False,
+            daily_loss_locked=True,
+            daily_loss_limit_pct=1.5,
+        )
+        assert m.autopilot_mode == "PAPER"
+        assert m.daily_loss_locked
+        assert m.daily_loss_limit_pct == 1.5
+
+    def test_mode_request(self):
+        m = AutopilotModeRequest(mode="LIVE", reason="Promote validated rules")
+        assert m.mode == "LIVE"
+        assert "validated" in m.reason
 
 
 class TestUncertainValueContract:
@@ -228,6 +257,8 @@ class TestAIDecisionPayloadContract:
     def test_minimal(self):
         m = AIDecisionPayload(reasoning="No changes needed", confidence=0.6)
         assert m.rule_changes == []
+        assert m.rule_actions == []
+        assert m.direct_trades == []
         assert m.signal_weights is None
 
     def test_with_rule_changes(self):
@@ -241,6 +272,33 @@ class TestAIDecisionPayloadContract:
         )
         assert len(m.rule_changes) == 2
         assert m.rule_changes[1].sizing_mult == 1.3
+
+    def test_with_rule_actions_and_direct_trades(self):
+        m = AIDecisionPayload(
+            rule_actions=[
+                AIRuleAction(
+                    action="create",
+                    rule_payload={"name": "AI Rule", "symbol": "AAPL"},
+                    reason="New regime opportunity",
+                    confidence=0.72,
+                )
+            ],
+            direct_trades=[
+                AIDirectTrade(
+                    symbol="NVDA",
+                    action="BUY",
+                    order_type="MKT",
+                    stop_price=115.0,
+                    invalidation="Momentum failure below VWAP",
+                    reason="Breakout continuation",
+                    confidence=0.8,
+                )
+            ],
+            reasoning="Rule + direct trade output",
+            confidence=0.81,
+        )
+        assert m.rule_actions[0].action == "create"
+        assert m.direct_trades[0].symbol == "NVDA"
 
 
 class TestCostReportContract:
@@ -304,6 +362,61 @@ class TestShadowPerformanceContract:
         m = ShadowPerformanceResponse(total_decisions=0)
         assert not m.ready_for_live
         assert m.gating_conditions == []
+
+
+class TestRuleVersionContract:
+    def test_valid(self):
+        m = RuleVersionResponse(
+            version=3,
+            rule_id="rule-1",
+            name="AI Momentum",
+            conditions=[],
+            logic="AND",
+            action={"type": "BUY", "asset_type": "STK", "quantity": 5, "order_type": "MKT"},
+            cooldown_minutes=60,
+            created_at="2026-03-20T12:00:00Z",
+            note="Promoted after paper validation",
+            author="ai",
+            status="paper",
+        )
+        assert m.version == 3
+        assert m.author == "ai"
+        assert m.status == "paper"
+
+
+class TestAutopilotPerformanceContract:
+    def test_valid(self):
+        m = AutopilotPerformanceResponse(
+            window_days=30,
+            total_trades=12,
+            hit_rate=0.58,
+            realized_pnl=320.5,
+            unrealized_pnl=12.0,
+            total_cost=24.0,
+            roi=13.35,
+            by_source=[
+                SourcePerformanceResponse(
+                    source="rule",
+                    trades_count=8,
+                    hit_rate=0.625,
+                    realized_pnl=250.0,
+                    unrealized_pnl=10.0,
+                    total_cost=16.0,
+                    roi=15.625,
+                ),
+                SourcePerformanceResponse(
+                    source="ai_direct",
+                    trades_count=4,
+                    hit_rate=0.5,
+                    realized_pnl=70.5,
+                    unrealized_pnl=2.0,
+                    total_cost=8.0,
+                    roi=8.8125,
+                ),
+            ],
+        )
+        assert m.total_trades == 12
+        assert len(m.by_source) == 2
 
 
 # ── Full report contract ─────────────────────────────────────────────────────

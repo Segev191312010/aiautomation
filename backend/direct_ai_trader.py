@@ -80,6 +80,20 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
     )
 
     if not is_autopilot_live():
+        # H-5 FIX: Paper mode still checks kill switch + daily loss
+        if not is_exit:
+            from ai_guardrails import _load_guardrails_from_db
+            try:
+                gconfig = await _load_guardrails_from_db()
+                if gconfig.emergency_stop:
+                    raise SafetyViolation("Kill switch active — paper entries also blocked")
+                if gconfig.daily_loss_locked:
+                    raise SafetyViolation("Daily loss lock — paper entries also blocked")
+            except SafetyViolation:
+                raise
+            except Exception:
+                pass
+
         simulated_trade = {
             "id": f"paper-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
             "rule_id": order_rule.id,
