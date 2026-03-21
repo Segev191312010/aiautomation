@@ -27,7 +27,7 @@ def clear_indicator_cache() -> None:
 # Single condition evaluation
 # ---------------------------------------------------------------------------
 
-def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict) -> bool:
+def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict, cache_scope: str = "") -> bool:
     """
     Evaluate one condition against the last bar of df.
 
@@ -38,8 +38,10 @@ def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict) -> bool:
     op = cond.operator.lower().strip()
 
     try:
-        # Compute the primary indicator series (with global cache)
-        cache_key = (id(df), len(df), cond.indicator, str(cond.params))
+        # Compute the primary indicator series (with deterministic cache key)
+        last_time = str(df.index[-1]) if len(df) > 0 else ""
+        normalized_params = tuple(sorted(cond.params.items())) if cond.params else ()
+        cache_key = (cache_scope, len(df), last_time, cond.indicator, normalized_params)
         if cache_key in _indicator_cache:
             series_a = _indicator_cache[cache_key]
         else:
@@ -118,7 +120,8 @@ def evaluate_rule(rule: Rule, df: pd.DataFrame) -> bool:
         return False
 
     cache: dict = {}
-    results = [_evaluate_condition(c, df, cache) for c in rule.conditions]
+    scope = rule.symbol.upper() if rule.symbol else f"universe:{rule.universe or 'custom'}"
+    results = [_evaluate_condition(c, df, cache, cache_scope=scope) for c in rule.conditions]
 
     if rule.logic == "AND":
         return all(results)
@@ -264,7 +267,8 @@ def _evaluate_conditions_for_rule(rule: Rule, df: pd.DataFrame) -> bool:
     if df.empty or len(df) < 2:
         return False
     cache: dict = {}
-    results = [_evaluate_condition(c, df, cache) for c in rule.conditions]
+    scope = rule.symbol.upper() if rule.symbol else f"universe:{rule.universe or 'custom'}"
+    results = [_evaluate_condition(c, df, cache, cache_scope=scope) for c in rule.conditions]
     if rule.logic == "AND":
         return all(results)
     return any(results)

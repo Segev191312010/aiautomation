@@ -62,11 +62,12 @@ def get_account_state(ib) -> dict:
         for p in ib.portfolio():
             if p.position == 0:
                 continue
+            mkt_price = p.marketPrice if p.marketPrice and p.marketPrice > 0 else p.averageCost
             positions.append({
                 "symbol": p.contract.symbol,
                 "qty": p.position,
                 "avg_cost": p.averageCost,
-                "market_price": p.marketPrice,
+                "market_price": mkt_price,
                 "market_value": p.marketValue,
                 "sector": get_sector(p.contract.symbol),
             })

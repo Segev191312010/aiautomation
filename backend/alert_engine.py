@@ -94,7 +94,9 @@ async def _loop() -> None:
                 duration,
                 cfg.ALERT_CHECK_INTERVAL_SECONDS,
             )
-        await asyncio.sleep(cfg.ALERT_CHECK_INTERVAL_SECONDS)
+        # Sleep only the remainder — prevents timing drift
+        remaining = max(0, cfg.ALERT_CHECK_INTERVAL_SECONDS - duration)
+        await asyncio.sleep(remaining)
 
 
 async def _check_cycle() -> None:
