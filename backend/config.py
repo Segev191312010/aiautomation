@@ -55,8 +55,8 @@ class Config:
     # Backward compat — derived from AUTOPILOT_MODE
     _apm = os.getenv("AUTOPILOT_MODE", "OFF").upper()
     AI_AUTONOMY_ENABLED: bool = _apm in ("PAPER", "LIVE")
-    AI_SHADOW_MODE: bool = _apm != "LIVE"
-    AI_OPTIMIZE_INTERVAL_SECONDS: int = int(os.getenv("AI_OPTIMIZE_INTERVAL_SECONDS", "14400"))
+    AI_SHADOW_MODE: bool = _apm == "OFF"
+    AI_OPTIMIZE_INTERVAL_SECONDS: int = int(os.getenv("AI_OPTIMIZE_INTERVAL_SECONDS", "3600"))  # 1h default
     AI_MODEL_OPTIMIZER: str = os.getenv("AI_MODEL_OPTIMIZER", "claude-sonnet-4-20250514")
     AI_MODEL_NARRATIVE: str = os.getenv("AI_MODEL_NARRATIVE", "claude-sonnet-4-20250514")
     AI_MODEL_REGIME: str = os.getenv("AI_MODEL_REGIME", "claude-sonnet-4-20250514")

@@ -354,26 +354,16 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
 
     # ── Direct AI Trades ─────────────────────────────────────────────────────
     direct_trades = decisions.get("direct_trades", [])
-    if direct_trades and ai_params.shadow_mode:
-        for dt in direct_trades:
-            results["shadow"].append(f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} (shadow)")
-    elif direct_trades:
+    if direct_trades:
         try:
-            from api_contracts import AIDirectTrade
-            from direct_ai_trader import execute_direct_trade
+            from execution_brain import queue_direct_candidates
 
+            queued = queue_direct_candidates(direct_trades)
             for dt in direct_trades:
-                try:
-                    outcome = await execute_direct_trade(AIDirectTrade(**dt))
-                    results["applied"].append(
-                        f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} "
-                        f"({'paper' if outcome.get('simulated') else 'live'})"
-                    )
-                except Exception as exc:
-                    log.warning("Direct AI trade failed for %s: %s", dt.get("symbol", "?"), exc)
-                    results["blocked"].append(
-                        f"direct_trade: {dt.get('symbol', '?')} blocked ({exc})"
-                    )
+                results["applied"].append(
+                    f"direct_trade_queued: {dt.get('symbol', '?')} {dt.get('action', '?')}"
+                )
+            log.info("Queued %d direct AI trade candidates for bot-cycle execution", queued)
         except Exception as exc:
             log.error("Direct AI trade engine unavailable: %s", exc)
             results["blocked"].append(f"direct_trade_engine: {exc}")
@@ -436,13 +426,25 @@ async def run_full_optimization() -> dict:
         # Step 3: Apply through guardrails
         results = await _apply_decisions(decisions, context)
 
+        # Step 4: Evaluate paper rules + auto-promote if ready
+        try:
+            from rule_validation import evaluate_paper_rules, auto_promote_paper_rules
+            eval_results = await evaluate_paper_rules()
+            promoted = await auto_promote_paper_rules()
+            if promoted:
+                for p in promoted:
+                    results["applied"].append(f"rule_promoted: {p['name']} (paper → active)")
+                log.info("Auto-promoted %d paper rules to active", len(promoted))
+        except Exception as e:
+            log.warning("Paper rule evaluation/promotion failed: %s", e)
+
         _last_optimization = time.time()
         ai_params.last_recompute = _last_optimization
 
         elapsed = time.time() - start
         log.info(
             "AI optimization complete in %.1fs: %d applied, %d blocked, %d shadow",
-            elapsed, len(results["applied"]), len(results["blocked"]), len(results["shadow"]),
+            elapsed, len(results["applied"]), len(results["blocked"]), len(results.get("shadow", [])),
         )
 
         return {
@@ -483,7 +485,7 @@ async def ai_optimization_loop() -> None:
     while True:
         try:
             config = await get_autopilot_config_dict()
-            ai_params.shadow_mode = config["autopilot_mode"] != "LIVE"
+            ai_params.shadow_mode = config["autopilot_mode"] == "OFF"
             if should_recompute():
                 await run_full_optimization()
         except Exception as e:
