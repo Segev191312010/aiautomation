@@ -58,14 +58,16 @@ def get_account_state(ib) -> dict:
 
     positions = []
     try:
-        for p in ib.positions():
+        # I-2 FIX: Use ib.portfolio() which provides marketPrice (not just avgCost)
+        for p in ib.portfolio():
             if p.position == 0:
                 continue
             positions.append({
                 "symbol": p.contract.symbol,
                 "qty": p.position,
-                "avg_cost": p.avgCost,
-                "market_price": p.avgCost,
+                "avg_cost": p.averageCost,
+                "market_price": p.marketPrice,
+                "market_value": p.marketValue,
                 "sector": get_sector(p.contract.symbol),
             })
     except Exception as e:

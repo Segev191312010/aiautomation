@@ -120,6 +120,8 @@ async def get_historical_bars(
             })
             df["time"] = pd.to_datetime(df["time"])
             df = df.sort_values("time").reset_index(drop=True)
+            if len(_bar_cache) >= _BAR_CACHE_MAX:
+                _bar_cache.clear()
             _bar_cache[cache_key] = df
             return df
     except Exception as exc:

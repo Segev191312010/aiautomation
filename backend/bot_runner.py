@@ -302,8 +302,7 @@ async def _run_cycle() -> None:
                             df.index.name = "time"
                             df = df.reset_index()
                             df.columns = [c.lower() for c in df.columns]
-                            if "adj close" in df.columns:
-                                df = df.rename(columns={"adj close": "close"})
+                            # adj close rename removed — auto_adjust=True already handles this
                             bars_by_symbol[sym.upper()] = df
                 except Exception as exc:
                     log.warning("Bulk fetch batch %d failed: %s", i // BATCH, exc)
@@ -511,7 +510,7 @@ async def _run_cycle() -> None:
                 event_logger.log_event(fill_event)
                 metrics.record("fill_price", trade.fill_price)
             metrics.record("orders_placed", orders_placed)
-        except OrderError as exc:
+        except (OrderError, RuntimeError) as exc:
             log.error("Order failed for rule '%s' on %s: %s", rule.name, trigger_symbol, exc)
             trade = None
 
