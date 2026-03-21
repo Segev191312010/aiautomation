@@ -432,6 +432,7 @@ interface UIState {
   orderModalSymbol: string
   /** The user's chosen preference — 'system' means follow OS */
   theme:            ThemePreference
+  tradebotTab:      'positions' | 'rules' | 'insights' | 'activity'
 
   setSidebarCollapsed: (v: boolean) => void
   toggleSidebar:       () => void
@@ -439,6 +440,7 @@ interface UIState {
   openOrderModal:      (symbol?: string) => void
   closeOrderModal:     () => void
   setTheme:            (t: ThemePreference) => void
+  setTradebotTab:      (tab: 'positions' | 'rules' | 'insights' | 'activity') => void
 }
 
 /** Apply a theme preference, persisting to localStorage and updating the DOM. */
@@ -456,6 +458,7 @@ export const useUIStore = create<UIState>((set) => ({
   activeRoute:      'dashboard',
   showOrderModal:   false,
   orderModalSymbol: '',
+  tradebotTab:      'positions',
   theme: ((): ThemePreference => {
     try {
       const stored = localStorage.getItem('theme')
@@ -473,6 +476,7 @@ export const useUIStore = create<UIState>((set) => ({
     applyTheme(t)
     set({ theme: t })
   },
+  setTradebotTab: (tab) => set({ tradebotTab: tab }),
 }))
 
 // ── Settings store ───────────────────────────────────────────────────────
