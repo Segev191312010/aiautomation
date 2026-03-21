@@ -84,11 +84,10 @@ async def _build_context() -> dict:
 # ── Claude API Call ──────────────────────────────────────────────────────────
 
 OPTIMIZER_SYSTEM_PROMPT = (
-    "You are a quantitative trading AI optimizer. Analyze the performance data "
-    "and return ONLY valid JSON with your parameter recommendations. "
-    "Be conservative — small incremental changes only. "
-    "Every numeric recommendation must include value, lower (10th percentile), "
-    "and upper (90th percentile) bounds."
+    "You are an autonomous AI trading strategist. You optimize parameters, "
+    "create new rules, pause underperforming rules, and retire broken ones. "
+    "Return ONLY valid JSON. No markdown fences, no explanations outside JSON. "
+    "CONSTRAINTS: No shorting (BUY only). 1% risk per trade. Intraday + swing styles."
 )
 
 OPTIMIZER_USER_TEMPLATE = """Trading bot performance data (last {lookback_days} days, {trade_count} trades):
@@ -102,21 +101,43 @@ Score Analysis: {score_analysis}
 
 Current AI Parameters: {current_params}
 
-Analyze this data and return a JSON object:
+Analyze this data and return a JSON object with your decisions:
 {{
   "min_score": {{"value": 55, "lower": 50, "upper": 60}},
-  "rule_changes": [
-    {{"rule_id": "...", "action": "disable|enable|boost|reduce", "sizing_mult": 1.3, "reason": "..."}}
-  ],
   "risk_multiplier": {{"value": 1.0, "lower": 0.8, "upper": 1.2}},
-  "reasoning": "2-3 sentence explanation",
+  "rule_actions": [
+    {{
+      "action": "create",
+      "rule_payload": {{
+        "name": "AI: Descriptive Name",
+        "symbol": "AAPL",
+        "conditions": [{{"indicator": "RSI", "params": {{"period": 14}}, "operator": "<", "value": 30}}],
+        "logic": "AND",
+        "action_type": "BUY",
+        "cooldown_minutes": 120,
+        "thesis": "Why this rule",
+        "hold_style": "swing"
+      }},
+      "reason": "Why creating",
+      "confidence": 0.7
+    }},
+    {{
+      "action": "pause",
+      "rule_id": "existing-id",
+      "reason": "Why pausing",
+      "confidence": 0.8
+    }}
+  ],
+  "reasoning": "2-3 sentence strategy summary",
   "confidence": 0.75
 }}
 
 Rules:
-- Only suggest changes supported by statistical evidence
-- Confidence 0-1 reflects data quality (more trades = higher confidence)
-- rule_changes: only for rules with 10+ trades and clear performance signal
+- New rules start as 'paper' (not live) — BUY only, no shorts
+- Only pause/retire rules with clear evidence of poor performance
+- Max 3 new rules per cycle
+- Include a thesis for new rules explaining the edge
+- If everything looks fine, return empty rule_actions
 - min_score: adjust if score analysis shows a better threshold
 - risk_multiplier: 1.0 = no change, <1.0 = reduce risk, >1.0 = increase risk"""
 
@@ -314,6 +335,31 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
             )
             key = "applied" if result.get("applied") else "blocked"
             results[key].append(f"rule_{action}: {rule_id} x{sizing:.2f}")
+
+    # ── Rule Lab Actions (create/modify/pause/retire rules) ────────────────
+    rule_actions = decisions.get("rule_actions", [])
+    if rule_actions:
+        try:
+            from ai_rule_lab import apply_rule_actions
+            lab_results = await apply_rule_actions(rule_actions, author="ai", allow_active=False)
+            for lr in lab_results:
+                if lr.get("ok"):
+                    results["applied"].append(f"rule_{lr['action']}: {lr.get('rule_id', '?')}")
+                else:
+                    results["blocked"].append(f"rule_{lr.get('action', '?')}: {lr.get('reason', 'failed')}")
+        except Exception as e:
+            log.error("Rule Lab actions failed: %s", e)
+            results["blocked"].append(f"rule_lab_error: {e}")
+
+    # ── Direct AI Trades ─────────────────────────────────────────────────────
+    direct_trades = decisions.get("direct_trades", [])
+    if direct_trades and ai_params.shadow_mode:
+        for dt in direct_trades:
+            results["shadow"].append(f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} (shadow)")
+    elif direct_trades:
+        # Phase 5: Direct trade execution will be wired here
+        for dt in direct_trades:
+            results["applied"].append(f"direct_trade: {dt.get('symbol', '?')} (queued for Phase 5)")
 
     return results
 

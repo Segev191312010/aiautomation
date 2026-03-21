@@ -16,23 +16,21 @@ from safety_kernel import (
 
 # ── Kill Switch ──────────────────────────────────────────────────────────────
 
-def test_kill_switch_blocks():
-    with patch("safety_kernel.cfg") as mock_cfg:
-        mock_cfg.AUTOPILOT_MODE = "KILLED"
+@pytest.mark.anyio
+async def test_kill_switch_blocks(anyio_backend):
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_config = type("C", (), {"emergency_stop": True})()
+        mock_load.return_value = mock_config
         with pytest.raises(SafetyViolation, match="Kill switch"):
-            assert_not_killed()
+            await assert_not_killed()
 
 
-def test_kill_switch_allows_when_live():
-    with patch("safety_kernel.cfg") as mock_cfg:
-        mock_cfg.AUTOPILOT_MODE = "LIVE"
-        assert_not_killed()  # should not raise
-
-
-def test_kill_switch_allows_when_off():
-    with patch("safety_kernel.cfg") as mock_cfg:
-        mock_cfg.AUTOPILOT_MODE = "OFF"
-        assert_not_killed()  # should not raise
+@pytest.mark.anyio
+async def test_kill_switch_allows_when_not_stopped(anyio_backend):
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_config = type("C", (), {"emergency_stop": False})()
+        mock_load.return_value = mock_config
+        await assert_not_killed()  # should not raise
 
 
 # ── Risk Budget ──────────────────────────────────────────────────────────────
@@ -40,23 +38,30 @@ def test_kill_switch_allows_when_off():
 def test_risk_budget_rejects_oversized():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        # 100 shares at $100 = $10,000 on a $10,000 account = 100% → blocked
-        with pytest.raises(SafetyViolation, match="exceeds 20%"):
+        # No stop_price → uses notional: 100 * 100 = $10,000 > 1% of $10,000 = $100
+        with pytest.raises(SafetyViolation, match="risk"):
             assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=10000.0)
 
 
 def test_risk_budget_allows_small_position():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        # 5 shares at $100 = $500 on $10,000 = 5% → allowed
-        assert_risk_budget(quantity=5, price_estimate=100.0, account_equity=10000.0)
+        # 1 share at $100 with stop at $99 → risk = $1, 1% of $10,000 = $100 → allowed
+        assert_risk_budget(quantity=1, price_estimate=100.0, account_equity=10000.0, stop_price=99.0)
+
+
+def test_risk_budget_rejects_with_wide_stop():
+    with patch("safety_kernel.cfg") as mock_cfg:
+        mock_cfg.RISK_PER_TRADE_PCT = 1.0
+        # 10 shares at $100 with stop at $50 → risk = $500, 1% of $10,000 = $100 → rejected
+        with pytest.raises(SafetyViolation, match="risk"):
+            assert_risk_budget(quantity=10, price_estimate=100.0, account_equity=10000.0, stop_price=50.0)
 
 
 def test_risk_budget_skips_when_no_data():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        # No equity data — can't validate, allow
-        assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=0)
+        assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=0)  # no equity → skip
 
 
 # ── No Shorts ────────────────────────────────────────────────────────────────
@@ -66,29 +71,37 @@ def test_no_shorts_allows_buy():
 
 
 def test_no_shorts_allows_sell_exit():
-    # SELL for exit is allowed — caller must verify it's an exit
-    assert_no_shorts("SELL")  # should not raise (validated at caller level)
+    assert_no_shorts("SELL", is_exit=True)  # exit → allowed
+
+
+def test_no_shorts_allows_sell_with_position():
+    assert_no_shorts("SELL", has_existing_position=True)  # closing position → allowed
+
+
+def test_no_shorts_blocks_sell_open():
+    with pytest.raises(SafetyViolation, match="Short"):
+        assert_no_shorts("SELL", is_exit=False, has_existing_position=False)
 
 
 # ── Dedup ────────────────────────────────────────────────────────────────────
 
 def test_dedup_blocks_rapid_fire():
     _recent_checks.clear()
-    assert_not_duplicate("AAPL", "BUY", "rule")  # first call — OK
+    assert_not_duplicate("AAPL", "BUY", "rule")
     with pytest.raises(SafetyViolation, match="Duplicate"):
-        assert_not_duplicate("AAPL", "BUY", "rule")  # second call — blocked
+        assert_not_duplicate("AAPL", "BUY", "rule")
 
 
 def test_dedup_allows_different_symbols():
     _recent_checks.clear()
     assert_not_duplicate("AAPL", "BUY", "rule")
-    assert_not_duplicate("TSLA", "BUY", "rule")  # different symbol — OK
+    assert_not_duplicate("TSLA", "BUY", "rule")
 
 
 def test_dedup_allows_after_window():
     _recent_checks.clear()
-    _recent_checks["AAPL:BUY:rule"] = time.time() - 20  # 20s ago — past window
-    assert_not_duplicate("AAPL", "BUY", "rule")  # should not raise
+    _recent_checks["AAPL:BUY:RULE"] = time.time() - 20
+    assert_not_duplicate("AAPL", "BUY", "rule")
 
 
 # ── Full Check ───────────────────────────────────────────────────────────────
@@ -96,17 +109,14 @@ def test_dedup_allows_after_window():
 @pytest.mark.anyio
 async def test_check_all_passes_clean(anyio_backend):
     _recent_checks.clear()
-    with patch("safety_kernel.cfg") as mock_cfg:
-        mock_cfg.AUTOPILOT_MODE = "LIVE"
-        mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        with patch("safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock):
-            await check_all("AAPL", "BUY", 5, "rule", account_equity=10000, price_estimate=100)
+    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock), \
+         patch("safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock):
+        await check_all("AAPL", "BUY", 1, "rule", account_equity=10000, price_estimate=100, stop_price=98.0)
 
 
 @pytest.mark.anyio
 async def test_check_all_rejects_killed(anyio_backend):
     _recent_checks.clear()
-    with patch("safety_kernel.cfg") as mock_cfg:
-        mock_cfg.AUTOPILOT_MODE = "KILLED"
+    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock, side_effect=SafetyViolation("Kill switch")):
         with pytest.raises(SafetyViolation, match="Kill switch"):
-            await check_all("AAPL", "BUY", 5, "rule")
+            await check_all("AAPL", "BUY", 1, "rule")
