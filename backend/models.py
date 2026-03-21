@@ -145,6 +145,11 @@ class OpenPosition(BaseModel):
     rule_id: str
     rule_name: str
     user_id: str = "demo"
+    # Exit coordination (JSON-backed, no SQL migration needed)
+    exit_pending_order_id: int | None = None
+    exit_attempts: int = 0
+    last_exit_attempt_at: str | None = None
+    last_exit_error: str | None = None
 
 
 # ---------------------------------------------------------------------------

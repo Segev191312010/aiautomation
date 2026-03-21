@@ -571,24 +571,41 @@ async def _run_cycle() -> None:
     )
 
 
+MAX_EXIT_ATTEMPTS = 3
+EXIT_PENDING_TIMEOUT = 90  # seconds
+
+
 async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
     """
-    Check all tracked positions for exit conditions each cycle.
+    Hardened exit lifecycle — position NEVER deleted until exit is FILLED.
 
     Order of operations:
-      1. Update watermarks (price moved up → raise the ATR trail floor)
-      2. Evaluate each position for hard stop / trail stop / MA / indicator exits
-      3. Place exit order (MKT SELL) and remove from tracker
+      1. Update watermarks
+      2. Reconcile any pending exit orders (FILLED/CANCELLED/PENDING timeout)
+      3. Evaluate positions for new exits (only if no pending exit)
+      4. Retry cap: max 3 attempts, then notify for manual intervention
     """
     if not open_positions:
         return
 
-    # Update watermarks first — if price rose, the trail stop rises too
+    # Step 1: Update watermarks
     for pos in update_watermarks(open_positions, bars_by_symbol):
         await save_open_position(pos)
 
     for pos in open_positions:
         sym = pos.symbol.upper()
+
+        # Step 2: Reconcile pending exit orders
+        if pos.exit_pending_order_id:
+            await _reconcile_pending_exit(pos)
+            continue  # don't evaluate for new exit this cycle
+
+        # Step 3: Check retry cap
+        if pos.exit_attempts >= MAX_EXIT_ATTEMPTS:
+            # Already capped — skip, manual intervention required
+            continue
+
+        # Step 4: Evaluate exit conditions
         df = bars_by_symbol.get(sym)
         if df is None:
             try:
@@ -597,7 +614,6 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
                 log.warning("Cannot fetch bars for exit check %s: %s", sym, exc)
                 continue
         if df is None or len(df) < 2:
-            log.debug("Insufficient bars for exit check %s", sym)
             continue
 
         current_price = float(df["close"].iloc[-1])
@@ -610,49 +626,157 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
             await delete_open_position(pos.id)
             continue
 
-        exit_action = "SELL" if pos.side == "BUY" else "BUY"
-        exit_rule = Rule(
-            id=pos.rule_id,
-            name=f"EXIT:{pos.rule_name}",
-            symbol=sym,
-            enabled=True,
-            conditions=[],
-            logic="AND",
-            action=TradeAction(
-                type=exit_action,  # type: ignore[arg-type]
-                asset_type="STK",
-                quantity=qty,
-                order_type="MKT",
-            ),
-            cooldown_minutes=0,
+        # Step 5: Place fresh exit order
+        await _place_exit_order(pos, sym, qty, current_price, reason)
+
+
+async def _reconcile_pending_exit(pos) -> None:
+    """Resolve a position's pending exit order."""
+    from database import get_trade_by_order_id
+    now = datetime.now(timezone.utc)
+
+    trade = await get_trade_by_order_id(pos.exit_pending_order_id)
+    if not trade:
+        # Trade record not found — stale order_id, clear and retry
+        pos.exit_pending_order_id = None
+        pos.exit_attempts += 1
+        pos.last_exit_error = "Trade record not found for pending order"
+        await save_open_position(pos)
+        return
+
+    if trade.status == "FILLED":
+        # Success — emit bookkeeping and delete position
+        current_price = trade.fill_price or pos.entry_price
+        if pos.side == "BUY":
+            pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+        else:
+            pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
+        await _emit({
+            "type": "exit", "symbol": pos.symbol, "reason": "pending_fill",
+            "action": "SELL" if pos.side == "BUY" else "BUY",
+            "qty": int(pos.quantity), "entry_price": pos.entry_price,
+            "exit_price": current_price, "pnl": pnl,
+        })
+        log.info("EXIT FILLED %s pnl=%.2f (reconciled pending)", pos.symbol, pnl)
+        await delete_open_position(pos.id)
+        return
+
+    if trade.status in ("CANCELLED", "ERROR"):
+        # Failed — clear pending, increment attempts, keep position
+        pos.exit_pending_order_id = None
+        pos.exit_attempts += 1
+        pos.last_exit_error = f"Exit order {trade.status}"
+        pos.last_exit_attempt_at = now.isoformat()
+        await save_open_position(pos)
+        log.warning("Exit %s for %s — attempt %d, retrying next cycle",
+                     trade.status, pos.symbol, pos.exit_attempts)
+        _check_retry_cap(pos)
+        return
+
+    # Still PENDING — check timeout
+    if pos.last_exit_attempt_at:
+        try:
+            placed_at = datetime.fromisoformat(pos.last_exit_attempt_at.replace("Z", "+00:00"))
+            elapsed = (now - placed_at).total_seconds()
+        except (ValueError, TypeError):
+            elapsed = 0
+    else:
+        elapsed = EXIT_PENDING_TIMEOUT + 1  # force timeout if no timestamp
+
+    if elapsed < EXIT_PENDING_TIMEOUT:
+        log.debug("Exit pending for %s (%.0fs elapsed, waiting)", pos.symbol, elapsed)
+        return
+
+    # Timed out — attempt cancel
+    try:
+        from order_executor import cancel_order
+        await cancel_order(pos.exit_pending_order_id)
+        log.warning("Cancelled timed-out exit order %d for %s", pos.exit_pending_order_id, pos.symbol)
+    except Exception as exc:
+        log.warning("Failed to cancel exit order %d: %s", pos.exit_pending_order_id, exc)
+
+    pos.exit_pending_order_id = None
+    pos.exit_attempts += 1
+    pos.last_exit_error = f"Exit order timed out after {EXIT_PENDING_TIMEOUT}s"
+    pos.last_exit_attempt_at = now.isoformat()
+    await save_open_position(pos)
+    _check_retry_cap(pos)
+
+
+async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reason: str) -> None:
+    """Place a fresh exit order and track it on the position."""
+    exit_action = "SELL" if pos.side == "BUY" else "BUY"
+    exit_rule = Rule(
+        id=pos.rule_id,
+        name=f"EXIT:{pos.rule_name}",
+        symbol=sym,
+        enabled=True,
+        conditions=[],
+        logic="AND",
+        action=TradeAction(
+            type=exit_action,  # type: ignore[arg-type]
+            asset_type="STK",
+            quantity=qty,
+            order_type="MKT",
+        ),
+        cooldown_minutes=0,
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        exit_trade = await place_order(exit_rule)
+        if not exit_trade:
+            pos.exit_attempts += 1
+            pos.last_exit_error = "place_order returned None"
+            pos.last_exit_attempt_at = now.isoformat()
+            await save_open_position(pos)
+            return
+
+        if exit_trade.status == "FILLED":
+            # Immediate fill — delete position
+            if pos.side == "BUY":
+                pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+            else:
+                pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
+            await _emit({
+                "type": "exit", "symbol": sym, "reason": reason,
+                "action": exit_action, "qty": qty,
+                "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl,
+            })
+            log.info("EXIT %s qty=%d reason='%s' pnl=%.2f", sym, qty, reason, pnl)
+            await delete_open_position(pos.id)
+        else:
+            # PENDING — track the order_id for reconciliation next cycle
+            pos.exit_pending_order_id = exit_trade.order_id
+            pos.last_exit_attempt_at = now.isoformat()
+            await save_open_position(pos)
+            log.info("Exit order PENDING for %s (order_id=%s)", sym, exit_trade.order_id)
+
+    except (OrderError, RuntimeError) as exc:
+        pos.exit_attempts += 1
+        pos.last_exit_error = str(exc)
+        pos.last_exit_attempt_at = now.isoformat()
+        await save_open_position(pos)
+        log.error("Exit order FAILED for %s (attempt %d): %s", sym, pos.exit_attempts, exc)
+        _check_retry_cap(pos)
+
+
+def _check_retry_cap(pos) -> None:
+    """Emit notification if retry cap reached."""
+    if pos.exit_attempts >= MAX_EXIT_ATTEMPTS:
+        log.critical(
+            "EXIT RETRY CAP REACHED for %s (rule=%s, attempts=%d, last_error=%s) — MANUAL INTERVENTION REQUIRED",
+            pos.symbol, pos.rule_name, pos.exit_attempts, pos.last_exit_error,
         )
         try:
-            exit_trade = await place_order(exit_rule)
-            if exit_trade:
-                # C-2 FIX: Correct PnL sign for SELL/short positions
-                if pos.side == "BUY":
-                    pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
-                else:
-                    pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
-                await _emit({
-                    "type": "exit",
-                    "symbol": sym,
-                    "reason": reason,
-                    "action": exit_action,
-                    "qty": qty,
-                    "entry_price": pos.entry_price,
-                    "exit_price": current_price,
-                    "pnl": pnl,
-                })
-                log.info(
-                    "EXIT %s qty=%d reason='%s' entry=%.4f exit=%.4f pnl=%.2f",
-                    sym, qty, reason, pos.entry_price, current_price, pnl,
-                )
-                # C-1 FIX: Only delete position on successful exit order
-                await delete_open_position(pos.id)
-        except Exception as exc:
-            # C-1 FIX: Keep position on failure — retry next cycle
-            log.error("Exit order FAILED for %s (position kept for retry): %s", sym, exc)
+            from notification_service import notify_risk_event
+            import asyncio
+            asyncio.create_task(notify_risk_event(
+                symbol=pos.symbol,
+                event_type="EXIT_RETRY_CAP",
+                message=f"Exit failed {pos.exit_attempts}x for {pos.symbol} (rule: {pos.rule_name}). Last error: {pos.last_exit_error}. Manual close required.",
+            ))
+        except Exception:
+            pass  # notification failure should not crash the bot
 
 
 async def _emit(payload: dict) -> None:
