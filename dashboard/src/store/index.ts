@@ -1635,3 +1635,308 @@ export const useRiskStore = create<RiskState>((set, get) => ({
     set({ riskChecks: checks })
   },
 }))
+
+
+// ── AI Advisor store ──────────────────────────────────────────────────────────
+
+import type {
+  AdvisorReport,
+  AdvisorAnalysis,
+  AutoTuneResult,
+  GuardrailConfig,
+  AuditLogEntry,
+  AIStatus,
+  Recommendation,
+  ShadowDecision,
+  ShadowPerformance,
+  ShadowFilters,
+  LearningMetrics,
+  EconomicReport,
+  CostReport,
+} from '@/types/advisor'
+
+interface AdvisorState {
+  report:            AdvisorReport | null
+  recommendations:   Recommendation[]
+  analysis:          AdvisorAnalysis | null
+  dailyReport:       string
+  autoTunePreview:   AutoTuneResult | null
+  guardrails:        GuardrailConfig | null
+  auditLog:          AuditLogEntry[]
+  auditLogTotal:     number
+  aiStatus:          AIStatus | null
+  loading:           boolean
+  reportLoading:     boolean
+  tuneLoading:       boolean
+  lookbackDays:      number
+  error:             string | null
+  _fetchSeq:         number
+
+  fetchReport:         (refresh?: boolean) => Promise<void>
+  fetchAnalysis:       () => Promise<void>
+  generateDailyReport: () => Promise<void>
+  previewAutoTune:     () => Promise<void>
+  applyAutoTune:       () => Promise<void>
+  setLookbackDays:     (days: number) => void
+  fetchGuardrails:     () => Promise<void>
+  updateGuardrails:    (config: Partial<GuardrailConfig>) => Promise<void>
+  emergencyStop:       () => Promise<void>
+  fetchAuditLog:       (limit?: number, offset?: number) => Promise<void>
+  revertAction:        (id: number) => Promise<void>
+  fetchAIStatus:       () => Promise<void>
+  // Shadow mode
+  shadowDecisions:     ShadowDecision[]
+  shadowTotal:         number
+  shadowPerformance:   ShadowPerformance | null
+  shadowFilters:       ShadowFilters
+  fetchShadowDecisions:    () => Promise<void>
+  fetchShadowPerformance:  () => Promise<void>
+  setShadowFilters:        (filters: Partial<ShadowFilters>) => void
+  toggleShadowMode:        (enable: boolean, force?: boolean) => Promise<void>
+  // Learning + Economics
+  learningMetrics:     LearningMetrics | null
+  costReport:          CostReport | null
+  economicReport:      EconomicReport | null
+  learningWindow:      7 | 30 | 90
+  fetchLearningMetrics:    () => Promise<void>
+  fetchCostReport:         () => Promise<void>
+  fetchEconomicReport:     () => Promise<void>
+  setLearningWindow:       (days: 7 | 30 | 90) => void
+}
+
+let _shadowFetchTimer: ReturnType<typeof setTimeout> | null = null  // B4: debounce timer
+
+export const useAdvisorStore = create<AdvisorState>((set, get) => ({
+  report:          null,
+  recommendations: [],
+  analysis:        null,
+  dailyReport:     '',
+  autoTunePreview: null,
+  guardrails:      null,
+  auditLog:        [],
+  auditLogTotal:   0,
+  aiStatus:        null,
+  loading:         false,
+  reportLoading:   false,
+  tuneLoading:     false,
+  lookbackDays:    90,
+  error:           null,
+
+  _fetchSeq: 0,
+
+  fetchReport: async (refresh = false) => {
+    const seq = get()._fetchSeq + 1
+    set({ loading: true, error: null, _fetchSeq: seq })
+    try {
+      const report = await api.fetchAdvisorReport(get().lookbackDays, refresh)
+      // Discard if a newer fetch was started while we were in-flight
+      if (get()._fetchSeq !== seq) return
+      set({
+        report,
+        recommendations: report.recommendations ?? [],
+        analysis: {
+          rule_performance:   report.rule_performance ?? [],
+          sector_performance: report.sector_performance ?? [],
+          time_patterns:      report.time_patterns ?? [],
+          score_analysis:     report.score_analysis ?? { available: false, buckets: [], optimal_min_score: 50, current_min_score: 50 },
+          bracket_analysis:   report.bracket_analysis ?? { total_closed: 0, sl_hits: 0, tp_hits: 0, other_exits: 0, sl_hit_pct: 0, tp_hit_pct: 0, brackets_too_tight: false },
+        },
+      })
+    } catch (err) {
+      if (get()._fetchSeq !== seq) return
+      set({ error: err instanceof Error ? err.message : 'Failed to load advisor report' })
+    } finally {
+      if (get()._fetchSeq === seq) set({ loading: false })
+    }
+  },
+
+  fetchAnalysis: async () => {
+    set({ loading: true, error: null })
+    try {
+      const analysis = await api.fetchAdvisorAnalysis(get().lookbackDays)
+      set({ analysis })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load analysis' })
+    } finally {
+      set({ loading: false })
+    }
+  },
+
+  generateDailyReport: async () => {
+    set({ reportLoading: true })
+    try {
+      const data = await api.fetchAdvisorDailyReport(get().lookbackDays)
+      set({ dailyReport: data.report })
+    } catch {
+      set({ dailyReport: 'Failed to generate report.' })
+    } finally {
+      set({ reportLoading: false })
+    }
+  },
+
+  previewAutoTune: async () => {
+    set({ tuneLoading: true })
+    try {
+      const preview = await api.postAdvisorAutoTune(false, get().lookbackDays)
+      set({ autoTunePreview: preview })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to preview auto-tune' })
+    } finally {
+      set({ tuneLoading: false })
+    }
+  },
+
+  applyAutoTune: async () => {
+    set({ tuneLoading: true })
+    try {
+      const result = await api.postAdvisorAutoTune(true, get().lookbackDays)
+      set({ autoTunePreview: result })
+      // Refresh report after applying
+      await get().fetchReport(true)
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to apply auto-tune' })
+    } finally {
+      set({ tuneLoading: false })
+    }
+  },
+
+  setLookbackDays: (days) => set({ lookbackDays: days }),
+
+  fetchGuardrails: async () => {
+    try {
+      const config = await api.fetchGuardrails()
+      set({ guardrails: config })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load guardrails' })
+    }
+  },
+
+  updateGuardrails: async (config) => {
+    try {
+      const updated = await api.updateGuardrails(config)
+      set({ guardrails: updated })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to update guardrails' })
+    }
+  },
+
+  emergencyStop: async () => {
+    try {
+      await api.postEmergencyStop()
+      await get().fetchGuardrails()
+      await get().fetchAIStatus()
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Emergency stop failed' })
+    }
+  },
+
+  fetchAuditLog: async (limit = 50, offset = 0) => {
+    try {
+      const data = await api.fetchAuditLog(limit, offset)
+      set({ auditLog: data.entries, auditLogTotal: data.total })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load audit log' })
+    }
+  },
+
+  revertAction: async (id) => {
+    try {
+      await api.revertAIAction(id)
+      await get().fetchAuditLog()
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to revert action' })
+    }
+  },
+
+  fetchAIStatus: async () => {
+    try {
+      const status = await api.fetchAIStatus()
+      set({ aiStatus: status })
+    } catch {
+      // Silently fail — status bar can handle null
+    }
+  },
+
+  // ── Shadow Mode ──────────────────────────────────────────────────────────
+  shadowDecisions: [],
+  shadowTotal: 0,
+  shadowPerformance: null,
+  shadowFilters: { page: 1, pageSize: 50 },  // B3 FIX: 1-indexed
+
+  fetchShadowDecisions: async () => {
+    const f = get().shadowFilters
+    try {
+      const data = await api.fetchShadowDecisions(
+        f.pageSize, (f.page - 1) * f.pageSize,  // B3 FIX: 1-indexed offset
+        f.paramType, f.symbol, f.regime, f.minConfidence,
+      )
+      set({ shadowDecisions: data.entries, shadowTotal: data.total })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load shadow decisions' })
+    }
+  },
+
+  fetchShadowPerformance: async () => {
+    try {
+      const perf = await api.fetchShadowPerformance()
+      set({ shadowPerformance: perf })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load shadow performance' })
+    }
+  },
+
+  setShadowFilters: (filters) => {
+    set((s) => ({ shadowFilters: { ...s.shadowFilters, ...filters } }))
+    // B4 FIX: Debounce re-fetch (300ms) to avoid slider request flood
+    if (_shadowFetchTimer) clearTimeout(_shadowFetchTimer)
+    _shadowFetchTimer = setTimeout(() => { get().fetchShadowDecisions() }, 300)
+  },
+
+  toggleShadowMode: async (enable, force = false) => {
+    try {
+      await api.toggleShadowMode(enable, force)
+      await get().fetchAIStatus()
+      await get().fetchShadowPerformance()
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to toggle shadow mode' })
+    }
+  },
+
+  // ── Learning + Economics ──────────────────────────────────────────────────
+  learningMetrics: null,
+  costReport: null,
+  economicReport: null,
+  learningWindow: 30,
+
+  fetchLearningMetrics: async () => {
+    try {
+      const metrics = await api.fetchLearningMetrics(get().learningWindow)
+      set({ learningMetrics: metrics })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load learning metrics' })
+    }
+  },
+
+  fetchCostReport: async () => {
+    try {
+      const report = await api.fetchAICosts(30)
+      set({ costReport: report })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load cost report' })
+    }
+  },
+
+  fetchEconomicReport: async () => {
+    try {
+      const report = await api.fetchEconomicReport(30)
+      set({ economicReport: report })
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : 'Failed to load economic report' })
+    }
+  },
+
+  setLearningWindow: (days) => {
+    set({ learningWindow: days })
+    get().fetchLearningMetrics()
+  },
+}))

@@ -59,7 +59,13 @@ async def register_position(
         if pd.notna(atr_raw):
             atr_val = float(atr_raw)
 
-    hard_stop = entry_price - cfg.ATR_STOP_MULT * atr_val if atr_val > 0 else entry_price * 0.97
+    # Use AI-optimized exit params if available, else config defaults
+    from ai_params import ai_params
+    exit_p = ai_params.get_exit_params(trade.symbol.upper())
+    atr_stop_mult = exit_p["atr_stop_mult"]
+    atr_trail_mult = exit_p["atr_trail_mult"]
+
+    hard_stop = entry_price - atr_stop_mult * atr_val if atr_val > 0 else entry_price * 0.97
 
     pos = OpenPosition(
         id=trade.id,
@@ -70,8 +76,8 @@ async def register_position(
         entry_time=trade.timestamp,
         atr_at_entry=round(atr_val, 6),
         hard_stop_price=round(hard_stop, 4),
-        atr_stop_mult=cfg.ATR_STOP_MULT,
-        atr_trail_mult=cfg.ATR_TRAIL_MULT,
+        atr_stop_mult=atr_stop_mult,
+        atr_trail_mult=atr_trail_mult,
         high_watermark=entry_price,
         rule_id=trade.rule_id,
         rule_name=rule_name,

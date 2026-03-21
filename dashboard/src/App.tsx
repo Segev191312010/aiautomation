@@ -16,6 +16,7 @@ const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 const StockProfilePage = lazy(() => import('@/pages/StockProfilePage'))
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
 const RulesPage = lazy(() => import('@/pages/RulesPage'))
+const AIAdvisorPage = lazy(() => import('@/pages/AIAdvisorPage'))
 
 function PageFallback() {
   return (
@@ -50,6 +51,7 @@ function PageSwitch() {
     case 'rules':      page = <RulesPage />; break
     case 'alerts':     page = <AlertsPage />; break
     case 'analytics':  page = <AnalyticsPage />; break
+    case 'advisor':    page = <AIAdvisorPage />; break
     case 'settings':   page = <SettingsPage />; break
     default:           page = <Dashboard />
   }

@@ -252,6 +252,15 @@ async def lifespan(app: FastAPI):
     await _start_market_heartbeat()
     await alert_engine.start()
 
+    # Start AI optimization background loop (if API key configured)
+    if cfg.ANTHROPIC_API_KEY:
+        from ai_optimizer import ai_optimization_loop
+        from ai_learning import ai_learning_loop
+        asyncio.create_task(ai_optimization_loop())
+        asyncio.create_task(ai_learning_loop())
+        log.info("AI optimization loop started (interval=%ds)", cfg.AI_OPTIMIZE_INTERVAL_SECONDS)
+        log.info("AI learning loop started (interval=6h)")
+
     yield
 
     # â"€â"€ Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€

@@ -194,6 +194,16 @@ async def _loop() -> None:
     global _last_run, _next_run
     while _running:
         _last_run = datetime.now(timezone.utc).isoformat()
+
+        # Check if AI optimization is due
+        try:
+            from ai_optimizer import should_recompute, run_full_optimization
+            if should_recompute():
+                log.info("AI optimization due — running before cycle")
+                await run_full_optimization()
+        except Exception as exc:
+            log.debug("AI optimization check skipped: %s", exc)
+
         try:
             await _run_cycle()
         except Exception as exc:
@@ -357,6 +367,11 @@ async def _run_cycle() -> None:
     # ── Score and rank signals ───────────────────────────────────────────────
     try:
         from signal_scorer import signal_scorer
+        from ai_params import ai_params
+
+        # Inject AI signal weights if available (scorer detects regime internally)
+        signal_scorer.set_ai_weights(None)  # cleared; scorer will check ai_params per-regime
+
         scored = []
         for rule, sym in triggered:
             if sym in bars_by_symbol:
@@ -364,7 +379,8 @@ async def _run_cycle() -> None:
                 result["_rule"] = rule
                 result["_symbol"] = sym
                 scored.append(result)
-        ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=50)
+        ai_min_score = ai_params.get_min_score()
+        ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=ai_min_score)
         if ranked:
             log.info("Signal scores: %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
             # Emit SignalEvents
@@ -451,13 +467,17 @@ async def _run_cycle() -> None:
                     from ibkr_client import ibkr as _ibkr
                     account_val = (await _ibkr.get_account_summary()).balance
                 computed_qty = max(1, int(account_val * cfg.POSITION_SIZE_PCT / price))
+                # Apply AI sizing multiplier for this rule
+                ai_sizing = ai_params.get_rule_sizing_multiplier(order_rule.id)
+                if ai_sizing != 1.0:
+                    computed_qty = max(1, int(computed_qty * ai_sizing))
                 order_rule = order_rule.model_copy()
                 order_rule.action = order_rule.action.model_copy(
                     update={"quantity": computed_qty}
                 )
                 log.info(
-                    "Sizing %s: $%.0f × %.1f%% / $%.4f = %d shares",
-                    sym_upper, account_val, cfg.POSITION_SIZE_PCT * 100, price, computed_qty,
+                    "Sizing %s: $%.0f × %.1f%% / $%.4f = %d shares (ai_mult=%.2f)",
+                    sym_upper, account_val, cfg.POSITION_SIZE_PCT * 100, price, computed_qty, ai_sizing,
                 )
         except Exception as exc:
             log.warning("Position sizing failed, using rule quantity: %s", exc)

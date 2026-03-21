@@ -46,6 +46,32 @@ class Config:
     ADVISOR_MIN_TRADES: int = int(os.getenv("ADVISOR_MIN_TRADES", "5"))
     ADVISOR_LOOKBACK_DAYS: int = int(os.getenv("ADVISOR_LOOKBACK_DAYS", "90"))
 
+    # ── AI Autonomy ──────────────────────────────────────────────────────────
+    AI_AUTONOMY_ENABLED: bool = os.getenv("AI_AUTONOMY_ENABLED", "false").lower() == "true"
+    AI_SHADOW_MODE: bool = os.getenv("AI_SHADOW_MODE", "true").lower() == "true"
+    AI_OPTIMIZE_INTERVAL_SECONDS: int = int(os.getenv("AI_OPTIMIZE_INTERVAL_SECONDS", "14400"))
+    AI_MODEL_OPTIMIZER: str = os.getenv("AI_MODEL_OPTIMIZER", "claude-sonnet-4-20250514")
+    AI_MODEL_NARRATIVE: str = os.getenv("AI_MODEL_NARRATIVE", "claude-sonnet-4-20250514")
+    AI_MODEL_REGIME: str = os.getenv("AI_MODEL_REGIME", "claude-sonnet-4-20250514")
+    AI_MODEL_PORTFOLIO: str = os.getenv("AI_MODEL_PORTFOLIO", "claude-sonnet-4-20250514")
+
+    # ── Shadow → Live gating ────────────────────────────────────────────────
+    SHADOW_TO_LIVE_MIN_DECISIONS: int = int(os.getenv("SHADOW_TO_LIVE_MIN_DECISIONS", "100"))
+    SHADOW_TO_LIVE_MIN_DAYS: int = int(os.getenv("SHADOW_TO_LIVE_MIN_DAYS", "15"))
+    SHADOW_TO_LIVE_HIT_RATE: float = float(os.getenv("SHADOW_TO_LIVE_HIT_RATE", "0.55"))
+    SHADOW_TO_LIVE_EFFECT_SIZE: float = float(os.getenv("SHADOW_TO_LIVE_EFFECT_SIZE", "0.0"))
+
+    # ── Auto-tighten thresholds ─────────────────────────────────────────────
+    AUTO_TIGHTEN_7D_HIT_RATE: float = float(os.getenv("AUTO_TIGHTEN_7D_HIT_RATE", "0.45"))
+    AUTO_TIGHTEN_7D_MIN_DECISIONS: int = int(os.getenv("AUTO_TIGHTEN_7D_MIN_DECISIONS", "40"))
+    AUTO_TIGHTEN_30D_HIT_RATE: float = float(os.getenv("AUTO_TIGHTEN_30D_HIT_RATE", "0.50"))
+    AUTO_TIGHTEN_30D_MIN_DECISIONS: int = int(os.getenv("AUTO_TIGHTEN_30D_MIN_DECISIONS", "100"))
+
+    # ── Trade windows for shadow/learning evaluation ────────────────────────
+    SHADOW_MIN_TRADES_PER_WINDOW: int = int(os.getenv("SHADOW_MIN_TRADES_PER_WINDOW", "20"))
+    SHADOW_TRADE_WINDOW_SIZE: int = int(os.getenv("SHADOW_TRADE_WINDOW_SIZE", "50"))
+    LEARNING_MIN_TRADES_PER_WINDOW: int = int(os.getenv("LEARNING_MIN_TRADES_PER_WINDOW", "20"))
+
     # ── Alert engine ──────────────────────────────────────────────────────────
     ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
 

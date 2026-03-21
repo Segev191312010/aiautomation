@@ -35,7 +35,19 @@ async def fetch_advisor_data(lookback_days: int = 90) -> dict:
     trade_dicts = [t.model_dump() for t in trades]
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
-    recent = [t for t in trade_dicts if t.get("timestamp", "") > cutoff.isoformat()]
+    recent = []
+    for t in trade_dicts:
+        ts_str = t.get("timestamp", "")
+        if not ts_str:
+            continue
+        try:
+            ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            if ts_dt >= cutoff:
+                recent.append(t)
+        except (ValueError, TypeError):
+            continue
 
     pnl = compute_realized_pnl(recent)
     rules = await get_rules()
@@ -53,22 +65,25 @@ async def fetch_advisor_data(lookback_days: int = 90) -> dict:
 
 def analyze_rule_performance(matched_trades: list[dict], rules: list[Rule]) -> list[dict]:
     """Per-rule: win_rate, profit_factor, total_pnl, trade count, verdict."""
-    rule_names = {r.id: r.name for r in rules}
+    # Build name→id lookup for resolving real rule IDs
+    name_to_id = {r.name: r.id for r in rules}
     by_rule: dict[str, list[dict]] = defaultdict(list)
 
     for t in matched_trades:
-        # Try to find rule_id from the trade's entry
+        # Group by rule_name (or entry_rule fallback)
         rule_name = t.get("rule_name", t.get("entry_rule", "Unknown"))
         by_rule[rule_name].append(t)
 
     results = []
     for name, trades in by_rule.items():
+        # Resolve to the actual rule UUID; fall back to name if rule was deleted
+        real_id = name_to_id.get(name, name)
         pnls = [t["pnl"] for t in trades]
         winners = [p for p in pnls if p > 0]
         losers = [p for p in pnls if p <= 0]
         total = len(trades)
         win_rate = len(winners) / total if total > 0 else 0
-        pf = abs(sum(winners)) / abs(sum(losers)) if losers and sum(losers) != 0 else 999
+        pf = abs(sum(winners)) / abs(sum(losers)) if losers and sum(losers) != 0 else 999.0
 
         if total >= MIN_TRADES * 2 and win_rate < 0.30:
             verdict = "disable"
@@ -83,16 +98,31 @@ def analyze_rule_performance(matched_trades: list[dict], rules: list[Rule]) -> l
 
         status = "good" if verdict in ("hold", "boost") else "bad" if verdict == "disable" else "ok"
 
+        # Compute average hold time in hours from entry/exit timestamps
+        hold_hours = []
+        for t in trades:
+            entry_ts = t.get("entry_date", "")
+            exit_ts = t.get("exit_date", "")
+            if entry_ts and exit_ts:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+                    exit_dt = datetime.fromisoformat(exit_ts.replace("Z", "+00:00"))
+                    hold_hours.append((exit_dt - entry_dt).total_seconds() / 3600)
+                except Exception:
+                    pass
+        avg_hold = round(sum(hold_hours) / len(hold_hours), 1) if hold_hours else 0
+
         results.append({
-            "rule_id": name,
+            "rule_id": real_id,
             "rule_name": name,
             "total_trades": total,
             "win_rate": round(win_rate * 100, 1),
-            "profit_factor": round(pf, 2) if pf < 100 else 999,
+            "profit_factor": round(pf, 2) if pf < 100 else 999.0,
             "total_pnl": round(sum(pnls), 2),
             "avg_pnl": round(sum(pnls) / total, 2) if total > 0 else 0,
             "avg_win": round(sum(winners) / len(winners), 2) if winners else 0,
             "avg_loss": round(sum(losers) / len(losers), 2) if losers else 0,
+            "avg_hold_hours": avg_hold,
             "verdict": verdict,
             "status": status,
         })
@@ -359,7 +389,7 @@ async def generate_daily_report(data: dict, recommendations: list[dict], use_ai:
 Write a 3-paragraph daily briefing: (1) overall performance, (2) what's working vs not, (3) top 3 actions for tomorrow. Be specific with numbers. Plain prose."""
 
             msg = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
                 max_tokens=800,
                 temperature=0,
                 system="You are a quantitative trading analyst. Write concise, actionable briefings.",

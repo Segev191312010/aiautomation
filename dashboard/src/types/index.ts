@@ -453,7 +453,7 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'rotation' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'rotation' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics' | 'advisor'
 
 // ── Chart types ─────────────────────────────────────────────────────────────
 
@@ -476,6 +476,49 @@ export type {
   DrawingToolState,
   HitTestResult,
 } from './drawing'
+
+// ── AI Advisor types ────────────────────────────────────────────────────
+
+export type {
+  AdvisorReport,
+  AdvisorAnalysis,
+  AutoTuneResult,
+  AdvisorPnLSummary,
+  PerformanceMetrics,
+  GuardrailConfig,
+  AuditLogEntry,
+  AuditLogPage,
+  AIStatus,
+  Recommendation,
+  RecommendationPriority,
+  RecommendationType,
+  RecommendationCategory,
+  RulePerformance,
+  RuleVerdict,
+  RuleStatus,
+  SectorPerformance,
+  TimePattern,
+  ScoreAnalysis,
+  ScoreBucket,
+  BracketAnalysis,
+  UncertainValue,
+  AIRuleChange,
+  AISignalWeights,
+  AIExitParams,
+  AIRiskAdjustments,
+  AIDecisionPayload,
+  ShadowDecision,
+  ShadowPerformance,
+  ShadowFilters,
+  ShadowDecisionsPage,
+  GatingCondition,
+  ParamTypeMetrics,
+  LearningMetrics,
+  DataQuality,
+  EconomicReport,
+  DailyCost,
+  CostReport,
+} from './advisor'
 
 // ── Screener ─────────────────────────────────────────────────────────────
 

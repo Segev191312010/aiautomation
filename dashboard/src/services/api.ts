@@ -64,6 +64,21 @@ import type {
   User,
   UserSettings,
 } from '@/types'
+import type {
+  AdvisorReport,
+  AdvisorAnalysis,
+  AutoTuneResult,
+  GuardrailConfig,
+  AuditLogPage,
+  AIStatus,
+  Recommendation,
+  RulePerformance,
+  CostReport,
+  ShadowDecisionsPage,
+  ShadowPerformance,
+  LearningMetrics,
+  EconomicReport,
+} from '@/types/advisor'
 
 const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
@@ -386,3 +401,73 @@ export const fetchTradeHistory = (limit = 20) =>
 
 export const fetchCorrelationMatrix = () =>
   get<CorrelationMatrix>('/api/risk/correlation')
+
+// ── AI Advisor ────────────────────────────────────────────────────────────────
+
+export const fetchAdvisorReport = (lookbackDays = 90, refresh = false) =>
+  get<AdvisorReport>(`/api/advisor/report?lookback_days=${lookbackDays}&refresh=${refresh}`)
+
+export const fetchAdvisorRecommendations = (
+  lookbackDays = 90,
+  maxPriority: 'high' | 'medium' | 'low' = 'low',
+) =>
+  get<{ recommendations: Recommendation[]; total: number }>(
+    `/api/advisor/recommendations?lookback_days=${lookbackDays}&max_priority=${maxPriority}`
+  )
+
+export const fetchAdvisorAnalysis = (lookbackDays = 90) =>
+  get<AdvisorAnalysis>(`/api/advisor/analysis?lookback_days=${lookbackDays}`)
+
+export const fetchAdvisorDailyReport = (lookbackDays = 90) =>
+  get<{ report: string }>(`/api/advisor/daily-report?lookback_days=${lookbackDays}`)
+
+export const postAdvisorAutoTune = (apply = false, lookbackDays = 90) =>
+  post<AutoTuneResult>(`/api/advisor/auto-tune?apply=${apply}&lookback_days=${lookbackDays}`)
+
+export const fetchAdvisorRuleAnalysis = (ruleId: string, lookbackDays = 90) =>
+  get<RulePerformance>(`/api/advisor/rule/${ruleId}?lookback_days=${lookbackDays}`)
+
+export const fetchGuardrails = () =>
+  get<GuardrailConfig>('/api/advisor/guardrails')
+
+export const updateGuardrails = (config: Partial<GuardrailConfig>) =>
+  put<GuardrailConfig>('/api/advisor/guardrails', config)
+
+export const postEmergencyStop = () =>
+  post<{ emergency_stop: boolean; message: string }>('/api/advisor/emergency-stop')
+
+export const fetchAuditLog = (limit = 50, offset = 0) =>
+  get<AuditLogPage>(`/api/advisor/audit-log?limit=${limit}&offset=${offset}`)
+
+export const revertAIAction = (entryId: number) =>
+  post<{ reverted: boolean }>(`/api/advisor/audit-log/${entryId}/revert`)
+
+export const fetchAIStatus = () =>
+  get<AIStatus>('/api/advisor/ai-status')
+
+export const fetchAICosts = (days = 30) =>
+  get<CostReport>(`/api/advisor/costs?days=${days}`)
+
+export const fetchShadowDecisions = (
+  limit = 50, offset = 0,
+  paramType?: string, symbol?: string, regime?: string, minConfidence?: number,
+) => {
+  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (paramType) qs.set('param_type', paramType)
+  if (symbol) qs.set('symbol', symbol)
+  if (regime) qs.set('regime', regime)
+  if (minConfidence != null) qs.set('min_confidence', String(minConfidence))
+  return get<ShadowDecisionsPage>(`/api/advisor/shadow-decisions?${qs}`)
+}
+
+export const fetchShadowPerformance = () =>
+  get<ShadowPerformance>('/api/advisor/shadow-performance')
+
+export const toggleShadowMode = (enable: boolean, force = false) =>
+  post<{ shadow_mode: boolean; message: string }>('/api/advisor/shadow-mode', { enable, force })
+
+export const fetchLearningMetrics = (windowDays = 30) =>
+  get<LearningMetrics>(`/api/advisor/learning-metrics?window_days=${windowDays}`)
+
+export const fetchEconomicReport = (days = 30) =>
+  get<EconomicReport>(`/api/advisor/economic-report?days=${days}`)

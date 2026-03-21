@@ -228,19 +228,103 @@ CREATE TABLE IF NOT EXISTS open_positions (
 );
 """
 
+_CREATE_AI_GUARDRAILS = """
+CREATE TABLE IF NOT EXISTS ai_guardrails (
+    id         TEXT PRIMARY KEY DEFAULT 'default',
+    user_id    TEXT NOT NULL DEFAULT 'demo',
+    data       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+_CREATE_AI_AUDIT_LOG = """
+CREATE TABLE IF NOT EXISTS ai_audit_log (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp                   TEXT NOT NULL,
+    action_type                 TEXT NOT NULL,
+    category                    TEXT NOT NULL,
+    description                 TEXT NOT NULL,
+    old_value                   TEXT,
+    new_value                   TEXT,
+    reason                      TEXT,
+    confidence                  REAL,
+    decision_confidence_avg     REAL,
+    parameter_uncertainty_width REAL,
+    input_tokens                INTEGER,
+    output_tokens               INTEGER,
+    status                      TEXT NOT NULL DEFAULT 'applied',
+    reverted_at                 TEXT,
+    user_id                     TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_AI_PARAMETER_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS ai_parameter_snapshots (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp  TEXT NOT NULL,
+    param_type TEXT NOT NULL,
+    symbol     TEXT,
+    data       TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'ai',
+    user_id    TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_AI_SHADOW_DECISIONS = """
+CREATE TABLE IF NOT EXISTS ai_shadow_decisions (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp            TEXT NOT NULL,
+    param_type           TEXT NOT NULL,
+    symbol               TEXT,
+    ai_suggested_value   TEXT NOT NULL,
+    actual_value_used    TEXT NOT NULL,
+    market_condition     TEXT,
+    hypothetical_outcome TEXT,
+    delta_value          REAL,
+    confidence           REAL,
+    regime               TEXT,
+    user_id              TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_REGIME_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS regime_snapshots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp        TEXT NOT NULL,
+    regime           TEXT NOT NULL,
+    regime_features  TEXT NOT NULL,
+    confidence       REAL,
+    user_id          TEXT DEFAULT 'demo'
+);
+"""
+
 _ALLOWED_COLUMNS: set[tuple[str, str]] = {
     ("rules", "user_id"),
     ("trades", "user_id"),
     ("sim_account", "user_id"),
     ("sim_positions", "user_id"),
     ("sim_orders", "user_id"),
+    ("ai_shadow_decisions", "delta_value"),
+    ("ai_shadow_decisions", "confidence"),
+    ("ai_shadow_decisions", "regime"),
+    ("ai_audit_log", "param_type"),
+    ("ai_audit_log", "regime"),
 }
 
+
+_SAFE_COL_TYPES = {"TEXT", "INTEGER", "REAL"}
 
 async def _safe_add_column(db: aiosqlite.Connection, table: str, column: str, col_type: str, default: str) -> None:
     """Add a column if table exists and column doesn't."""
     if (table, column) not in _ALLOWED_COLUMNS:
         log.warning("Blocked ALTER on non-allowlisted column %s.%s", table, column)
+        return
+    # Validate col_type and default to prevent SQL injection in DDL
+    if col_type not in _SAFE_COL_TYPES:
+        log.warning("Blocked ALTER with unsafe col_type: %s", col_type)
+        return
+    if not (default.startswith("'") and default.endswith("'")) and default not in ("0", "1", "NULL"):
+        log.warning("Blocked ALTER with unsafe default: %s", default)
         return
     async with db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -279,6 +363,11 @@ async def init_db() -> None:
         await db.execute(_CREATE_ALERTS)
         await db.execute(_CREATE_ALERT_HISTORY)
         await db.execute(_CREATE_OPEN_POSITIONS)
+        await db.execute(_CREATE_AI_GUARDRAILS)
+        await db.execute(_CREATE_AI_AUDIT_LOG)
+        await db.execute(_CREATE_AI_PARAMETER_SNAPSHOTS)
+        await db.execute(_CREATE_AI_SHADOW_DECISIONS)
+        await db.execute(_CREATE_REGIME_SNAPSHOTS)
         await db.commit()
 
         # Migrate: add user_id column to existing tables
@@ -287,6 +376,12 @@ async def init_db() -> None:
         await _safe_add_column(db, "sim_account",   "user_id", "TEXT", "'demo'")
         await _safe_add_column(db, "sim_positions", "user_id", "TEXT", "'demo'")
         await _safe_add_column(db, "sim_orders",    "user_id", "TEXT", "'demo'")
+        # Phase 3.5: extend shadow + audit tables
+        await _safe_add_column(db, "ai_shadow_decisions", "delta_value", "REAL", "NULL")
+        await _safe_add_column(db, "ai_shadow_decisions", "confidence",  "REAL", "NULL")
+        await _safe_add_column(db, "ai_shadow_decisions", "regime",      "TEXT", "NULL")
+        await _safe_add_column(db, "ai_audit_log",        "param_type",  "TEXT", "NULL")
+        await _safe_add_column(db, "ai_audit_log",        "regime",      "TEXT", "NULL")
         await db.commit()
 
         # Indexes for common query patterns (after migration so user_id exists)
@@ -306,6 +401,11 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_alert ON alert_history(alert_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_user ON open_positions(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_symbol ON open_positions(symbol, user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_audit_log_ts ON ai_audit_log(timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_audit_log_status ON ai_audit_log(status, timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_snapshots_ts ON ai_parameter_snapshots(timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_shadow_ts ON ai_shadow_decisions(timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(timestamp DESC)")
         await db.commit()
 
         # Seed demo user

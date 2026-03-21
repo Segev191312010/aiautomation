@@ -18,6 +18,13 @@ DEFAULT_WEIGHTS = {
 class SignalScorer:
     """Multi-factor signal scoring. Higher composite = better trade."""
 
+    def __init__(self):
+        self._ai_weights: dict | None = None  # Set by AI optimizer
+
+    def set_ai_weights(self, weights: dict | None) -> None:
+        """Override signal weights with AI-computed values."""
+        self._ai_weights = weights
+
     def score_signal(self, symbol: str, df: pd.DataFrame, side: str = "BUY",
                      bars_cache: dict | None = None) -> dict:
         if df is None or len(df) < 20:
@@ -109,8 +116,8 @@ class SignalScorer:
         else:
             scores["bollinger"] = 50
 
-        # Regime-aware weights
-        weights = self._get_regime_weights(bars_cache)
+        # Regime-aware weights (AI override if available)
+        weights = self._get_regime_weights(bars_cache, ai_weights=self._ai_weights)
         total_w = sum(weights.values())
         composite = sum(scores[k] * weights[k] for k in weights) / total_w
 
@@ -131,25 +138,52 @@ class SignalScorer:
             "side": side,
         }
 
-    def _get_regime_weights(self, bars_cache: dict | None) -> dict:
-        """SPY SMA200-based regime detection → adjust signal weights."""
-        if not bars_cache or "SPY" not in bars_cache:
-            return DEFAULT_WEIGHTS
+    def _get_regime_weights(self, bars_cache: dict | None, ai_weights: dict | None = None) -> dict:
+        """SPY SMA200-based regime detection → adjust signal weights.
+        Checks AI optimizer for per-regime weights before falling back to static."""
+        if ai_weights:
+            return ai_weights
+
+        # Detect regime first, then check AI params for regime-specific weights
+        regime = "NEUTRAL"
+        if bars_cache and "SPY" in bars_cache:
+            try:
+                spy = bars_cache["SPY"]
+                if len(spy) >= 200:
+                    spy_close = spy["close"]
+                    price = float(spy_close.iloc[-1])
+                    sma200 = float(spy_close.rolling(200).mean().iloc[-1])
+                    if price > sma200 * 1.02:
+                        regime = "BULL"
+                    elif price < sma200 * 0.98:
+                        regime = "BEAR"
+            except Exception:
+                pass
+
+        # Check AI-optimized weights for this regime (filter to known keys only)
+        _KNOWN_KEYS = set(DEFAULT_WEIGHTS.keys())
         try:
-            spy = bars_cache["SPY"]
-            if len(spy) < 200:
-                return DEFAULT_WEIGHTS
-            spy_close = spy["close"]
-            price = float(spy_close.iloc[-1])
-            sma200 = float(spy_close.rolling(200).mean().iloc[-1])
-            if price > sma200 * 1.02:  # BULL
-                return {"rsi": 15, "volume": 15, "trend": 30, "volatility": 8,
-                        "momentum": 17, "support": 5, "macd": 8, "bollinger": 2}
-            elif price < sma200 * 0.98:  # BEAR
-                return {"rsi": 20, "volume": 15, "trend": 10, "volatility": 18,
-                        "momentum": 5, "support": 17, "macd": 10, "bollinger": 5}
+            from ai_params import ai_params
+            ai_regime_weights = ai_params.get_signal_weights(regime)
+            if ai_regime_weights:
+                # Only use keys that exist in DEFAULT_WEIGHTS to prevent KeyError in scoring
+                filtered = {k: v for k, v in ai_regime_weights.items() if k in _KNOWN_KEYS}
+                if filtered:
+                    # Fill missing keys from defaults
+                    for k in _KNOWN_KEYS:
+                        if k not in filtered:
+                            filtered[k] = DEFAULT_WEIGHTS[k]
+                    return filtered
         except Exception:
             pass
+
+        # Fall back to static regime weights
+        if regime == "BULL":
+            return {"rsi": 15, "volume": 15, "trend": 30, "volatility": 8,
+                    "momentum": 17, "support": 5, "macd": 8, "bollinger": 2}
+        elif regime == "BEAR":
+            return {"rsi": 20, "volume": 15, "trend": 10, "volatility": 18,
+                    "momentum": 5, "support": 17, "macd": 10, "bollinger": 5}
         return DEFAULT_WEIGHTS
 
     def rank_signals(self, signals: list[dict], top_n: int = 5, min_score: float = 55) -> list[dict]:

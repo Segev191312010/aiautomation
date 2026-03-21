@@ -91,7 +91,7 @@ def compute_realized_pnl(trades: list[dict]) -> dict:
         "worst_trade": min((m["pnl"] for m in matched), default=0),
         "profit_factor": round(
             abs(sum(m["pnl"] for m in winners)) / abs(sum(m["pnl"] for m in losers)), 2
-        ) if losers and sum(m["pnl"] for m in losers) != 0 else float("inf"),
+        ) if losers and sum(m["pnl"] for m in losers) != 0 else 999.99,
         "matched_trades": matched,
     }
 
@@ -250,7 +250,7 @@ def compute_performance_metrics(matched_trades: list[dict], account_value: float
     winners = [p for p in pnls if p > 0]
     losers = [p for p in pnls if p <= 0]
     win_rate = len(winners) / len(pnls) * 100 if pnls else 0
-    profit_factor = abs(sum(winners)) / abs(sum(losers)) if losers and sum(losers) != 0 else float("inf")
+    profit_factor = abs(sum(winners)) / abs(sum(losers)) if losers and sum(losers) != 0 else 999.99
 
     return {
         "total_return": round(total_return, 2),
@@ -258,7 +258,7 @@ def compute_performance_metrics(matched_trades: list[dict], account_value: float
         "sharpe_ratio": round(sharpe, 2),
         "sortino_ratio": round(sortino, 2),
         "win_rate": round(win_rate, 1),
-        "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else 999.99,
+        "profit_factor": round(profit_factor, 2),
         "avg_hold_time": matched_trades[0].get("hold_time", "—") if matched_trades else "—",
         "total_trades": len(matched_trades),
         "best_trade": round(max(pnls), 2),

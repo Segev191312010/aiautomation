@@ -36,6 +36,7 @@ class EventType(Enum):
     TICKER = "TICKER"
     REGIME = "REGIME"
     METRIC = "METRIC"
+    AI_DECISION = "AI_DECISION"
 
 
 # ── Base Event ───────────────────────────────────────────────────────────────
@@ -164,6 +165,20 @@ class MetricEvent(Event):
             object.__setattr__(self, "type", EventType.METRIC)
 
 
+@dataclass(order=True)
+class AIDecisionEvent(Event):
+    decision_type: str = field(default="", compare=False)   # optimization, rule_change, etc.
+    description: str = field(default="", compare=False)
+    old_params: str = field(default="", compare=False)      # JSON string
+    new_params: str = field(default="", compare=False)      # JSON string
+    confidence: float = field(default=0.0, compare=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.type is None:
+            object.__setattr__(self, "type", EventType.AI_DECISION)
+
+
 # ── Event Deserialization ────────────────────────────────────────────────────
 
 _EVENT_CLASSES = {
@@ -173,6 +188,7 @@ _EVENT_CLASSES = {
     "FILL": FillEvent,
     "REGIME": RegimeEvent,
     "METRIC": MetricEvent,
+    "AI_DECISION": AIDecisionEvent,
 }
 
 
