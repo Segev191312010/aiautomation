@@ -752,7 +752,7 @@ export default function MarketRotationPage() {
   const [error, setError] = useState<string | null>(null)
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
   const [selectedSector, setSelectedSector] = useState('XLK')
-  const [activeTab, setActiveTab] = useState<'heatmap' | 'quadrant' | 'chart'>('heatmap')
+  const [activeTab, setActiveTab] = useState<'heatmap' | 'quadrant'>('heatmap')
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const livePrices = useLiveSectorPrices()
@@ -798,11 +798,6 @@ export default function MarketRotationPage() {
   return (
     <div className="flex flex-col gap-4 pb-8">
 
-      {/* ── TradingView Ticker Tape ──────────────────────────────── */}
-      <div className="rounded-lg border border-zinc-700/30 bg-zinc-950/50 overflow-hidden">
-        <TradingViewTickerTape />
-      </div>
-
       {/* ── Header ───────────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-4">
         <div>
@@ -837,19 +832,6 @@ export default function MarketRotationPage() {
         </div>
       </div>
 
-      {/* ── Quadrant Legend ───────────────────────────────────────── */}
-      <div className="flex flex-wrap gap-2">
-        {(Object.keys(Q_LABEL) as Quadrant[]).map(q => (
-          <span key={q} className={clsx(
-            'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-mono',
-            Q_COLORS[q].badge,
-          )}>
-            <span className={clsx('h-1.5 w-1.5 rounded-full', Q_COLORS[q].dot)} />
-            {Q_LABEL[q]} {ROTATION_ARROWS[q]}
-          </span>
-        ))}
-      </div>
-
       {/* ── Error ────────────────────────────────────────────────── */}
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3">
@@ -877,7 +859,6 @@ export default function MarketRotationPage() {
         {([
           { key: 'heatmap' as const, label: 'S&P 500 Heatmap' },
           { key: 'quadrant' as const, label: 'Rotation Quadrant' },
-          { key: 'chart' as const, label: `${selectedSector} Chart` },
         ]).map(tab => (
           <button
             key={tab.key}
@@ -906,6 +887,22 @@ export default function MarketRotationPage() {
           )}
           {activeTab === 'quadrant' && (
             <div className="p-4">
+              <details className="mb-3">
+                <summary className="text-[10px] font-mono text-zinc-500 cursor-pointer hover:text-zinc-400 select-none">
+                  Quadrant Legend
+                </summary>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {(Object.keys(Q_LABEL) as Quadrant[]).map(q => (
+                    <span key={q} className={clsx(
+                      'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-mono',
+                      Q_COLORS[q].badge,
+                    )}>
+                      <span className={clsx('h-1.5 w-1.5 rounded-full', Q_COLORS[q].dot)} />
+                      {Q_LABEL[q]} {ROTATION_ARROWS[q]}
+                    </span>
+                  ))}
+                </div>
+              </details>
               {loading && !rotation.length ? (
                 <Skeleton className="h-[400px]" />
               ) : rotation.length > 0 ? (
@@ -917,11 +914,6 @@ export default function MarketRotationPage() {
               ) : (
                 <div className="flex items-center justify-center h-64 text-sm text-zinc-400">No data</div>
               )}
-            </div>
-          )}
-          {activeTab === 'chart' && (
-            <div className="h-[500px]">
-              <TradingViewChart symbol={selectedSector} />
             </div>
           )}
         </div>
@@ -942,31 +934,19 @@ export default function MarketRotationPage() {
         </div>
       </div>
 
-      {/* ── TradingView Mini Widgets Row ─────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        {(['XLK', 'XLE', 'XLF', 'XLV'] as const).map(sym => (
-          <div key={sym} className="rounded-lg border border-zinc-700/30 bg-zinc-950/30 h-[180px] overflow-hidden">
-            <TradingViewMiniWidget symbol={sym} />
-          </div>
-        ))}
-      </div>
-
-      {/* ── Sector Leaders Grid ──────────────────────────────────── */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-xs font-mono font-semibold text-zinc-500 uppercase tracking-wider">
-            Sector Leaders — Top Stocks by Momentum
-          </h3>
-        </div>
-
+      {/* ── Sector Leaders (collapsed by default) ───────────────── */}
+      <details>
+        <summary className="text-xs font-mono font-semibold text-zinc-500 uppercase tracking-wider cursor-pointer hover:text-zinc-400 select-none py-2">
+          Sector Leaders — Top Stocks by Momentum
+        </summary>
         {loading && !rotation.length ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3 mt-3">
             {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-64" />)}
           </div>
         ) : rotation.length === 0 ? (
           <div className="text-sm text-zinc-400 text-center py-8">No sector data</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3 mt-3">
             {sortedByMomentum.map(sector => (
               <SectorLeadersCard
                 key={sector.symbol}
@@ -976,7 +956,7 @@ export default function MarketRotationPage() {
             ))}
           </div>
         )}
-      </div>
+      </details>
 
     </div>
   )

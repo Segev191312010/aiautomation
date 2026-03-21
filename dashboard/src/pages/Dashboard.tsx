@@ -238,7 +238,7 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.9fr)] flex-1 min-h-0 animate-fade-in-up" style={{ animationDelay: '80ms' }}>
+      <section className="flex-1 min-h-0 animate-fade-in-up" style={{ animationDelay: '80ms' }}>
         <div className="card rounded-lg overflow-hidden  min-h-[28rem] flex flex-col">
           <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E8E4DF]">
             <div>
@@ -295,55 +295,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="card rounded-lg p-5  flex flex-col gap-4">
-          <SectionHeader eyebrow="Context" title="Quick Brief" />
-
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
-            <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Active Name</div>
-            <div className="mt-1 flex items-end justify-between gap-3">
-              <div>
-                <div className="text-xl font-mono font-bold text-zinc-50">{selectedSymbol}</div>
-                <div className="text-sm font-mono text-zinc-400">{formatPrice(selectedQuote?.price)}</div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setRoute('stock')}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-sans text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
-              >
-                Full analysis
-              </button>
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-            <div className="rounded-lg border border-zinc-800 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">52W Range</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
-                {selectedQuote?.year_low != null && selectedQuote?.year_high != null
-                  ? `$${selectedQuote.year_low.toFixed(0)} - $${selectedQuote.year_high.toFixed(0)}`
-                  : '--'}
-              </div>
-            </div>
-            <div className="rounded-lg border border-zinc-800 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Market State</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
-                {selectedQuote?.market_state?.toUpperCase() ?? 'UNKNOWN'}
-              </div>
-            </div>
-            <div className="rounded-lg border border-zinc-800 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Volume</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
-                {selectedQuote?.volume?.toLocaleString('en-US') ?? '--'}
-              </div>
-            </div>
-            <div className="rounded-lg border border-zinc-800 px-4 py-3">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Market Cap</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
-                {formatCompact(selectedQuote?.market_cap)}
-              </div>
-            </div>
-          </div>
-        </div>
+        {/* Quick Brief removed — info available in sidebar focus widget */}
       </section>
 
       {diagnosticsEnabled && (

@@ -12,6 +12,7 @@
  */
 import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react'
 import clsx from 'clsx'
+import TradeBotTabs from '@/components/tradebot/TradeBotTabs'
 import {
   createChart,
   type IChartApi,
@@ -994,6 +995,9 @@ export default function AnalyticsPage() {
 
   const showCorrelation = (correlation?.symbols.length ?? 0) >= 3
 
+  type AnalyticsTab = 'performance' | 'risk' | 'positions' | 'history'
+  const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('performance')
+
   return (
     <div className="flex flex-col gap-5">
 
@@ -1031,6 +1035,19 @@ export default function AnalyticsPage() {
         )}
       </section>
 
+      {/* ── Tab Selector ──────────────────────────────────────────────── */}
+      <TradeBotTabs
+        activeTab={analyticsTab}
+        onTabChange={(t) => setAnalyticsTab(t as AnalyticsTab)}
+        tabs={[
+          { id: 'performance', label: 'Performance' },
+          { id: 'risk', label: 'Risk' },
+          { id: 'positions', label: 'Positions' },
+          { id: 'history', label: 'History' },
+        ]}
+      />
+
+      {analyticsTab === 'performance' && (<>
       {/* ── 2. Equity Curve ─────────────────────────────────────────────── */}
       <section
         className="card rounded-2xl  p-5 animate-fade-in-up"
@@ -1067,13 +1084,10 @@ export default function AnalyticsPage() {
         )}
       </section>
 
-      {/* ── 4 + 5. Exposure + Risk side-by-side ─────────────────────────── */}
-      <div
-        className="grid gap-4 xl:grid-cols-2 animate-fade-in-up"
-        style={{ animationDelay: '120ms' }}
-      >
-        {/* 4. Position Exposure */}
-        <section className="card rounded-2xl  p-5">
+      </>)}
+
+      {analyticsTab === 'positions' && (
+      <section className="card rounded-2xl p-5 animate-fade-in-up" style={{ animationDelay: '120ms' }}>
           <SectionHeader
             icon={<IconPieChart className="w-3.5 h-3.5 text-indigo-500" />}
             eyebrow="Allocation"
@@ -1095,9 +1109,11 @@ export default function AnalyticsPage() {
             </div>
           )}
         </section>
+      )}
 
+      {analyticsTab === 'risk' && (<>
         {/* 5. Risk Metrics */}
-        <section className="card rounded-2xl  p-5">
+        <section className="card rounded-2xl p-5 animate-fade-in-up" style={{ animationDelay: '120ms' }}>
           <SectionHeader
             icon={<IconShield className="w-3.5 h-3.5 text-rose-500" />}
             eyebrow="Risk Management"
@@ -1123,13 +1139,33 @@ export default function AnalyticsPage() {
             </div>
           )}
         </section>
-      </div>
 
-      {/* ── 6. Trade History Summary ─────────────────────────────────────── */}
-      <section
-        className="card rounded-2xl  p-5 animate-fade-in-up"
-        style={{ animationDelay: '160ms' }}
-      >
+      {/* Correlation in Risk tab */}
+      <section className="card rounded-2xl p-5 animate-fade-in-up" style={{ animationDelay: '200ms' }}>
+        <SectionHeader
+          icon={<IconGrid className="w-3.5 h-3.5 text-slate-500" />}
+          eyebrow="Diversification"
+          title="Correlation Matrix"
+          badge={
+            showCorrelation && correlation ? (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">
+                {correlation.symbols.length} assets
+              </span>
+            ) : null
+          }
+        />
+        {showCorrelation && correlation ? (
+          <CorrelationMatrixPanel matrix={correlation} />
+        ) : (
+          <div className="flex items-center justify-center py-8 text-sm text-[var(--text-muted)]">
+            Correlation unavailable — at least 3 symbols are required.
+          </div>
+        )}
+      </section>
+      </>)}
+
+      {analyticsTab === 'history' && (
+      <section className="card rounded-2xl p-5 animate-fade-in-up" style={{ animationDelay: '160ms' }}>
         <SectionHeader
           icon={<IconHistory className="w-3.5 h-3.5 text-zinc-400" />}
           eyebrow="Trades"
@@ -1158,25 +1194,6 @@ export default function AnalyticsPage() {
           </div>
         )}
       </section>
-
-      {/* ── 7. Correlation Matrix (3+ positions only) ────────────────────── */}
-      {showCorrelation && correlation && (
-        <section
-          className="card rounded-2xl  p-5 animate-fade-in-up"
-          style={{ animationDelay: '200ms' }}
-        >
-          <SectionHeader
-            icon={<IconGrid className="w-3.5 h-3.5 text-slate-500" />}
-            eyebrow="Diversification"
-            title="Correlation Matrix"
-            badge={
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">
-                {correlation.symbols.length} assets
-              </span>
-            }
-          />
-          <CorrelationMatrixPanel matrix={correlation} />
-        </section>
       )}
 
     </div>
