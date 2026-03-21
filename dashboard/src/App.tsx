@@ -16,7 +16,6 @@ const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
 const StockProfilePage = lazy(() => import('@/pages/StockProfilePage'))
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
 const RulesPage = lazy(() => import('@/pages/RulesPage'))
-const AIAdvisorPage = lazy(() => import('@/pages/AIAdvisorPage'))
 const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
 
 function PageFallback() {

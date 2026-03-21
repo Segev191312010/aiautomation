@@ -84,7 +84,6 @@ async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:
         # C-2 FIX: Default to BLOCKED on DB error — fail closed, not open
         log.error("Daily loss check FAILED (DB unavailable) — blocking for safety: %s", e)
         raise SafetyViolation("Daily loss check unavailable — blocking for safety")
-        pass
 
 
 def assert_no_shorts(side: str, *, is_exit: bool = False, has_existing_position: bool = False) -> None:
