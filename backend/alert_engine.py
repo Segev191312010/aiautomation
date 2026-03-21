@@ -101,7 +101,6 @@ async def _loop() -> None:
 
 async def _check_cycle() -> None:
     """Run one evaluation cycle over all enabled alerts."""
-    _cycle_start = time.monotonic()
     alerts = await get_enabled_alerts_all()
     if not alerts:
         return
@@ -137,12 +136,11 @@ async def _check_cycle() -> None:
         _prev_prices[sym] = price
 
     log.info(
-        "Alert cycle: checked=%d symbols=%d fired=%d failed=%d duration=%.1fs",
+        "Alert cycle: checked=%d symbols=%d fired=%d failed=%d",
         checked,
         len(symbols),
         fired,
         failed,
-        time.monotonic() - _cycle_start,
     )
 
 

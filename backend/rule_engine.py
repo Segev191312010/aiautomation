@@ -40,7 +40,11 @@ def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict, cache_sc
     try:
         # Compute the primary indicator series (with deterministic cache key)
         last_time = str(df.index[-1]) if len(df) > 0 else ""
-        normalized_params = tuple(sorted(cond.params.items())) if cond.params else ()
+        try:
+            normalized_params = tuple(sorted(cond.params.items())) if cond.params else ()
+        except TypeError:
+            # Fallback for unhashable param values (nested dicts)
+            normalized_params = (str(cond.params),)
         cache_key = (cache_scope, len(df), last_time, cond.indicator, normalized_params)
         if cache_key in _indicator_cache:
             series_a = _indicator_cache[cache_key]
@@ -136,6 +140,7 @@ def evaluate_conditions(
     conditions: list[Condition],
     df: pd.DataFrame,
     logic: str = "AND",
+    symbol: str = "",
 ) -> bool:
     """
     Evaluate a list of conditions against a DataFrame slice.
@@ -145,6 +150,7 @@ def evaluate_conditions(
         conditions: List of Condition objects.
         df:         DataFrame slice (e.g., df[:i+1] for bar-by-bar).
         logic:      "AND" or "OR".
+        symbol:     Symbol for cache isolation (required for multi-symbol backtests).
 
     Returns:
         True if conditions are met per the logic operator.
@@ -152,7 +158,7 @@ def evaluate_conditions(
     if df.empty or len(df) < 2:
         return False
     cache: dict = {}
-    results = [_evaluate_condition(c, df, cache) for c in conditions]
+    results = [_evaluate_condition(c, df, cache, cache_scope=symbol) for c in conditions]
     if logic == "AND":
         return all(results)
     return any(results)  # OR
@@ -229,7 +235,7 @@ def evaluate_all(
                 if _check_symbol_cooldown(rule, sym_upper):
                     continue
 
-                if _evaluate_conditions_for_rule(rule, df):
+                if _evaluate_conditions_for_rule(rule, df, symbol=sym_upper):
                     log.info(
                         "Universe rule TRIGGERED: '%s' on %s (universe=%s)",
                         rule.name, sym_upper, rule.universe,
@@ -259,15 +265,17 @@ def evaluate_all(
     return triggered
 
 
-def _evaluate_conditions_for_rule(rule: Rule, df: pd.DataFrame) -> bool:
+def _evaluate_conditions_for_rule(rule: Rule, df: pd.DataFrame, symbol: str = "") -> bool:
     """
     Evaluate rule conditions against a DataFrame, without cooldown
     check (caller handles cooldown for universe rules).
+    symbol: the actual symbol being evaluated (required for universe rules).
     """
     if df.empty or len(df) < 2:
         return False
     cache: dict = {}
-    scope = rule.symbol.upper() if rule.symbol else f"universe:{rule.universe or 'custom'}"
+    # R2-C1 FIX: Use actual symbol, not shared universe scope
+    scope = symbol.upper() if symbol else (rule.symbol.upper() if rule.symbol else "unknown")
     results = [_evaluate_condition(c, df, cache, cache_scope=scope) for c in rule.conditions]
     if rule.logic == "AND":
         return all(results)

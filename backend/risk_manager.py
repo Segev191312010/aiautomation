@@ -62,7 +62,13 @@ def get_account_state(ib) -> dict:
         for p in ib.portfolio():
             if p.position == 0:
                 continue
-            mkt_price = p.marketPrice if p.marketPrice and p.marketPrice > 0 else p.averageCost
+            import math
+            # Guard against nan, UNSET_DOUBLE (~1.8e308), zero, and None
+            _mp = p.marketPrice
+            _valid_mp = (_mp is not None and not math.isnan(_mp) and 0 < _mp < 1e7)
+            _ac = p.averageCost
+            _valid_ac = (_ac is not None and not math.isnan(_ac) and 0 < _ac < 1e7)
+            mkt_price = _mp if _valid_mp else (_ac if _valid_ac else 100.0)
             positions.append({
                 "symbol": p.contract.symbol,
                 "qty": p.position,
