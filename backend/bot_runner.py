@@ -16,11 +16,19 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 from config import cfg
-from database import get_rules, save_rule, get_trades, get_open_positions, save_open_position, delete_open_position
+from database import (
+    get_rules,
+    save_rule,
+    get_trades,
+    get_open_positions,
+    save_open_position,
+    delete_open_position,
+    save_trade,
+)
 from market_data import get_historical_bars, clear_bar_cache, get_latest_price
 from rule_engine import evaluate_all
 from order_executor import OrderError, place_order
-from models import Rule, TradeAction
+from models import Rule, Trade, TradeAction
 from position_tracker import check_exits, update_watermarks
 from screener import load_universe
 from events import (
@@ -333,16 +341,13 @@ async def _run_cycle() -> None:
     except Exception as exc:
         log.exception("Exit processing failed: %s", exc)
 
-    if not enabled:
-        log.debug("No enabled rules — skipping entry evaluation")
-        await _emit({
-            "type": "bot",
-            "status": "running",
-            "rules_enabled": 0,
-            "rules_checked": 0,
-            "signals": 0,
-        })
-        return
+    try:
+        from execution_brain import drain_direct_candidates
+
+        direct_candidates = drain_direct_candidates()
+    except Exception as exc:
+        log.debug("Direct candidate queue unavailable: %s", exc)
+        direct_candidates = []
 
     # ── Emit MarketEvents for all fetched bars ─────────────────────────────────
     now = datetime.now(timezone.utc)
@@ -360,7 +365,11 @@ async def _run_cycle() -> None:
     metrics.record("bars_fetched", len(bars_by_symbol))
 
     # ── Phase 2: Evaluate entry rules ─────────────────────────────────────────
-    triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
+    if cfg.AUTOPILOT_MODE == "OFF":
+        log.info("Autopilot OFF — skipping new entries")
+        triggered = []
+    else:
+        triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
 
     # ── Score and rank signals ───────────────────────────────────────────────
     try:
@@ -399,9 +408,10 @@ async def _run_cycle() -> None:
         log.warning("Signal scoring failed, using unranked: %s", exc)
 
     # ── Execute triggered rules ───────────────────────────────────────────────
-    total_signals = 0
+    total_signals = len(direct_candidates)
     orders_placed = 0
     max_orders_per_cycle = 5
+    executed_symbols: set[str] = set()
     for rule, trigger_symbol in triggered:
         total_signals += 1
         if orders_placed >= max_orders_per_cycle:
@@ -455,6 +465,7 @@ async def _run_cycle() -> None:
             log.debug("Risk check skipped: %s", e)
 
         # ── Dynamic position sizing: 0.5% of account NetLiquidation ─────────
+        price = 0.0
         try:
             sym_upper = order_rule.symbol.upper()
             if sym_upper in bars_by_symbol:
@@ -484,6 +495,24 @@ async def _run_cycle() -> None:
         except Exception as exc:
             log.warning("Position sizing failed, using rule quantity: %s", exc)
 
+        try:
+            from safety_kernel import check_all, SafetyViolation
+
+            await check_all(
+                symbol=order_rule.symbol,
+                side=order_rule.action.type,
+                quantity=order_rule.action.quantity,
+                source="rule",
+                account_equity=available_cash,
+                price_estimate=price,
+                is_exit=False,
+            )
+        except SafetyViolation as exc:
+            log.warning("Safety kernel REJECTED %s %s: %s", order_rule.action.type, order_rule.symbol, exc)
+            continue
+        except Exception as exc:
+            log.debug("Safety kernel check skipped: %s", exc)
+
         # Emit OrderEvent
         order_event = OrderEvent(
             timestamp=now, type=EventType.ORDER,
@@ -495,7 +524,13 @@ async def _run_cycle() -> None:
         event_logger.log_event(order_event)
 
         try:
-            trade = await place_order(order_rule)
+            if cfg.AUTOPILOT_MODE == "LIVE" and not cfg.SIM_MODE:
+                trade = await place_order(order_rule)
+            else:
+                trade = await _create_paper_trade(
+                    order_rule,
+                    price if price > 0 else order_rule.action.limit_price,
+                )
             orders_placed += 1
             # Emit FillEvent if trade was placed (PENDING or FILLED)
             if trade and trade.fill_price:
@@ -536,6 +571,7 @@ async def _run_cycle() -> None:
             pass
 
         if trade:
+            executed_symbols.add(trigger_symbol.upper())
             await _emit({
                 "type": "signal",
                 "rule_id": rule.id,
@@ -546,6 +582,40 @@ async def _run_cycle() -> None:
                 "trade_id": trade.id,
                 "order_id": trade.order_id,
             })
+
+    if cfg.AUTOPILOT_MODE != "OFF" and direct_candidates:
+        try:
+            from execution_brain import choose_candidates
+            from api_contracts import AIDirectTrade
+            from direct_ai_trader import execute_direct_trade
+
+            remaining_direct = [
+                candidate for candidate in direct_candidates
+                if str(candidate.get("symbol", "")).upper() not in executed_symbols
+            ]
+            for candidate in choose_candidates([], remaining_direct):
+                if orders_placed >= max_orders_per_cycle:
+                    log.info("Max orders per cycle (%d) reached — deferring direct AI trades", max_orders_per_cycle)
+                    break
+                decision = AIDirectTrade(**dict(candidate.get("decision", {})))
+                try:
+                    outcome = await execute_direct_trade(decision)
+                    trade_payload = outcome.get("trade", {})
+                    orders_placed += 1
+                    metrics.record("orders_placed", orders_placed)
+                    await _emit({
+                        "type": "signal",
+                        "source": "ai_direct",
+                        "symbol": decision.symbol,
+                        "action": decision.action,
+                        "trade_id": trade_payload.get("id"),
+                        "order_id": trade_payload.get("order_id"),
+                        "reason": decision.reason,
+                    })
+                except Exception as exc:
+                    log.warning("Direct AI trade blocked for %s: %s", decision.symbol, exc)
+        except Exception as exc:
+            log.warning("Direct AI execution phase unavailable: %s", exc)
 
     await _emit({
         "type": "bot",
@@ -569,6 +639,27 @@ async def _run_cycle() -> None:
         "Cycle complete — %d rules, %d symbols, %d signals, %d orders | events: %d logged",
         len(enabled), len(bars_by_symbol), total_signals, orders_placed, event_logger.event_count,
     )
+
+
+async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Trade:
+    trade = Trade(
+        rule_id=order_rule.id,
+        rule_name=order_rule.name,
+        symbol=order_rule.symbol,
+        action=order_rule.action.type,  # type: ignore[arg-type]
+        asset_type=order_rule.action.asset_type,
+        quantity=order_rule.action.quantity,
+        order_type=order_rule.action.order_type,
+        limit_price=order_rule.action.limit_price,
+        fill_price=fill_price,
+        status="FILLED",
+        order_id=None,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        source="rule",
+        metadata={"paper": True, "autopilot_mode": cfg.AUTOPILOT_MODE},
+    )
+    await save_trade(trade)
+    return trade
 
 
 MAX_EXIT_ATTEMPTS = 3

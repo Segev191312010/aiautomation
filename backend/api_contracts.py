@@ -327,6 +327,28 @@ class RuleVersionResponse(BaseModel):
     status: Literal["draft", "paper", "active", "paused", "retired"] = "active"
 
 
+class RuleValidationRunResponse(BaseModel):
+    version: int
+    validation_mode: str
+    trades_count: int = 0
+    hit_rate: Optional[float] = None
+    net_pnl: Optional[float] = None
+    expectancy: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    overlap_score: Optional[float] = None
+    passed: bool = False
+    notes: Optional[str] = None
+    created_at: str
+
+
+class RulePromotionReadinessResponse(BaseModel):
+    rule_id: str
+    status: Literal["draft", "paper", "active", "paused", "retired"]
+    eligible: bool = False
+    reasons: list[str] = Field(default_factory=list)
+    latest_validation: Optional[RuleValidationRunResponse] = None
+
+
 class SourcePerformanceResponse(BaseModel):
     source: Literal["rule", "ai_direct", "manual", "combined"]
     trades_count: int = 0

@@ -676,6 +676,34 @@ async def save_rule_validation_run(
         await db.commit()
 
 
+async def get_rule_validation_runs(rule_id: str, user_id: str = "demo") -> list[dict]:
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT version, validation_mode, trades_count, hit_rate, net_pnl, expectancy, "
+            "max_drawdown, overlap_score, passed, notes, created_at "
+            "FROM ai_rule_validation_runs WHERE rule_id=? AND user_id=? "
+            "ORDER BY created_at DESC",
+            (rule_id, user_id),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "version": row[0],
+            "validation_mode": row[1],
+            "trades_count": row[2],
+            "hit_rate": row[3],
+            "net_pnl": row[4],
+            "expectancy": row[5],
+            "max_drawdown": row[6],
+            "overlap_score": row[7],
+            "passed": bool(row[8]),
+            "notes": row[9],
+            "created_at": row[10],
+        }
+        for row in rows
+    ]
+
+
 async def open_manual_intervention(
     *,
     severity: str,
@@ -699,8 +727,8 @@ async def open_manual_intervention(
 
 
 async def get_manual_interventions(user_id: str = "demo", include_resolved: bool = False) -> list[dict]:
-    where = "" if include_resolved else "WHERE user_id=? AND resolved_at IS NULL"
-    params: tuple[object, ...] = () if include_resolved else (user_id,)
+    where = "WHERE user_id=?" if include_resolved else "WHERE user_id=? AND resolved_at IS NULL"
+    params: tuple[object, ...] = (user_id,)
     async with get_db() as db:
         async with db.execute(
             f"SELECT id, opened_at, severity, category, symbol, source, summary, required_action, "
