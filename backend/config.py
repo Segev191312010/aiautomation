@@ -46,9 +46,16 @@ class Config:
     ADVISOR_MIN_TRADES: int = int(os.getenv("ADVISOR_MIN_TRADES", "5"))
     ADVISOR_LOOKBACK_DAYS: int = int(os.getenv("ADVISOR_LOOKBACK_DAYS", "90"))
 
-    # ── AI Autonomy ──────────────────────────────────────────────────────────
-    AI_AUTONOMY_ENABLED: bool = os.getenv("AI_AUTONOMY_ENABLED", "false").lower() == "true"
-    AI_SHADOW_MODE: bool = os.getenv("AI_SHADOW_MODE", "true").lower() == "true"
+    # ── AI Autopilot Control Plane ───────────────────────────────────────────
+    # AUTOPILOT_MODE controls AI authority. Separate from SIM_MODE/IS_PAPER (broker env).
+    # OFF   = AI does nothing (manual trading only)
+    # PAPER = AI creates draft/paper rules, logs decisions, no live orders
+    # LIVE  = AI manages rules AND places orders with real money
+    AUTOPILOT_MODE: str = os.getenv("AUTOPILOT_MODE", "OFF").upper()
+    # Backward compat — derived from AUTOPILOT_MODE
+    _apm = os.getenv("AUTOPILOT_MODE", "OFF").upper()
+    AI_AUTONOMY_ENABLED: bool = _apm in ("PAPER", "LIVE")
+    AI_SHADOW_MODE: bool = _apm != "LIVE"
     AI_OPTIMIZE_INTERVAL_SECONDS: int = int(os.getenv("AI_OPTIMIZE_INTERVAL_SECONDS", "14400"))
     AI_MODEL_OPTIMIZER: str = os.getenv("AI_MODEL_OPTIMIZER", "claude-sonnet-4-20250514")
     AI_MODEL_NARRATIVE: str = os.getenv("AI_MODEL_NARRATIVE", "claude-sonnet-4-20250514")
