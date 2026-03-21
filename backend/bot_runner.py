@@ -270,7 +270,7 @@ async def _run_cycle() -> None:
             for i in range(0, len(symbol_list), BATCH):
                 batch = symbol_list[i:i + BATCH]
                 try:
-                    raw = await asyncio.get_event_loop().run_in_executor(
+                    raw = await asyncio.get_running_loop().run_in_executor(
                         None,
                         lambda b=batch: yf.download(
                             b, period="1y", interval="1d",
@@ -627,7 +627,11 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
         try:
             exit_trade = await place_order(exit_rule)
             if exit_trade:
-                pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+                # C-2 FIX: Correct PnL sign for SELL/short positions
+                if pos.side == "BUY":
+                    pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
+                else:
+                    pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
                 await _emit({
                     "type": "exit",
                     "symbol": sym,
@@ -642,11 +646,11 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
                     "EXIT %s qty=%d reason='%s' entry=%.4f exit=%.4f pnl=%.2f",
                     sym, qty, reason, pos.entry_price, current_price, pnl,
                 )
+                # C-1 FIX: Only delete position on successful exit order
+                await delete_open_position(pos.id)
         except Exception as exc:
-            log.error("Exit order failed for %s: %s", sym, exc)
-        finally:
-            # Always remove — never get stuck trying to exit the same position forever
-            await delete_open_position(pos.id)
+            # C-1 FIX: Keep position on failure — retry next cycle
+            log.error("Exit order FAILED for %s (position kept for retry): %s", sym, exc)
 
 
 async def _emit(payload: dict) -> None:

@@ -271,7 +271,7 @@ async def get_sector_rotation(lookback_days: int = 90) -> list[dict]:
     if cached is not None:
         return cached
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(_executor, _compute_rotation, lookback_days)
     _cache_set(key, result)
     return result
@@ -323,7 +323,7 @@ async def get_rotation_heatmap() -> list[dict]:
     if cached is not None:
         return cached
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(_executor, _compute_heatmap)
     _cache_set("heatmap", result)
     return result
@@ -392,7 +392,7 @@ async def get_sector_leaders(sector_etf: str, top_n: int = 10, period: str = "3m
     if cached is not None:
         return cached
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(_executor, _compute_leaders, sector_etf, top_n, period)
     _cache_set(key, result)
     return result

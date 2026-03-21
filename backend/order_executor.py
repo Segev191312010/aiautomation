@@ -44,7 +44,7 @@ async def _get_limit_price(symbol: str, action: str, slip_pct: float = 0.005,
     # Fall back to yfinance
     try:
         import yfinance as yf
-        info = await asyncio.get_event_loop().run_in_executor(
+        info = await asyncio.get_running_loop().run_in_executor(
             None, lambda: yf.Ticker(symbol).fast_info
         )
         price = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
@@ -84,6 +84,10 @@ def _pre_flight_check(rule: Rule, price_estimate: float | None = None) -> str | 
     # Dedup: reject same symbol+action within DEDUP_WINDOW
     key = f"{rule.symbol}:{rule.action.type}"
     now = time.time()
+    # C-3 FIX: Evict stale entries to prevent unbounded growth
+    stale = [k for k, v in _recent_orders.items() if (now - v) > DEDUP_WINDOW * 2]
+    for k in stale:
+        del _recent_orders[k]
     last = _recent_orders.get(key)
     if last and (now - last) < DEDUP_WINDOW:
         return f"Duplicate order for {key} within {DEDUP_WINDOW}s"
@@ -195,7 +199,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         return trade_rec
 
 
-async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule, timeout: int = 60) -> None:
+async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule | None = None, timeout: int = 60) -> None:
     """Poll the IBKR trade object until it fills or times out."""
     elapsed = 0
     while elapsed < timeout:
