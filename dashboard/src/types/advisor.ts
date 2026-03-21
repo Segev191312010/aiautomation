@@ -158,6 +158,7 @@ export interface AdvisorAnalysis {
 // ── Guardrails ──────────────────────────────────────────────────────────────
 
 export interface GuardrailConfig {
+  autopilot_mode: 'OFF' | 'PAPER' | 'LIVE'
   shadow_mode: boolean
   ai_autonomy_enabled: boolean
   max_rules_disabled_per_day: number
@@ -170,6 +171,8 @@ export interface GuardrailConfig {
   max_changes_per_day: number
   min_hours_between_changes: number
   emergency_stop: boolean
+  daily_loss_locked?: boolean
+  daily_loss_limit_pct?: number
   // Shadow → Live gating
   shadow_to_live_min_decisions: number
   shadow_to_live_min_days: number
@@ -215,9 +218,16 @@ export interface AuditLogPage {
 // ── AI Status ───────────────────────────────────────────────────────────────
 
 export interface AIStatus {
+  mode: 'OFF' | 'PAPER' | 'LIVE'
   autonomy_active: boolean
   shadow_mode: boolean
   emergency_stop: boolean
+  daily_loss_locked: boolean
+  daily_loss_limit_pct: number
+  broker_connected: boolean
+  open_positions_count: number
+  active_rules_count: number
+  direct_ai_open_trades_count: number
   last_action_at?: string | null
   changes_today: number
   next_optimization_at?: string | null
@@ -267,9 +277,97 @@ export interface AIDecisionPayload {
   exit_params?: Record<string, AIExitParams>
   min_score?: UncertainValue
   rule_changes: AIRuleChange[]
+  rule_actions?: AIRuleAction[]
+  direct_trades?: AIDirectTrade[]
   risk_adjustments?: AIRiskAdjustments
   reasoning: string
   confidence: number
+}
+
+export type AutopilotMode = 'OFF' | 'PAPER' | 'LIVE'
+
+export interface AutopilotConfig {
+  autopilot_mode: AutopilotMode
+  emergency_stop: boolean
+  daily_loss_locked: boolean
+  daily_loss_limit_pct: number
+}
+
+export interface AIRuleAction {
+  action: 'create' | 'update' | 'enable' | 'disable' | 'pause' | 'retire' | 'delete'
+  rule_id?: string
+  rule_payload?: Record<string, unknown>
+  reason: string
+  confidence: number
+}
+
+export interface AIDirectTrade {
+  symbol: string
+  action: 'BUY' | 'SELL'
+  order_type: 'MKT' | 'LMT'
+  limit_price?: number | null
+  stop_price: number
+  invalidation: string
+  reason: string
+  confidence: number
+}
+
+export interface RuleVersionRecord {
+  version: number
+  rule_id: string
+  name: string
+  conditions: import('@/types').Condition[]
+  logic: 'AND' | 'OR'
+  action: import('@/types').TradeAction
+  cooldown_minutes: number
+  created_at: string
+  note?: string
+  author?: string
+  status?: import('@/types').RuleStatus
+}
+
+export interface SourcePerformance {
+  source: 'rule' | 'ai_direct' | 'manual' | 'combined'
+  trades_count: number
+  hit_rate: number | null
+  realized_pnl: number
+  unrealized_pnl: number
+  total_cost: number
+  roi: number | null
+}
+
+export interface AutopilotPerformance {
+  window_days: number
+  total_trades: number
+  hit_rate: number | null
+  realized_pnl: number
+  unrealized_pnl: number
+  total_cost: number
+  roi: number | null
+  by_source: SourcePerformance[]
+}
+
+export interface RulePerformanceRow {
+  rule_id: string
+  rule_name: string
+  trades_count: number
+  hit_rate: number | null
+  net_pnl: number
+  source: 'rule' | 'ai_direct' | 'manual'
+}
+
+export interface AutopilotIntervention {
+  id: number
+  opened_at: string
+  severity: string
+  category: string
+  symbol?: string | null
+  source: string
+  summary: string
+  required_action: string
+  acknowledged_at?: string | null
+  resolved_at?: string | null
+  resolved_by?: string | null
 }
 
 // ── Shadow Mode ─────────────────────────────────────────────────────────────

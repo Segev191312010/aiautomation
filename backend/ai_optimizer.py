@@ -23,6 +23,7 @@ from ai_guardrails import (
     log_ai_action,
     log_shadow_decision,
     save_param_snapshot,
+    get_autopilot_config_dict,
 )
 from ai_advisor import fetch_advisor_data, analyze_rule_performance, analyze_score_effectiveness
 
@@ -357,9 +358,24 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
         for dt in direct_trades:
             results["shadow"].append(f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} (shadow)")
     elif direct_trades:
-        # Phase 5: Direct trade execution will be wired here
-        for dt in direct_trades:
-            results["applied"].append(f"direct_trade: {dt.get('symbol', '?')} (queued for Phase 5)")
+        try:
+            from direct_ai_trader import execute_direct_trade
+
+            for dt in direct_trades:
+                try:
+                    outcome = await execute_direct_trade(dt)
+                    results["applied"].append(
+                        f"direct_trade: {dt.get('symbol', '?')} {dt.get('action', '?')} "
+                        f"({'paper' if outcome.get('simulated') else 'live'})"
+                    )
+                except Exception as exc:
+                    log.warning("Direct AI trade failed for %s: %s", dt.get("symbol", "?"), exc)
+                    results["blocked"].append(
+                        f"direct_trade: {dt.get('symbol', '?')} blocked ({exc})"
+                    )
+        except Exception as exc:
+            log.error("Direct AI trade engine unavailable: %s", exc)
+            results["blocked"].append(f"direct_trade_engine: {exc}")
 
     return results
 
@@ -441,6 +457,8 @@ def should_recompute() -> bool:
     """Check if it's time to run AI optimization."""
     if not cfg.ANTHROPIC_API_KEY:
         return False
+    if cfg.AUTOPILOT_MODE not in ("PAPER", "LIVE"):
+        return False
     elapsed = time.time() - _last_optimization
     return elapsed >= cfg.AI_OPTIMIZE_INTERVAL_SECONDS
 
@@ -455,6 +473,8 @@ async def ai_optimization_loop() -> None:
     )
     while True:
         try:
+            config = await get_autopilot_config_dict()
+            ai_params.shadow_mode = config["autopilot_mode"] != "LIVE"
             if should_recompute():
                 await run_full_optimization()
         except Exception as e:

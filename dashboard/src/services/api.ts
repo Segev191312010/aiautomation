@@ -68,12 +68,20 @@ import type {
   AdvisorReport,
   AdvisorAnalysis,
   AutoTuneResult,
+  AutopilotConfig,
+  AutopilotIntervention,
+  AutopilotPerformance,
   GuardrailConfig,
   AuditLogPage,
   AIStatus,
+  AIRuleAction,
+  AIDirectTrade,
   Recommendation,
+  RulePerformanceRow,
+  RuleVersionRecord,
   RulePerformance,
   CostReport,
+  SourcePerformance,
   ShadowDecisionsPage,
   ShadowPerformance,
   LearningMetrics,
@@ -428,25 +436,34 @@ export const fetchAdvisorRuleAnalysis = (ruleId: string, lookbackDays = 90) =>
   get<RulePerformance>(`/api/advisor/rule/${ruleId}?lookback_days=${lookbackDays}`)
 
 export const fetchGuardrails = () =>
-  get<GuardrailConfig>('/api/advisor/guardrails')
+  get<GuardrailConfig>('/api/autopilot/config')
 
 export const updateGuardrails = (config: Partial<GuardrailConfig>) =>
-  put<GuardrailConfig>('/api/advisor/guardrails', config)
+  put<GuardrailConfig>('/api/autopilot/config', config)
 
 export const postEmergencyStop = () =>
-  post<{ emergency_stop: boolean; message: string }>('/api/advisor/emergency-stop')
+  post<{ emergency_stop: boolean; message: string }>('/api/autopilot/kill')
+
+export const resetEmergencyStop = () =>
+  post<{ emergency_stop: boolean; message: string }>('/api/autopilot/kill/reset')
+
+export const setAutopilotMode = (mode: 'OFF' | 'PAPER' | 'LIVE', reason = '') =>
+  post<AutopilotConfig>('/api/autopilot/mode', { mode, reason })
+
+export const resetDailyLossLock = () =>
+  post<AutopilotConfig>('/api/autopilot/daily-loss/reset')
 
 export const fetchAuditLog = (limit = 50, offset = 0) =>
-  get<AuditLogPage>(`/api/advisor/audit-log?limit=${limit}&offset=${offset}`)
+  get<AuditLogPage>(`/api/autopilot/feed?limit=${limit}&offset=${offset}`)
 
 export const revertAIAction = (entryId: number) =>
-  post<{ reverted: boolean }>(`/api/advisor/audit-log/${entryId}/revert`)
+  post<{ reverted: boolean }>(`/api/autopilot/feed/${entryId}/revert`)
 
 export const fetchAIStatus = () =>
-  get<AIStatus>('/api/advisor/ai-status')
+  get<AIStatus>('/api/autopilot/status')
 
 export const fetchAICosts = (days = 30) =>
-  get<CostReport>(`/api/advisor/costs?days=${days}`)
+  get<CostReport>(`/api/autopilot/costs?days=${days}`)
 
 export const fetchShadowDecisions = (
   limit = 50, offset = 0,
@@ -467,7 +484,50 @@ export const toggleShadowMode = (enable: boolean, force = false) =>
   post<{ shadow_mode: boolean; message: string }>('/api/advisor/shadow-mode', { enable, force })
 
 export const fetchLearningMetrics = (windowDays = 30) =>
-  get<LearningMetrics>(`/api/advisor/learning-metrics?window_days=${windowDays}`)
+  get<LearningMetrics>(`/api/autopilot/learning-metrics?window_days=${windowDays}`)
 
 export const fetchEconomicReport = (days = 30) =>
-  get<EconomicReport>(`/api/advisor/economic-report?days=${days}`)
+  get<EconomicReport>(`/api/autopilot/economic-report?days=${days}`)
+
+export const fetchAutopilotRules = () =>
+  get<Rule[]>('/api/autopilot/rules')
+
+export const fetchAutopilotRule = (id: string) =>
+  get<Rule>(`/api/autopilot/rules/${id}`)
+
+export const fetchAutopilotRuleVersions = (id: string) =>
+  get<RuleVersionRecord[]>(`/api/autopilot/rules/${id}/versions`)
+
+export const manualPauseAutopilotRule = (id: string, reason = '') =>
+  post<Rule>(`/api/autopilot/rules/${id}/manual-pause`, { reason })
+
+export const manualRetireAutopilotRule = (id: string, reason = '') =>
+  post<Rule>(`/api/autopilot/rules/${id}/manual-retire`, { reason })
+
+export const applyRuleLabActions = (actions: AIRuleAction[], author = 'ai', allowActive = false) =>
+  post<{ results: Array<Record<string, unknown>> }>('/api/autopilot/rule-lab/apply', {
+    actions,
+    author,
+    allow_active: allowActive,
+  })
+
+export const executeDirectAITrade = (decision: AIDirectTrade) =>
+  post<{ mode: string; simulated: boolean; trade: Trade }>('/api/autopilot/direct-trades/execute', decision)
+
+export const fetchAutopilotPerformance = (window = 30) =>
+  get<AutopilotPerformance>(`/api/autopilot/performance?window=${window}`)
+
+export const fetchAutopilotSourcePerformance = (window = 30) =>
+  get<SourcePerformance[]>(`/api/autopilot/performance/sources?window=${window}`)
+
+export const fetchAutopilotRulePerformance = (window = 30) =>
+  get<RulePerformanceRow[]>(`/api/autopilot/performance/rules?window=${window}`)
+
+export const fetchAutopilotInterventions = (includeResolved = false) =>
+  get<AutopilotIntervention[]>(`/api/autopilot/interventions?include_resolved=${includeResolved}`)
+
+export const acknowledgeAutopilotIntervention = (id: number) =>
+  post<{ acknowledged: boolean }>(`/api/autopilot/interventions/${id}/ack`)
+
+export const resolveAutopilotIntervention = (id: number, resolvedBy = 'operator') =>
+  post<{ resolved: boolean; resolved_by: string }>(`/api/autopilot/interventions/${id}/resolve`, { resolved_by: resolvedBy })

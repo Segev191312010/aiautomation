@@ -121,6 +121,8 @@ export interface TradeAction {
 }
 
 export type RuleUniverse = 'sp500' | 'nasdaq100' | 'etfs' | 'all'
+export type RuleStatus = 'draft' | 'paper' | 'active' | 'paused' | 'retired'
+export type HoldStyle = 'intraday' | 'swing'
 
 export interface Rule {
   id: string
@@ -133,6 +135,15 @@ export interface Rule {
   action: TradeAction
   cooldown_minutes: number
   last_triggered?: string | null
+  status?: RuleStatus
+  ai_generated?: boolean
+  ai_reason?: string | null
+  thesis?: string | null
+  hold_style?: HoldStyle | null
+  version?: number
+  created_by?: string
+  supersedes_rule_id?: string | null
+  updated_at?: string | null
 }
 
 export interface RuleCreate {
@@ -144,6 +155,14 @@ export interface RuleCreate {
   logic?: 'AND' | 'OR'
   action: TradeAction
   cooldown_minutes?: number
+  status?: RuleStatus
+  ai_generated?: boolean
+  ai_reason?: string | null
+  thesis?: string | null
+  hold_style?: HoldStyle | null
+  version?: number
+  created_by?: string
+  supersedes_rule_id?: string | null
 }
 
 // ── Alerts ──────────────────────────────────────────────────────────────────
@@ -264,6 +283,12 @@ export interface Trade {
   status: TradeStatus
   order_id?: number
   timestamp: string
+  source?: 'rule' | 'ai_direct' | 'manual'
+  ai_reason?: string | null
+  ai_confidence?: number | null
+  stop_price?: number | null
+  invalidation?: string | null
+  metadata?: Record<string, unknown>
 }
 
 // ── System status ─────────────────────────────────────────────────────────────
@@ -276,8 +301,12 @@ export interface SystemStatus {
   last_run?: string
   next_run?: string
   bot_interval_seconds: number
+  autopilot_mode?: 'OFF' | 'PAPER' | 'LIVE'
+  autopilot_emergency_stop?: boolean
+  autopilot_daily_loss_locked?: boolean
   features?: {
     market_diagnostics: boolean
+    autopilot_console?: boolean
   }
 }
 
@@ -495,7 +524,6 @@ export type {
   RecommendationCategory,
   RulePerformance,
   RuleVerdict,
-  RuleStatus,
   SectorPerformance,
   TimePattern,
   ScoreAnalysis,
@@ -1006,6 +1034,8 @@ export interface RuleVersion {
   cooldown_minutes: number
   created_at: string
   note?: string
+  author?: string
+  status?: RuleStatus
 }
 
 export interface ValidationError {

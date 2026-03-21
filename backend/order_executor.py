@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from ib_insync import MarketOrder, LimitOrder, Trade as IBTrade
 from ibkr_client import ibkr
 from database import save_trade, update_trade_status
+from market_data import get_latest_price
 from models import Rule, Trade
 from config import cfg
 
@@ -123,6 +124,20 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         log.error("Pre-flight check failed: %s", err)
         return None
 
+    price_estimate = rule.action.limit_price
+    if price_estimate is None:
+        try:
+            price_estimate = await get_latest_price(rule.symbol)
+        except Exception:
+            price_estimate = None
+
+    account_equity = 0.0
+    try:
+        acct = await ibkr.get_account_summary()
+        account_equity = float(acct.balance) if acct else 0.0
+    except Exception:
+        account_equity = 0.0
+
     # Safety kernel — hard runtime checks (kill switch, daily loss, risk, dedup)
     try:
         from safety_kernel import check_all, SafetyViolation
@@ -131,6 +146,8 @@ async def place_order(rule: Rule) -> Optional[Trade]:
             side=rule.action.type,
             quantity=rule.action.quantity,
             source="rule",
+            account_equity=account_equity,
+            price_estimate=float(price_estimate or 0.0),
         )
     except SafetyViolation as exc:
         log.warning("Safety kernel REJECTED order: %s", exc)
