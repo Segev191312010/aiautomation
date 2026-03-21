@@ -427,6 +427,32 @@ async def resolve_autopilot_intervention(intervention_id: int, payload: ResolveI
     return {"resolved": True, "resolved_by": payload.resolved_by}
 
 
+# ── IBKR Scanner ─────────────────────────────────────────────────────────────
+
+@router.get("/scanner/templates")
+async def get_scanner_templates():
+    """List available IBKR scan templates."""
+    from ibkr_scanner import get_available_scans
+    return get_available_scans()
+
+
+@router.get("/scanner/run/{scan_name}")
+async def run_scanner(scan_name: str, max_results: int = Query(default=50, ge=1, le=100)):
+    """Run an IBKR server-side market scan."""
+    from ibkr_scanner import run_scan
+    results = await run_scan(scan_name, max_results)
+    return {"scan": scan_name, "count": len(results), "results": results}
+
+
+@router.get("/scanner/multi")
+async def run_multi_scanner():
+    """Run multiple scans and return combined results."""
+    from ibkr_scanner import run_multi_scan
+    results = await run_multi_scan()
+    total = sum(len(v) for v in results.values())
+    return {"scans": list(results.keys()), "total": total, "results": results}
+
+
 @router.get("/costs", response_model=CostReportResponse)
 async def get_autopilot_costs(days: int = Query(default=30, ge=1, le=365)):
     try:

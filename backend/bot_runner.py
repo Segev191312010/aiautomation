@@ -264,6 +264,21 @@ async def _run_cycle() -> None:
     # ── Fetch bars ────────────────────────────────────────────────────────────
     clear_bar_cache()
     bars_by_symbol: dict = {}
+
+    # Fast path: use IBKR scanner for real-time market scanning (2-sec cycles)
+    if cfg.BOT_INTERVAL_SECONDS <= 30 and ibkr.is_connected():
+        try:
+            from ibkr_scanner import get_scan_symbols
+            scanner_symbols = await get_scan_symbols(["hot_us_stocks", "top_gainers", "gap_up"])
+            # Add open position symbols (always need to check exits)
+            for pos in open_positions:
+                if pos.symbol.upper() not in scanner_symbols:
+                    scanner_symbols.append(pos.symbol.upper())
+            all_symbols = set(scanner_symbols)
+            log.info("IBKR scanner: %d symbols for fast cycle", len(all_symbols))
+        except Exception as exc:
+            log.warning("IBKR scanner failed, falling back to universe: %s", exc)
+
     symbol_list = sorted(all_symbols)
 
     if len(symbol_list) > 50:
@@ -372,6 +387,7 @@ async def _run_cycle() -> None:
         triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
 
     # ── Score and rank signals ───────────────────────────────────────────────
+    rule_candidates: list[dict] = []
     try:
         from signal_scorer import signal_scorer
         from ai_params import ai_params
@@ -403,20 +419,88 @@ async def _run_cycle() -> None:
                 event_bus.publish(sig_event)
                 event_logger.log_event(sig_event)
             metrics.record("signals_scored", len(ranked))
-        triggered = [(r["_rule"], r["_symbol"]) for r in ranked]
+        rule_candidates = [
+            {
+                "symbol": str(r["_symbol"]).upper(),
+                "trigger_symbol": r["_symbol"],
+                "source": "rule",
+                "score": float(r["composite_score"]),
+                "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
+                "is_exit": r["_rule"].action.type == "SELL",
+                "rule": r["_rule"],
+            }
+            for r in ranked
+        ]
     except Exception as exc:
         log.warning("Signal scoring failed, using unranked: %s", exc)
+        rule_candidates = [
+            {
+                "symbol": str(sym).upper(),
+                "trigger_symbol": sym,
+                "source": "rule",
+                "score": 50.0,
+                "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
+                "is_exit": rule.action.type == "SELL",
+                "rule": rule,
+            }
+            for rule, sym in triggered
+        ]
 
     # ── Execute triggered rules ───────────────────────────────────────────────
-    total_signals = len(direct_candidates)
+    total_signals = len(rule_candidates) + len(direct_candidates)
+    selected_candidates: list[dict] = []
+    if cfg.AUTOPILOT_MODE != "OFF":
+        try:
+            from execution_brain import choose_candidates
+
+            selected_candidates = choose_candidates(rule_candidates, direct_candidates)
+            if selected_candidates:
+                log.info("Execution brain selected %d / %d candidates", len(selected_candidates), total_signals)
+        except Exception as exc:
+            log.warning("Execution brain unavailable, falling back to ordered candidates: %s", exc)
+            selected_candidates = rule_candidates + direct_candidates
     orders_placed = 0
     max_orders_per_cycle = 5
     executed_symbols: set[str] = set()
-    for rule, trigger_symbol in triggered:
-        total_signals += 1
+    for candidate in selected_candidates:
         if orders_placed >= max_orders_per_cycle:
             log.info("Max orders per cycle (%d) reached — deferring remaining signals", max_orders_per_cycle)
             break
+
+        source = str(candidate.get("source", "rule"))
+        symbol = str(candidate.get("symbol", "")).upper()
+        if not symbol or symbol in executed_symbols:
+            continue
+
+        if source == "ai_direct":
+            try:
+                from api_contracts import AIDirectTrade
+                from direct_ai_trader import execute_direct_trade
+
+                decision = AIDirectTrade(**dict(candidate.get("decision", {})))
+                outcome = await execute_direct_trade(decision)
+                trade_payload = outcome.get("trade", {})
+                orders_placed += 1
+                executed_symbols.add(decision.symbol.upper())
+                metrics.record("orders_placed", orders_placed)
+                await _emit({
+                    "type": "signal",
+                    "source": "ai_direct",
+                    "symbol": decision.symbol,
+                    "action": decision.action,
+                    "trade_id": trade_payload.get("id"),
+                    "order_id": trade_payload.get("order_id"),
+                    "reason": decision.reason,
+                })
+            except Exception as exc:
+                log.warning("Direct AI trade blocked for %s: %s", symbol, exc)
+            continue
+
+        rule = candidate.get("rule")
+        trigger_symbol = str(candidate.get("trigger_symbol", symbol)).upper()
+        if not isinstance(rule, Rule):
+            log.warning("Skipping malformed rule candidate for %s", symbol)
+            continue
 
         # For universe rules, set the symbol on the rule copy for order placement
         order_rule = rule.model_copy()
@@ -582,40 +666,6 @@ async def _run_cycle() -> None:
                 "trade_id": trade.id,
                 "order_id": trade.order_id,
             })
-
-    if cfg.AUTOPILOT_MODE != "OFF" and direct_candidates:
-        try:
-            from execution_brain import choose_candidates
-            from api_contracts import AIDirectTrade
-            from direct_ai_trader import execute_direct_trade
-
-            remaining_direct = [
-                candidate for candidate in direct_candidates
-                if str(candidate.get("symbol", "")).upper() not in executed_symbols
-            ]
-            for candidate in choose_candidates([], remaining_direct):
-                if orders_placed >= max_orders_per_cycle:
-                    log.info("Max orders per cycle (%d) reached — deferring direct AI trades", max_orders_per_cycle)
-                    break
-                decision = AIDirectTrade(**dict(candidate.get("decision", {})))
-                try:
-                    outcome = await execute_direct_trade(decision)
-                    trade_payload = outcome.get("trade", {})
-                    orders_placed += 1
-                    metrics.record("orders_placed", orders_placed)
-                    await _emit({
-                        "type": "signal",
-                        "source": "ai_direct",
-                        "symbol": decision.symbol,
-                        "action": decision.action,
-                        "trade_id": trade_payload.get("id"),
-                        "order_id": trade_payload.get("order_id"),
-                        "reason": decision.reason,
-                    })
-                except Exception as exc:
-                    log.warning("Direct AI trade blocked for %s: %s", decision.symbol, exc)
-        except Exception as exc:
-            log.warning("Direct AI execution phase unavailable: %s", exc)
 
     await _emit({
         "type": "bot",
