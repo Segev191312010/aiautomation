@@ -65,7 +65,11 @@ async def register_position(
     atr_stop_mult = exit_p["atr_stop_mult"]
     atr_trail_mult = exit_p["atr_trail_mult"]
 
-    hard_stop = entry_price - atr_stop_mult * atr_val if atr_val > 0 else entry_price * 0.97
+    # I-8 FIX: Correct hard stop direction for SELL/short positions
+    if trade.action == "SELL":
+        hard_stop = entry_price + atr_stop_mult * atr_val if atr_val > 0 else entry_price * 1.03
+    else:
+        hard_stop = entry_price - atr_stop_mult * atr_val if atr_val > 0 else entry_price * 0.97
 
     pos = OpenPosition(
         id=trade.id,

@@ -99,6 +99,7 @@ async def _loop() -> None:
 
 async def _check_cycle() -> None:
     """Run one evaluation cycle over all enabled alerts."""
+    _cycle_start = time.monotonic()
     alerts = await get_enabled_alerts_all()
     if not alerts:
         return
@@ -139,7 +140,7 @@ async def _check_cycle() -> None:
         len(symbols),
         fired,
         failed,
-        time.monotonic() - time.monotonic(),  # will be ~0, real duration logged in _loop
+        time.monotonic() - _cycle_start,
     )
 
 

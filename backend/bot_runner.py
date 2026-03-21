@@ -290,8 +290,7 @@ async def _run_cycle() -> None:
                                 df.index.name = "time"
                                 df = df.reset_index()
                                 df.columns = [c.lower() for c in df.columns]
-                                if "adj close" in df.columns:
-                                    df = df.rename(columns={"adj close": "close"})
+                                # adj close rename removed — auto_adjust=True already handles this
                                 bars_by_symbol[sym.upper()] = df
                             except Exception:
                                 pass
@@ -438,7 +437,11 @@ async def _run_cycle() -> None:
             from risk_config import DEFAULT_LIMITS
             positions = []
             try:
-                positions = [p.__dict__ if hasattr(p, '__dict__') else p for p in (await ibkr.get_positions() or [])]
+                if not cfg.SIM_MODE:
+                    positions = [p.__dict__ if hasattr(p, '__dict__') else p for p in (await ibkr.get_positions() or [])]
+                else:
+                    from simulation import sim_engine
+                    positions = [p.model_dump() for p in await sim_engine.get_positions()]
             except Exception:
                 pass
             risk_result = check_trade_risk(

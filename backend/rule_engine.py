@@ -39,7 +39,7 @@ def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict) -> bool:
 
     try:
         # Compute the primary indicator series (with global cache)
-        cache_key = (id(df), cond.indicator, str(cond.params))
+        cache_key = (id(df), len(df), cond.indicator, str(cond.params))
         if cache_key in _indicator_cache:
             series_a = _indicator_cache[cache_key]
         else:
@@ -242,6 +242,9 @@ def evaluate_all(
             continue
 
         # ── Single-symbol rule ───────────────────────────────────────────
+        if not rule.symbol:
+            log.warning("Rule '%s' has no symbol or universe, skipping", rule.name)
+            continue
         df = bars_by_symbol.get(rule.symbol.upper())
         if df is None or df.empty:
             log.warning("No bars available for symbol '%s' (rule: %s)", rule.symbol, rule.name)

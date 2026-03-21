@@ -58,6 +58,7 @@ class WebSocketService {
   // ── Private ─────────────────────────────────────────────────────────────
 
   private _connect(): void {
+    if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return
     try {
       this.ws = new WebSocket(this.url)
     } catch {

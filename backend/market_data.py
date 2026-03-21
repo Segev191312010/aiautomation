@@ -26,6 +26,7 @@ _BAR_SIZE_MAP = {
 
 # Cache: symbol → DataFrame (refreshed each bot cycle)
 _bar_cache: dict[str, pd.DataFrame] = {}
+_BAR_CACHE_MAX = 2000  # safety cap to prevent unbounded growth
 
 # Real-time tick callbacks: symbol → list of callbacks
 _tick_callbacks: dict[str, list[Callable]] = {}
@@ -85,6 +86,8 @@ async def get_historical_bars(
                 )
                 df["time"] = pd.to_datetime(df["time"])
                 df = df.sort_values("time").reset_index(drop=True)
+                if len(_bar_cache) >= _BAR_CACHE_MAX:
+                    _bar_cache.clear()  # full eviction when cap hit
                 _bar_cache[cache_key] = df
                 return df
         except Exception as exc:

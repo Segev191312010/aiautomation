@@ -155,8 +155,8 @@ def check_trade_risk(
         if already:
             return RiskCheckResult("BLOCK", [f"Already holding {symbol}."])
 
-    # Position size check (cap at 20% per position)
-    max_pct = 20.0
+    # Position size check — use configurable limit
+    max_pct = limits.max_position_pct
     if order_pct > max_pct:
         reasons.append(f"Position size {order_pct:.1f}% exceeds limit {limits.max_position_pct}%.")
         status = "BLOCK"
