@@ -7,6 +7,7 @@ Concurrency: asyncio.Semaphore(3), exponential backoff retry per batch.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import functools
 import json
 import logging
@@ -24,6 +25,7 @@ from models import (
     EnrichRequest, EnrichResult, ScreenerPreset,
 )
 from indicators import calculate as ind_calculate, detect_cross
+from risk_manager import get_sector
 
 log = logging.getLogger(__name__)
 
@@ -408,6 +410,167 @@ def evaluate_symbol(
     return indicator_values
 
 
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _pct_move(current: float, previous: float | None) -> float:
+    if previous in (None, 0):
+        return 0.0
+    return ((current - previous) / previous) * 100.0
+
+
+def _series_last(series: pd.Series, fallback: float) -> float:
+    clean = series.dropna()
+    if clean.empty:
+        return fallback
+    return float(clean.iloc[-1])
+
+
+def compute_screener_snapshot(df: pd.DataFrame) -> dict[str, Any]:
+    """
+    Derive a ranked setup snapshot from OHLCV bars.
+
+    The goal is not just "did it match filters?" but "how compelling is the
+    current long setup compared with other matches?".
+    """
+    close = df["close"].astype(float)
+    volume = df["volume"].astype(float)
+    price = float(close.iloc[-1])
+
+    sma20 = _series_last(_compute_indicator_series(df, "SMA", {"length": 20}), price)
+    sma50 = _series_last(_compute_indicator_series(df, "SMA", {"length": 50}), price)
+    sma200 = _series_last(_compute_indicator_series(df, "SMA", {"length": 200}), price)
+    rsi14 = _series_last(_compute_indicator_series(df, "RSI", {"length": 14}), 50.0)
+    atr14 = _series_last(_compute_indicator_series(df, "ATR", {"length": 14}), 0.0)
+
+    avg_volume20 = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean() or 0.0)
+    relative_volume = (float(volume.iloc[-1]) / avg_volume20) if avg_volume20 > 0 else 0.0
+    dollar_volume = price * avg_volume20
+    atr_pct = (atr14 / price * 100.0) if price > 0 else 0.0
+
+    ret_5 = _pct_move(price, float(close.iloc[-6]) if len(close) >= 6 else None)
+    ret_20 = _pct_move(price, float(close.iloc[-21]) if len(close) >= 21 else None)
+    ret_60 = _pct_move(price, float(close.iloc[-61]) if len(close) >= 61 else None)
+    high_20 = float(close.tail(20).max()) if len(close) >= 20 else price
+
+    trend_aligned = price > sma20 > sma50 > sma200
+    above_sma50 = price > sma50
+    above_sma200 = price > sma200
+    near_20d_high = price >= high_20 * 0.98 if high_20 > 0 else False
+    pullback_zone = trend_aligned and abs(price - sma20) / max(sma20, 1e-9) <= 0.03 and 40 <= rsi14 <= 58
+    reversal_setup = rsi14 < 38 and ret_5 > 0 and price > sma20
+    breakout_setup = trend_aligned and near_20d_high and relative_volume >= 1.4 and ret_20 > 4
+
+    trend_score = 0.0
+    if trend_aligned:
+        trend_score = 32.0
+    elif above_sma50 and above_sma200:
+        trend_score = 24.0
+    elif above_sma200:
+        trend_score = 16.0
+    elif price > sma20:
+        trend_score = 9.0
+
+    momentum_score = _clamp((ret_20 * 1.1) + (ret_60 * 0.35) + 10.0, 0.0, 24.0)
+    relative_volume_score = _clamp((relative_volume - 1.0) * 14.0, 0.0, 18.0)
+    liquidity_score = 0.0
+    if dollar_volume >= 1_000_000_000:
+        liquidity_score = 12.0
+    elif dollar_volume >= 300_000_000:
+        liquidity_score = 9.0
+    elif dollar_volume >= 100_000_000:
+        liquidity_score = 6.0
+    elif dollar_volume >= 25_000_000:
+        liquidity_score = 3.0
+
+    stability_score = 0.0
+    if 1.5 <= atr_pct <= 6.0:
+        stability_score = 8.0
+    elif 0.8 <= atr_pct <= 8.0:
+        stability_score = 5.0
+    else:
+        stability_score = 2.0
+
+    rsi_score = 0.0
+    if 48 <= rsi14 <= 68:
+        rsi_score = 8.0
+    elif 40 <= rsi14 <= 75:
+        rsi_score = 5.0
+    elif breakout_setup or reversal_setup:
+        rsi_score = 4.0
+
+    setup_bonus = 0.0
+    setup = "mixed"
+    if breakout_setup:
+        setup = "breakout"
+        setup_bonus = 10.0
+    elif pullback_zone:
+        setup = "pullback"
+        setup_bonus = 8.0
+    elif reversal_setup:
+        setup = "reversal"
+        setup_bonus = 6.0
+    elif trend_aligned:
+        setup = "trend"
+        setup_bonus = 5.0
+
+    screener_score = round(
+        _clamp(
+            trend_score
+            + momentum_score
+            + relative_volume_score
+            + liquidity_score
+            + stability_score
+            + rsi_score
+            + setup_bonus,
+            0.0,
+            100.0,
+        ),
+        1,
+    )
+
+    notes: list[str] = []
+    if trend_aligned:
+        notes.append("MA stack aligned")
+    elif above_sma200:
+        notes.append("Above 200-day trend")
+    if near_20d_high:
+        notes.append("Pressing 20-day highs")
+    if relative_volume >= 1.5:
+        notes.append(f"RVOL {relative_volume:.1f}x")
+    if ret_20 >= 8:
+        notes.append(f"20D momentum {ret_20:.1f}%")
+    if pullback_zone:
+        notes.append("Constructive pullback near trend support")
+    if reversal_setup:
+        notes.append("Oversold reversal improving")
+
+    return {
+        "screener_score": screener_score,
+        "setup": setup,
+        "relative_volume": round(relative_volume, 2),
+        "momentum_20d": round(ret_20, 2),
+        "trend_strength": round(trend_score, 1),
+        "notes": notes[:3],
+        "rsi14": round(rsi14, 2),
+        "atr_pct": round(atr_pct, 2),
+        "ret_5": round(ret_5, 2),
+        "ret_60": round(ret_60, 2),
+        "near_20d_high": near_20d_high,
+        "dollar_volume": round(dollar_volume, 2),
+    }
+
+
+def _result_sort_key(row: ScanResultRow) -> tuple[float, float, float, float]:
+    return (
+        row.screener_score,
+        row.relative_volume,
+        row.momentum_20d,
+        row.change_pct,
+    )
+
+
 async def run_scan(request: ScanRequest) -> ScanResponse:
     """Execute a full scan: resolve universe, fetch data, evaluate filters.
 
@@ -450,6 +613,7 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
         indicator_values = evaluate_symbol(df, request.filters)
         if indicator_values is None:
             continue
+        snapshot = compute_screener_snapshot(df)
 
         # Build result row
         close = df["close"]
@@ -465,12 +629,124 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
             change_pct=round(change_pct, 2),
             volume=volume,
             indicators=indicator_values,
+            screener_score=snapshot["screener_score"],
+            setup=snapshot["setup"],
+            relative_volume=snapshot["relative_volume"],
+            momentum_20d=snapshot["momentum_20d"],
+            trend_strength=snapshot["trend_strength"],
+            notes=snapshot["notes"],
         ))
+    ranked_results = sorted(results, key=_result_sort_key, reverse=True)[:request.limit]
+    return ScanResponse(results=ranked_results, skipped_symbols=sorted(skipped_set))
 
-        if len(results) >= request.limit:
-            break
 
-    return ScanResponse(results=results, skipped_symbols=sorted(skipped_set))
+async def build_market_opportunity_snapshot(
+    *,
+    universe_ids: tuple[str, ...] = ("nasdaq100", "sp500", "etfs"),
+    interval: str = "1d",
+    period: str = "6mo",
+    limit: int = 12,
+) -> dict[str, Any]:
+    """
+    Build a ranked opportunity board for the AI optimizer.
+
+    This is intentionally broader than a user-defined scan: it sweeps a liquid
+    universe, scores every symbol, and returns the strongest long setups with
+    concise rationale for Claude.
+    """
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for universe_id in universe_ids:
+        for symbol in load_universe(universe_id):
+            sym = symbol.upper()
+            if sym not in seen:
+                seen.add(sym)
+                symbols.append(sym)
+
+    if not symbols:
+        return {
+            "available": False,
+            "reason": "no_universe_symbols",
+            "candidates": [],
+            "setup_counts": {},
+            "sector_counts": {},
+        }
+
+    skipped = await refresh_cache(symbols, interval, period)
+    skipped_set = set(skipped)
+    candidates: list[dict[str, Any]] = []
+    setup_counts: Counter[str] = Counter()
+    sector_counts: Counter[str] = Counter()
+
+    for sym in symbols:
+        if sym in skipped_set:
+            continue
+        entry = _bar_cache.get((sym, interval, period))
+        if entry is None or entry.df.empty:
+            continue
+
+        df = entry.df
+        close = df["close"].astype(float)
+        if close.empty:
+            continue
+
+        last_price = float(close.iloc[-1])
+        if last_price < 5:
+            continue
+
+        volume = df["volume"].astype(float)
+        avg_volume20 = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean() or 0.0)
+        if avg_volume20 < 300_000:
+            continue
+
+        snapshot = compute_screener_snapshot(df)
+        if snapshot["screener_score"] < 45:
+            continue
+
+        sector = get_sector(sym) or "Unknown"
+        candidate = {
+            "symbol": sym,
+            "price": round(last_price, 2),
+            "change_pct": round(_pct_move(last_price, float(close.iloc[-2]) if len(close) >= 2 else None), 2),
+            "screener_score": snapshot["screener_score"],
+            "setup": snapshot["setup"],
+            "relative_volume": snapshot["relative_volume"],
+            "momentum_20d": snapshot["momentum_20d"],
+            "trend_strength": snapshot["trend_strength"],
+            "sector": sector,
+            "notes": snapshot["notes"],
+        }
+        candidates.append(candidate)
+        setup_counts[snapshot["setup"]] += 1
+        sector_counts[sector] += 1
+
+    candidates.sort(
+        key=lambda item: (
+            float(item["screener_score"]),
+            float(item["relative_volume"]),
+            float(item["momentum_20d"]),
+            float(item["change_pct"]),
+        ),
+        reverse=True,
+    )
+
+    def _top_for_setup(setup_name: str) -> list[dict[str, Any]]:
+        return [candidate for candidate in candidates if candidate["setup"] == setup_name][:3]
+
+    return {
+        "available": bool(candidates),
+        "universe_ids": list(universe_ids),
+        "interval": interval,
+        "period": period,
+        "candidate_count": len(candidates),
+        "skipped_symbols": len(skipped_set),
+        "candidates": candidates[:limit],
+        "top_breakouts": _top_for_setup("breakout"),
+        "top_pullbacks": _top_for_setup("pullback"),
+        "top_reversals": _top_for_setup("reversal"),
+        "setup_counts": dict(setup_counts),
+        "sector_counts": dict(sector_counts.most_common(6)),
+    }
 
 
 # ---------------------------------------------------------------------------

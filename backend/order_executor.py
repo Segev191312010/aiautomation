@@ -13,6 +13,7 @@ from database import save_trade, update_trade_status
 from market_data import get_latest_price
 from models import Rule, Trade
 from config import cfg
+from services import order_lifecycle, order_recovery, safety_gate
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ DEDUP_WINDOW = 5  # seconds
 _recent_orders: dict[str, float] = {}  # "symbol:action" -> timestamp
 
 
-def _pre_flight_check(rule: Rule, price_estimate: float | None = None) -> str | None:
+def _pre_flight_check(rule: Rule, price_estimate: float | None = None, *, is_exit: bool = False) -> str | None:
     """Return error message if order fails pre-flight, else None."""
     qty = rule.action.quantity
     if qty < 1 or qty > MAX_ORDER_QTY:
@@ -82,17 +83,18 @@ def _pre_flight_check(rule: Rule, price_estimate: float | None = None) -> str | 
         if order_cost < MIN_ORDER_VALUE:
             return f"Order value {order_cost:.2f} below minimum {MIN_ORDER_VALUE}"
 
-    # Dedup: reject same symbol+action within DEDUP_WINDOW
-    key = f"{rule.symbol}:{rule.action.type}"
-    now = time.time()
-    # C-3 FIX: Evict stale entries to prevent unbounded growth
-    stale = [k for k, v in _recent_orders.items() if (now - v) > DEDUP_WINDOW * 2]
-    for k in stale:
-        del _recent_orders[k]
-    last = _recent_orders.get(key)
-    if last and (now - last) < DEDUP_WINDOW:
-        return f"Duplicate order for {key} within {DEDUP_WINDOW}s"
-    _recent_orders[key] = now
+    if not is_exit:
+        # Dedup: reject same symbol+action within DEDUP_WINDOW
+        key = f"{rule.symbol}:{rule.action.type}"
+        now = time.time()
+        # C-3 FIX: Evict stale entries to prevent unbounded growth
+        stale = [k for k, v in _recent_orders.items() if (now - v) > DEDUP_WINDOW * 2]
+        for k in stale:
+            del _recent_orders[k]
+        last = _recent_orders.get(key)
+        if last and (now - last) < DEDUP_WINDOW:
+            return f"Duplicate order for {key} within {DEDUP_WINDOW}s"
+        _recent_orders[key] = now
 
     return None
 
@@ -108,7 +110,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def place_order(rule: Rule) -> Optional[Trade]:
+async def place_order(
+    rule: Rule,
+    *,
+    source: str = "rule",
+    skip_safety: bool = False,
+    require_autopilot_authority: bool = True,
+    stop_price: float | None = None,
+    is_exit: bool = False,
+    has_existing_position: bool = False,
+) -> Optional[Trade]:
     """
     Place an order for the given rule's action.
 
@@ -119,7 +130,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         raise RuntimeError("SIM_MODE=true: use simulation endpoints instead")
 
     # Pre-flight validation
-    err = _pre_flight_check(rule)
+    err = _pre_flight_check(rule, is_exit=is_exit)
     if err:
         log.error("Pre-flight check failed: %s", err)
         return None
@@ -137,23 +148,22 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         account_equity = float(acct.balance) if acct else 0.0
     except Exception:
         account_equity = 0.0
-
-    # Safety kernel — hard runtime checks (kill switch, daily loss, risk, dedup)
-    try:
-        from safety_kernel import check_all, SafetyViolation
-        await check_all(
+    if not skip_safety:
+        allowed, reason = await safety_gate.evaluate_runtime_safety(
             symbol=rule.symbol,
             side=rule.action.type,
             quantity=rule.action.quantity,
-            source="rule",
+            source=source,
             account_equity=account_equity,
             price_estimate=float(price_estimate or 0.0),
+            stop_price=stop_price,
+            is_exit=is_exit,
+            has_existing_position=has_existing_position,
+            require_autopilot_authority=require_autopilot_authority,
         )
-    except SafetyViolation as exc:
-        log.warning("Safety kernel REJECTED order: %s", exc)
-        return None
-    except Exception as exc:
-        log.debug("Safety kernel check skipped: %s", exc)
+        if not allowed:
+            log.warning("Runtime safety gate REJECTED order: %s", reason)
+            return None
 
     if not ibkr.is_connected():
         log.error("Cannot place order — IBKR not connected")
@@ -193,6 +203,7 @@ async def place_order(rule: Rule) -> Optional[Trade]:
     ib_order.tif = "GTC"
 
     # Record trade in DB (PENDING status)
+    now_iso = _now_iso()
     trade_rec = Trade(
         rule_id=rule.id,
         rule_name=rule.name,
@@ -205,8 +216,11 @@ async def place_order(rule: Rule) -> Optional[Trade]:
         fill_price=None,
         status="PENDING",
         order_id=None,
-        timestamp=_now_iso(),
+        timestamp=now_iso,
+        mode="LIVE",
+        opened_at=now_iso,
     )
+    trade_rec.position_id = trade_rec.id
     await save_trade(trade_rec)
 
     try:
@@ -238,17 +252,17 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
         await asyncio.sleep(2)
         elapsed += 2
         status = ib_trade.orderStatus.status
-        if status == "Filled":
-            fill_price = ib_trade.orderStatus.avgFillPrice
-            await update_trade_status(trade_rec.id, "FILLED", fill_price)
-            trade_rec.status = "FILLED"  # type: ignore[assignment]
-            trade_rec.fill_price = fill_price
+        resolved = await order_recovery.reconcile_trade_status_update(
+            trade_rec,
+            status,
+            fill_price=ib_trade.orderStatus.avgFillPrice,
+            fill_callbacks=_fill_callbacks,
+        )
+        if resolved == "FILLED":
+            fill_price = float(trade_rec.fill_price or ib_trade.orderStatus.avgFillPrice or 0.0)
             log.info("Order FILLED: %s %d %s @ %.4f",
                      trade_rec.action, trade_rec.quantity, trade_rec.symbol, fill_price)
-            for cb in _fill_callbacks:
-                cb(trade_rec)
 
-            # Notify via WebSocket
             try:
                 from notification_service import notification_service
                 asyncio.create_task(notification_service.notify_order_filled({
@@ -262,13 +276,11 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
             except Exception:
                 pass
 
-            # Exit management is handled by position_tracker (ATR stops + MA exits)
             log.info("Fill ready for exit tracker: %s %s @ %.4f",
                      trade_rec.action, trade_rec.symbol, fill_price)
             return
-        if status in ("Cancelled", "ApiCancelled", "Inactive"):
-            await update_trade_status(trade_rec.id, "CANCELLED")
-            log.warning("Order cancelled: %s", trade_rec.order_id)
+        if resolved in {"CANCELLED", "ERROR"}:
+            log.warning("Order resolved without fill: order_id=%s status=%s", trade_rec.order_id, resolved)
             return
 
     log.warning("Order %s did not fill within %ds", trade_rec.order_id, timeout)
@@ -291,15 +303,14 @@ async def reconcile_pending_orders() -> None:
     """
     Called once on startup. Subscribes to IBKR orderStatusEvent so that
     any PENDING orders in the DB are updated when IBKR reports a fill or
-    cancellation — even if the fill happened while the server was down.
+    cancellation - even if the fill happened while the server was down.
     """
-    from database import get_trades, update_trade_status
+    from database import get_trades
 
     if not ibkr.is_connected():
         log.warning("reconcile_pending_orders: IBKR not connected, skipping")
         return
 
-    # Load our PENDING trades and build a lookup by IBKR order_id
     pending = [t for t in await get_trades(limit=500) if t.status == "PENDING" and t.order_id]
     if not pending:
         return
@@ -307,39 +318,39 @@ async def reconcile_pending_orders() -> None:
     pending_by_oid: dict[int, Trade] = {t.order_id: t for t in pending}
     log.info("Reconciling %d PENDING order(s) with IBKR", len(pending))
 
-    # Check current IBKR open trades for immediate status
     for ib_trade in ibkr.ib.openTrades():
         oid = ib_trade.order.orderId
         if oid not in pending_by_oid:
             continue
         rec = pending_by_oid[oid]
-        status = ib_trade.orderStatus.status
-        if status == "Filled":
-            fill_price = ib_trade.orderStatus.avgFillPrice
-            await update_trade_status(rec.id, "FILLED", fill_price)
-            log.info("Reconciled FILLED: %s %s @ %.4f", rec.action, rec.symbol, fill_price)
-        elif status in ("Cancelled", "ApiCancelled", "Inactive"):
-            await update_trade_status(rec.id, "CANCELLED")
-            log.info("Reconciled CANCELLED: %s %s", rec.action, rec.symbol)
+        resolved = await order_recovery.reconcile_trade_status_update(
+            rec,
+            ib_trade.orderStatus.status,
+            fill_price=ib_trade.orderStatus.avgFillPrice,
+            fill_callbacks=_fill_callbacks,
+        )
+        if resolved == "FILLED":
+            log.info("Reconciled FILLED: %s %s @ %.4f", rec.action, rec.symbol, float(rec.fill_price or 0.0))
+        elif resolved in {"CANCELLED", "ERROR"}:
+            log.info("Reconciled %s: %s %s", resolved, rec.action, rec.symbol)
 
-    # Subscribe to live events for orders still open in IBKR
     def _on_order_status(ib_trade: IBTrade) -> None:
         oid = ib_trade.order.orderId
         if oid not in pending_by_oid:
             return
         rec = pending_by_oid[oid]
         status = ib_trade.orderStatus.status
-        if status == "Filled":
+        normalized = order_recovery.normalize_trade_status(status)
+        if normalized == "FILLED":
             fill_price = ib_trade.orderStatus.avgFillPrice
             asyncio.create_task(_handle_fill(rec, fill_price))
-        elif status in ("Cancelled", "ApiCancelled", "Inactive"):
-            asyncio.create_task(update_trade_status(rec.id, "CANCELLED"))
-            log.info("Order CANCELLED via event: %s %s", rec.action, rec.symbol)
+        elif normalized in {"CANCELLED", "ERROR"}:
+            asyncio.create_task(order_recovery.reconcile_trade_status_update(rec, status))
+            log.info("Order resolved via event: %s %s -> %s", rec.action, rec.symbol, normalized)
 
     ibkr.ib.orderStatusEvent += _on_order_status
     log.info("Subscribed to IBKR orderStatusEvent for pending order reconciliation")
 
-    # Convert any stuck MKT orders to LIMIT so they can trade pre-market
     await _convert_mkt_orders_to_limit()
 
 
@@ -402,15 +413,15 @@ async def _convert_mkt_orders_to_limit() -> None:
 
 
 async def _handle_fill(trade_rec: Trade, fill_price: float) -> None:
-    """Process a fill from IBKR event — update DB and fire callbacks."""
-    from database import update_trade_status
-    await update_trade_status(trade_rec.id, "FILLED", fill_price)
-    trade_rec.status = "FILLED"  # type: ignore[assignment]
-    trade_rec.fill_price = fill_price
+    """Process a fill from IBKR event - update DB and fire callbacks."""
+    await order_recovery.reconcile_trade_status_update(
+        trade_rec,
+        "Filled",
+        fill_price=fill_price,
+        fill_callbacks=_fill_callbacks,
+    )
     log.info("Order FILLED (reconciled): %s %d %s @ %.4f",
              trade_rec.action, trade_rec.quantity, trade_rec.symbol, fill_price)
-    for cb in _fill_callbacks:
-        cb(trade_rec)
 
 
 async def get_open_orders() -> list[dict]:
@@ -429,3 +440,8 @@ async def get_open_orders() -> list[dict]:
         }
         for t in ibkr.ib.openTrades()
     ]
+
+
+
+
+

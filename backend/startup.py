@@ -19,6 +19,8 @@ from typing import TypedDict
 
 log = logging.getLogger(__name__)
 
+DEFAULT_DEV_JWT_SECRET = "trading-dev-secret-MUST-SET-IN-ENV"
+
 
 class StartupResult(TypedDict):
     errors: list[str]
@@ -46,8 +48,7 @@ async def validate_startup() -> StartupResult:
     # ------------------------------------------------------------------
     # 1. JWT secret strength
     # ------------------------------------------------------------------
-    default_secret = "trading-dev-secret-change-in-prod"
-    if cfg.JWT_SECRET == default_secret:
+    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET:
         warnings.append(
             "JWT_SECRET is the default development value. "
             "Set a strong random secret before going to production."
@@ -98,6 +99,7 @@ async def validate_startup() -> StartupResult:
     # ------------------------------------------------------------------
     log.info("=== Trading Platform Startup ===")
     log.info("version  : %s", cfg.APP_VERSION)
+    log.info("autopilot: %s", getattr(cfg, "AUTOPILOT_MODE", "OFF"))
     log.info("mode     : %s", "PAPER" if cfg.IS_PAPER else "LIVE")
     log.info("sim_mode : %s", "ON" if cfg.SIM_MODE else "OFF")
     log.info("ibkr_port: %d", cfg.IBKR_PORT)

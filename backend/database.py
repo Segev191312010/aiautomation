@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
+from typing import Literal
 import aiosqlite
 from datetime import datetime, timezone
 from config import cfg
@@ -27,6 +28,7 @@ async def get_db():
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA foreign_keys=ON")
         yield db
 
 
@@ -315,6 +317,7 @@ CREATE TABLE IF NOT EXISTS ai_rule_validation_runs (
     overlap_score   REAL,
     passed          INTEGER NOT NULL DEFAULT 0,
     notes           TEXT,
+    details         TEXT,
     created_at      TEXT NOT NULL,
     user_id         TEXT NOT NULL DEFAULT 'demo'
 );
@@ -348,6 +351,95 @@ CREATE TABLE IF NOT EXISTS regime_snapshots (
 );
 """
 
+# ── S10: Decision Ledger Tables ──────────────────────────────────────────────
+
+_CREATE_AI_DECISION_RUNS = """
+CREATE TABLE IF NOT EXISTS ai_decision_runs (
+    id                   TEXT PRIMARY KEY,
+    source               TEXT NOT NULL,
+    mode                 TEXT NOT NULL,
+    provider             TEXT,
+    model                TEXT,
+    prompt_version       TEXT,
+    context_hash         TEXT NOT NULL,
+    context_json         TEXT NOT NULL,
+    reasoning            TEXT,
+    aggregate_confidence REAL,
+    abstained            INTEGER NOT NULL DEFAULT 0,
+    input_tokens         INTEGER,
+    output_tokens        INTEGER,
+    latency_ms           INTEGER,
+    status               TEXT NOT NULL DEFAULT 'created',
+    error                TEXT,
+    created_at           TEXT NOT NULL,
+    completed_at         TEXT,
+    user_id              TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_AI_DECISION_ITEMS = """
+CREATE TABLE IF NOT EXISTS ai_decision_items (
+    id                TEXT PRIMARY KEY,
+    run_id            TEXT NOT NULL,
+    item_index        INTEGER NOT NULL,
+    item_type         TEXT NOT NULL,
+    action_name       TEXT,
+    target_key        TEXT,
+    symbol            TEXT,
+    proposed_json     TEXT NOT NULL,
+    applied_json      TEXT,
+    gate_status       TEXT NOT NULL DEFAULT 'pending',
+    gate_reason       TEXT,
+    confidence        REAL,
+    regime            TEXT,
+    origin_rule_id    TEXT,
+    created_rule_id   TEXT,
+    created_trade_id  TEXT,
+    realized_trade_id TEXT,
+    realized_pnl      REAL,
+    realized_at       TEXT,
+    score_status      TEXT NOT NULL DEFAULT 'unscored',
+    score_source      TEXT,
+    notes             TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    user_id           TEXT NOT NULL DEFAULT 'demo',
+    FOREIGN KEY(run_id) REFERENCES ai_decision_runs(id) ON DELETE CASCADE
+);
+"""
+
+_CREATE_AI_EVALUATION_RUNS = """
+CREATE TABLE IF NOT EXISTS ai_evaluation_runs (
+    id              TEXT PRIMARY KEY,
+    candidate_type  TEXT NOT NULL,
+    candidate_key   TEXT NOT NULL,
+    baseline_key    TEXT,
+    evaluation_mode TEXT NOT NULL,
+    window_start    TEXT,
+    window_end      TEXT,
+    request_json    TEXT NOT NULL,
+    summary_json    TEXT,
+    status          TEXT NOT NULL DEFAULT 'queued',
+    error           TEXT,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    user_id         TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_AI_EVALUATION_SLICES = """
+CREATE TABLE IF NOT EXISTS ai_evaluation_slices (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluation_run_id TEXT NOT NULL,
+    slice_type        TEXT NOT NULL,
+    slice_key         TEXT NOT NULL,
+    metrics_json      TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    user_id           TEXT NOT NULL DEFAULT 'demo',
+    FOREIGN KEY(evaluation_run_id) REFERENCES ai_evaluation_runs(id) ON DELETE CASCADE
+);
+"""
+
 _ALLOWED_COLUMNS: set[tuple[str, str]] = {
     ("rules", "user_id"),
     ("trades", "user_id"),
@@ -359,6 +451,11 @@ _ALLOWED_COLUMNS: set[tuple[str, str]] = {
     ("ai_shadow_decisions", "regime"),
     ("ai_audit_log", "param_type"),
     ("ai_audit_log", "regime"),
+    ("ai_rule_validation_runs", "details"),
+    ("ai_audit_log", "decision_run_id"),
+    ("ai_audit_log", "decision_item_id"),
+    ("ai_shadow_decisions", "decision_run_id"),
+    ("ai_shadow_decisions", "decision_item_id"),
 }
 
 
@@ -396,6 +493,7 @@ async def init_db() -> None:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA foreign_keys=ON")
 
         # Create tables
         await db.execute(_CREATE_USERS)
@@ -421,6 +519,11 @@ async def init_db() -> None:
         await db.execute(_CREATE_AI_RULE_VALIDATION_RUNS)
         await db.execute(_CREATE_MANUAL_INTERVENTIONS)
         await db.execute(_CREATE_REGIME_SNAPSHOTS)
+        # S10: decision ledger tables
+        await db.execute(_CREATE_AI_DECISION_RUNS)
+        await db.execute(_CREATE_AI_DECISION_ITEMS)
+        await db.execute(_CREATE_AI_EVALUATION_RUNS)
+        await db.execute(_CREATE_AI_EVALUATION_SLICES)
         await db.commit()
 
         # Migrate: add user_id column to existing tables
@@ -435,6 +538,13 @@ async def init_db() -> None:
         await _safe_add_column(db, "ai_shadow_decisions", "regime",      "TEXT", "NULL")
         await _safe_add_column(db, "ai_audit_log",        "param_type",  "TEXT", "NULL")
         await _safe_add_column(db, "ai_audit_log",        "regime",      "TEXT", "NULL")
+        # S9: evidence details on validation runs
+        await _safe_add_column(db, "ai_rule_validation_runs", "details", "TEXT", "NULL")
+        # S10: decision ledger linkage on audit/shadow tables
+        await _safe_add_column(db, "ai_audit_log", "decision_run_id", "TEXT", "NULL")
+        await _safe_add_column(db, "ai_audit_log", "decision_item_id", "TEXT", "NULL")
+        await _safe_add_column(db, "ai_shadow_decisions", "decision_run_id", "TEXT", "NULL")
+        await _safe_add_column(db, "ai_shadow_decisions", "decision_item_id", "TEXT", "NULL")
         await db.commit()
 
         # Indexes for common query patterns (after migration so user_id exists)
@@ -463,6 +573,13 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_opened ON manual_interventions(opened_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_resolved ON manual_interventions(resolved_at, opened_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(timestamp DESC)")
+        # S10: decision ledger indexes
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_runs_created ON ai_decision_runs(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_run ON ai_decision_items(run_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_type ON ai_decision_items(item_type)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_trade ON ai_decision_items(created_trade_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_evaluation_runs_created ON ai_evaluation_runs(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_evaluation_slices_run ON ai_evaluation_slices(evaluation_run_id)")
         await db.commit()
 
         # Seed demo user
@@ -517,7 +634,7 @@ async def save_rule_version(
     created_at = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
-            "INSERT OR REPLACE INTO ai_rule_versions "
+            "INSERT INTO ai_rule_versions "
             "(rule_id, version, snapshot, diff_summary, created_at, author, user_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -564,6 +681,31 @@ async def get_rule_versions(rule_id: str, user_id: str = "demo") -> list[dict]:
     return versions
 
 
+async def persist_rule_revision(
+    rule: Rule,
+    *,
+    author: str = "ai",
+    diff_summary: str | None = None,
+    user_id: str = "demo",
+) -> None:
+    """Atomic: bump version, save rule + version snapshot in a single transaction."""
+    rule.version = max(1, rule.version) + 1
+    rule.updated_at = datetime.now(timezone.utc).isoformat()
+    created_at = rule.updated_at
+    async with get_db() as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO rules (id, data, user_id) VALUES (?, ?, ?)",
+            (rule.id, rule.model_dump_json(), user_id),
+        )
+        await db.execute(
+            "INSERT INTO ai_rule_versions "
+            "(rule_id, version, snapshot, diff_summary, created_at, author, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (rule.id, rule.version, rule.model_dump_json(), diff_summary, created_at, author, user_id),
+        )
+        await db.commit()
+
+
 async def delete_rule(rule_id: str, user_id: str = "demo") -> bool:
     async with get_db() as db:
         cur = await db.execute(
@@ -598,6 +740,19 @@ async def get_trades(limit: int = 200, user_id: str = "demo") -> list[Trade]:
     return [Trade.model_validate(json.loads(r[0])) for r in rows]
 
 
+async def get_trade(trade_id: str, user_id: str = "demo") -> Trade | None:
+    """Fetch a single trade by its ID."""
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT data FROM trades WHERE id=? AND user_id=?",
+            (trade_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+    if row:
+        return Trade.model_validate(json.loads(row[0]))
+    return None
+
+
 async def get_trade_by_order_id(order_id: int, symbol: str | None = None, user_id: str = "demo") -> Trade | None:
     """Fetch a trade by IBKR order_id, optionally filtered by symbol to prevent ID reuse collisions."""
     async with get_db() as db:
@@ -618,10 +773,12 @@ async def get_trade_by_order_id(order_id: int, symbol: str | None = None, user_i
     return None
 
 
-async def update_trade_status(trade_id: str, status: str, fill_price: float | None = None) -> None:
+async def update_trade_status(
+    trade_id: str, status: str, fill_price: float | None = None, user_id: str = "demo"
+) -> None:
     trade = None
     async with get_db() as db:
-        async with db.execute("SELECT data FROM trades WHERE id=?", (trade_id,)) as cur:
+        async with db.execute("SELECT data FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)) as cur:
             row = await cur.fetchone()
         if row:
             trade = Trade.model_validate(json.loads(row[0]))
@@ -629,10 +786,74 @@ async def update_trade_status(trade_id: str, status: str, fill_price: float | No
             if fill_price is not None:
                 trade.fill_price = fill_price
             await db.execute(
-                "UPDATE trades SET data=? WHERE id=?",
-                (trade.model_dump_json(), trade_id),
+                "UPDATE trades SET data=? WHERE id=? AND user_id=?",
+                (trade.model_dump_json(), trade_id, user_id),
             )
             await db.commit()
+
+
+async def finalize_trade_outcome(
+    trade_id: str,
+    *,
+    position_side: Literal["BUY", "SELL"],  # "BUY" (long) or "SELL" (short) — the ENTRY side
+    entry_price: float,
+    exit_price: float,
+    fees: float = 0.0,
+    close_reason: str,
+    position_id: str | None = None,
+    user_id: str = "demo",
+) -> Trade | None:
+    """Finalize a trade's canonical outcome fields. Single source of truth for P&L."""
+    if position_side not in ("BUY", "SELL"):
+        raise ValueError(f"position_side must be 'BUY' or 'SELL', got '{position_side}'")
+    async with get_db() as db:
+        async with db.execute("SELECT data FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)) as cur:
+            row = await cur.fetchone()
+        if not row:
+            log.warning("finalize_trade_outcome: trade %s not found", trade_id)
+            return None
+
+        trade = Trade.model_validate(json.loads(row[0]))
+        qty = trade.quantity
+
+        # Side-aware P&L
+        if position_side == "BUY":
+            realized_pnl = round((exit_price - entry_price) * qty - fees, 2)
+            pnl_pct = round(((exit_price / entry_price) - 1) * 100, 2) if entry_price > 0 else 0.0
+        else:
+            realized_pnl = round((entry_price - exit_price) * qty - fees, 2)
+            pnl_pct = round(((entry_price / exit_price) - 1) * 100, 2) if exit_price > 0 else 0.0
+
+        trade.entry_price = entry_price
+        trade.exit_price = exit_price
+        trade.fees = fees
+        trade.realized_pnl = realized_pnl
+        trade.pnl_pct = pnl_pct
+        trade.closed_at = datetime.now(timezone.utc).isoformat()
+        trade.close_reason = close_reason
+        trade.outcome_quality = "canonical"
+        if position_id is not None:
+            trade.position_id = position_id
+        # Backward compat: metadata["pnl"] for unmigrated readers
+        trade.metadata["pnl"] = realized_pnl
+
+        await db.execute(
+            "UPDATE trades SET data=? WHERE id=? AND user_id=?",
+            (trade.model_dump_json(), trade_id, user_id),
+        )
+        await db.commit()
+
+    # S10: link realized outcome back to originating decision item
+    if trade.decision_id:
+        try:
+            from ai_decision_ledger import attach_realized_trade
+            await attach_realized_trade(
+                trade.decision_id, trade.id, realized_pnl, trade.closed_at,
+            )
+        except Exception as exc:
+            log.warning("Failed to attach realized trade to decision item: %s", exc)
+
+    return trade
 
 
 async def save_rule_validation_run(
@@ -648,15 +869,17 @@ async def save_rule_validation_run(
     overlap_score: float | None,
     passed: bool,
     notes: str | None = None,
+    details: dict | None = None,
     user_id: str = "demo",
 ) -> None:
     created_at = datetime.now(timezone.utc).isoformat()
+    details_json = json.dumps(details) if details else None
     async with get_db() as db:
         await db.execute(
             "INSERT INTO ai_rule_validation_runs "
             "(rule_id, version, validation_mode, trades_count, hit_rate, net_pnl, expectancy, "
-            " max_drawdown, overlap_score, passed, notes, created_at, user_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " max_drawdown, overlap_score, passed, notes, details, created_at, user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rule_id,
                 version,
@@ -669,6 +892,7 @@ async def save_rule_validation_run(
                 overlap_score,
                 1 if passed else 0,
                 notes,
+                details_json,
                 created_at,
                 user_id,
             ),
@@ -680,14 +904,15 @@ async def get_rule_validation_runs(rule_id: str, user_id: str = "demo") -> list[
     async with get_db() as db:
         async with db.execute(
             "SELECT version, validation_mode, trades_count, hit_rate, net_pnl, expectancy, "
-            "max_drawdown, overlap_score, passed, notes, created_at "
+            "max_drawdown, overlap_score, passed, notes, details, created_at "
             "FROM ai_rule_validation_runs WHERE rule_id=? AND user_id=? "
             "ORDER BY created_at DESC",
             (rule_id, user_id),
         ) as cur:
             rows = await cur.fetchall()
-    return [
-        {
+    results = []
+    for row in rows:
+        entry = {
             "version": row[0],
             "validation_mode": row[1],
             "trades_count": row[2],
@@ -698,9 +923,19 @@ async def get_rule_validation_runs(rule_id: str, user_id: str = "demo") -> list[
             "overlap_score": row[7],
             "passed": bool(row[8]),
             "notes": row[9],
-            "created_at": row[10],
+            "created_at": row[11],
         }
-        for row in rows
+        # S9: flatten details JSON into the response dict
+        if row[10]:
+            try:
+                details = json.loads(row[10])
+                entry.update(details)
+            except Exception:
+                pass
+        results.append(entry)
+    return [
+        entry
+        for entry in results
     ]
 
 

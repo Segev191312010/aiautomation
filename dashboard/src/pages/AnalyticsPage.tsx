@@ -1,5 +1,5 @@
-/**
- * AnalyticsPage — Professional Portfolio Analytics Dashboard
+﻿/**
+ * AnalyticsPage â€” Professional Portfolio Analytics Dashboard
  *
  * Sections:
  *  1. Portfolio KPI Strip (total value, day P&L, total P&L, win rate, Sharpe, max DD)
@@ -8,11 +8,12 @@
  *  4. Position Exposure Panel (stacked bar, sector donut via conic-gradient, top-5 table)
  *  5. Risk Metrics Panel (limit gauges with color-coded progress bars)
  *  6. Trade History Summary (recent trades, win/loss bar, best/worst)
- *  7. Correlation Matrix (CSS grid, color-coded cells — shown when 3+ positions)
+ *  7. Correlation Matrix (CSS grid, color-coded cells â€” shown when 3+ positions)
  */
 import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react'
 import clsx from 'clsx'
 import TradeBotTabs from '@/components/tradebot/TradeBotTabs'
+import DegradedStateCard from '@/components/common/DegradedStateCard'
 import {
   createChart,
   type IChartApi,
@@ -43,122 +44,7 @@ import type {
   AccountSummary,
 } from '@/types'
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Mock fallback data (renders when backend endpoints are not yet implemented)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function buildMockEquityCurve(days: number, start: number) {
-  const now = Math.floor(Date.now() / 1000)
-  const DAY = 86400
-  const pts: { time: number; value: number }[] = []
-  let v = start
-  for (let i = days; i >= 0; i--) {
-    v = v * (1 + (Math.random() - 0.47) * 0.012)
-    pts.push({ time: now - i * DAY, value: Math.round(v * 100) / 100 })
-  }
-  return pts
-}
-
-const _mockEquity = buildMockEquityCurve(90, 100_000)
-
-const MOCK_PORTFOLIO: PortfolioAnalytics = (() => {
-  const eq = _mockEquity
-  const final = eq[eq.length - 1].value
-  const prev  = eq[eq.length - 2].value
-  let bv = 100_000
-  const bench = eq.map((pt) => {
-    bv = bv * (1 + (Math.random() - 0.465) * 0.009)
-    return { time: pt.time, value: Math.round(bv * 100) / 100 }
-  })
-  return {
-    total_value:      final,
-    day_pnl:          final - prev,
-    day_pnl_pct:      ((final - prev) / prev) * 100,
-    total_pnl:        final - 100_000,
-    total_pnl_pct:    ((final - 100_000) / 100_000) * 100,
-    win_rate:         58.3,
-    sharpe_ratio:     1.42,
-    max_drawdown_pct: -8.7,
-    equity_curve:     eq,
-    benchmark_curve:  bench,
-  }
-})()
-
-const MOCK_DAILY_PNL: DailyPnL[] = (() => {
-  const result: DailyPnL[] = []
-  const now = new Date()
-  for (let i = 89; i >= 0; i--) {
-    const d = new Date(now)
-    d.setDate(d.getDate() - i)
-    result.push({
-      date:   d.toISOString().slice(0, 10),
-      pnl:    Math.round((Math.random() - 0.44) * 3200 * 100) / 100,
-      trades: Math.floor(Math.random() * 5),
-    })
-  }
-  return result
-})()
-
-const MOCK_EXPOSURE: ExposureBreakdown = {
-  positions: [
-    { symbol: 'NVDA', sector: 'Technology', value: 24_500, weight_pct: 24.5, pnl:  3_200, pnl_pct: 15.1 },
-    { symbol: 'AAPL', sector: 'Technology', value: 18_200, weight_pct: 18.2, pnl:  1_100, pnl_pct:  6.4 },
-    { symbol: 'SPY',  sector: 'ETF',        value: 15_000, weight_pct: 15.0, pnl:    820, pnl_pct:  5.8 },
-    { symbol: 'MSFT', sector: 'Technology', value: 14_300, weight_pct: 14.3, pnl:   -420, pnl_pct: -2.9 },
-    { symbol: 'JPM',  sector: 'Financials', value: 12_800, weight_pct: 12.8, pnl:    560, pnl_pct:  4.6 },
-    { symbol: 'XOM',  sector: 'Energy',     value:  8_600, weight_pct:  8.6, pnl:   -310, pnl_pct: -3.5 },
-    { symbol: 'JNJ',  sector: 'Healthcare', value:  6_600, weight_pct:  6.6, pnl:    180, pnl_pct:  2.8 },
-  ],
-  sector_weights: {
-    Technology: 57.0,
-    ETF:        15.0,
-    Financials: 12.8,
-    Energy:      8.6,
-    Healthcare:  6.6,
-  },
-}
-
-const MOCK_RISK_LIMITS: RiskLimits = {
-  max_position_size_pct: 25,
-  daily_loss_limit: -2_000,
-  drawdown_limit_pct: -15,
-  max_open_positions: 10,
-  limits: [
-    { label: 'Max Position Size', used: 24.5,  limit: 25,      unit: '%'     },
-    { label: 'Daily Loss',        used: -340,   limit: -2_000,  unit: '$'     },
-    { label: 'Max Drawdown',      used: -8.7,   limit: -15,     unit: '%'     },
-    { label: 'Open Positions',    used: 7,      limit: 10,      unit: 'count' },
-  ],
-}
-
-const MOCK_TRADES: TradeHistoryRow[] = [
-  { id: '1',  symbol: 'NVDA',  action: 'SELL', quantity: 20, fill_price: 890.40, pnl:  3_200, timestamp: new Date(Date.now() - 1  * 86400000).toISOString(), holding_days: 14 },
-  { id: '2',  symbol: 'AAPL',  action: 'BUY',  quantity: 50, fill_price: 192.30,              timestamp: new Date(Date.now() - 2  * 86400000).toISOString()                  },
-  { id: '3',  symbol: 'MSFT',  action: 'SELL', quantity: 30, fill_price: 415.20, pnl:   -420, timestamp: new Date(Date.now() - 3  * 86400000).toISOString(), holding_days:  5 },
-  { id: '4',  symbol: 'SPY',   action: 'BUY',  quantity: 40, fill_price: 520.10,              timestamp: new Date(Date.now() - 4  * 86400000).toISOString()                  },
-  { id: '5',  symbol: 'JPM',   action: 'SELL', quantity: 25, fill_price: 202.70, pnl:    560, timestamp: new Date(Date.now() - 5  * 86400000).toISOString(), holding_days:  8 },
-  { id: '6',  symbol: 'XOM',   action: 'SELL', quantity: 45, fill_price: 118.30, pnl:   -310, timestamp: new Date(Date.now() - 6  * 86400000).toISOString(), holding_days:  3 },
-  { id: '7',  symbol: 'META',  action: 'SELL', quantity: 15, fill_price: 520.60, pnl:  1_840, timestamp: new Date(Date.now() - 7  * 86400000).toISOString(), holding_days: 21 },
-  { id: '8',  symbol: 'TSLA',  action: 'SELL', quantity: 30, fill_price: 248.90, pnl: -1_200, timestamp: new Date(Date.now() - 8  * 86400000).toISOString(), holding_days:  6 },
-  { id: '9',  symbol: 'AMZN',  action: 'SELL', quantity: 20, fill_price: 205.40, pnl:    940, timestamp: new Date(Date.now() - 9  * 86400000).toISOString(), holding_days: 11 },
-  { id: '10', symbol: 'GOOGL', action: 'SELL', quantity: 35, fill_price: 175.20, pnl:    720, timestamp: new Date(Date.now() - 10 * 86400000).toISOString(), holding_days:  9 },
-]
-
-const MOCK_CORRELATION: CorrelationMatrix = {
-  symbols: ['NVDA', 'AAPL', 'MSFT', 'SPY', 'JPM'],
-  matrix: [
-    [1.00, 0.72, 0.68, 0.61, 0.29],
-    [0.72, 1.00, 0.81, 0.74, 0.35],
-    [0.68, 0.81, 1.00, 0.78, 0.42],
-    [0.61, 0.74, 0.78, 1.00, 0.58],
-    [0.29, 0.35, 0.42, 0.58, 1.00],
-  ],
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Formatters
-// ─────────────────────────────────────────────────────────────────────────────
-
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function fmtUSD(v: number): string {
   return new Intl.NumberFormat('en-US', {
     style: 'currency', currency: 'USD',
@@ -191,9 +77,9 @@ function fmtDate(ts: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Icons
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function IconTrendUp({ className }: { className?: string }) {
   return (
@@ -269,9 +155,9 @@ function IconBarChart({ className }: { className?: string }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Shared: Section header
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function SectionHeader({
   icon, eyebrow, title, badge, action,
@@ -299,9 +185,9 @@ function SectionHeader({
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 1. KPI Strip
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface KpiCardProps {
   label: string
@@ -358,12 +244,34 @@ function KpiSkeleton() {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 2. Equity Curve Chart
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type DateRange = '1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL'
+type SectionStatus = 'loading' | 'loaded' | 'unavailable'
 const DATE_RANGES: DateRange[] = ['1W', '1M', '3M', '6M', '1Y', 'ALL']
+
+function warnSectionFetchFailure(section: string, error: unknown) {
+  console.warn(`[AnalyticsPage] ${section} fetch failed`, error)
+}
+
+function isCorrelationMatrixPayload(value: unknown): value is CorrelationMatrix {
+  if (!value || typeof value !== 'object') return false
+  const payload = value as { symbols?: unknown; matrix?: unknown; error?: unknown }
+  if (typeof payload.error === 'string' && payload.error.length > 0) return false
+  if (!Array.isArray(payload.symbols) || !Array.isArray(payload.matrix)) return false
+  const symbols = payload.symbols as unknown[]
+  const matrix = payload.matrix as unknown[]
+  if (!symbols.every((symbol) => typeof symbol === 'string' && symbol.length > 0)) return false
+  if (symbols.length < 3) return matrix.length === 0
+  if (matrix.length !== symbols.length) return false
+  return matrix.every(
+    (row) => Array.isArray(row)
+      && row.length === symbols.length
+      && row.every((cell) => typeof cell === 'number' && Number.isFinite(cell)),
+  )
+}
 
 function filterByRange(data: { time: number; value: number }[], range: DateRange) {
   if (range === 'ALL' || data.length === 0) return data
@@ -384,6 +292,7 @@ function EquityCurveChart({ analytics, range, onRangeChange }: EquityCurveProps)
   const chartRef     = useRef<IChartApi | null>(null)
   const seriesRef    = useRef<ISeriesApi<'Line'> | null>(null)
   const benchRef     = useRef<ISeriesApi<'Line'> | null>(null)
+  const hasBenchmark = analytics.benchmark_curve.length > 0
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -440,10 +349,12 @@ function EquityCurveChart({ analytics, range, onRangeChange }: EquityCurveProps)
             <span className="w-5 h-0.5 bg-indigo-600 inline-block rounded" />
             Portfolio
           </span>
-          <span className="flex items-center gap-1.5">
-            <span className="w-5 h-px bg-zinc-600 inline-block rounded" />
-            SPY
-          </span>
+          {hasBenchmark && (
+            <span className="flex items-center gap-1.5">
+              <span className="w-5 h-px bg-zinc-600 inline-block rounded" />
+              SPY
+            </span>
+          )}
         </span>
       </div>
       <div ref={containerRef} className="rounded-xl overflow-hidden" />
@@ -451,9 +362,9 @@ function EquityCurveChart({ analytics, range, onRangeChange }: EquityCurveProps)
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 3. Daily P&L Bar Chart
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function DailyPnLChart({ data }: { data: DailyPnL[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -508,9 +419,9 @@ function DailyPnLChart({ data }: { data: DailyPnL[] }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Sector color palette
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const SECTOR_PALETTE: Record<string, { bar: string; dot: string; hex: string }> = {
   Technology:               { bar: 'bg-indigo-500',  dot: 'bg-indigo-500',  hex: '#6366F1' },
@@ -529,9 +440,9 @@ const SECTOR_PALETTE: Record<string, { bar: string; dot: string; hex: string }> 
 }
 const pal = (sector: string) => SECTOR_PALETTE[sector] ?? SECTOR_PALETTE['Unknown']
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 4. Position Exposure Panel
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
   const sorted = [...exposure.positions].sort((a, b) => b.value - a.value)
@@ -650,9 +561,9 @@ function ExposurePanel({ exposure }: { exposure: ExposureBreakdown }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 5. Risk Metrics Panel
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function usagePct(used: number, limit: number): number {
   if (limit === 0) return 0
@@ -699,9 +610,9 @@ function RiskGauge({ item }: { item: RiskLimits['limits'][0] }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 6. Trade History Summary
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
   const closed = trades.filter((t) => t.pnl !== undefined)
@@ -795,10 +706,10 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
                     <td className="py-2 px-2 font-mono text-sm tabular-nums text-right">
                       {t.pnl !== undefined
                         ? <span className={t.pnl >= 0 ? 'text-emerald-600' : 'text-red-400'}>{t.pnl >= 0 ? '+' : ''}{fmtUSD(t.pnl)}</span>
-                        : <span className="text-zinc-500">—</span>}
+                        : <span className="text-zinc-500">â€”</span>}
                     </td>
                     <td className="py-2 px-2 font-mono text-[11px] text-zinc-500 text-right">
-                      {t.holding_days !== undefined ? `${t.holding_days}d` : '—'}
+                      {t.holding_days !== undefined ? `${t.holding_days}d` : 'â€”'}
                     </td>
                   </tr>
                 )
@@ -811,9 +722,9 @@ function TradeHistoryPanel({ trades }: { trades: TradeHistoryRow[] }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // 7. Correlation Matrix
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function corrBg(v: number): string {
   if (v === 1)     return 'bg-zinc-800'
@@ -871,9 +782,9 @@ function CorrelationMatrixPanel({ matrix }: { matrix: CorrelationMatrix }) {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Page
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export default function AnalyticsPage() {
   const { account }   = useAccountStore()
@@ -888,11 +799,26 @@ export default function AnalyticsPage() {
   const [riskLimits, setRiskLimits]   = useState<RiskLimits | null>(null)
   const [tradeHist, setTradeHist]     = useState<TradeHistoryRow[] | null>(null)
   const [correlation, setCorrelation] = useState<CorrelationMatrix | null>(null)
+  const [portfolioStatus, setPortfolioStatus]     = useState<SectionStatus>('loading')
+  const [dailyPnlStatus, setDailyPnlStatus]       = useState<SectionStatus>('loading')
+  const [exposureStatus, setExposureStatus]       = useState<SectionStatus>('loading')
+  const [riskLimitsStatus, setRiskLimitsStatus]   = useState<SectionStatus>('loading')
+  const [tradeHistoryStatus, setTradeHistoryStatus] = useState<SectionStatus>('loading')
+  const [correlationStatus, setCorrelationStatus] = useState<SectionStatus>('loading')
 
   const displayAccount = simMode ? simAccount : account
+  const loadGenRef = useRef(0)
 
   const loadAll = useCallback(async () => {
+    const gen = ++loadGenRef.current
     setLoading(true)
+    setPortfolioStatus('loading')
+    setDailyPnlStatus('loading')
+    setExposureStatus('loading')
+    setRiskLimitsStatus('loading')
+    setTradeHistoryStatus('loading')
+    setCorrelationStatus('loading')
+
     const [r0, r1, r2, r3, r4, r5] = await Promise.allSettled([
       fetchPortfolioAnalytics(range),
       fetchDailyPnL(90),
@@ -901,12 +827,68 @@ export default function AnalyticsPage() {
       fetchTradeHistory(20),
       fetchCorrelationMatrix(),
     ])
-    setAnalytics    (r0.status === 'fulfilled' ? r0.value : MOCK_PORTFOLIO)
-    setDailyPnL     (r1.status === 'fulfilled' ? r1.value : MOCK_DAILY_PNL)
-    setExposure     (r2.status === 'fulfilled' ? r2.value : MOCK_EXPOSURE)
-    setRiskLimits   (r3.status === 'fulfilled' ? r3.value : MOCK_RISK_LIMITS)
-    setTradeHist    (r4.status === 'fulfilled' ? r4.value : MOCK_TRADES)
-    setCorrelation  (r5.status === 'fulfilled' ? r5.value : MOCK_CORRELATION)
+
+    // Stale guard: if a newer loadAll() was triggered, discard this result
+    if (gen !== loadGenRef.current) return
+
+    if (r0.status === 'fulfilled') {
+      setAnalytics(r0.value)
+      setPortfolioStatus('loaded')
+    } else {
+      setAnalytics(null)
+      setPortfolioStatus('unavailable')
+      warnSectionFetchFailure('portfolio', r0.reason)
+    }
+
+    if (r1.status === 'fulfilled') {
+      setDailyPnL(r1.value)
+      setDailyPnlStatus('loaded')
+    } else {
+      setDailyPnL(null)
+      setDailyPnlStatus('unavailable')
+      warnSectionFetchFailure('daily_pnl', r1.reason)
+    }
+
+    if (r2.status === 'fulfilled') {
+      setExposure(r2.value)
+      setExposureStatus('loaded')
+    } else {
+      setExposure(null)
+      setExposureStatus('unavailable')
+      warnSectionFetchFailure('exposure', r2.reason)
+    }
+
+    if (r3.status === 'fulfilled') {
+      setRiskLimits(r3.value)
+      setRiskLimitsStatus('loaded')
+    } else {
+      setRiskLimits(null)
+      setRiskLimitsStatus('unavailable')
+      warnSectionFetchFailure('risk_limits', r3.reason)
+    }
+
+    if (r4.status === 'fulfilled') {
+      setTradeHist(r4.value)
+      setTradeHistoryStatus('loaded')
+    } else {
+      setTradeHist(null)
+      setTradeHistoryStatus('unavailable')
+      warnSectionFetchFailure('trade_history', r4.reason)
+    }
+    if (r5.status === 'fulfilled' && isCorrelationMatrixPayload(r5.value)) {
+      setCorrelation(r5.value)
+      setCorrelationStatus('loaded')
+    } else {
+      setCorrelation(null)
+      setCorrelationStatus('unavailable')
+      warnSectionFetchFailure(
+        'correlation',
+        r5.status === 'fulfilled'
+          ? new Error('Invalid correlation payload')
+          : r5.reason,
+      )
+    }
+
     setLoading(false)
   }, [range])
 
@@ -935,65 +917,72 @@ export default function AnalyticsPage() {
     }
   }, [analytics, displayAccount])
 
-  const kpiData = liveAnalytics ?? MOCK_PORTFOLIO
-
-  const kpis: KpiCardProps[] = [
+  const kpis: KpiCardProps[] = liveAnalytics ? [
     {
       label: 'Portfolio Value',
-      value: fmtUSDCompact(kpiData.total_value),
+      value: fmtUSDCompact(liveAnalytics.total_value),
       icon:        <IconDollar className="w-3.5 h-3.5 text-indigo-600" />,
       iconBg:      'bg-indigo-50',
       accentColor: 'border-l-indigo-500/60',
     },
     {
       label:    'Day P&L',
-      value:    (kpiData.day_pnl >= 0 ? '+' : '') + fmtUSD(kpiData.day_pnl),
-      sub:      fmtPct(kpiData.day_pnl_pct),
-      positive: kpiData.day_pnl >= 0,
-      icon:     kpiData.day_pnl >= 0
+      value:    (liveAnalytics.day_pnl >= 0 ? '+' : '') + fmtUSD(liveAnalytics.day_pnl),
+      sub:      fmtPct(liveAnalytics.day_pnl_pct),
+      positive: liveAnalytics.day_pnl >= 0,
+      icon:     liveAnalytics.day_pnl >= 0
         ? <IconTrendUp   className="w-3.5 h-3.5 text-emerald-600" />
         : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />,
-      iconBg:      kpiData.day_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-500/10',
-      accentColor: kpiData.day_pnl >= 0 ? 'border-l-emerald-500/60' : 'border-l-red-500/60',
+      iconBg:      liveAnalytics.day_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-500/10',
+      accentColor: liveAnalytics.day_pnl >= 0 ? 'border-l-emerald-500/60' : 'border-l-red-500/60',
     },
     {
       label:    'Total P&L',
-      value:    (kpiData.total_pnl >= 0 ? '+' : '') + fmtUSD(kpiData.total_pnl),
-      sub:      fmtPct(kpiData.total_pnl_pct),
-      positive: kpiData.total_pnl >= 0,
-      icon:     kpiData.total_pnl >= 0
+      value:    (liveAnalytics.total_pnl >= 0 ? '+' : '') + fmtUSD(liveAnalytics.total_pnl),
+      sub:      fmtPct(liveAnalytics.total_pnl_pct),
+      positive: liveAnalytics.total_pnl >= 0,
+      icon:     liveAnalytics.total_pnl >= 0
         ? <IconTrendUp   className="w-3.5 h-3.5 text-emerald-600" />
         : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />,
-      iconBg:      kpiData.total_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-500/10',
-      accentColor: kpiData.total_pnl >= 0 ? 'border-l-emerald-500/60' : 'border-l-red-500/60',
+      iconBg:      liveAnalytics.total_pnl >= 0 ? 'bg-emerald-50' : 'bg-red-500/10',
+      accentColor: liveAnalytics.total_pnl >= 0 ? 'border-l-emerald-500/60' : 'border-l-red-500/60',
     },
     {
       label:    'Win Rate',
-      value:    kpiData.win_rate.toFixed(1) + '%',
-      positive: kpiData.win_rate >= 50,
+      value:    liveAnalytics.win_rate.toFixed(1) + '%',
+      positive: liveAnalytics.win_rate >= 50,
       icon:     <IconBarChart className="w-3.5 h-3.5 text-blue-500" />,
       iconBg:      'bg-blue-50',
       accentColor: 'border-l-blue-500/40',
     },
     {
       label:    'Sharpe Ratio',
-      value:    kpiData.sharpe_ratio.toFixed(2),
-      positive: kpiData.sharpe_ratio >= 1 ? true : kpiData.sharpe_ratio >= 0 ? undefined : false,
+      value:    liveAnalytics.sharpe_ratio.toFixed(2),
+      positive: liveAnalytics.sharpe_ratio >= 1 ? true : liveAnalytics.sharpe_ratio >= 0 ? undefined : false,
       icon:     <IconShield className="w-3.5 h-3.5 text-violet-500" />,
       iconBg:      'bg-violet-50',
       accentColor: 'border-l-violet-400/50',
     },
     {
       label:    'Max Drawdown',
-      value:    kpiData.max_drawdown_pct.toFixed(1) + '%',
-      positive: kpiData.max_drawdown_pct >= -5 ? true : kpiData.max_drawdown_pct >= -15 ? undefined : false,
+      value:    liveAnalytics.max_drawdown_pct.toFixed(1) + '%',
+      positive: liveAnalytics.max_drawdown_pct >= -5 ? true : liveAnalytics.max_drawdown_pct >= -15 ? undefined : false,
       icon:     <IconTrendDown className="w-3.5 h-3.5 text-rose-500" />,
       iconBg:      'bg-rose-50',
       accentColor: 'border-l-rose-400/50',
     },
-  ]
+  ] : []
 
-  const showCorrelation = (correlation?.symbols.length ?? 0) >= 3
+  const unavailableSections = [
+    portfolioStatus === 'unavailable' ? 'portfolio KPIs' : null,
+    dailyPnlStatus === 'unavailable' ? 'daily P&L' : null,
+    exposureStatus === 'unavailable' ? 'position exposure' : null,
+    riskLimitsStatus === 'unavailable' ? 'risk limits' : null,
+    tradeHistoryStatus === 'unavailable' ? 'trade history' : null,
+    correlationStatus === 'unavailable' ? 'correlation matrix' : null,
+  ].filter((section): section is string => section !== null)
+
+  const showCorrelation = correlation !== null && correlation.symbols.length >= 3 && isCorrelationMatrixPayload(correlation)
 
   type AnalyticsTab = 'performance' | 'risk' | 'positions' | 'history'
   const [analyticsTab, setAnalyticsTab] = useState<AnalyticsTab>('performance')
@@ -1001,7 +990,7 @@ export default function AnalyticsPage() {
   return (
     <div className="flex flex-col gap-5">
 
-      {/* ── Page title ──────────────────────────────────────────────────── */}
+      {/* â”€â”€ Page title â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex items-center justify-between gap-4">
         <div>
           <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">Stage 7</div>
@@ -1014,28 +1003,43 @@ export default function AnalyticsPage() {
             </span>
           )}
           {loading && (
-            <span className="text-[10px] font-mono text-zinc-500 animate-pulse">Loading…</span>
+            <span className="text-[10px] font-mono text-zinc-500 animate-pulse">Loadingâ€¦</span>
           )}
         </div>
       </div>
 
-      {/* ── 1. KPI Strip ────────────────────────────────────────────────── */}
+      {/* â”€â”€ 1. KPI Strip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+
+      {unavailableSections.length > 0 && !loading && (
+        <DegradedStateCard
+          title="Analytics data partially unavailable"
+          reason={`Unavailable sections: ${unavailableSections.join(', ')}.`}
+          description="Only sections backed by live API data are rendered. No placeholder analytics values are shown."
+        />
+      )}
+
       <section className="animate-fade-in-up">
         <div className="text-[10px] font-sans uppercase tracking-[0.2em] text-zinc-500 mb-3">
           Portfolio KPIs
         </div>
-        {loading && !analytics ? (
+        {loading && portfolioStatus === 'loading' && !liveAnalytics ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
             {Array.from({ length: 6 }).map((_, i) => <KpiSkeleton key={i} />)}
           </div>
-        ) : (
+        ) : liveAnalytics ? (
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
             {kpis.map((k) => <KpiCard key={k.label} {...k} />)}
           </div>
+        ) : (
+          <DegradedStateCard
+            title="Portfolio KPIs unavailable"
+            reason="Portfolio analytics could not be loaded from the backend."
+            description="The KPI strip is hidden until live portfolio analytics are available."
+          />
         )}
       </section>
 
-      {/* ── Tab Selector ──────────────────────────────────────────────── */}
+      {/* â”€â”€ Tab Selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <TradeBotTabs
         activeTab={analyticsTab}
         onTabChange={(t) => setAnalyticsTab(t as AnalyticsTab)}
@@ -1048,7 +1052,7 @@ export default function AnalyticsPage() {
       />
 
       {analyticsTab === 'performance' && (<>
-      {/* ── 2. Equity Curve ─────────────────────────────────────────────── */}
+      {/* â”€â”€ 2. Equity Curve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <section
         className="card rounded-2xl  p-5 animate-fade-in-up"
         style={{ animationDelay: '40ms' }}
@@ -1057,16 +1061,22 @@ export default function AnalyticsPage() {
           icon={<IconTrendUp className="w-3.5 h-3.5 text-indigo-500" />}
           eyebrow="Performance"
           title="Equity Curve"
-          badge={<span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">vs SPY</span>}
+          badge={liveAnalytics?.benchmark_curve.length ? <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">vs SPY</span> : null}
         />
-        {liveAnalytics ? (
+        {loading && portfolioStatus === 'loading' && !liveAnalytics ? (
+          <div className="h-[300px] rounded-xl bg-zinc-800/40 animate-pulse" />
+        ) : liveAnalytics ? (
           <EquityCurveChart analytics={liveAnalytics} range={range} onRangeChange={setRange} />
         ) : (
-          <div className="h-[300px] rounded-xl bg-zinc-800/40 animate-pulse" />
+          <DegradedStateCard
+            title="Equity curve unavailable"
+            reason="Equity-curve data could not be loaded for the selected range."
+            description="The range selector remains available, but the chart is hidden until live data returns."
+          />
         )}
       </section>
 
-      {/* ── 3. Daily P&L Bar Chart ───────────────────────────────────────── */}
+      {/* â”€â”€ 3. Daily P&L Bar Chart â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <section
         className="card rounded-2xl  p-5 animate-fade-in-up"
         style={{ animationDelay: '80ms' }}
@@ -1077,10 +1087,16 @@ export default function AnalyticsPage() {
           title="Daily P&L"
           badge={<span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-zinc-800 text-zinc-400">90 days</span>}
         />
-        {dailyPnL ? (
+        {loading && dailyPnlStatus === 'loading' && !dailyPnL ? (
+          <div className="h-[220px] rounded-xl bg-zinc-800/40 animate-pulse" />
+        ) : dailyPnL ? (
           <DailyPnLChart data={dailyPnL} />
         ) : (
-          <div className="h-[220px] rounded-xl bg-zinc-800/40 animate-pulse" />
+          <DegradedStateCard
+            title="Daily P&L unavailable"
+            reason="Daily realized performance data could not be loaded."
+            description="No fallback bars are rendered when this feed is unavailable."
+          />
         )}
       </section>
 
@@ -1100,13 +1116,19 @@ export default function AnalyticsPage() {
               )
             }
           />
-          {exposure ? (
-            <ExposurePanel exposure={exposure} />
-          ) : (
+          {loading && exposureStatus === 'loading' && !exposure ? (
             <div className="space-y-3 animate-pulse">
               <div className="h-6 rounded-full bg-zinc-800" />
               <div className="h-24 rounded-xl bg-zinc-800" />
             </div>
+          ) : exposure ? (
+            <ExposurePanel exposure={exposure} />
+          ) : (
+            <DegradedStateCard
+              title="Position exposure unavailable"
+              reason="Open-position allocation data could not be loaded."
+              description="Sector and symbol exposure are hidden until live portfolio data is available."
+            />
           )}
         </section>
       )}
@@ -1119,7 +1141,16 @@ export default function AnalyticsPage() {
             eyebrow="Risk Management"
             title="Risk Limit Usage"
           />
-          {riskLimits ? (
+          {loading && riskLimitsStatus === 'loading' && !riskLimits ? (
+            <div className="space-y-4 animate-pulse">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="flex flex-col gap-1.5">
+                  <div className="h-3 w-40 rounded bg-zinc-800" />
+                  <div className="h-2 rounded-full bg-zinc-800" />
+                </div>
+              ))}
+            </div>
+          ) : riskLimits ? (
             <div className="flex flex-col gap-5">
               {riskLimits.limits.map((item) => (
                 <RiskGauge key={item.label} item={item} />
@@ -1129,14 +1160,11 @@ export default function AnalyticsPage() {
               </p>
             </div>
           ) : (
-            <div className="space-y-4 animate-pulse">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <div key={i} className="flex flex-col gap-1.5">
-                  <div className="h-3 w-40 rounded bg-zinc-800" />
-                  <div className="h-2 rounded-full bg-zinc-800" />
-                </div>
-              ))}
-            </div>
+            <DegradedStateCard
+              title="Risk limits unavailable"
+              reason="Risk-limit usage could not be loaded from the backend."
+              description="The gauge panel stays hidden instead of showing placeholder utilization."
+            />
           )}
         </section>
 
@@ -1154,11 +1182,21 @@ export default function AnalyticsPage() {
             ) : null
           }
         />
-        {showCorrelation && correlation ? (
+        {loading && correlationStatus === 'loading' && !correlation ? (
+          <div className="flex items-center justify-center py-8 text-sm text-[var(--text-muted)]">
+            Loading correlation matrix...
+          </div>
+        ) : correlationStatus === 'unavailable' ? (
+          <DegradedStateCard
+            title="Correlation matrix unavailable"
+            reason="Correlation data could not be loaded from the backend."
+            description="Correlation is shown only when live matrix data is available."
+          />
+        ) : showCorrelation && correlation ? (
           <CorrelationMatrixPanel matrix={correlation} />
         ) : (
           <div className="flex items-center justify-center py-8 text-sm text-[var(--text-muted)]">
-            Correlation unavailable — at least 3 symbols are required.
+            Correlation unavailable - at least 3 symbols are required.
           </div>
         )}
       </section>
@@ -1178,9 +1216,7 @@ export default function AnalyticsPage() {
             )
           }
         />
-        {tradeHist ? (
-          <TradeHistoryPanel trades={tradeHist} />
-        ) : (
+        {loading && tradeHistoryStatus === 'loading' && !tradeHist ? (
           <div className="space-y-2.5 animate-pulse">
             {Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="flex gap-3">
@@ -1192,6 +1228,14 @@ export default function AnalyticsPage() {
               </div>
             ))}
           </div>
+        ) : tradeHist ? (
+          <TradeHistoryPanel trades={tradeHist} />
+        ) : (
+          <DegradedStateCard
+            title="Trade history unavailable"
+            reason="Recent-trade analytics could not be loaded."
+            description="The history panel stays hidden until live trade data is available."
+          />
         )}
       </section>
       )}
@@ -1199,3 +1243,4 @@ export default function AnalyticsPage() {
     </div>
   )
 }
+

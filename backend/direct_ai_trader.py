@@ -12,21 +12,30 @@ from market_data import get_latest_price
 from models import Rule, TradeAction
 from order_executor import place_order
 from risk_manager import calculate_position_size
-from safety_kernel import SafetyViolation, check_all, is_autopilot_live
+from safety_kernel import SafetyViolation, is_autopilot_live
+from services import order_lifecycle, safety_gate
 
 log = logging.getLogger(__name__)
 
 
-async def execute_direct_trade(decision: AIDirectTrade) -> dict:
+async def preview_direct_trade(decision: AIDirectTrade | dict) -> dict:
+    """Compute the estimated execution inputs for a direct AI trade without placing it."""
+    if isinstance(decision, dict):
+        decision = AIDirectTrade(**decision)
+
     symbol = decision.symbol.upper()
     open_positions = await get_open_positions()
     existing = next((pos for pos in open_positions if pos.symbol.upper() == symbol and pos.side == "BUY"), None)
     is_exit = decision.action == "SELL"
 
-    if decision.action == "SELL" and existing is None:
+    if is_exit and existing is None:
         raise SafetyViolation(f"Cannot SELL {symbol} without an existing long position")
 
-    entry_price = decision.limit_price if decision.order_type == "LMT" and decision.limit_price else await get_latest_price(symbol)
+    entry_price = (
+        decision.limit_price
+        if decision.order_type == "LMT" and decision.limit_price
+        else await get_latest_price(symbol)
+    )
     if not entry_price or entry_price <= 0:
         raise SafetyViolation(f"Unable to determine price for {symbol}")
 
@@ -44,17 +53,41 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
         quantity = int(sizing["shares"])
         if quantity < 1:
             raise SafetyViolation(f"Calculated size for {symbol} is 0 shares")
-        await check_all(
-            symbol,
-            decision.action,
-            quantity,
-            "ai_direct",
-            account_equity=account_equity,
-            price_estimate=entry_price,
-            stop_price=decision.stop_price,
-            is_exit=False,
-            has_existing_position=existing is not None,
-        )
+
+    return {
+        "decision": decision,
+        "symbol": symbol,
+        "existing": existing,
+        "is_exit": is_exit,
+        "entry_price": float(entry_price),
+        "quantity": quantity,
+        "notional": float(entry_price) * quantity,
+    }
+
+
+async def execute_direct_trade(decision: AIDirectTrade) -> dict:
+    preview = await preview_direct_trade(decision)
+    symbol = preview["symbol"]
+    existing = preview["existing"]
+    is_exit = preview["is_exit"]
+    entry_price = preview["entry_price"]
+    quantity = int(preview["quantity"])
+
+    account_equity = 0.0 if is_exit else await _get_account_equity()
+    allowed, reason = await safety_gate.evaluate_runtime_safety(
+        symbol=symbol,
+        side=decision.action,
+        quantity=quantity,
+        source="ai_direct",
+        account_equity=account_equity,
+        price_estimate=entry_price,
+        stop_price=decision.stop_price,
+        is_exit=is_exit,
+        has_existing_position=existing is not None,
+        require_autopilot_authority=True,
+    )
+    if not allowed:
+        raise SafetyViolation(reason or f"Runtime safety gate blocked direct AI trade for {symbol}")
 
     order_rule = Rule(
         id=f"ai-direct:{symbol}",
@@ -80,20 +113,7 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
     )
 
     if not is_autopilot_live():
-        # H-5 FIX: Paper mode still checks kill switch + daily loss
-        if not is_exit:
-            from ai_guardrails import _load_guardrails_from_db
-            try:
-                gconfig = await _load_guardrails_from_db()
-                if gconfig.emergency_stop:
-                    raise SafetyViolation("Kill switch active — paper entries also blocked")
-                if gconfig.daily_loss_locked:
-                    raise SafetyViolation("Daily loss lock — paper entries also blocked")
-            except SafetyViolation:
-                raise
-            except Exception:
-                pass
-
+        now_iso = datetime.now(timezone.utc).isoformat()
         simulated_trade = {
             "id": f"paper-{symbol}-{int(datetime.now(timezone.utc).timestamp())}",
             "rule_id": order_rule.id,
@@ -107,18 +127,42 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
             "fill_price": entry_price,
             "status": "FILLED",
             "order_id": None,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now_iso,
             "source": "ai_direct",
             "ai_reason": decision.reason,
             "ai_confidence": decision.confidence,
             "stop_price": decision.stop_price,
             "invalidation": decision.invalidation,
             "metadata": {"paper": True},
+            "mode": "PAPER",
+            "opened_at": now_iso,
+            "entry_price": entry_price,
+            "decision_id": getattr(decision, "decision_id", None),
         }
         from models import Trade
 
         trade = Trade(**simulated_trade)
-        await save_trade(trade)
+
+        if is_exit:
+            trade.opened_at = None
+            await order_lifecycle.stamp_exit_trade_context(
+                trade,
+                existing,
+                fallback_mode="PAPER",
+                fallback_source="ai_direct",
+                fallback_decision_id=trade.decision_id,
+            )
+            await order_lifecycle.finalize_filled_exit_trade(
+                trade,
+                existing,
+                close_reason="ai_direct_exit",
+                fallback_exit_price=entry_price,
+            )
+        else:
+            trade.position_id = trade.id
+            await save_trade(trade)
+            await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
+
         await log_ai_action(
             action_type=f"direct_trade_{decision.action.lower()}",
             category="direct_ai",
@@ -129,10 +173,25 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
             confidence=decision.confidence,
             status="applied",
         )
-        return {"mode": cfg.AUTOPILOT_MODE, "simulated": True, "trade": trade.model_dump()}
+        if trade.decision_id:
+            try:
+                from ai_decision_ledger import mark_decision_item_applied
 
-    trade = await place_order(order_rule)
-    if not trade:
+                await mark_decision_item_applied(trade.decision_id, created_trade_id=trade.id)
+            except Exception:
+                pass
+        return {"mode": cfg.AUTOPILOT_MODE, "simulated": True, "status": "applied", "trade": trade.model_dump()}
+
+    trade = await place_order(
+        order_rule,
+        source="ai_direct",
+        skip_safety=True,
+        require_autopilot_authority=True,
+        stop_price=decision.stop_price,
+        is_exit=is_exit,
+        has_existing_position=existing is not None,
+    )
+    if not trade or getattr(trade, "status", "") == "ERROR":
         raise SafetyViolation(f"Failed to place direct AI trade for {symbol}")
 
     trade.source = "ai_direct"
@@ -140,7 +199,39 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
     trade.ai_confidence = decision.confidence
     trade.stop_price = decision.stop_price
     trade.invalidation = decision.invalidation
-    await save_trade(trade)
+    trade.mode = "LIVE"
+    trade.decision_id = getattr(decision, "decision_id", None)
+
+    if is_exit:
+        if trade.fill_price is not None and trade.status == "FILLED":
+            await order_lifecycle.stamp_exit_trade_context(
+                trade,
+                existing,
+                fallback_mode="LIVE",
+                fallback_source="ai_direct",
+                fallback_decision_id=trade.decision_id,
+            )
+            await order_lifecycle.finalize_filled_exit_trade(
+                trade,
+                existing,
+                close_reason="ai_direct_exit",
+                fallback_exit_price=trade.fill_price,
+            )
+        else:
+            await order_lifecycle.stamp_exit_trade_context(
+                trade,
+                existing,
+                fallback_mode="LIVE",
+                fallback_source="ai_direct",
+                fallback_decision_id=trade.decision_id,
+            )
+    else:
+        trade.opened_at = trade.timestamp
+        trade.position_id = trade.id
+        if trade.fill_price is not None:
+            trade.entry_price = trade.fill_price
+        await save_trade(trade)
+
     await log_ai_action(
         action_type=f"direct_trade_{decision.action.lower()}",
         category="direct_ai",
@@ -151,7 +242,14 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
         confidence=decision.confidence,
         status="applied",
     )
-    return {"mode": cfg.AUTOPILOT_MODE, "simulated": False, "trade": trade.model_dump()}
+    if trade.decision_id:
+        try:
+            from ai_decision_ledger import mark_decision_item_applied
+
+            await mark_decision_item_applied(trade.decision_id, created_trade_id=trade.id)
+        except Exception:
+            pass
+    return {"mode": cfg.AUTOPILOT_MODE, "simulated": False, "status": "applied", "trade": trade.model_dump()}
 
 
 async def _get_account_equity() -> float:

@@ -6,7 +6,7 @@ from typing import Iterable
 
 from api_contracts import AIRuleAction
 from ai_guardrails import log_ai_action
-from database import delete_rule, get_rule, get_rules, save_rule, save_rule_version
+from database import delete_rule, get_rule, get_rules, save_rule, save_rule_version, persist_rule_revision
 from models import Rule, RuleCreate
 
 log = logging.getLogger(__name__)
@@ -21,13 +21,19 @@ async def apply_rule_actions(
     *,
     author: str = "ai",
     allow_active: bool = False,
+    decision_run_id: str | None = None,
+    decision_item_ids: list[str | None] | None = None,
 ) -> list[dict]:
     """Apply AI-authored actions to the current rule model and snapshot versions."""
     results: list[dict] = []
-    for raw_action in actions:
+    for idx, raw_action in enumerate(actions):
         action = _as_action(raw_action)
+        _item_id = decision_item_ids[idx] if decision_item_ids and idx < len(decision_item_ids) else None
         try:
-            result = await _apply_rule_action(action, author=author, allow_active=allow_active)
+            result = await _apply_rule_action(
+                action, author=author, allow_active=allow_active,
+                decision_run_id=decision_run_id, decision_item_id=_item_id,
+            )
             results.append({"ok": True, **result})
         except Exception as exc:
             log.warning("Rule lab action failed: %s", exc)
@@ -40,7 +46,10 @@ async def apply_rule_actions(
     return results
 
 
-async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active: bool) -> dict:
+async def _apply_rule_action(
+    action: AIRuleAction, *, author: str, allow_active: bool,
+    decision_run_id: str | None = None, decision_item_id: str | None = None,
+) -> dict:
     if action.action == "create":
         if not action.rule_payload:
             raise ValueError("create requires rule_payload")
@@ -69,6 +78,13 @@ async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active:
         rule.ai_generated = True
         rule.created_by = author
         rule.ai_reason = action.reason
+        # S10: stamp origin decision
+        rule.origin_decision_id = decision_item_id
+        rule.origin_run_id = decision_run_id
+        # W1-05: stamp replay config for deterministic backtests
+        if not rule.replay_config:
+            from rule_replay_adapter import build_default_replay_config
+            rule.replay_config = build_default_replay_config()
         if not allow_active and rule.status == "active":
             rule.status = "paper"
             rule.enabled = False
@@ -97,7 +113,6 @@ async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active:
 
     original = existing.model_dump()
     updated = existing.model_copy(deep=True)
-    updated.version = max(1, existing.version) + 1
     updated.created_by = author if existing.created_by == "human" else existing.created_by
     updated.ai_generated = True
     updated.ai_reason = action.reason
@@ -109,11 +124,9 @@ async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active:
         if not allow_active and patch.get("status") == "active":
             patch["status"] = "paper"
         updated = updated.model_copy(update=patch)
-        updated.version = max(1, existing.version) + 1
         if updated.status != "active":
             updated.enabled = False
-        await save_rule(updated)
-        await save_rule_version(updated, diff_summary=action.reason, author=author)
+        await persist_rule_revision(updated, diff_summary=action.reason, author=author)
         action_type = "rule_update"
     elif action.action == "enable":
         if existing.status == "retired":
@@ -122,27 +135,25 @@ async def _apply_rule_action(action: AIRuleAction, *, author: str, allow_active:
             raise ValueError(f"Cannot enable rule '{existing.id}' — allow_active=False")
         updated.status = "active"
         updated.enabled = True
-        await save_rule(updated)
-        await save_rule_version(updated, diff_summary=action.reason, author=author)
+        await persist_rule_revision(updated, diff_summary=action.reason, author=author)
         action_type = "rule_enable"
     elif action.action == "disable":
         updated.enabled = False
-        await save_rule(updated)
-        await save_rule_version(updated, diff_summary=action.reason, author=author)
+        await persist_rule_revision(updated, diff_summary=action.reason, author=author)
         action_type = "rule_disable"
     elif action.action == "pause":
         updated.status = "paused"
         updated.enabled = False
-        await save_rule(updated)
-        await save_rule_version(updated, diff_summary=action.reason, author=author)
+        await persist_rule_revision(updated, diff_summary=action.reason, author=author)
         action_type = "rule_pause"
     elif action.action == "retire":
         updated.status = "retired"
         updated.enabled = False
-        await save_rule(updated)
-        await save_rule_version(updated, diff_summary=action.reason, author=author)
+        await persist_rule_revision(updated, diff_summary=action.reason, author=author)
         action_type = "rule_retire"
     elif action.action == "delete":
+        # For delete: bump version for the final snapshot, then delete the rule
+        updated.version = max(1, existing.version) + 1
         await save_rule_version(updated, diff_summary=f"Deleted: {action.reason}", author=author)
         await delete_rule(updated.id)
         action_type = "rule_delete"

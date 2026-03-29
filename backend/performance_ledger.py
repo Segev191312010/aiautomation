@@ -4,27 +4,21 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from database import get_trades
+from trade_utils import get_trade_realized_pnl, is_closed_any
 
 
 def _window_cutoff(days: int) -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=max(1, days))
 
 
-def _trade_pnl(trade) -> float | None:
-    if trade.metadata and "pnl" in trade.metadata:
-        try:
-            return float(trade.metadata["pnl"])
-        except Exception:
-            return None
-    return None
-
-
 async def compute_source_performance(days: int = 30) -> list[dict]:
     cutoff = _window_cutoff(days)
-    trades = await get_trades(limit=1000)
+    trades = await get_trades(limit=10000)
     buckets: dict[str, dict] = {}
 
     for trade in trades:
+        if not is_closed_any(trade):
+            continue
         try:
             ts = datetime.fromisoformat(trade.timestamp.replace("Z", "+00:00"))
         except Exception:
@@ -41,11 +35,14 @@ async def compute_source_performance(days: int = 30) -> list[dict]:
             "total_cost": 0.0,
         })
         bucket["trades_count"] += 1
-        pnl = _trade_pnl(trade)
+        pnl = get_trade_realized_pnl(trade)
         if pnl is not None:
             bucket["realized_pnl"] += pnl
             if pnl > 0:
                 bucket["wins"] += 1
+        # Compute entry cost for ROI
+        entry_cost = (trade.entry_price or trade.fill_price or 0) * trade.quantity
+        bucket["total_cost"] += entry_cost
 
     results: list[dict] = []
     for bucket in buckets.values():
@@ -84,9 +81,11 @@ async def compute_autopilot_performance(days: int = 30) -> dict:
 
 async def compute_rule_performance(days: int = 30) -> list[dict]:
     cutoff = _window_cutoff(days)
-    trades = await get_trades(limit=1000)
+    trades = await get_trades(limit=10000)
     buckets: dict[str, dict] = {}
     for trade in trades:
+        if not is_closed_any(trade):
+            continue
         try:
             ts = datetime.fromisoformat(trade.timestamp.replace("Z", "+00:00"))
         except Exception:
@@ -102,7 +101,7 @@ async def compute_rule_performance(days: int = 30) -> list[dict]:
             "source": trade.source,
         })
         bucket["trades_count"] += 1
-        pnl = _trade_pnl(trade)
+        pnl = get_trade_realized_pnl(trade)
         if pnl is not None:
             bucket["net_pnl"] += pnl
             if pnl > 0:

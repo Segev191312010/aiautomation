@@ -12,6 +12,7 @@ from api_contracts import (
     AuditLogResponse,
     AutoTuneResultResponse,
     AIStatusResponse,
+    BotHealthResponse,
     AutopilotConfigResponse,
     AutopilotPerformanceResponse,
     AutopilotModeRequest,
@@ -22,7 +23,9 @@ from api_contracts import (
     GuardrailConfigResponse,
     ParamTypeMetrics,
     RecommendationResponse,
+    RulePromotionReadinessResponse,
     RulePerformanceResponse,
+    RuleValidationRunResponse,
     RuleVersionResponse,
     ScoreAnalysisResponse,
     ScoreBucket,
@@ -178,7 +181,7 @@ class TestGuardrailConfigContract:
     def test_defaults(self):
         m = GuardrailConfigResponse()
         assert m.autopilot_mode == "OFF"
-        assert m.shadow_mode is True
+        assert m.shadow_mode is False
         assert not m.ai_autonomy_enabled
         assert not m.emergency_stop
         assert m.daily_loss_limit_pct == 2.0
@@ -223,9 +226,29 @@ class TestAIStatusContract:
         m = AIStatusResponse()
         assert m.mode == "OFF"
         assert not m.autonomy_active
-        assert m.shadow_mode
+        assert m.shadow_mode is False
         assert not m.daily_loss_locked
         assert m.daily_budget_remaining == 10
+        assert m.bot_health is None
+
+    def test_with_bot_health(self):
+        m = AIStatusResponse(
+            mode="LIVE",
+            autonomy_active=True,
+            bot_health=BotHealthResponse(
+                is_running=True,
+                minutes_since_last_cycle=1.25,
+                total_cycles_today=12,
+                error_count_24h=1,
+                ibkr_connected=True,
+                stale_warning=False,
+                last_signal_symbol="NVDA",
+                degraded_mode_count_24h=2,
+            ),
+        )
+        assert m.bot_health is not None
+        assert m.bot_health.total_cycles_today == 12
+        assert m.bot_health.last_signal_symbol == "NVDA"
 
 
 class TestAutopilotConfigContract:
@@ -382,6 +405,51 @@ class TestRuleVersionContract:
         assert m.version == 3
         assert m.author == "ai"
         assert m.status == "paper"
+
+
+class TestRuleValidationRunContract:
+    def test_valid(self):
+        m = RuleValidationRunResponse(
+            version=2,
+            validation_mode="paper",
+            trades_count=9,
+            hit_rate=0.67,
+            net_pnl=180.0,
+            expectancy=0.22,
+            max_drawdown=6.5,
+            overlap_score=0.15,
+            passed=True,
+            notes="Paper validation passed",
+            created_at="2026-03-21T10:00:00Z",
+        )
+        assert m.passed is True
+        assert m.expectancy == 0.22
+
+
+class TestRulePromotionReadinessContract:
+    def test_valid(self):
+        m = RulePromotionReadinessResponse(
+            rule_id="rule-1",
+            status="paper",
+            eligible=False,
+            reasons=["Needs at least 5 trades"],
+            latest_validation=RuleValidationRunResponse(
+                version=2,
+                validation_mode="paper",
+                trades_count=3,
+                hit_rate=0.5,
+                net_pnl=10.0,
+                expectancy=0.01,
+                max_drawdown=4.0,
+                overlap_score=0.1,
+                passed=False,
+                notes="Not enough evidence",
+                created_at="2026-03-21T10:00:00Z",
+            ),
+        )
+        assert m.status == "paper"
+        assert m.latest_validation is not None
+        assert m.reasons == ["Needs at least 5 trades"]
 
 
 class TestAutopilotPerformanceContract:

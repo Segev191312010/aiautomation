@@ -1,5 +1,5 @@
-/**
- * API client — thin fetch wrapper around the FastAPI backend.
+﻿/**
+ * API client â€” thin fetch wrapper around the FastAPI backend.
  * All methods throw on non-2xx responses.
  */
 import type {
@@ -65,32 +65,32 @@ import type {
   UserSettings,
 } from '@/types'
 import type {
-  AdvisorReport,
-  AdvisorAnalysis,
-  AutoTuneResult,
   AutopilotConfig,
   AutopilotIntervention,
   AutopilotPerformance,
-  GuardrailConfig,
   AuditLogPage,
   AIStatus,
   AIRuleAction,
   AIDirectTrade,
-  Recommendation,
   RulePerformanceRow,
+  RulePromotionReadiness,
+  RuleValidationRecord,
   RuleVersionRecord,
-  RulePerformance,
   CostReport,
   SourcePerformance,
-  ShadowDecisionsPage,
-  ShadowPerformance,
   LearningMetrics,
   EconomicReport,
+  DecisionRun,
+  DecisionItem,
+  EvaluationRun,
+  EvaluationSlice,
+  EvaluationCompare,
+  ReplayRequest,
 } from '@/types/advisor'
 
 const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
-// Auth token storage — demo token bootstrapped on app init
+// Auth token storage â€” demo token bootstrapped on app init
 let _authToken: string | null = null
 export function setAuthToken(token: string | null) { _authToken = token }
 export function getAuthToken() { return _authToken }
@@ -106,14 +106,14 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body ? JSON.stringify(body) : undefined,
   })
 
-  // 401 → clear token (prep for Stage 8 login redirect)
+  // 401 â†’ clear token (prep for Stage 8 login redirect)
   if (resp.status === 401) {
     _authToken = null
   }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => resp.statusText)
-    throw new Error(`${method} ${path} → ${resp.status}: ${text}`)
+    throw new Error(`${method} ${path} â†’ ${resp.status}: ${text}`)
   }
   return resp.json() as Promise<T>
 }
@@ -123,12 +123,12 @@ const post = <T>(p: string, b?: unknown) => req<T>('POST', p, b)
 const put  = <T>(p: string, b?: unknown) => req<T>('PUT',  p, b)
 const del  = <T>(p: string)            => req<T>('DELETE', p)
 
-// ── Status ────────────────────────────────────────────────────────────────────
+// â”€â”€ Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchStatus   = () => get<SystemStatus>('/api/status')
 export const fetchBotStatus= () => get<BotStatus>('/api/bot/status')
 
-// —— Diagnostics ———————————————————————————————————————————————————————
+// â€”â€” Diagnostics â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”â€”
 
 export const fetchDiagnosticsOverview = (lookbackDays: 90 | 180 | 365 = 90) =>
   get<DiagnosticOverview>(`/api/diagnostics/overview?lookback_days=${lookbackDays}`)
@@ -175,12 +175,12 @@ export async function runDiagnosticsRefresh(): Promise<
 export const fetchDiagnosticsRefreshRun = (runId: number) =>
   get<DiagnosticRefreshRun>(`/api/diagnostics/refresh/${runId}`)
 
-// ── IBKR ──────────────────────────────────────────────────────────────────────
+// â”€â”€ IBKR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const connectIBKR    = () => post<{ connected: boolean }>('/api/ibkr/connect')
 export const disconnectIBKR = () => post<{ connected: boolean }>('/api/ibkr/disconnect')
 
-// ── Account ───────────────────────────────────────────────────────────────────
+// â”€â”€ Account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchAccountSummary = () => get<AccountSummary | SimAccountState>('/api/account/summary')
 export const fetchPositions      = () => get<(Position | SimPosition)[]>('/api/positions')
@@ -197,7 +197,7 @@ export const placeManualOrder = (body: {
   asset_type?: 'STK' | 'OPT' | 'FUT'
 }) => post<{ success?: boolean; message?: string }>('/api/orders/manual', body)
 
-// ── Market data ───────────────────────────────────────────────────────────────
+// â”€â”€ Market data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchWatchlist = (symbols?: string) =>
   get<MarketQuote[]>(`/api/watchlist${symbols ? `?symbols=${encodeURIComponent(symbols)}` : ''}`)
@@ -214,7 +214,7 @@ export const fetchPrice = (symbol: string) =>
 export const subscribeRtBars   = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${symbol}/subscribe`)
 export const unsubscribeRtBars = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${symbol}/unsubscribe`)
 
-// ── Simulation ────────────────────────────────────────────────────────────────
+// â”€â”€ Simulation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchSimAccount   = () => get<SimAccountState>('/api/simulation/account')
 export const fetchSimPositions = () => get<SimPosition[]>('/api/simulation/positions')
@@ -224,7 +224,7 @@ export const resetSimAccount   = () => post<{ reset: boolean }>('/api/simulation
 export const placeSimOrder = (body: { symbol: string; action: 'BUY' | 'SELL'; qty: number; price: number }) =>
   post<{ success: boolean; message: string }>('/api/simulation/order', body)
 
-// ── Playback ──────────────────────────────────────────────────────────────────
+// â”€â”€ Playback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchPlaybackState  = () => get<PlaybackState>('/api/simulation/playback')
 export const loadReplay = (symbol: string, period = '1y', interval = '1d') =>
@@ -235,7 +235,7 @@ export const stopReplay          = () => post<PlaybackState>('/api/simulation/pl
 export const setReplaySpeed      = (speed: number) =>
   post<{ speed: number }>('/api/simulation/playback/speed', { speed })
 
-// ── Rules ─────────────────────────────────────────────────────────────────────
+// â”€â”€ Rules â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchRules         = () => get<Rule[]>('/api/rules')
 export const fetchRule          = (id: string) => get<Rule>(`/api/rules/${id}`)
@@ -245,22 +245,22 @@ export const deleteRule         = (id: string) => del<{ deleted: boolean }>(`/ap
 export const toggleRule         = (id: string) => post<{ id: string; enabled: boolean }>(`/api/rules/${id}/toggle`)
 export const fetchRuleTemplates = () => get<import('@/types').RuleTemplate[]>('/api/rules/templates')
 
-// ── Bot ───────────────────────────────────────────────────────────────────────
+// â”€â”€ Bot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const startBot = () => post<{ running: boolean }>('/api/bot/start')
 export const stopBot  = () => post<{ running: boolean }>('/api/bot/stop')
 
-// ── Auth ──────────────────────────────────────────────────────────────────
+// â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchAuthToken = () => post<{ access_token: string; token_type: string }>('/api/auth/token')
 export const fetchAuthMe    = () => get<User>('/api/auth/me')
 
-// ── Settings ──────────────────────────────────────────────────────────────
+// â”€â”€ Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchSettings  = () => get<UserSettings>('/api/settings')
 export const updateSettings = (partial: Partial<UserSettings>) => put<UserSettings>('/api/settings', partial)
 
-// ── Screener ─────────────────────────────────────────────────────────────
+// â”€â”€ Screener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const runScan = (request: {
   universe: string
@@ -284,7 +284,7 @@ export const deleteScreenerPreset = (id: string) =>
 export const enrichSymbols = (symbols: string[]) =>
   post<EnrichResult[]>('/api/screener/enrich', { symbols })
 
-// ── Backtesting ─────────────────────────────────────────────────────────
+// â”€â”€ Backtesting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const runBacktest = (body: BacktestRequest) =>
   post<BacktestResult>('/api/backtest/run', body)
@@ -301,7 +301,7 @@ export const fetchBacktest = (id: string) =>
 export const deleteBacktest = (id: string) =>
   del<{ deleted: boolean }>(`/api/backtest/${id}`)
 
-// ── Alerts ─────────────────────────────────────────────────────────────────
+// â”€â”€ Alerts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchAlerts       = () => get<Alert[]>('/api/alerts')
 export const fetchAlert        = (id: string) => get<Alert>(`/api/alerts/${id}`)
@@ -317,7 +317,7 @@ export const fetchAlertStats   = () => get<AlertStats>('/api/alerts/stats')
 export const subscribePush = (subscription: PushSubscriptionJSON) =>
   post<{ subscribed: boolean }>('/api/push/subscribe', subscription)
 
-// ── Indicators ──────────────────────────────────────────────────────────
+// â”€â”€ Indicators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchIndicatorData = (
   symbol: string,
@@ -335,7 +335,7 @@ export const fetchIndicatorData = (
   return get<Array<{ time: number; value: number }>>(`/api/market/${symbol}/indicators?${qs}`)
 }
 
-// ── Stock Profile ─────────────────────────────────────────────────────────
+// â”€â”€ Stock Profile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchStockOverview = (symbol: string) =>
   get<StockOverview>(`/api/stock/${symbol}/overview`)
@@ -379,7 +379,7 @@ export const fetchStockEarningsDetail = (symbol: string) =>
 export const fetchStockProfile = (symbol: string) =>
   get<StockProfileBundle>(`/api/stock/${symbol}/profile`)
 
-// ── Sector Rotation ─────────────────────────────────────────────────────────
+// â”€â”€ Sector Rotation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchSectorRotation = (lookbackDays = 90): Promise<SectorRotation[]> =>
   get<SectorRotation[]>(`/api/sectors/rotation?lookback_days=${lookbackDays}`)
@@ -390,56 +390,271 @@ export const fetchSectorLeaders = (sectorEtf: string, topN = 10, period = '3mo')
 export const fetchSectorHeatmap = (): Promise<SectorHeatmapRow[]> =>
   get<SectorHeatmapRow[]>('/api/sectors/heatmap')
 
-// ── Portfolio Analytics & Risk ───────────────────────────────────────────────
+// â”€â”€ Portfolio Analytics & Risk â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-export const fetchPortfolioAnalytics = (range: '1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL' = '3M') =>
-  get<PortfolioAnalytics>(`/api/risk/portfolio?range=${range}`)
+type RiskPortfolioResponse = {
+  pnl?: {
+    total_pnl?: number
+    win_rate?: number
+  }
+  daily_pnl?: Array<{
+    date: string
+    pnl: number
+    cumulative: number
+  }>
+  performance?: {
+    total_return?: number
+    total_return_pct?: number
+    sharpe_ratio?: number
+    win_rate?: number
+  }
+  drawdown?: {
+    current_pct?: number
+    max_pct?: number
+  }
+}
 
-export const fetchDailyPnL = (days = 90) =>
-  get<DailyPnL[]>(`/api/risk/pnl/daily?days=${days}`)
+type RiskSettingsResponse = {
+  max_position_pct: number
+  max_sector_pct: number
+  max_daily_loss_pct: number
+  max_drawdown_pct: number
+  max_open_positions: number
+}
 
-export const fetchExposureBreakdown = () =>
-  get<ExposureBreakdown>('/api/risk/exposure')
+type CorrelationApiResponse = CorrelationMatrix & { error?: string }
 
-export const fetchRiskLimits = () =>
-  get<RiskLimits>('/api/risk/limits')
+const ANALYTICS_BASELINE_EQUITY = 100_000
 
-export const fetchTradeHistory = (limit = 20) =>
-  get<TradeHistoryRow[]>(`/api/risk/trades?limit=${limit}`)
+function toChartTime(date: string): number {
+  const parsed = Date.parse(`${date}T00:00:00Z`)
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0
+}
 
-export const fetchCorrelationMatrix = () =>
-  get<CorrelationMatrix>('/api/risk/correlation')
+function buildEquityCurve(
+  rows: Array<{ date: string; cumulative: number }> | undefined,
+): PortfolioAnalytics['equity_curve'] {
+  return (rows ?? []).map((row) => ({
+    time: toChartTime(row.date),
+    value: ANALYTICS_BASELINE_EQUITY + Number(row.cumulative ?? 0),
+  }))
+}
 
-// ── AI Advisor ────────────────────────────────────────────────────────────────
+function mapPortfolioAnalytics(payload: RiskPortfolioResponse): PortfolioAnalytics {
+  const daily = payload.daily_pnl ?? []
+  const equityCurve = buildEquityCurve(daily)
+  const latest = daily[daily.length - 1]
+  const previousValue = equityCurve.length >= 2
+    ? equityCurve[equityCurve.length - 2].value
+    : ANALYTICS_BASELINE_EQUITY
+  const dayPnl = Number(latest?.pnl ?? 0)
+  const totalPnl = Number(payload.pnl?.total_pnl ?? payload.performance?.total_return ?? 0)
 
-export const fetchAdvisorReport = (lookbackDays = 90, refresh = false) =>
-  get<AdvisorReport>(`/api/advisor/report?lookback_days=${lookbackDays}&refresh=${refresh}`)
+  return {
+    total_value: equityCurve.length > 0
+      ? equityCurve[equityCurve.length - 1].value
+      : ANALYTICS_BASELINE_EQUITY + totalPnl,
+    day_pnl: dayPnl,
+    day_pnl_pct: previousValue > 0 ? (dayPnl / previousValue) * 100 : 0,
+    total_pnl: totalPnl,
+    total_pnl_pct: Number(payload.performance?.total_return_pct ?? 0),
+    win_rate: Number(payload.performance?.win_rate ?? payload.pnl?.win_rate ?? 0),
+    sharpe_ratio: Number(payload.performance?.sharpe_ratio ?? 0),
+    max_drawdown_pct: -Math.abs(Number(payload.drawdown?.max_pct ?? 0)),
+    equity_curve: equityCurve,
+    benchmark_curve: [],
+  }
+}
 
-export const fetchAdvisorRecommendations = (
-  lookbackDays = 90,
-  maxPriority: 'high' | 'medium' | 'low' = 'low',
-) =>
-  get<{ recommendations: Recommendation[]; total: number }>(
-    `/api/advisor/recommendations?lookback_days=${lookbackDays}&max_priority=${maxPriority}`
+function mapDailyPnL(rows: Array<{ date: string; pnl: number }> | undefined): DailyPnL[] {
+  return (rows ?? []).map((row) => ({
+    date: row.date,
+    pnl: Number(row.pnl ?? 0),
+    trades: 0,
+  }))
+}
+
+function normalizePositionExposure(position: Position | SimPosition) {
+  const value = Math.abs(Number(position.market_value ?? 0))
+  const pnl = Number(position.unrealized_pnl ?? 0) + Number('realized_pnl' in position ? position.realized_pnl ?? 0 : 0)
+  const qty = Math.abs(Number(position.qty ?? 0))
+  const avgCost = Number(position.avg_cost ?? 0)
+  const costBasis = qty * avgCost
+  const pnlPct = 'pnl_pct' in position && typeof position.pnl_pct === 'number'
+    ? position.pnl_pct
+    : costBasis > 0 ? (pnl / costBasis) * 100 : 0
+
+  return {
+    symbol: position.symbol,
+    sector: 'Unknown',
+    value,
+    weight_pct: 0,
+    pnl,
+    pnl_pct: pnlPct,
+  }
+}
+
+function toTradeHistoryRow(trade: Trade, index: number): TradeHistoryRow {
+  const rawMetadata = (trade.metadata ?? {}) as Record<string, unknown>
+  const rawRealized = typeof trade.realized_pnl === 'number'
+    ? trade.realized_pnl
+    : typeof rawMetadata.realized_pnl === 'number'
+      ? rawMetadata.realized_pnl
+      : typeof rawMetadata.pnl === 'number'
+        ? rawMetadata.pnl
+        : undefined
+
+  const openedAt = typeof trade.opened_at === 'string' ? trade.opened_at : undefined
+  const closedAt = typeof trade.closed_at === 'string' ? trade.closed_at : undefined
+  const holdingDays = openedAt && closedAt
+    ? Math.max(0, Math.round((Date.parse(closedAt) - Date.parse(openedAt)) / 86400000))
+    : undefined
+
+  return {
+    id: trade.id || `${trade.symbol}-${trade.timestamp}-${index}`,
+    symbol: trade.symbol,
+    action: trade.action,
+    quantity: trade.quantity,
+    fill_price: Number(trade.fill_price ?? trade.exit_price ?? trade.entry_price ?? 0),
+    pnl: rawRealized,
+    timestamp: closedAt ?? trade.timestamp,
+    holding_days: holdingDays,
+  }
+}
+
+export const fetchPortfolioAnalytics = async (
+  range: '1W' | '1M' | '3M' | '6M' | '1Y' | 'ALL' = '3M',
+) => {
+  const payload = await get<RiskPortfolioResponse>(`/api/risk/portfolio?range=${range}`)
+  return mapPortfolioAnalytics(payload)
+}
+
+export const fetchDailyPnL = async (days = 90) => {
+  const rows = await get<Array<{ date: string; pnl: number; cumulative?: number }>>(`/api/analytics/pnl/daily?days=${days}`)
+  return mapDailyPnL(rows)
+}
+
+export const fetchExposureBreakdown = async () => {
+  const positions = await fetchPositions()
+  const normalized = positions.map(normalizePositionExposure)
+  const totalValue = normalized.reduce((sum, position) => sum + position.value, 0)
+  // No sector API available â€” leave empty rather than faking "Unknown: 100%"
+  const sectorWeights: Record<string, number> = {}
+
+  return {
+    positions: normalized.map((position) => ({
+      ...position,
+      weight_pct: totalValue > 0 ? (position.value / totalValue) * 100 : 0,
+    })),
+    sector_weights: sectorWeights,
+  } satisfies ExposureBreakdown
+}
+
+export const fetchRiskLimits = async () => {
+  const [settings, positions, account, dailyPnl, drawdown] = await Promise.all([
+    get<RiskSettingsResponse>('/api/risk/settings'),
+    fetchPositions(),
+    fetchAccountSummary(),
+    get<Array<{ date: string; pnl: number }>>('/api/analytics/pnl/daily?days=1'),
+    get<{ current_pct?: number }>('/api/risk/drawdown'),
+  ])
+
+  const accountValue = 'net_liquidation' in account
+    ? Number(account.net_liquidation ?? 0)
+    : Number(account.balance ?? 0)
+  const largestPositionValue = positions.reduce(
+    (largest, position) => Math.max(largest, Math.abs(Number(position.market_value ?? 0))),
+    0,
+  )
+  const latestDailyPnl = Number(dailyPnl[dailyPnl.length - 1]?.pnl ?? 0)
+  const dailyLossLimit = accountValue > 0
+    ? (accountValue * Number(settings.max_daily_loss_pct ?? 0)) / 100
+    : 0
+  const currentDrawdown = Math.abs(Number(drawdown.current_pct ?? 0))
+
+  return {
+    limits: [
+      {
+        label: 'Max Position Size',
+        used: accountValue > 0 ? (largestPositionValue / accountValue) * 100 : 0,
+        limit: Number(settings.max_position_pct ?? 0),
+        unit: '%',
+      },
+      {
+        label: 'Daily Loss Limit',
+        used: latestDailyPnl < 0 ? Math.abs(latestDailyPnl) : 0,
+        limit: dailyLossLimit,
+        unit: '$',
+      },
+      {
+        label: 'Max Drawdown',
+        used: currentDrawdown,
+        limit: Number(settings.max_drawdown_pct ?? 0),
+        unit: '%',
+      },
+      {
+        label: 'Open Positions',
+        used: positions.length,
+        limit: Number(settings.max_open_positions ?? 0),
+        unit: 'count',
+      },
+    ],
+    max_position_size_pct: Number(settings.max_position_pct ?? 0),
+    daily_loss_limit: dailyLossLimit,
+    drawdown_limit_pct: Number(settings.max_drawdown_pct ?? 0),
+    max_open_positions: Number(settings.max_open_positions ?? 0),
+  } satisfies RiskLimits
+}
+
+export const fetchTradeHistory = async (limit = 20) => {
+  const trades = await fetchTrades(limit)
+  return trades.map(toTradeHistoryRow)
+}
+
+export const fetchCorrelationMatrix = async () => {
+  const positions = await fetchPositions()
+  const symbols = Array.from(
+    new Set(
+      positions
+        .map((position) => position.symbol?.trim().toUpperCase())
+        .filter((symbol): symbol is string => Boolean(symbol)),
+    ),
   )
 
-export const fetchAdvisorAnalysis = (lookbackDays = 90) =>
-  get<AdvisorAnalysis>(`/api/advisor/analysis?lookback_days=${lookbackDays}`)
+  if (symbols.length < 3) {
+    return { symbols, matrix: [] } satisfies CorrelationMatrix
+  }
 
-export const fetchAdvisorDailyReport = (lookbackDays = 90) =>
-  get<{ report: string }>(`/api/advisor/daily-report?lookback_days=${lookbackDays}`)
+  const payload = await get<CorrelationApiResponse>(`/api/risk/correlation?symbols=${encodeURIComponent(symbols.join(','))}`)
+  if (payload.error) {
+    throw new Error(payload.error)
+  }
+  if (!Array.isArray(payload.symbols) || !Array.isArray(payload.matrix)) {
+    throw new Error('Invalid correlation payload')
+  }
 
-export const postAdvisorAutoTune = (apply = false, lookbackDays = 90) =>
-  post<AutoTuneResult>(`/api/advisor/auto-tune?apply=${apply}&lookback_days=${lookbackDays}`)
+  const expectedSize = payload.symbols.length
+  const hasValidMatrix =
+    expectedSize >= 3 &&
+    payload.matrix.length === expectedSize &&
+    payload.matrix.every(
+      (row) => Array.isArray(row) && row.length === expectedSize && row.every((value) => typeof value === 'number' && Number.isFinite(value)),
+    )
 
-export const fetchAdvisorRuleAnalysis = (ruleId: string, lookbackDays = 90) =>
-  get<RulePerformance>(`/api/advisor/rule/${ruleId}?lookback_days=${lookbackDays}`)
+  if (!hasValidMatrix) {
+    throw new Error('Invalid correlation payload')
+  }
+
+  return payload satisfies CorrelationMatrix
+}
+
+// â”€â”€ Autopilot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export const fetchGuardrails = () =>
-  get<GuardrailConfig>('/api/autopilot/config')
+  get<AutopilotConfig>('/api/autopilot/config')
 
-export const updateGuardrails = (config: Partial<GuardrailConfig>) =>
-  put<GuardrailConfig>('/api/autopilot/config', config)
+export const updateGuardrails = (config: Partial<AutopilotConfig>) =>
+  put<AutopilotConfig>('/api/autopilot/config', config)
 
 export const postEmergencyStop = () =>
   post<{ emergency_stop: boolean; message: string }>('/api/autopilot/kill')
@@ -465,24 +680,6 @@ export const fetchAIStatus = () =>
 export const fetchAICosts = (days = 30) =>
   get<CostReport>(`/api/autopilot/costs?days=${days}`)
 
-export const fetchShadowDecisions = (
-  limit = 50, offset = 0,
-  paramType?: string, symbol?: string, regime?: string, minConfidence?: number,
-) => {
-  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) })
-  if (paramType) qs.set('param_type', paramType)
-  if (symbol) qs.set('symbol', symbol)
-  if (regime) qs.set('regime', regime)
-  if (minConfidence != null) qs.set('min_confidence', String(minConfidence))
-  return get<ShadowDecisionsPage>(`/api/advisor/shadow-decisions?${qs}`)
-}
-
-export const fetchShadowPerformance = () =>
-  get<ShadowPerformance>('/api/advisor/shadow-performance')
-
-export const toggleShadowMode = (enable: boolean, force = false) =>
-  post<{ shadow_mode: boolean; message: string }>('/api/advisor/shadow-mode', { enable, force })
-
 export const fetchLearningMetrics = (windowDays = 30) =>
   get<LearningMetrics>(`/api/autopilot/learning-metrics?window_days=${windowDays}`)
 
@@ -497,6 +694,12 @@ export const fetchAutopilotRule = (id: string) =>
 
 export const fetchAutopilotRuleVersions = (id: string) =>
   get<RuleVersionRecord[]>(`/api/autopilot/rules/${id}/versions`)
+
+export const fetchAutopilotRuleValidations = (id: string) =>
+  get<RuleValidationRecord[]>(`/api/autopilot/rules/${id}/validations`)
+
+export const fetchAutopilotRulePromotionReadiness = (id: string) =>
+  get<RulePromotionReadiness>(`/api/autopilot/rules/${id}/promotion-readiness`)
 
 export const manualPauseAutopilotRule = (id: string, reason = '') =>
   post<Rule>(`/api/autopilot/rules/${id}/manual-pause`, { reason })
@@ -531,3 +734,32 @@ export const acknowledgeAutopilotIntervention = (id: number) =>
 
 export const resolveAutopilotIntervention = (id: number, resolvedBy = 'operator') =>
   post<{ resolved: boolean; resolved_by: string }>(`/api/autopilot/interventions/${id}/resolve`, { resolved_by: resolvedBy })
+
+// â”€â”€ S10: Decision Ledger â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export const fetchDecisionRuns = (limit = 50, offset = 0) =>
+  get<DecisionRun[]>(`/api/autopilot/decision-runs?limit=${limit}&offset=${offset}`)
+
+export const fetchDecisionRun = (runId: string) =>
+  get<DecisionRun>(`/api/autopilot/decision-runs/${runId}`)
+
+export const fetchDecisionRunItems = (runId: string) =>
+  get<DecisionItem[]>(`/api/autopilot/decision-runs/${runId}/items`)
+
+// â”€â”€ S10: Evaluation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export const launchEvaluationReplay = (request: ReplayRequest) =>
+  post<EvaluationRun>('/api/autopilot/evaluation/replay', request)
+
+export const fetchEvaluationRuns = (limit = 50, offset = 0) =>
+  get<EvaluationRun[]>(`/api/autopilot/evaluation/runs?limit=${limit}&offset=${offset}`)
+
+export const fetchEvaluationRun = (evaluationId: string) =>
+  get<EvaluationRun>(`/api/autopilot/evaluation/${evaluationId}`)
+
+export const fetchEvaluationSlices = (evaluationId: string) =>
+  get<EvaluationSlice[]>(`/api/autopilot/evaluation/${evaluationId}/slices`)
+
+export const fetchEvaluationCompare = (baselineId: string, candidateId: string) =>
+  get<EvaluationCompare>(`/api/autopilot/evaluation/compare?baseline=${baselineId}&candidate=${candidateId}`)
+

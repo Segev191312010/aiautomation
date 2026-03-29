@@ -60,6 +60,15 @@ const NAV_GROUPS: NavGroup[] = [
           </svg>
         ),
       },
+      {
+        route: 'advisor',
+        label: 'Autopilot',
+        icon: (
+          <svg viewBox="0 0 24 24" fill="currentColor" className={IC}>
+            <path d="M12 2a3 3 0 00-3 3v1H7a3 3 0 00-3 3v2a5 5 0 001 2.97V19a3 3 0 003 3h8a3 3 0 003-3v-5.03A5 5 0 0020 11V9a3 3 0 00-3-3h-2V5a3 3 0 00-3-3zm-1 4V5a1 1 0 112 0v1h-2zm-2 8a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zm6 0a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zM8 9h8a1 1 0 011 1v1a3 3 0 01-3 3H10a3 3 0 01-3-3v-1a1 1 0 011-1z" />
+          </svg>
+        ),
+      },
     ],
   },
   {
@@ -77,6 +86,15 @@ const NAV_GROUPS: NavGroup[] = [
         icon: (
           <svg viewBox="0 0 24 24" fill="currentColor" className={IC}>
             <path d="M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z" />
+          </svg>
+        ),
+      },
+      {
+        route: 'charts',
+        label: 'Charts',
+        icon: (
+          <svg viewBox="0 0 24 24" fill="currentColor" className={IC}>
+            <path d="M4 9h4v11H4zm6-4h4v15h-4zm6 8h4v7h-4z" />
           </svg>
         ),
       },

@@ -151,7 +151,7 @@ class AdvisorReportResponse(BaseModel):
 
 class GuardrailConfigResponse(BaseModel):
     autopilot_mode: Literal["OFF", "PAPER", "LIVE"] = "OFF"
-    shadow_mode: bool = True
+    shadow_mode: bool = False
     ai_autonomy_enabled: bool = False
     max_rules_disabled_per_day: int = 2
     max_rules_enabled_per_day: int = 1
@@ -201,6 +201,8 @@ class AuditLogEntryResponse(BaseModel):
     output_tokens: Optional[int] = None
     status: str = "applied"
     reverted_at: Optional[str] = None
+    decision_run_id: Optional[str] = None
+    decision_item_id: Optional[str] = None
 
 
 class AuditLogResponse(BaseModel):
@@ -212,10 +214,25 @@ class AuditLogResponse(BaseModel):
 
 # ── AI Status ────────────────────────────────────────────────────────────────
 
+class BotHealthResponse(BaseModel):
+    is_running: bool = False
+    minutes_since_last_cycle: Optional[float] = None
+    total_cycles_today: int = 0
+    error_count_24h: int = 0
+    ibkr_connected: bool = False
+    stale_warning: bool = False
+    last_error_message: Optional[str] = None
+    last_signal_symbol: Optional[str] = None
+    last_successful_ibkr_heartbeat_at: Optional[str] = None
+    last_order_submit_at: Optional[str] = None
+    last_fill_event_at: Optional[str] = None
+    degraded_mode_count_24h: int = 0
+
+
 class AIStatusResponse(BaseModel):
     mode: Literal["OFF", "PAPER", "LIVE"] = "OFF"
     autonomy_active: bool = False
-    shadow_mode: bool = True
+    shadow_mode: bool = False
     emergency_stop: bool = False
     daily_loss_locked: bool = False
     daily_loss_limit_pct: float = 2.0
@@ -229,6 +246,7 @@ class AIStatusResponse(BaseModel):
     daily_budget_remaining: int = 10
     last_optimization_at: Optional[str] = None
     optimizer_running: bool = False
+    bot_health: Optional[BotHealthResponse] = None
 
 
 class AutopilotConfigResponse(BaseModel):
@@ -298,6 +316,7 @@ class AIDirectTrade(BaseModel):
     invalidation: str
     reason: str
     confidence: float = 0.5
+    decision_id: Optional[str] = None  # S9: originating decision; None until wired to audit log
 
 
 class AIDecisionPayload(BaseModel):
@@ -311,6 +330,98 @@ class AIDecisionPayload(BaseModel):
     risk_adjustments: Optional[AIRiskAdjustments] = None
     reasoning: str = ""
     confidence: float = 0.5
+    abstained: bool = False  # S10: explicit abstain signal for calibration/coverage
+
+
+# ── S10: Decision Ledger Response/Request Models ─────────────────────────────
+
+class DecisionRunResponse(BaseModel):
+    id: str
+    source: str
+    mode: Literal["OFF", "PAPER", "LIVE"]
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    prompt_version: Optional[str] = None
+    aggregate_confidence: Optional[float] = None
+    abstained: bool = False
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    status: str
+    error: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
+    item_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class DecisionItemResponse(BaseModel):
+    id: str
+    run_id: str
+    item_index: int
+    item_type: str
+    action_name: Optional[str] = None
+    target_key: Optional[str] = None
+    symbol: Optional[str] = None
+    gate_status: str
+    gate_reason: Optional[str] = None
+    confidence: Optional[float] = None
+    regime: Optional[str] = None
+    created_rule_id: Optional[str] = None
+    created_trade_id: Optional[str] = None
+    realized_trade_id: Optional[str] = None
+    realized_pnl: Optional[float] = None
+    realized_at: Optional[str] = None
+    score_status: str
+    score_source: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class EvaluationRunResponse(BaseModel):
+    id: str
+    candidate_type: str
+    candidate_key: str
+    baseline_key: Optional[str] = None
+    evaluation_mode: str
+    window_start: Optional[str] = None
+    window_end: Optional[str] = None
+    status: str
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+    completed_at: Optional[str] = None
+
+
+class EvaluationSliceResponse(BaseModel):
+    slice_type: str
+    slice_key: str
+    count: int = 0
+    scored_count: int = 0
+    hit_rate: Optional[float] = None
+    net_pnl: Optional[float] = None
+    expectancy: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    coverage: Optional[float] = None
+    abstain_rate: Optional[float] = None
+    avg_confidence: Optional[float] = None
+    calibration_error: Optional[float] = None
+
+
+class EvaluationCompareResponse(BaseModel):
+    baseline: Optional[EvaluationRunResponse] = None
+    candidate: Optional[EvaluationRunResponse] = None
+    baseline_slices: list[EvaluationSliceResponse] = Field(default_factory=list)
+    candidate_slices: list[EvaluationSliceResponse] = Field(default_factory=list)
+
+
+class ReplayRequest(BaseModel):
+    candidate_type: Literal["prompt_version", "model_version", "rule_snapshot", "decision_run"]
+    candidate_key: str
+    baseline_key: Optional[str] = None
+    evaluation_mode: Literal["stored_context_existing", "stored_context_generate", "rule_backtest"] = "stored_context_existing"
+    window_days: int = Field(default=90, ge=7, le=365)
+    limit_runs: int = Field(default=500, ge=1, le=5000)
+    min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    symbols: list[str] = Field(default_factory=list)
+    action_types: list[str] = Field(default_factory=list)
 
 
 class RuleVersionResponse(BaseModel):
@@ -339,6 +450,12 @@ class RuleValidationRunResponse(BaseModel):
     passed: bool = False
     notes: Optional[str] = None
     created_at: str
+    # S9: evidence quality fields
+    evaluated_closed_count: Optional[int] = None
+    excluded_legacy_count: Optional[int] = None
+    validation_window: Optional[str] = None
+    symbols_evaluated: Optional[list[str]] = None
+    data_quality: Optional[Literal["canonical", "legacy_fallback", "mixed"]] = None
 
 
 class RulePromotionReadinessResponse(BaseModel):
@@ -347,6 +464,7 @@ class RulePromotionReadinessResponse(BaseModel):
     eligible: bool = False
     reasons: list[str] = Field(default_factory=list)
     latest_validation: Optional[RuleValidationRunResponse] = None
+    data_quality_note: Optional[str] = None
 
 
 class SourcePerformanceResponse(BaseModel):

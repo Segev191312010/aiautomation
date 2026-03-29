@@ -17,6 +17,7 @@ const StockProfilePage = lazy(() => import('@/pages/StockProfilePage'))
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
 const RulesPage = lazy(() => import('@/pages/RulesPage'))
 const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
+const ChartsPage = lazy(() => import('@/pages/ChartsPage'))
 
 function PageFallback() {
   return (
@@ -43,6 +44,7 @@ function PageSwitch() {
     case 'dashboard':  page = <Dashboard />; break
     case 'tradebot':   page = <TradeBotPage />; break
     case 'market':     page = <MarketPage />; break
+    case 'charts':     page = <ChartsPage />; break
     case 'rotation':   page = <MarketRotationPage />; break
     case 'screener':   page = <ScreenerPage />; break
     case 'stock':      page = <StockProfilePage />; break

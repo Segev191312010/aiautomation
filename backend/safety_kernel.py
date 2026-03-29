@@ -33,20 +33,24 @@ async def check_all(
     stop_price: float | None = None,
     is_exit: bool = False,
     has_existing_position: bool = False,
+    require_autopilot_authority: bool = True,
 ) -> None:
-    """Run all safety checks for an Autopilot-controlled order."""
-    await assert_not_killed()
-    await assert_daily_loss_not_locked(is_exit=is_exit)
+    """Run the shared runtime safety checks for an order."""
+    if require_autopilot_authority and not is_exit:
+        await assert_not_killed()
+        await assert_daily_loss_not_locked(is_exit=False)
     assert_no_shorts(side, is_exit=is_exit, has_existing_position=has_existing_position)
-    assert_risk_budget(quantity, price_estimate, account_equity, stop_price=stop_price)
-    assert_not_duplicate(symbol, side, source)
+    if not is_exit:
+        assert_risk_budget(quantity, price_estimate, account_equity, stop_price=stop_price)
+        assert_not_duplicate(symbol, side, source)
     log.debug(
-        "Safety kernel PASS: side=%s symbol=%s qty=%s source=%s exit=%s",
+        "Safety kernel PASS: side=%s symbol=%s qty=%s source=%s exit=%s authority=%s",
         side,
         symbol,
         quantity,
         source,
         is_exit,
+        require_autopilot_authority,
     )
 
 
@@ -59,13 +63,12 @@ async def assert_not_killed() -> None:
         if config.autopilot_mode == "OFF":
             raise SafetyViolation("Autopilot is OFF")
         if config.emergency_stop:
-            raise SafetyViolation("Kill switch active — all new AI entries blocked")
+            raise SafetyViolation("Kill switch active - all new AI entries blocked")
     except SafetyViolation:
         raise
-    except Exception as e:
-        # C-1 FIX: Default to BLOCKED on DB error — fail closed, not open
-        log.error("Kill switch check FAILED (DB unavailable) — blocking for safety: %s", e)
-        raise SafetyViolation("Kill switch check unavailable — blocking for safety")
+    except Exception as exc:
+        log.error("Kill switch check FAILED (DB unavailable) - blocking for safety: %s", exc)
+        raise SafetyViolation("Kill switch check unavailable - blocking for safety")
 
 
 async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:
@@ -77,13 +80,12 @@ async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:
 
         config = await _load_guardrails_from_db()
         if config.daily_loss_locked:
-            raise SafetyViolation("Daily loss lock active — new AI entries blocked")
+            raise SafetyViolation("Daily loss lock active - new AI entries blocked")
     except SafetyViolation:
         raise
-    except Exception as e:
-        # C-2 FIX: Default to BLOCKED on DB error — fail closed, not open
-        log.error("Daily loss check FAILED (DB unavailable) — blocking for safety: %s", e)
-        raise SafetyViolation("Daily loss check unavailable — blocking for safety")
+    except Exception as exc:
+        log.error("Daily loss check FAILED (DB unavailable) - blocking for safety: %s", exc)
+        raise SafetyViolation("Daily loss check unavailable - blocking for safety")
 
 
 def assert_no_shorts(side: str, *, is_exit: bool = False, has_existing_position: bool = False) -> None:
@@ -106,8 +108,10 @@ def assert_risk_budget(
     For rule-driven entries without a concrete stop, we conservatively fall back
     to order notional.
     """
-    if quantity <= 0 or account_equity <= 0 or price_estimate <= 0:
+    if quantity <= 0 or account_equity <= 0:
         return
+    if price_estimate <= 0:
+        raise SafetyViolation("price_estimate is zero - cannot verify risk budget")
 
     max_risk = account_equity * cfg.RISK_PER_TRADE_PCT / 100
     if stop_price is not None and stop_price > 0:

@@ -34,14 +34,42 @@ def _get_sector(symbol: str) -> str:
 
 
 def compute_realized_pnl(trades: list[dict]) -> dict:
-    """FIFO matching of BUY/SELL pairs to compute realized P&L."""
-    buys: dict[str, list[dict]] = defaultdict(list)  # symbol -> [{'qty': ..., 'price': ..., 'ts': ...}]
+    """Compute realized P&L. S9: canonical outcomes scored directly, FIFO only for legacy."""
     matched: list[dict] = []
     total_pnl = 0.0
 
-    sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", ""))
+    # S9: split into canonical outcomes (use directly) and legacy rows (FIFO match)
+    canonical_ids: set[str] = set()
+    for trade in trades:
+        if (trade.get("realized_pnl") is not None
+                and trade.get("entry_price") is not None
+                and trade.get("exit_price") is not None):
+            matched.append({
+                "symbol": trade.get("symbol", ""),
+                "entry_date": trade.get("opened_at") or trade.get("timestamp", ""),
+                "exit_date": trade.get("closed_at") or trade.get("timestamp", ""),
+                "entry_price": trade["entry_price"],
+                "exit_price": trade["exit_price"],
+                "qty": abs(trade.get("quantity", 0)),
+                "pnl": round(float(trade["realized_pnl"]), 2),
+                "pnl_pct": round(float(trade.get("pnl_pct", 0)), 2),
+                "hold_time": _hold_time(
+                    trade.get("opened_at") or trade.get("timestamp", ""),
+                    trade.get("closed_at") or trade.get("timestamp", ""),
+                ),
+            })
+            total_pnl += float(trade["realized_pnl"])
+            canonical_ids.add(trade.get("id", ""))
+            # Also exclude the linked entry trade from FIFO
+            if trade.get("position_id"):
+                canonical_ids.add(trade["position_id"])
 
-    for trade in sorted_trades:
+    # FIFO match only legacy rows (not already scored via canonical path)
+    legacy_trades = [t for t in trades if t.get("id", "") not in canonical_ids]
+    buys: dict[str, list[dict]] = defaultdict(list)
+    sorted_legacy = sorted(legacy_trades, key=lambda t: t.get("timestamp", ""))
+
+    for trade in sorted_legacy:
         symbol = trade.get("symbol", "")
         action = trade.get("action", "")
         qty = abs(trade.get("quantity", 0))

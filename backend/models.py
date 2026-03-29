@@ -58,6 +58,9 @@ class Rule(BaseModel):
     created_by: str = "human"
     supersedes_rule_id: Optional[str] = None
     updated_at: Optional[str] = None
+    origin_decision_id: Optional[str] = None  # S10: ai_decision_items.id that created this rule
+    origin_run_id: Optional[str] = None       # S10: ai_decision_runs.id that created this rule
+    replay_config: Optional[dict] = None      # W1-05: deterministic exit params for rule replay
 
     @model_validator(mode="after")
     def _check_symbol_or_universe(self) -> "Rule":
@@ -208,6 +211,19 @@ class Trade(BaseModel):
     stop_price: Optional[float] = None
     invalidation: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # ── S9 canonical outcome fields ──────────────────────────────
+    mode: Optional[Literal["LIVE", "PAPER", "SIM"]] = None
+    decision_id: Optional[str] = None          # originating/opening decision; stable across entry+exit
+    position_id: Optional[str] = None          # entry trade id; links entry <-> exit
+    opened_at: Optional[str] = None            # ISO when position opened
+    closed_at: Optional[str] = None            # ISO when position closed
+    entry_price: Optional[float] = None        # scoring entry price
+    exit_price: Optional[float] = None         # scoring exit price
+    fees: float = 0.0
+    realized_pnl: Optional[float] = None       # side-aware: long=(exit-entry)*qty, short=(entry-exit)*qty, minus fees
+    pnl_pct: Optional[float] = None            # long=((exit/entry)-1)*100, short=((entry/exit)-1)*100
+    close_reason: Optional[str] = None         # hard_stop, trailing_stop, ma_exit, pending_fill, manual...
+    outcome_quality: Optional[Literal["canonical", "legacy_enriched", "legacy_unverified"]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +398,12 @@ class ScanResultRow(BaseModel):
     change_pct: float
     volume: int
     indicators: dict[str, float]
+    screener_score: float = 0.0
+    setup: str = "mixed"
+    relative_volume: float = 0.0
+    momentum_20d: float = 0.0
+    trend_strength: float = 0.0
+    notes: list[str] = Field(default_factory=list)
 
 
 class ScanResponse(BaseModel):

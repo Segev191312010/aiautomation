@@ -12,7 +12,8 @@ _pending_direct_candidates: list[dict] = []
 def _priority(candidate: dict) -> tuple[int, float]:
     is_exit = bool(candidate.get("is_exit"))
     score = float(candidate.get("score", 0))
-    return (1 if is_exit else 0, score)
+    # Exits always outrank entries regardless of score
+    return (1 if is_exit else 0, float("inf") if is_exit else score)
 
 
 def choose_candidates(rule_candidates: list[dict], direct_candidates: list[dict]) -> list[dict]:
@@ -64,7 +65,7 @@ def drain_direct_candidates(max_age_seconds: int = 900) -> list[dict]:
         try:
             queued_at = datetime.fromisoformat(str(queued_at_raw).replace("Z", "+00:00"))
         except Exception:
-            queued_at = datetime.now(timezone.utc)
+            queued_at = datetime.min.replace(tzinfo=timezone.utc)  # malformed = treat as expired
         if queued_at < cutoff:
             continue
         symbol = str(candidate.get("symbol", "")).upper()

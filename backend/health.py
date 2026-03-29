@@ -186,3 +186,20 @@ async def detailed():
     from fastapi.responses import JSONResponse
 
     return JSONResponse(base, status_code=status_code)
+
+
+@router.get("/bot")
+async def bot_health():
+    """Bot/autopilot health report for operator visibility and alerting."""
+    from config import cfg
+    from bot_runner import get_bot_health
+    from fastapi.responses import JSONResponse
+
+    payload = get_bot_health()
+    payload["monitoring_enabled"] = cfg.ENABLE_BOT_HEALTH_MONITORING
+
+    status_code = 200
+    if payload.get("is_running") and payload.get("stale_warning"):
+        status_code = 503
+
+    return JSONResponse(payload, status_code=status_code)

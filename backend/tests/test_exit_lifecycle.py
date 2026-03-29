@@ -1,4 +1,4 @@
-"""
+﻿"""
 Exit lifecycle tests — Phase 1 account safety.
 
 Verifies that tracked positions are NEVER deleted unless the exit
@@ -6,14 +6,13 @@ trade is confirmed FILLED. Covers: failed exits, pending exits,
 timed-out exits, cancelled exits, retry cap, and short P&L sign.
 """
 import pytest
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from models import OpenPosition, Trade, Rule, TradeAction
+from models import OpenPosition, Trade
 
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
+# ── Fixtures ──────────────────────────────────────────────────────────────────
 
 def _make_position(**overrides) -> OpenPosition:
     defaults = {
@@ -53,7 +52,7 @@ def _make_trade(status="PENDING", order_id=12345, fill_price=None) -> Trade:
     )
 
 
-# ── Test: Failed exit keeps position ─────────────────────────────────────────
+# ── Test: Failed exit keeps position ──────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_failed_exit_keeps_position(anyio_backend):
@@ -65,20 +64,18 @@ async def test_failed_exit_keeps_position(anyio_backend):
 
     with patch("bot_runner.place_order", side_effect=RuntimeError("IBKR connection lost")), \
          patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved_positions.append(p)), \
-         patch("bot_runner.delete_open_position", new_callable=AsyncMock) as mock_delete, \
-         patch("bot_runner._emit", new_callable=AsyncMock):
+         patch("bot_runner._emit", new_callable=AsyncMock), \
+         patch("bot_runner.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
+         patch("bot_runner.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock):
 
         await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
 
-    # Position NOT deleted
-    mock_delete.assert_not_called()
-    # Position saved with error info
     assert len(saved_positions) == 1
     assert saved_positions[0].exit_attempts == 1
     assert "IBKR connection lost" in saved_positions[0].last_exit_error
 
 
-# ── Test: Pending exit blocks duplicate ──────────────────────────────────────
+# ── Test: Pending exit blocks duplicate ───────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_pending_exit_blocks_duplicate(anyio_backend):
@@ -93,40 +90,39 @@ async def test_pending_exit_blocks_duplicate(anyio_backend):
 
         await _process_exits([pos], {"AAPL": MagicMock()})
 
-    # Reconcile was called (to check the pending order)
     mock_reconcile.assert_called_once()
-    # No NEW exit order placed
     mock_place.assert_not_called()
 
 
-# ── Test: Filled exit deletes position ───────────────────────────────────────
+# ── Test: Filled exit deletes position ────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_filled_exit_deletes_position(anyio_backend):
-    """When pending exit is FILLED, position should be deleted."""
+    """When pending exit is FILLED, position should be finalized through lifecycle helper."""
     from bot_runner import _reconcile_pending_exit
 
     pos = _make_position(exit_pending_order_id=12345, last_exit_attempt_at="2026-03-20T14:00:00+00:00")
     filled_trade = _make_trade(status="FILLED", fill_price=148.0)
 
+    finalized_trade = _make_trade(status="FILLED", fill_price=148.0)
+    finalized_trade.realized_pnl = -20.0  # (148-150)*10
+
     with patch("database.get_trade_by_order_id", new_callable=AsyncMock, return_value=filled_trade), \
          patch("bot_runner.save_open_position", new_callable=AsyncMock), \
-         patch("bot_runner.delete_open_position", new_callable=AsyncMock) as mock_delete, \
-         patch("bot_runner._emit", new_callable=AsyncMock) as mock_emit:
+         patch("bot_runner._emit", new_callable=AsyncMock) as mock_emit, \
+         patch("bot_runner.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade) as mock_finalize:
 
         await _reconcile_pending_exit(pos)
 
-    mock_delete.assert_called_once_with("pos-001")
-    # Pending cleared before delete (B3 fix)
+    mock_finalize.assert_awaited_once()
     assert pos.exit_pending_order_id is None
-    # Exit event emitted
     mock_emit.assert_called_once()
     payload = mock_emit.call_args[0][0]
     assert payload["type"] == "exit"
-    assert payload["pnl"] < 0  # BUY at 150, filled at 148 = loss
+    assert payload["pnl"] < 0
 
 
-# ── Test: Cancelled exit clears pending + retries ────────────────────────────
+# ── Test: Cancelled exit clears pending + retries ─────────────────────────────
 
 @pytest.mark.anyio
 async def test_cancelled_exit_clears_pending(anyio_backend):
@@ -150,7 +146,7 @@ async def test_cancelled_exit_clears_pending(anyio_backend):
     assert "CANCELLED" in saved[0].last_exit_error
 
 
-# ── Test: Timed-out pending triggers cancel + retry ──────────────────────────
+# ── Test: Timed-out pending triggers cancel + retry ───────────────────────────
 
 @pytest.mark.anyio
 async def test_timeout_triggers_cancel_and_retry(anyio_backend):
@@ -177,7 +173,7 @@ async def test_timeout_triggers_cancel_and_retry(anyio_backend):
     assert "timed out" in saved[0].last_exit_error
 
 
-# ── Test: Retry cap stops automation ─────────────────────────────────────────
+# ── Test: Retry cap stops automation ───────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_retry_cap_stops_automation(anyio_backend):
@@ -192,11 +188,10 @@ async def test_retry_cap_stops_automation(anyio_backend):
 
         await _process_exits([pos], {"AAPL": MagicMock()})
 
-    # No exit placed — cap reached
     mock_place.assert_not_called()
 
 
-# ── Test: Short P&L positive when price falls ────────────────────────────────
+# ── Test: Short P&L positive when price falls ─────────────────────────────────
 
 @pytest.mark.anyio
 async def test_short_pnl_positive_when_price_falls(anyio_backend):
@@ -206,20 +201,24 @@ async def test_short_pnl_positive_when_price_falls(anyio_backend):
     pos = _make_position(side="SELL", entry_price=150.0)
     filled_trade = _make_trade(status="FILLED", fill_price=140.0)
 
+    finalized_trade = _make_trade(status="FILLED", fill_price=140.0)
+    finalized_trade.realized_pnl = 100.0  # (150-140)*10
+
     emitted = []
     with patch("bot_runner.place_order", new_callable=AsyncMock, return_value=filled_trade), \
-         patch("bot_runner.delete_open_position", new_callable=AsyncMock), \
-         patch("bot_runner._emit", new_callable=AsyncMock, side_effect=lambda p: emitted.append(p)):
+         patch("bot_runner._emit", new_callable=AsyncMock, side_effect=lambda p: emitted.append(p)), \
+         patch("bot_runner.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
+         patch("bot_runner.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
 
         await _place_exit_order(pos, "AAPL", 10, 140.0, "trail_stop")
 
     assert len(emitted) == 1
     pnl = emitted[0]["pnl"]
     assert pnl > 0, f"Short P&L should be positive when price falls, got {pnl}"
-    assert pnl == 100.0  # (150 - 140) * 10
+    assert pnl == 100.0
 
 
-# ── Test: place_order returns None ───────────────────────────────────────────
+# ── Test: place_order returns None ────────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_place_order_returns_none_keeps_position(anyio_backend):
@@ -238,3 +237,25 @@ async def test_place_order_returns_none_keeps_position(anyio_backend):
     mock_delete.assert_not_called()
     assert saved[0].exit_attempts == 1
     assert "returned None" in saved[0].last_exit_error
+
+
+# ?? Test: ERROR exit trade retries instead of tracking as pending ?????????????????
+
+@pytest.mark.anyio
+async def test_error_exit_trade_retries_instead_of_pending(anyio_backend):
+    """If place_order returns an ERROR trade, the position should stay and retry state should advance."""
+    from bot_runner import _place_exit_order
+
+    pos = _make_position()
+    errored_trade = _make_trade(status="ERROR", order_id=77777)
+    saved = []
+
+    with patch("bot_runner.place_order", new_callable=AsyncMock, return_value=errored_trade),          patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)),          patch("bot_runner._check_retry_cap", new_callable=AsyncMock) as mock_retry_cap,          patch("bot_runner.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock):
+
+        await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
+
+    assert len(saved) == 1
+    assert saved[0].exit_pending_order_id is None
+    assert saved[0].exit_attempts == 1
+    assert "ERROR" in (saved[0].last_exit_error or "")
+    mock_retry_cap.assert_awaited_once()

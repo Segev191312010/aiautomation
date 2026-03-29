@@ -39,70 +39,244 @@ DEFAULT_PRICING = (3.0, 15.0)  # Sonnet fallback
 # ── Cost Report ──────────────────────────────────────────────────────────────
 
 async def compute_cost_report(days: int = 30) -> dict:
-    """Aggregate real Claude costs from ai_audit_log token counts."""
+    """S10: Aggregate costs from ai_decision_runs (model-aware), with audit_log fallback."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
+    # Primary: read from decision runs (has model column)
     async with get_db() as db:
-        cur = await db.execute(
-            "SELECT timestamp, input_tokens, output_tokens "
-            "FROM ai_audit_log "
-            "WHERE input_tokens IS NOT NULL AND timestamp >= ? "
-            "ORDER BY timestamp ASC",
-            (cutoff,),
-        )
-        rows = await cur.fetchall()
+        try:
+            cur = await db.execute(
+                "SELECT created_at, model, input_tokens, output_tokens "
+                "FROM ai_decision_runs "
+                "WHERE input_tokens IS NOT NULL AND created_at >= ? "
+                "ORDER BY created_at ASC",
+                (cutoff,),
+            )
+            rows = await cur.fetchall()
+        except Exception:
+            rows = []
 
+    # Fallback: audit_log if no decision runs yet
     if not rows:
-        return {"days": days, "total_cost_usd": 0, "total_calls": 0, "daily": []}
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT timestamp, input_tokens, output_tokens "
+                "FROM ai_audit_log "
+                "WHERE input_tokens IS NOT NULL AND timestamp >= ? "
+                "ORDER BY timestamp ASC",
+                (cutoff,),
+            )
+            legacy_rows = await cur.fetchall()
 
-    # Group by day
-    by_day: dict[str, dict] = {}
-    for ts, in_tok, out_tok in rows:
+        if not legacy_rows:
+            return {"days": days, "total_cost_usd": 0, "total_calls": 0, "daily": []}
+
+        # Legacy path: single-model pricing
+        rate_in, rate_out = DEFAULT_PRICING
+        by_day: dict[str, dict] = {}
+        for ts, in_tok, out_tok in legacy_rows:
+            day = ts[:10] if ts else "unknown"
+            if day not in by_day:
+                by_day[day] = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+            by_day[day]["calls"] += 1
+            by_day[day]["input_tokens"] += in_tok or 0
+            by_day[day]["output_tokens"] += out_tok or 0
+
+        daily = []
+        total_cost = 0.0
+        total_calls = 0
+        for day in sorted(by_day.keys()):
+            d = by_day[day]
+            cost = (d["input_tokens"] * rate_in + d["output_tokens"] * rate_out) / 1_000_000
+            daily.append({"date": day, "calls": d["calls"], "input_tokens": d["input_tokens"],
+                          "output_tokens": d["output_tokens"], "estimated_cost_usd": round(cost, 4)})
+            total_cost += cost
+            total_calls += d["calls"]
+        return {"days": days, "total_cost_usd": round(total_cost, 4), "total_calls": total_calls, "daily": daily}
+
+    # S10 path: model-aware pricing from decision runs
+    by_day = {}
+    for ts, model, in_tok, out_tok in rows:
         day = ts[:10] if ts else "unknown"
         if day not in by_day:
-            by_day[day] = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+            by_day[day] = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost": 0.0}
         by_day[day]["calls"] += 1
         by_day[day]["input_tokens"] += in_tok or 0
         by_day[day]["output_tokens"] += out_tok or 0
+        rate_in, rate_out = _get_model_pricing(model)
+        by_day[day]["cost"] += ((in_tok or 0) * rate_in + (out_tok or 0) * rate_out) / 1_000_000
 
-    # Compute costs using Sonnet pricing (no model column in audit log)
-    rate_in, rate_out = DEFAULT_PRICING
     daily = []
     total_cost = 0.0
     total_calls = 0
-
     for day in sorted(by_day.keys()):
         d = by_day[day]
-        cost = (d["input_tokens"] * rate_in + d["output_tokens"] * rate_out) / 1_000_000
-        daily.append({
-            "date": day,
-            "calls": d["calls"],
-            "input_tokens": d["input_tokens"],
-            "output_tokens": d["output_tokens"],
-            "estimated_cost_usd": round(cost, 4),
-        })
-        total_cost += cost
+        daily.append({"date": day, "calls": d["calls"], "input_tokens": d["input_tokens"],
+                      "output_tokens": d["output_tokens"], "estimated_cost_usd": round(d["cost"], 4)})
+        total_cost += d["cost"]
         total_calls += d["calls"]
 
-    return {
-        "days": days,
-        "total_cost_usd": round(total_cost, 4),
-        "total_calls": total_calls,
-        "daily": daily,
-    }
+    return {"days": days, "total_cost_usd": round(total_cost, 4), "total_calls": total_calls, "daily": daily}
+
+
+def _get_model_pricing(model: str | None) -> tuple[float, float]:
+    """Look up pricing for a model name, with fuzzy matching."""
+    if not model:
+        return DEFAULT_PRICING
+    for key, pricing in MODEL_PRICING.items():
+        if key in model or model in key:
+            return pricing
+    # Check for model family
+    m = model.lower()
+    if "haiku" in m:
+        return (0.25, 1.25)
+    if "opus" in m:
+        return (15.0, 75.0)
+    return DEFAULT_PRICING
 
 
 # ── Decision Evaluation ──────────────────────────────────────────────────────
 
 async def evaluate_past_decisions(window_days: int = 30) -> dict:
-    """Multi-window evaluation of applied AI decisions."""
+    """S10: Ledger-backed evaluation of AI decisions. Falls back to audit heuristic if no ledger data."""
     if window_days not in SUPPORTED_WINDOWS:
         window_days = 30
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat()
 
+    # Try S10 ledger first
     async with get_db() as db:
-        # Fetch applied decisions
+        try:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM ai_decision_runs WHERE created_at >= ?", (cutoff,)
+            )
+            run_count = (await cur.fetchone())[0]
+        except Exception:
+            run_count = 0
+
+    if run_count > 0:
+        return await _evaluate_from_ledger(window_days, cutoff)
+
+    # Fallback: legacy audit-log heuristic
+    return await _evaluate_from_audit_log(window_days, cutoff)
+
+
+async def _evaluate_from_ledger(window_days: int, cutoff: str) -> dict:
+    """Read from ai_decision_runs + ai_decision_items for metrics."""
+    async with get_db() as db:
+        # Count runs
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_decision_runs WHERE created_at >= ?", (cutoff,)
+        )
+        total_runs = (await cur.fetchone())[0]
+
+        # Fetch all items in window
+        cur = await db.execute(
+            "SELECT i.item_type, i.gate_status, i.confidence, i.realized_pnl, "
+            "i.score_status, i.regime "
+            "FROM ai_decision_items i "
+            "JOIN ai_decision_runs r ON i.run_id = r.id "
+            "WHERE r.created_at >= ? "
+            "ORDER BY i.created_at",
+            (cutoff,),
+        )
+        items_raw = await cur.fetchall()
+
+        # Count abstained runs
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM ai_decision_runs WHERE created_at >= ? AND abstained = 1",
+            (cutoff,),
+        )
+        abstained_runs = (await cur.fetchone())[0]
+
+    total_items = len(items_raw)
+    if total_items == 0:
+        return _empty_metrics(window_days, "No decision items in window")
+
+    # Compute metrics
+    scored = [r for r in items_raw if r[4] != "unscored" and r[3] is not None]
+    scored_count = len(scored)
+    wins = sum(1 for r in scored if (r[3] or 0) > 0)
+    hit_rate = (wins / scored_count) if scored_count else None
+    net_pnl = sum(float(r[3] or 0) for r in scored)
+
+    # By action type
+    by_action: dict[str, dict] = {}
+    for r in items_raw:
+        at = r[0]
+        by_action.setdefault(at, {"count": 0, "scored": 0, "hits": 0, "net_pnl": 0.0})
+        by_action[at]["count"] += 1
+        if r[4] != "unscored" and r[3] is not None:
+            by_action[at]["scored"] += 1
+            by_action[at]["net_pnl"] += float(r[3] or 0)
+            if (r[3] or 0) > 0:
+                by_action[at]["hits"] += 1
+
+    action_breakdown = {}
+    for action, data in by_action.items():
+        action_breakdown[action] = {
+            "count": data["count"],
+            "hit_rate": round(data["hits"] / max(data["scored"], 1), 4) if data["scored"] else None,
+            "net_pnl": round(data["net_pnl"], 2),
+        }
+
+    # By regime
+    by_regime: dict[str, dict] = {}
+    for r in items_raw:
+        regime = r[5] or "unknown"
+        by_regime.setdefault(regime, {"count": 0, "scored": 0, "hits": 0})
+        by_regime[regime]["count"] += 1
+        if r[4] != "unscored" and r[3] is not None:
+            by_regime[regime]["scored"] += 1
+            if (r[3] or 0) > 0:
+                by_regime[regime]["hits"] += 1
+
+    regime_breakdown = {}
+    for regime, data in by_regime.items():
+        regime_breakdown[regime] = {
+            "count": data["count"],
+            "hit_rate": round(data["hits"] / max(data["scored"], 1), 4) if data["scored"] else None,
+        }
+
+    # Confidence + calibration
+    confidences = [float(r[2]) for r in items_raw if r[2] is not None]
+    avg_confidence = (sum(confidences) / len(confidences)) if confidences else None
+    scored_confs = [float(r[2]) for r in scored if r[2] is not None]
+    calibration_error = None
+    if scored_confs and hit_rate is not None:
+        calibration_error = round(abs(sum(scored_confs) / len(scored_confs) - hit_rate), 4)
+
+    # Data quality
+    if scored_count == 0:
+        quality = "insufficient"
+    elif scored_count < 10:
+        quality = "low"
+    elif scored_count < 30:
+        quality = "moderate"
+    else:
+        quality = "good"
+
+    return {
+        "window_days": window_days,
+        "total_decisions": total_items,
+        "total_runs": total_runs,
+        "scored_decisions": scored_count,
+        "hit_rate": round(hit_rate, 4) if hit_rate is not None else None,
+        "net_score": wins - (scored_count - wins),
+        "net_pnl_impact": round(net_pnl, 2) if net_pnl else None,
+        "data_quality": quality,
+        "abstain_rate": round(abstained_runs / max(total_runs, 1), 4) if total_runs else None,
+        "avg_confidence": round(avg_confidence, 4) if avg_confidence is not None else None,
+        "calibration_error": calibration_error,
+        "by_action_type": action_breakdown,
+        "by_regime": regime_breakdown,
+        "warning": None,
+    }
+
+
+async def _evaluate_from_audit_log(window_days: int, cutoff: str) -> dict:
+    """Legacy fallback: heuristic pre/post trade-window scoring from ai_audit_log."""
+    async with get_db() as db:
         cur = await db.execute(
             "SELECT id, timestamp, action_type, description "
             "FROM ai_audit_log "
@@ -115,7 +289,6 @@ async def evaluate_past_decisions(window_days: int = 30) -> dict:
         if not decisions:
             return _empty_metrics(window_days, "No applied decisions in window")
 
-        # Fetch trades for evaluation (bounded by decision range)
         earliest_ts = decisions[0][1]
         cur = await db.execute(
             "SELECT id, symbol, timestamp, data FROM trades "
@@ -124,7 +297,6 @@ async def evaluate_past_decisions(window_days: int = 30) -> dict:
         )
         pre_trades_raw = list(reversed(await cur.fetchall()))
 
-        latest_ts = decisions[-1][1]
         cur = await db.execute(
             "SELECT id, symbol, timestamp, data FROM trades "
             "WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
@@ -133,14 +305,14 @@ async def evaluate_past_decisions(window_days: int = 30) -> dict:
         post_trades_raw = await cur.fetchall()
 
     all_trades_raw = pre_trades_raw + post_trades_raw
-
-    # Parse trades
     trades = []
     for t in all_trades_raw:
         try:
             tdata = json.loads(t[3]) if t[3] else {}
-            raw_pnl = tdata.get("pnl")
-            pnl = float(raw_pnl) if raw_pnl is not None else 0.0
+            pnl_val = tdata.get("realized_pnl")
+            if pnl_val is None:
+                pnl_val = tdata.get("pnl")
+            pnl = float(pnl_val) if pnl_val is not None else 0.0
             trades.append({"id": t[0], "symbol": t[1], "timestamp": t[2], "pnl": pnl})
         except Exception:
             continue
@@ -149,76 +321,46 @@ async def evaluate_past_decisions(window_days: int = 30) -> dict:
         return _empty_metrics(window_days, "No trades available for evaluation")
 
     trade_timestamps = [t["timestamp"] for t in trades]
-
-    # Evaluate each decision
     hits = 0
     misses = 0
-    effect_sizes: list[float] = []
     by_action: dict[str, dict] = {}
 
     for d_id, d_ts, d_action, d_desc in decisions:
         if not d_ts:
             continue
-
-        if d_action not in by_action:
-            by_action[d_action] = {"count": 0, "hits": 0, "pnl_impacts": []}
+        by_action.setdefault(d_action, {"count": 0, "hits": 0, "pnl_impacts": []})
         by_action[d_action]["count"] += 1
 
-        # Trade-count windows using bisect
         idx = bisect.bisect_left(trade_timestamps, d_ts)
         pre = trades[max(0, idx - MIN_TRADES_PER_WINDOW):idx]
         post = trades[idx:idx + MIN_TRADES_PER_WINDOW]
-
         if len(pre) < MIN_TRADES_PER_WINDOW or len(post) < MIN_TRADES_PER_WINDOW:
             continue
 
         pnl_pre = sum(t["pnl"] for t in pre)
         pnl_post = sum(t["pnl"] for t in post)
-        effect = (pnl_post - pnl_pre) / max(abs(pnl_pre), 1.0)
-
-        # Hit logic: conservative vs aggressive
         is_conservative = _is_conservative(d_action, d_desc)
-        if is_conservative:
-            hit = pnl_post >= pnl_pre * 0.95
-        else:
-            hit = pnl_post > pnl_pre * 1.02
+        hit = pnl_post >= pnl_pre * 0.95 if is_conservative else pnl_post > pnl_pre * 1.02
 
         if hit:
             hits += 1
             by_action[d_action]["hits"] += 1
         else:
             misses += 1
-
-        effect_sizes.append(effect)
         by_action[d_action]["pnl_impacts"].append(pnl_post - pnl_pre)
 
     scored = hits + misses
     hit_rate = hits / scored if scored > 0 else None
-    net_pnl = sum(effect_sizes) if effect_sizes else None
 
-    # Data quality assessment
-    if scored == 0:
-        quality = "insufficient"
-    elif scored < 10:
-        quality = "low"
-    elif scored < 30:
-        quality = "moderate"
-    else:
-        quality = "good"
-
-    # Build action type breakdown
-    action_breakdown = {}
-    for action, data in by_action.items():
-        impacts = data["pnl_impacts"]
-        action_breakdown[action] = {
+    quality = "insufficient" if scored == 0 else "low" if scored < 10 else "moderate" if scored < 30 else "good"
+    action_breakdown = {
+        action: {
             "count": data["count"],
-            "hit_rate": data["hits"] / max(1, len(impacts)) if impacts else None,
-            "net_pnl": sum(impacts) if impacts else 0,
+            "hit_rate": data["hits"] / max(1, len(data["pnl_impacts"])) if data["pnl_impacts"] else None,
+            "net_pnl": sum(data["pnl_impacts"]) if data["pnl_impacts"] else 0,
         }
-
-    warning = None
-    if scored < MIN_TRADES_PER_WINDOW:
-        warning = f"Only {scored} scored decisions — results have high uncertainty"
+        for action, data in by_action.items()
+    }
 
     return {
         "window_days": window_days,
@@ -226,10 +368,10 @@ async def evaluate_past_decisions(window_days: int = 30) -> dict:
         "scored_decisions": scored,
         "hit_rate": round(hit_rate, 4) if hit_rate is not None else None,
         "net_score": hits - misses,
-        "net_pnl_impact": round(net_pnl, 2) if net_pnl is not None else None,
+        "net_pnl_impact": None,
         "data_quality": quality,
         "by_action_type": action_breakdown,
-        "warning": warning,
+        "warning": f"Legacy heuristic evaluation ({scored} scored)" if scored > 0 else "No scored decisions",
     }
 
 
@@ -257,22 +399,23 @@ def _empty_metrics(window_days: int, warning: str) -> dict:
 # ── Economic Report ──────────────────────────────────────────────────────────
 
 async def compute_economic_report(days: int = 30) -> dict:
-    """ROI analysis: is the AI paying for itself?"""
+    """S10: ROI analysis from evaluated decision impact vs actual token cost."""
     learning = await evaluate_past_decisions(days)
     costs = await compute_cost_report(days)
 
     ai_pnl = learning.get("net_pnl_impact") or 0
     total_cost = costs.get("total_cost_usd", 0)
     total_decisions = learning.get("total_decisions", 0)
+    total_runs = learning.get("total_runs", total_decisions)
 
     return {
         "days": days,
         "ai_pnl_impact": round(ai_pnl, 2),
         "total_cost": round(total_cost, 4),
-        "cost_per_decision": round(total_cost / max(total_decisions, 1), 4),
+        "cost_per_decision": round(total_cost / max(total_runs, 1), 4),
         "roi_estimate": round(ai_pnl / max(total_cost, 0.001), 2) if total_cost > 0 else None,
         "cost_as_pct_pnl": round((total_cost / max(abs(ai_pnl), 1.0)) * 100, 2) if ai_pnl != 0 else None,
-        "decisions_per_day": round(total_decisions / max(days, 1), 2),
+        "decisions_per_day": round(total_runs / max(days, 1), 2),
     }
 
 
@@ -321,22 +464,22 @@ async def check_auto_tighten() -> dict:
             and metrics_30d["hit_rate"] < config.auto_tighten_bad_hit_rate_30d
             and metrics_30d["scored_decisions"] >= config.auto_tighten_min_decisions_30d):
 
-        # Revert to shadow mode
-        config = config.model_copy(update={"shadow_mode": True})
+        # Revert to PAPER mode: keep AI active, but move execution back to simulated-only.
+        config = config.model_copy(update={"autopilot_mode": "PAPER"})
         await save_guardrails_to_db(config)
-        ai_params.shadow_mode = True
+        ai_params.shadow_mode = False  # PAPER = AI still active (creates paper rules), but no live orders
         await log_ai_action(
             action_type="auto_tighten_level2",
             category="self_evaluation",
-            description=f"AI Level 2 shadow revert: 30d hit_rate={metrics_30d['hit_rate']:.2f}",
+            description=f"AI Level 2 paper revert: 30d hit_rate={metrics_30d['hit_rate']:.2f}",
             confidence=1.0,
             status="applied",
         )
-        actions_taken.append("level2_shadow_revert")
-        log.warning("AI auto-tighten LEVEL 2: shadow mode re-enabled, 30d hit_rate=%.2f", metrics_30d["hit_rate"])
+        actions_taken.append("level2_paper_revert")
+        log.warning("AI auto-tighten LEVEL 2: PAPER mode re-enabled, 30d hit_rate=%.2f", metrics_30d["hit_rate"])
 
-    # Recovery: performance improves while tightened
-    if (config.guardrails_currently_tightened
+    # Recovery: performance improves while tightened (elif to prevent same-cycle oscillation)
+    elif (config.guardrails_currently_tightened
             and metrics_30d["hit_rate"] is not None
             and metrics_30d["hit_rate"] > 0.55
             and metrics_30d["scored_decisions"] >= 50):

@@ -25,7 +25,15 @@ from ai_guardrails import (
     save_param_snapshot,
     get_autopilot_config_dict,
 )
-from ai_advisor import fetch_advisor_data, analyze_rule_performance, analyze_score_effectiveness
+from context_builder import build_optimizer_context
+from ai_decision_ledger import (
+    start_decision_run,
+    record_decision_items,
+    mark_decision_item_applied,
+    mark_decision_item_blocked,
+    mark_decision_item_shadow,
+    finalize_decision_run,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,48 +46,10 @@ _last_optimization: float = 0
 async def _build_context() -> dict:
     """Collect all data Claude needs to make decisions."""
     try:
-        data = await fetch_advisor_data(lookback_days=cfg.ADVISOR_LOOKBACK_DAYS)
+        return await build_optimizer_context(lookback_days=cfg.ADVISOR_LOOKBACK_DAYS)
     except Exception as e:
         log.warning("Failed to fetch advisor data for optimizer: %s", e)
         return {}
-
-    matched = data.get("matched_trades", [])
-    rules = data.get("rules", [])
-    rule_perf = analyze_rule_performance(matched, rules)
-    score_analysis = analyze_score_effectiveness(matched)
-
-    # Current AI parameters
-    current_params = {
-        "min_score": ai_params.get_min_score(),
-        "risk_multiplier": ai_params.get_risk_multiplier(),
-        "signal_weights": ai_params._signal_weights,
-        "exit_params": ai_params._exit_params,
-        "sizing_multipliers": ai_params._rule_sizing_multipliers,
-    }
-
-    # B11 FIX: Get current regime from DB snapshots
-    current_regime = None
-    try:
-        from database import get_db
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT regime FROM regime_snapshots ORDER BY timestamp DESC LIMIT 1"
-            )
-            row = await cur.fetchone()
-            if row:
-                current_regime = row[0]
-    except Exception:
-        pass  # regime_snapshots may not have data yet
-
-    return {
-        "pnl_summary": data.get("pnl_summary", {}),
-        "trade_count": len(matched),
-        "rule_performance": rule_perf[:20],
-        "score_analysis": score_analysis,
-        "current_params": current_params,
-        "lookback_days": data.get("lookback_days", 90),
-        "current_regime": current_regime,
-    }
 
 
 # ── Claude API Call ──────────────────────────────────────────────────────────
@@ -143,6 +113,126 @@ Rules:
 - risk_multiplier: 1.0 = no change, <1.0 = reduce risk, >1.0 = increase risk"""
 
 
+def _format_market_snapshot(snapshot: dict) -> str:
+    if not snapshot or not snapshot.get("available"):
+        return "  No live opportunity snapshot available."
+
+    lines = []
+    for candidate in snapshot.get("candidates", [])[:8]:
+        notes = ", ".join(candidate.get("notes", [])) or "no extra notes"
+        lines.append(
+            f"  - {candidate.get('symbol', '?')}: score {candidate.get('screener_score', 0)}, "
+            f"{candidate.get('setup', 'mixed')}, price ${float(candidate.get('price', 0) or 0):.2f}, "
+            f"chg {float(candidate.get('change_pct', 0) or 0):+.2f}%, "
+            f"RVOL {candidate.get('relative_volume', 0)}x, "
+            f"mom20 {float(candidate.get('momentum_20d', 0) or 0):+.2f}%, "
+            f"sector {candidate.get('sector', 'Unknown')}, notes: {notes}"
+        )
+    lines.append(f"  Setup counts: {json.dumps(snapshot.get('setup_counts', {}))}")
+    lines.append(f"  Leading sectors: {json.dumps(snapshot.get('sector_counts', {}))}")
+    return "\n".join(lines)
+
+
+def _format_sector_performance(rows: list[dict]) -> str:
+    if not rows:
+        return "  No sector-performance history available."
+    return "\n".join(
+        f"  - {row['sector']}: {row['trade_count']} trades, {row['win_rate']}% WR, "
+        f"${row['total_pnl']:.0f} P&L, verdict={row['verdict']}"
+        for row in rows[:8]
+    )
+
+
+def _format_time_patterns(rows: list[dict]) -> str:
+    if not rows:
+        return "  No reliable time-pattern data available."
+    return "\n".join(
+        f"  - Hour {row['hour']:02d}: {row['trade_count']} trades, "
+        f"{row['win_rate']}% WR, avg pnl {row['avg_pnl']}"
+        for row in rows[:6]
+    )
+
+
+OPTIMIZER_USER_TEMPLATE = """Trading bot performance data (last {lookback_days} days, {trade_count} trades):
+
+Current regime: {current_regime}
+
+P&L Summary: {pnl_summary}
+
+Rule Performance (top rules by trade count):
+{rule_perf_text}
+
+Sector Performance:
+{sector_perf_text}
+
+Time-of-Day Patterns:
+{time_pattern_text}
+
+Score Analysis: {score_analysis}
+
+Bracket Analysis: {bracket_analysis}
+
+Current AI Parameters: {current_params}
+
+Live Opportunity Snapshot (ranked long setups from the screener):
+{market_snapshot_text}
+
+Analyze this data and return a JSON object with your decisions:
+{{
+  "min_score": {{"value": 55, "lower": 50, "upper": 60}},
+  "risk_multiplier": {{"value": 1.0, "lower": 0.8, "upper": 1.2}},
+  "rule_actions": [
+    {{
+      "action": "create",
+      "rule_payload": {{
+        "name": "AI: Descriptive Name",
+        "symbol": "AAPL",
+        "conditions": [{{"indicator": "RSI", "params": {{"length": 14}}, "operator": "LT", "value": 30}}],
+        "logic": "AND",
+        "action_type": "BUY",
+        "cooldown_minutes": 120,
+        "thesis": "Why this rule",
+        "hold_style": "swing",
+        "status": "paper"
+      }},
+      "reason": "Why creating",
+      "confidence": 0.7
+    }},
+    {{
+      "action": "pause",
+      "rule_id": "existing-id",
+      "reason": "Why pausing",
+      "confidence": 0.8
+    }}
+  ],
+  "direct_trades": [
+    {{
+      "symbol": "NVDA",
+      "action": "BUY",
+      "order_type": "MKT",
+      "stop_price": 108.5,
+      "invalidation": "Close back below 20-day trend support",
+      "reason": "High-score breakout with strong relative volume",
+      "confidence": 0.72
+    }}
+  ],
+  "reasoning": "2-3 sentence strategy summary",
+  "confidence": 0.75
+}}
+
+Rules:
+- New rules start as 'paper' (not live) - BUY only, no shorts
+- Only pause/retire rules with clear evidence of poor performance
+- Max 3 new rules per cycle
+- Include a thesis for new rules explaining the edge
+- Direct trades should prefer names from the live opportunity snapshot when score >= 70
+- Every direct trade must have a realistic stop_price below current price and a concrete invalidation
+- If the opportunity board is weak or mixed, prefer empty direct_trades
+- If everything looks fine, return empty rule_actions and empty direct_trades
+- min_score: adjust if score analysis shows a better threshold
+- risk_multiplier: 1.0 = no change, <1.0 = reduce risk, >1.0 = increase risk"""
+
+
 async def _get_ai_decisions(context: dict) -> dict | None:
     """Call Claude API for structured parameter recommendations."""
     api_key = cfg.ANTHROPIC_API_KEY
@@ -157,14 +247,22 @@ async def _get_ai_decisions(context: dict) -> dict | None:
         f"${r['total_pnl']:.0f} P&L, verdict={r['verdict']}"
         for r in rule_perf[:15]
     ) or "  No trade data available."
+    sector_perf_text = _format_sector_performance(context.get("sector_performance", []))
+    time_pattern_text = _format_time_patterns(context.get("time_patterns", []))
+    market_snapshot_text = _format_market_snapshot(context.get("market_snapshot", {}))
 
     prompt = OPTIMIZER_USER_TEMPLATE.format(
         lookback_days=context.get("lookback_days", 90),
         trade_count=context.get("trade_count", 0),
+        current_regime=context.get("current_regime", "unknown"),
         pnl_summary=json.dumps(context.get("pnl_summary", {})),
         rule_perf_text=rule_perf_text,
+        sector_perf_text=sector_perf_text,
+        time_pattern_text=time_pattern_text,
         score_analysis=json.dumps(context.get("score_analysis", {})),
+        bracket_analysis=json.dumps(context.get("bracket_analysis", {})),
         current_params=json.dumps(context.get("current_params", {})),
+        market_snapshot_text=market_snapshot_text,
     )
 
     try:
@@ -211,7 +309,72 @@ async def _get_ai_decisions(context: dict) -> dict | None:
 
 # ── Decision Application ─────────────────────────────────────────────────────
 
-async def _apply_decisions(decisions: dict, context: dict) -> dict:
+def _build_ledger_items(decisions: dict) -> list[dict]:
+    """Build decision_item dicts from an AIDecisionPayload for the ledger."""
+    items: list[dict] = []
+    confidence = decisions.get("confidence", 0.5)
+
+    # min_score
+    min_score_rec = decisions.get("min_score")
+    if min_score_rec and isinstance(min_score_rec, dict):
+        items.append({
+            "item_type": "score_threshold", "action_name": "adjust",
+            "target_key": "min_score", "proposed": min_score_rec,
+            "confidence": confidence,
+        })
+
+    # risk_multiplier
+    risk_rec = decisions.get("risk_multiplier")
+    if risk_rec and isinstance(risk_rec, dict):
+        items.append({
+            "item_type": "risk_adjust", "action_name": "adjust",
+            "target_key": "risk_multiplier", "proposed": risk_rec,
+            "confidence": confidence,
+        })
+
+    # rule_changes
+    for rc in decisions.get("rule_changes", []):
+        items.append({
+            "item_type": "rule_change",
+            "action_name": rc.get("action"),
+            "target_key": rc.get("rule_id"),
+            "proposed": rc,
+            "confidence": confidence,
+        })
+
+    # rule_actions
+    for ra in decisions.get("rule_actions", []):
+        items.append({
+            "item_type": "rule_action",
+            "action_name": ra.get("action"),
+            "target_key": ra.get("rule_id"),
+            "symbol": (ra.get("rule_payload") or {}).get("symbol"),
+            "proposed": ra,
+            "confidence": ra.get("confidence", confidence),
+        })
+
+    # direct_trades
+    for dt in decisions.get("direct_trades", []):
+        items.append({
+            "item_type": "direct_trade",
+            "action_name": dt.get("action"),
+            "symbol": dt.get("symbol"),
+            "proposed": dt,
+            "confidence": dt.get("confidence", confidence),
+        })
+
+    # abstain
+    if decisions.get("abstained") and not items:
+        items.append({
+            "item_type": "abstain", "action_name": "abstain",
+            "proposed": {"reason": decisions.get("reasoning", "No action")},
+            "confidence": confidence,
+        })
+
+    return items
+
+
+async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None = None, item_ids: list[str] | None = None) -> dict:
     """Apply AI decisions through guardrails. Returns summary of applied/blocked changes."""
     enforcer = GuardrailEnforcer()
     confidence = decisions.get("confidence", 0.5)
@@ -219,9 +382,23 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
     output_tokens = decisions.get("_output_tokens")
     results = {"applied": [], "blocked": [], "shadow": []}
 
+    # S10: track which item_id corresponds to which decision
+    # item_ids follows the same order as _build_ledger_items output
+    _item_idx = 0
+
+    def _next_item_id() -> str | None:
+        nonlocal _item_idx
+        if item_ids and _item_idx < len(item_ids):
+            iid = item_ids[_item_idx]
+            _item_idx += 1
+            return iid
+        _item_idx += 1
+        return None
+
     # ── Min Score ────────────────────────────────────────────────────────────
     min_score_rec = decisions.get("min_score")
     if min_score_rec and isinstance(min_score_rec, dict):
+        cur_item_id = _next_item_id()
         new_score = min_score_rec.get("value", 50)
         old_score = ai_params.get_min_score()
 
@@ -229,7 +406,10 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
             delta = new_score - old_score
             await log_shadow_decision("min_score", None, min_score_rec, old_score,
                                       delta_value=delta, confidence=confidence,
-                                      regime=context.get("current_regime"))
+                                      regime=context.get("current_regime"),
+                                      decision_run_id=run_id, decision_item_id=cur_item_id)
+            if cur_item_id:
+                await mark_decision_item_shadow(cur_item_id, notes="shadow mode")
             results["shadow"].append(f"min_score: {old_score} -> {new_score} (shadow)")
         elif abs(new_score - old_score) >= 1:
             result = await enforcer.execute_with_audit(
@@ -243,13 +423,24 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
                 apply_fn=lambda s=new_score: _set_min_score(s),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                decision_run_id=run_id,
+                decision_item_id=cur_item_id,
             )
+            if cur_item_id:
+                if result.get("applied"):
+                    await mark_decision_item_applied(cur_item_id, applied_json={"value": new_score})
+                else:
+                    await mark_decision_item_blocked(cur_item_id, reason=result.get("reason", "guardrail"))
             key = "applied" if result.get("applied") else "blocked"
             results[key].append(f"min_score: {old_score} -> {new_score}")
+        else:
+            if cur_item_id:
+                await mark_decision_item_applied(cur_item_id, applied_json={"value": new_score, "no_change": True})
 
     # ── Risk Multiplier ──────────────────────────────────────────────────────
     risk_rec = decisions.get("risk_multiplier")
     if risk_rec and isinstance(risk_rec, dict):
+        cur_item_id = _next_item_id()
         new_mult = risk_rec.get("value", 1.0)
         old_mult = ai_params.get_risk_multiplier()
 
@@ -257,7 +448,10 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
             delta = new_mult - old_mult
             await log_shadow_decision("risk_multiplier", None, risk_rec, old_mult,
                                       delta_value=delta, confidence=confidence,
-                                      regime=context.get("current_regime"))
+                                      regime=context.get("current_regime"),
+                                      decision_run_id=run_id, decision_item_id=cur_item_id)
+            if cur_item_id:
+                await mark_decision_item_shadow(cur_item_id, notes="shadow mode")
             results["shadow"].append(f"risk_mult: {old_mult} -> {new_mult} (shadow)")
         elif abs(new_mult - old_mult) >= 0.05:
             increase_pct = ((new_mult - old_mult) / old_mult * 100) if old_mult > 0 else 0
@@ -272,13 +466,24 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
                 apply_fn=lambda m=new_mult: _set_risk_mult(m),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                decision_run_id=run_id,
+                decision_item_id=cur_item_id,
             )
+            if cur_item_id:
+                if result.get("applied"):
+                    await mark_decision_item_applied(cur_item_id, applied_json={"value": new_mult})
+                else:
+                    await mark_decision_item_blocked(cur_item_id, reason=result.get("reason", "guardrail"))
             key = "applied" if result.get("applied") else "blocked"
             results[key].append(f"risk_mult: {old_mult:.2f} -> {new_mult:.2f}")
+        else:
+            if cur_item_id:
+                await mark_decision_item_applied(cur_item_id, applied_json={"value": new_mult, "no_change": True})
 
     # ── Rule Changes ─────────────────────────────────────────────────────────
     rule_changes = decisions.get("rule_changes", [])
     for rc in rule_changes:
+        cur_item_id = _next_item_id()
         rule_id = rc.get("rule_id", "")
         action = rc.get("action", "")
         reason = rc.get("reason", "")
@@ -287,13 +492,15 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
             continue
 
         if ai_params.shadow_mode:
-            # B13 FIX: Meaningful delta for rule changes
             rule_delta = {"disable": -1.0, "enable": 1.0,
                           "boost": float(rc.get("sizing_mult", 1.3)) - 1.0,
                           "reduce": float(rc.get("sizing_mult", 0.7)) - 1.0}.get(action, 0.0)
             await log_shadow_decision("rule_change", None, rc, {"rule_id": rule_id, "action": "none"},
                                       delta_value=rule_delta, confidence=confidence,
-                                      regime=context.get("current_regime"))
+                                      regime=context.get("current_regime"),
+                                      decision_run_id=run_id, decision_item_id=cur_item_id)
+            if cur_item_id:
+                await mark_decision_item_shadow(cur_item_id, notes="shadow mode")
             results["shadow"].append(f"rule {action}: {rule_id} (shadow)")
             continue
 
@@ -302,20 +509,26 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
                 action_type=f"rule_{action}",
                 category="rule_change",
                 description=f"AI {action} rule: {rule_id}",
-                old_value={"rule_id": rule_id, "enabled": action != "disable"},
+                old_value={"rule_id": rule_id, "enabled": action == "disable"},
                 new_value={"rule_id": rule_id, "enabled": action == "enable"},
                 reason=reason,
                 confidence=confidence,
                 apply_fn=lambda rid=rule_id, act=action: _toggle_rule(rid, act == "enable"),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                decision_run_id=run_id,
+                decision_item_id=cur_item_id,
             )
+            if cur_item_id:
+                if result.get("applied"):
+                    await mark_decision_item_applied(cur_item_id)
+                else:
+                    await mark_decision_item_blocked(cur_item_id, reason=result.get("reason", "guardrail"))
             key = "applied" if result.get("applied") else "blocked"
             results[key].append(f"rule_{action}: {rule_id}")
 
         elif action in ("boost", "reduce"):
             raw_sizing = rc.get("sizing_mult", 1.3 if action == "boost" else 0.7)
-            # Hard clamp: sizing multiplier must be between 0.1x and 3.0x
             sizing = max(0.1, min(3.0, float(raw_sizing)))
             old_sizing = ai_params.get_rule_sizing_multiplier(rule_id)
 
@@ -333,23 +546,43 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
                 apply_fn=_apply_sizing,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                decision_run_id=run_id,
+                decision_item_id=cur_item_id,
             )
+            if cur_item_id:
+                if result.get("applied"):
+                    await mark_decision_item_applied(cur_item_id, applied_json={"sizing_mult": sizing})
+                else:
+                    await mark_decision_item_blocked(cur_item_id, reason=result.get("reason", "guardrail"))
             key = "applied" if result.get("applied") else "blocked"
             results[key].append(f"rule_{action}: {rule_id} x{sizing:.2f}")
 
     # ── Rule Lab Actions (create/modify/pause/retire rules) ────────────────
     rule_actions = decisions.get("rule_actions", [])
     if rule_actions:
+        # Collect item_ids for rule_action items
+        ra_item_ids = [_next_item_id() for _ in rule_actions]
         try:
             from ai_rule_lab import apply_rule_actions
-            # LIVE mode = rules go straight to active. No paper gate.
             from safety_kernel import is_autopilot_live
-            lab_results = await apply_rule_actions(rule_actions, author="ai", allow_active=is_autopilot_live())
-            for lr in lab_results:
+
+            # S10-BE-07: pass run_id and item_ids for origin tracking
+            lab_results = await apply_rule_actions(
+                rule_actions, author="ai", allow_active=is_autopilot_live(),
+                decision_run_id=run_id, decision_item_ids=ra_item_ids,
+            )
+            for idx, lr in enumerate(lab_results):
+                iid = ra_item_ids[idx] if idx < len(ra_item_ids) else None
                 if lr.get("ok"):
                     results["applied"].append(f"rule_{lr['action']}: {lr.get('rule_id', '?')}")
+                    if iid:
+                        await mark_decision_item_applied(
+                            iid, created_rule_id=lr.get("rule_id"),
+                        )
                 else:
                     results["blocked"].append(f"rule_{lr.get('action', '?')}: {lr.get('reason', 'failed')}")
+                    if iid:
+                        await mark_decision_item_blocked(iid, reason=lr.get("reason", "failed"))
         except Exception as e:
             log.error("Rule Lab actions failed: %s", e)
             results["blocked"].append(f"rule_lab_error: {e}")
@@ -357,15 +590,33 @@ async def _apply_decisions(decisions: dict, context: dict) -> dict:
     # ── Direct AI Trades ─────────────────────────────────────────────────────
     direct_trades = decisions.get("direct_trades", [])
     if direct_trades:
+        # Collect item_ids for direct_trade items
+        dt_item_ids = [_next_item_id() for _ in direct_trades]
         try:
             from execution_brain import queue_direct_candidates
 
+            # S10-BE-06: inject decision_item_id into each trade dict for propagation
+            for i, dt in enumerate(direct_trades):
+                if dt_item_ids[i]:
+                    if isinstance(dt, dict):
+                        dt["decision_id"] = dt_item_ids[i]
+
             queued = queue_direct_candidates(direct_trades)
-            for dt in direct_trades:
-                results["applied"].append(
-                    f"direct_trade_queued: {dt.get('symbol', '?')} {dt.get('action', '?')}"
-                )
-            log.info("Queued %d direct AI trade candidates for bot-cycle execution", queued)
+            for i, dt in enumerate(direct_trades):
+                iid = dt_item_ids[i] if i < len(dt_item_ids) else None
+                if i < queued:
+                    # HB1-06: Leave as pending — actual execution path marks applied on success
+                    results["applied"].append(
+                        f"direct_trade_queued: {dt.get('symbol', '?')} {dt.get('action', '?')}"
+                    )
+                    # item stays 'pending' until execute_direct_trade succeeds
+                else:
+                    results["blocked"].append(
+                        f"direct_trade_queued: {dt.get('symbol', '?')} {dt.get('action', '?')}"
+                    )
+                    if iid:
+                        await mark_decision_item_blocked(iid, reason="not queued")
+            log.info("Queued %d/%d direct AI trade candidates for bot-cycle execution", queued, len(direct_trades))
         except Exception as exc:
             log.error("Direct AI trade engine unavailable: %s", exc)
             results["blocked"].append(f"direct_trade_engine: {exc}")
@@ -405,13 +656,14 @@ async def run_full_optimization() -> dict:
     _optimizer_running = True
     start = time.time()
     try:
-        # H-6 FIX: Check emergency_stop before running
+        # H-6 FIX: Check emergency_stop before running (fail-closed on error)
         try:
             config = await get_autopilot_config_dict()
             if config.get("emergency_stop"):
                 return {"skipped": True, "reason": "emergency_stop active"}
-        except Exception:
-            pass
+        except Exception as cfg_exc:
+            log.error("Cannot verify emergency_stop — blocking optimizer for safety: %s", cfg_exc)
+            return {"skipped": True, "reason": f"config_unavailable: {cfg_exc}"}
 
         log.info("AI optimization cycle starting...")
 
@@ -425,8 +677,49 @@ async def run_full_optimization() -> dict:
         if not decisions:
             return {"skipped": True, "reason": "no API key or API failed"}
 
+        # S10: Create decision run and items in ledger
+        run_id = None
+        item_ids = None
+        try:
+            context_json = json.dumps({
+                "pnl_summary": context.get("pnl_summary", {}),
+                "trade_count": context.get("trade_count", 0),
+                "current_regime": context.get("current_regime"),
+                "lookback_days": context.get("lookback_days"),
+            }, default=str)
+
+            run_id = await start_decision_run(
+                source="optimizer",
+                mode=cfg.AUTOPILOT_MODE,
+                provider="anthropic",
+                model=cfg.AI_MODEL_OPTIMIZER,
+                prompt_version="v2_market_snapshot",
+                context_json=context_json,
+                reasoning=decisions.get("reasoning", ""),
+                aggregate_confidence=decisions.get("confidence"),
+                abstained=decisions.get("abstained", False),
+                input_tokens=decisions.get("_input_tokens"),
+                output_tokens=decisions.get("_output_tokens"),
+            )
+
+            ledger_items = _build_ledger_items(decisions)
+            if ledger_items:
+                item_ids = await record_decision_items(
+                    run_id, ledger_items,
+                    regime=context.get("current_regime"),
+                )
+        except Exception as ledger_exc:
+            log.warning("Decision ledger recording failed (non-fatal): %s", ledger_exc)
+
         # Step 3: Apply through guardrails
-        results = await _apply_decisions(decisions, context)
+        results = await _apply_decisions(decisions, context, run_id=run_id, item_ids=item_ids)
+
+        # Finalize decision run
+        if run_id:
+            try:
+                await finalize_decision_run(run_id, status="completed")
+            except Exception:
+                pass
 
         # Step 4: Evaluate paper rules + auto-promote if ready
         try:

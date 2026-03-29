@@ -99,6 +99,12 @@ class Config:
     WS_STALE_WARN_SECONDS: int = int(os.getenv("WS_STALE_WARN_SECONDS", "10"))
     WS_STALE_CRITICAL_SECONDS: int = int(os.getenv("WS_STALE_CRITICAL_SECONDS", "30"))
     ENABLE_MARKET_DIAGNOSTICS: bool = os.getenv("ENABLE_MARKET_DIAGNOSTICS", "false").lower() == "true"
+
+    # ── Phase 2 hardening feature flags ─────────────────────────────────────
+    ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT: bool = os.getenv("ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT", "false").lower() == "true"
+    ENABLE_RULE_BACKTEST_GATE: bool = os.getenv("ENABLE_RULE_BACKTEST_GATE", "false").lower() == "true"
+    ENABLE_BOT_HEALTH_MONITORING: bool = os.getenv("ENABLE_BOT_HEALTH_MONITORING", "false").lower() == "true"
+    ENABLE_ENHANCED_REGIME: bool = os.getenv("ENABLE_ENHANCED_REGIME", "false").lower() == "true"
     DIAG_INTRADAY_INTERVAL_SECONDS: int = int(os.getenv("DIAG_INTRADAY_INTERVAL_SECONDS", "300"))
     DIAG_LOCK_TTL_SECONDS: int = int(os.getenv("DIAG_LOCK_TTL_SECONDS", "600"))
     DIAG_NEWS_HOURS_DEFAULT: int = int(os.getenv("DIAG_NEWS_HOURS_DEFAULT", "24"))
@@ -111,7 +117,7 @@ class Config:
     PORT: int = int(os.getenv("PORT", "8000"))
 
     # ── JWT / Auth ─────────────────────────────────────────────────────────
-    JWT_SECRET: str = os.getenv("JWT_SECRET", "trading-dev-secret-change-in-prod")
+    JWT_SECRET: str = os.getenv("JWT_SECRET", "trading-dev-secret-MUST-SET-IN-ENV")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "1440"))
 
@@ -136,7 +142,19 @@ cfg = Config()
 
 
 def _validate_config(c: Config) -> None:
-    """Validate port/paper consistency at startup."""
+    """Validate config consistency at startup."""
+    # AUTOPILOT_MODE must be a known value
+    valid_modes = {"OFF", "PAPER", "LIVE"}
+    if c.AUTOPILOT_MODE not in valid_modes:
+        raise ValueError(
+            f"AUTOPILOT_MODE='{c.AUTOPILOT_MODE}' is invalid. Must be one of: {valid_modes}"
+        )
+
+    # JWT_SECRET must not be the dev placeholder in production
+    if c.AUTOPILOT_MODE == "LIVE" and "MUST-SET" in c.JWT_SECRET:
+        import warnings
+        warnings.warn("JWT_SECRET is using dev default — set it in .env for production", stacklevel=2)
+
     # Port guide: 7496=TWS live, 7497=TWS paper, 4001=GW live, 4002=GW paper
     paper_ports = {7497, 4002}
     live_ports = {7496, 4001}

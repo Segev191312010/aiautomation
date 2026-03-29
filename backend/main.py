@@ -114,6 +114,7 @@ from advisor_api import router as advisor_router
 from risk_api import router as risk_router
 from health import router as health_router
 from notification_service import notification_service
+from runtime_state import initialize_runtime_state, reset_runtime_state
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,7 +184,7 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-
+initialize_runtime_state(ws_manager=manager, data_health=_data_health, diag_service=_diag_service)
 
 async def _broadcast(payload: dict) -> None:
     await manager.broadcast(payload)
@@ -208,34 +209,13 @@ async def lifespan(app: FastAPI):
     ibkr.set_broadcast(_broadcast)
     alert_engine.set_broadcast(_broadcast)
     notification_service.set_ws_broadcast(_broadcast)
+    initialize_runtime_state(ws_manager=manager, data_health=_data_health, diag_service=_diag_service)
 
-    # Register order-fill â†’ WS broadcast
-    async def _on_trade_fill(trade: Trade) -> None:
-        await _broadcast(
-            {
-                "type":     "filled",
-                "order_id": trade.order_id,
-                "trade_id": trade.id,
-                "symbol":   trade.symbol,
-                "action":   trade.action,
-                "qty":      trade.quantity,
-                "price":    trade.fill_price,
-            }
-        )
-    on_fill(lambda t: asyncio.create_task(_on_trade_fill(t)))
-
-    # Register order-fill → position tracker (exit management)
+    # Register order-fill ? tracked position lifecycle
     async def _on_trade_fill_register(trade: Trade) -> None:
-        if trade.action != "BUY" or not trade.fill_price:
-            return
-        try:
-            from position_tracker import register_position
-            from market_data import get_historical_bars
-            df = await get_historical_bars(trade.symbol, duration="60 D", bar_size="1D")
-            if df is not None and len(df) >= 14:
-                await register_position(trade, df, trade.rule_name)
-        except Exception as exc:
-            log.error("Position registration failed for %s: %s", trade.id, exc)
+        from services import order_lifecycle
+
+        await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
     on_fill(lambda t: asyncio.create_task(_on_trade_fill_register(t)))
 
     # Attempt IBKR connection (non-blocking)
@@ -259,8 +239,10 @@ async def lifespan(app: FastAPI):
         mode = db_config.autopilot_mode
         if mode in ("OFF", "PAPER", "LIVE"):
             cfg.AUTOPILOT_MODE = mode
+            cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
+            cfg.AI_SHADOW_MODE = mode == "OFF"
             from ai_params import ai_params
-            ai_params.shadow_mode = mode != "LIVE"
+            ai_params.shadow_mode = mode == "OFF"
             log.info("Autopilot mode synced from DB: %s", mode)
     except Exception as e:
         log.warning("Failed to sync autopilot mode from DB: %s", e)
@@ -282,6 +264,7 @@ async def lifespan(app: FastAPI):
     await bot_runner.stop()
     await replay_engine.stop()
     await ibkr.disconnect()
+    reset_runtime_state()
 
 
 # ---------------------------------------------------------------------------
@@ -300,34 +283,12 @@ app.include_router(advisor_router)
 from autopilot_api import router as autopilot_router
 app.include_router(autopilot_router)
 
-
-# ── Event system endpoints ───────────────────────────────────────────────────
-
-@app.get("/api/events/metrics")
-async def get_event_metrics():
-    """Live metrics from the event system."""
-    from bot_runner import event_bus, event_logger, metrics
-    return {
-        "event_bus": {"total_events": event_bus.event_count, "handlers": event_bus.handler_count()},
-        "event_logger": {"events_logged": event_logger.event_count, "log_file": str(event_logger.log_path)},
-        "metrics": metrics.summary(),
-    }
+# ── Extracted domain routers (Stage 1A)
+from routers import register_routers
+register_routers(app)
 
 
-@app.get("/api/events/log")
-async def get_event_log(last_n: int = 50):
-    """Recent events from the JSONL log."""
-    from bot_runner import event_logger
-    from event_logger import EventLogger
-    events = EventLogger.replay(event_logger.log_path)
-    return {"events": events[-last_n:], "total": len(events)}
-
-
-@app.get("/api/events/sessions")
-async def get_event_sessions():
-    """List all event log sessions."""
-    from event_logger import EventLogger
-    return EventLogger.list_sessions()
+# ── Event system endpoints (moved to routers/events.py) ──────────────────────
 
 
 # â"€â"€ CORS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -488,6 +449,7 @@ _ws_price_cache: dict[str, tuple[float, float, int, str]] = {}  # symbol -> (pri
 _ws_ibkr_quotes: dict[str, tuple[float, int, str]] = {}         # symbol -> (price, quote_ts, market_state)
 _ws_symbol_ref_counts: dict[str, int] = {}                      # symbol -> subscriber count
 _ws_ibkr_subscribed_symbols: set[str] = set()
+_market_dynamic_symbols: set[str] = set()
 _ws_lock = threading.Lock()
 
 _ws_last_ibkr_quote_ts: float = 0.0
@@ -963,686 +925,60 @@ async def ws_market_data(ws: WebSocket):
 # Status
 # ---------------------------------------------------------------------------
 
-@app.get("/api/status")
-async def get_status():
-    from ai_guardrails import get_autopilot_config_dict
-
-    autopilot = await get_autopilot_config_dict()
-    return {
-        "ibkr_connected":       ibkr.is_connected(),
-        "is_paper":             cfg.IS_PAPER,
-        "sim_mode":             cfg.SIM_MODE,
-        "bot_running":          bot_runner.is_running(),
-        "last_run":             bot_runner.get_last_run(),
-        "next_run":             bot_runner.get_next_run(),
-        "bot_interval_seconds": cfg.BOT_INTERVAL_SECONDS,
-        "autopilot_mode":       autopilot["autopilot_mode"],
-        "autopilot_emergency_stop": autopilot["emergency_stop"],
-        "autopilot_daily_loss_locked": autopilot["daily_loss_locked"],
-        "features": {
-            "market_diagnostics": cfg.ENABLE_MARKET_DIAGNOSTICS,
-            "autopilot_console": True,
-        },
-    }
+# ── Status route (moved to routers/status.py) ────────────────────────────────
 
 
-@app.get("/api/health")
-async def health_check():
-    """Lightweight health probe for Docker / load balancers."""
-    import aiosqlite
-    db_ok = True
-    try:
-        async with aiosqlite.connect(cfg.DB_PATH) as db:
-            await db.execute("SELECT 1")
-    except Exception:
-        db_ok = False
-    return {
-        "status": "healthy" if db_ok else "degraded",
-        "db": "ok" if db_ok else "unreachable",
-        "version": app.version,
-    }
+# -- Health check (already in health.py router) -------------------------------
 
 
-@app.get("/api/data/health")
-async def get_data_health():
-    snapshot = _data_health.snapshot()
-    now = _time.time()
-    ibkr_age = None if _ws_last_ibkr_quote_ts <= 0 else round(max(0.0, now - _ws_last_ibkr_quote_ts), 3)
-    yahoo_age = None if _ws_last_yahoo_quote_ts <= 0 else round(max(0.0, now - _ws_last_yahoo_quote_ts), 3)
-    with _ws_lock:
-        active_symbols = sum(1 for count in _ws_symbol_ref_counts.values() if count > 0)
-        ibkr_symbols = len(_ws_ibkr_subscribed_symbols)
-    snapshot["streaming"] = {
-        "push_interval_s": _WS_PUSH_INTERVAL,
-        "cache_ttl_s": _WS_CACHE_TTL,
-        "stale_warn_s": _WS_STALE_WARN_SECONDS,
-        "stale_critical_s": _WS_STALE_CRITICAL_SECONDS,
-        "active_symbols": active_symbols,
-        "ibkr_subscribed_symbols": ibkr_symbols,
-        "ibkr_connected": ibkr.is_connected(),
-        "ibkr_last_quote_age_s": ibkr_age,
-        "yahoo_last_quote_age_s": yahoo_age,
-    }
-    snapshot["diagnostics"] = {
-        "enabled": _diag_service.enabled,
-    }
-    return snapshot
-
-
+# -- data/health route (moved to routers/status.py) --
 # ---------------------------------------------------------------------------
 # IBKR connection control
 # ---------------------------------------------------------------------------
 
-@app.post("/api/ibkr/connect")
-async def connect_ibkr():
-    ok = await ibkr.connect()
-    if not ok:
-        raise HTTPException(502, "Could not connect to IBKR. Is IB Gateway running?")
-    await ibkr.start_reconnect_loop()
-    return {"connected": True}
-
-
-@app.post("/api/ibkr/disconnect")
-async def disconnect_ibkr():
-    await ibkr.disconnect()
-    return {"connected": False}
+# -- IBKR connect/disconnect (moved to routers/status.py) ---------------------
 
 
 # ---------------------------------------------------------------------------
 # Account summary  (IBKR live | simulation)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/account/summary")
-async def get_account_summary():
-    """
-    Returns a unified account summary regardless of connection mode:
-      - SIM_MODE â†’ virtual sim account
-      - IBKR connected â†’ real account summary
-    """
-    if cfg.SIM_MODE:
-        account = await sim_engine.get_account()
-        return account.model_dump()
+# -- Account + Positions routes (moved to routers/positions.py) -----------------
+# -- Account + Positions routes (moved to routers/positions.py) -----------------
 
-    if ibkr.is_connected():
-        try:
-            summary = await ibkr.get_account_summary()
-            return summary.model_dump()
-        except Exception as exc:
-            log.warning("Account fetch failed: %s", exc)
-
-    raise HTTPException(503, "IBKR not connected")
-
-
-# Backwards-compatible alias
-@app.get("/api/account")
-async def get_account():
-    if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected")
-    return (await ibkr.get_account_summary()).model_dump()
-
-
-# ---------------------------------------------------------------------------
-# Positions
-# ---------------------------------------------------------------------------
-
-@app.get("/api/positions")
-async def get_positions():
-    if cfg.SIM_MODE:
-        positions = await sim_engine.get_positions()
-        return [p.model_dump() for p in positions]
-
-    if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected")
-    return [p.model_dump() for p in await ibkr.get_positions()]
-
-
-@app.get("/api/positions/summary")
-async def get_positions_summary():
-    """EOD summary: reasoning for each position — P&L, rule, hold time, signals."""
-    if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected")
-
-    positions = await ibkr.get_positions()
-    trades = await get_trades(limit=500)
-    acct = await ibkr.get_account_summary()
-
-    # Map trades to positions by symbol (most recent BUY)
-    trade_by_sym: dict[str, Any] = {}
-    for t in trades:
-        if t.action == "BUY" and t.status == "FILLED" and t.symbol not in trade_by_sym:
-            trade_by_sym[t.symbol] = t
-
-    # Get open bracket orders
-    bracket_orders: dict[str, dict] = {}
-    for ib_trade in ibkr.ib.openTrades():
-        sym = ib_trade.contract.symbol
-        if sym not in bracket_orders:
-            bracket_orders[sym] = {}
-        if ib_trade.order.orderType == "STP":
-            bracket_orders[sym]["sl"] = ib_trade.order.auxPrice
-        elif ib_trade.order.orderType == "LMT" and ib_trade.order.action == "SELL":
-            bracket_orders[sym]["tp"] = ib_trade.order.lmtPrice
-
-    summaries = []
-    for pos in positions:
-        sym = pos.symbol
-        entry_trade = trade_by_sym.get(sym)
-        entry_date = entry_trade.timestamp if entry_trade else None
-        rule_name = entry_trade.rule_name if entry_trade else "Unknown"
-
-        hold_days = 0
-        if entry_date:
-            try:
-                from datetime import datetime as dt
-                entry_dt = dt.fromisoformat(entry_date.replace("Z", "+00:00"))
-                hold_days = (dt.now(entry_dt.tzinfo) - entry_dt).days
-            except Exception:
-                pass
-
-        brackets = bracket_orders.get(sym, {})
-        pnl = pos.unrealized_pnl
-        pnl_pct = ((pos.market_price / pos.avg_cost) - 1) * 100 if pos.avg_cost > 0 else 0
-
-        summaries.append({
-            "symbol": sym,
-            "entry_date": entry_date,
-            "hold_time_days": hold_days,
-            "qty": pos.qty,
-            "avg_cost": round(pos.avg_cost, 2),
-            "current_price": round(pos.market_price, 2),
-            "pnl": round(pnl, 2),
-            "pnl_pct": round(pnl_pct, 2),
-            "rule_trigger": rule_name,
-            "sl_price": brackets.get("sl"),
-            "tp_price": brackets.get("tp"),
-            "pct_of_account": round(abs(pos.market_value) / acct.balance * 100, 2) if acct.balance > 0 else 0,
-        })
-
-    return {"positions_summary": summaries, "account": acct.model_dump()}
-
-
-@app.get("/api/positions/tracked")
-async def get_tracked_positions():
-    """Open positions monitored by the exit manager, enriched with live stop levels."""
-    from database import get_open_positions
-    from position_tracker import compute_trail_stop
-    from market_data import get_latest_price, get_historical_bars
-    from indicators import _atr
-
-    positions = await get_open_positions()
-    result = []
-    for pos in positions:
-        try:
-            price = await get_latest_price(pos.symbol) or pos.entry_price
-            df = await get_historical_bars(pos.symbol, "60 D", "1D")
-            if df is not None and len(df) >= 14:
-                current_atr = float(_atr(df["high"], df["low"], df["close"], 14).iloc[-1])
-            else:
-                current_atr = pos.atr_at_entry
-            trail_stop = compute_trail_stop(pos, current_atr)
-            effective_stop = max(pos.hard_stop_price, trail_stop)
-        except Exception:
-            price = pos.entry_price
-            trail_stop = pos.hard_stop_price
-            effective_stop = pos.hard_stop_price
-
-        result.append({
-            **pos.model_dump(),
-            "current_price": round(price, 4),
-            "trail_stop_price": round(trail_stop, 4),
-            "effective_stop_price": round(effective_stop, 4),
-            "unrealized_pnl": round((price - pos.entry_price) * pos.quantity, 2),
-            "unrealized_pct": round(((price - pos.entry_price) / pos.entry_price) * 100, 2),
-        })
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Simulation endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/simulation/account")
-async def sim_account():
-    positions = await sim_engine.get_positions()
-    account = await sim_engine.get_account(positions)
-    return account.model_dump()
+# -- Simulation routes (moved to routers/simulation_routes.py) -----------------
 
 
-@app.get("/api/simulation/positions")
-async def sim_positions():
-    def _price(sym: str) -> float | None:
-        return None   # resolved asynchronously by get_positions
-
-    positions = await sim_engine.get_positions(price_fn=_price)
-    return [p.model_dump() for p in positions]
-
-
-@app.get("/api/simulation/orders")
-async def sim_orders(limit: int = 100):
-    orders = await sim_engine.get_orders(limit)
-    return [o.model_dump() for o in orders]
-
-
-class SimOrderRequest(BaseModel):
-    symbol: str
-    action: Literal["BUY", "SELL"]
-    qty: float = Field(gt=0)
-    price: float = Field(gt=0)
-
-
-@app.post("/api/simulation/order", status_code=201)
-async def sim_place_order(body: SimOrderRequest):
-    ok, msg = await sim_engine.execute_order(
-        symbol=body.symbol.upper(),
-        action=body.action,
-        qty=body.qty,
-        price=body.price,
-    )
-    if not ok:
-        raise HTTPException(400, msg)
-    return {"success": True, "message": msg}
-
-
-@app.post("/api/simulation/reset")
-async def sim_reset():
-    await sim_engine.reset()
-    return {"reset": True, "initial_cash": cfg.SIM_INITIAL_CASH}
 
 
 # ---------------------------------------------------------------------------
 # Replay / Playback endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/simulation/playback")
-async def playback_state():
-    return replay_engine.state.model_dump()
-
-
-class LoadReplayRequest(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10, pattern=r'^[A-Za-z0-9.\-]+$')
-    period: Literal["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"] = "1y"
-    interval: Literal["1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo"] = "1d"
-
-
-@app.post("/api/simulation/playback/load")
-async def playback_load(body: LoadReplayRequest):
-    sym = body.symbol.upper()
-    # Fetch bars from Yahoo Finance
-    bars: list[dict] = []
-    try:
-        bars = await _yf_bars(sym, body.period, body.interval)
-    except Exception as exc:
-        log.warning("Yahoo bars failed for replay (%s): %s", sym, exc)
-
-    if not bars:
-        raise HTTPException(404, f"No replay data for {sym}")
-
-    await replay_engine.load(sym, bars)
-    return replay_engine.state.model_dump()
-
-
-@app.post("/api/simulation/playback/play")
-async def playback_play():
-    await replay_engine.play()
-    return replay_engine.state.model_dump()
-
-
-@app.post("/api/simulation/playback/pause")
-async def playback_pause():
-    await replay_engine.pause()
-    return replay_engine.state.model_dump()
-
-
-@app.post("/api/simulation/playback/stop")
-async def playback_stop():
-    await replay_engine.stop()
-    return replay_engine.state.model_dump()
-
-
-class SpeedRequest(BaseModel):
-    speed: int = Field(ge=1, le=100)
-
-
-@app.post("/api/simulation/playback/speed")
-async def playback_speed(body: SpeedRequest):
-    replay_engine.set_speed(body.speed)
-    return {"speed": replay_engine.state.speed}
 
 
 # ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
 
-@app.get("/api/orders")
-async def get_orders():
-    return await get_open_orders()
-
-
-@app.delete("/api/orders/{order_id}")
-async def cancel_order_route(order_id: int):
-    ok = await cancel_order(order_id)
-    if not ok:
-        raise HTTPException(404, "Order not found")
-    return {"cancelled": True}
-
-
-class ManualOrderRequest(BaseModel):
-    symbol: str
-    action: Literal["BUY", "SELL"]
-    quantity: int = Field(gt=0)
-    order_type: Literal["MKT", "LMT"] = "MKT"
-    limit_price: float | None = None
-    asset_type: Literal["STK", "OPT", "FUT"] = "STK"
-
-
-@app.post("/api/orders/manual", status_code=201)
-async def place_manual_order(body: ManualOrderRequest):
-    """Place a manual order  --  routes to sim if SIM_MODE, else IBKR."""
-    if cfg.SIM_MODE:
-        sym = body.symbol.upper()
-        price = await get_latest_price(sym)
-        if price is None:
-            try:
-                quotes = await _yf_quotes(sym, source="sim_order_price")
-                if quotes and quotes[0].get("price"):
-                    price = quotes[0]["price"]
-            except Exception:
-                pass
-        if price is None:
-            raise HTTPException(503, "No market data available for " + sym)
-        ok, msg = await sim_engine.execute_order(
-            symbol=sym,
-            action=body.action,
-            qty=float(body.quantity),
-            price=price,
-        )
-        if not ok:
-            raise HTTPException(400, msg)
-        return {"success": True, "message": msg, "sim": True}
-
-    if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected  --  start IB Gateway first")
-
-    rule = Rule(
-        name="Manual",
-        symbol=body.symbol.upper(),
-        enabled=True,
-        conditions=[],
-        action=TradeAction(
-            type=body.action,
-            asset_type=body.asset_type,
-            quantity=body.quantity,
-            order_type=body.order_type,
-            limit_price=body.limit_price,
-        ),
-        cooldown_minutes=0,
-    )
-    try:
-        trade = await place_order(rule)
-    except OrderError as exc:
-        raise HTTPException(400, str(exc))
-    if not trade:
-        raise HTTPException(502, "Order placement failed — check IBKR logs")
-    return trade.model_dump()
+# ── Orders routes (moved to routers/orders.py) ───────────────────────────────
 
 
 # ---------------------------------------------------------------------------
 # Trades
 # ---------------------------------------------------------------------------
 
-@app.get("/api/trades")
-async def get_trade_log(limit: int = 200):
-    trades = await get_trades(limit)
-    return [t.model_dump() for t in trades]
-
-
-# ---------------------------------------------------------------------------
-# Rules
-# ---------------------------------------------------------------------------
-
-@app.get("/api/rules")
-async def list_rules():
-    return [r.model_dump() for r in await get_rules()]
-
-
-@app.get("/api/rules/{rule_id}")
-async def get_rule_route(rule_id: str):
-    # Skip reserved sub-paths handled by rule_builder_router
-    if rule_id in ("templates", "validate", "from-template", "export", "import"):
-        raise HTTPException(404, "Use the specific endpoint")
-    rule = await get_rule(rule_id)
-    if not rule:
-        raise HTTPException(404, "Rule not found")
-    return rule.model_dump()
-
-
-@app.post("/api/rules", status_code=201)
-async def create_rule(body: RuleCreate):
-    rule = Rule(**body.model_dump())
-    await save_rule(rule)
-    return rule.model_dump()
-
-
-@app.put("/api/rules/{rule_id}")
-async def update_rule_route(rule_id: str, body: RuleUpdate):
-    rule = await get_rule(rule_id)
-    if not rule:
-        raise HTTPException(404, "Rule not found")
-    updated = rule.model_copy(update=body.model_dump(exclude_none=True))
-    await save_rule(updated)
-    return updated.model_dump()
-
-
-@app.delete("/api/rules/{rule_id}")
-async def delete_rule_route(rule_id: str):
-    if not await delete_rule(rule_id):
-        raise HTTPException(404, "Rule not found")
-    return {"deleted": True}
-
-
-@app.post("/api/rules/{rule_id}/toggle")
-async def toggle_rule(rule_id: str):
-    rule = await get_rule(rule_id)
-    if not rule:
-        raise HTTPException(404, "Rule not found")
-    rule.enabled = not rule.enabled
-    await save_rule(rule)
-    return {"id": rule_id, "enabled": rule.enabled}
-
-
-# ---------------------------------------------------------------------------
-# Bot control
-# ---------------------------------------------------------------------------
-
-@app.post("/api/bot/start")
-async def start_bot():
-    await bot_runner.start()
-    return {"running": True}
-
-
-@app.post("/api/bot/stop")
-async def stop_bot():
-    await bot_runner.stop()
-    return {"running": False}
-
-
-@app.get("/api/bot/status")
-async def bot_status_route():
-    return {
-        "running":  bot_runner.is_running(),
-        "last_run": bot_runner.get_last_run(),
-        "next_run": bot_runner.get_next_run(),
-    }
+# ── Trades + Rules + Bot routes (moved to routers/bot_routes.py, rules_routes.py) ──
 
 
 # ---------------------------------------------------------------------------
 # IBKR market data (real-time bars + historical)
 # ---------------------------------------------------------------------------
 
-_active_rt_subs: set[str] = set()
-
-
-@app.get("/api/market/{symbol}/bars")
-async def get_bars(symbol: str, bar_size: str = "1D", duration: str = "60 D"):
-    if not ibkr.is_connected():
-        raise HTTPException(503, "IBKR not connected")
-
-    df = await get_historical_bars(symbol.upper(), duration=duration, bar_size=bar_size, use_cache=False)
-    if df.empty:
-        raise HTTPException(404, f"No bars found for {symbol}")
-
-    return [
-        {
-            "time":   int(row["time"].timestamp()),
-            "open":   float(row["open"]),
-            "high":   float(row["high"]),
-            "low":    float(row["low"]),
-            "close":  float(row["close"]),
-            "volume": float(row["volume"]),
-        }
-        for _, row in df.iterrows()
-    ]
-
-
-@app.get("/api/market/{symbol}/price")
-async def get_price(symbol: str):
-    sym = symbol.upper()
-    price = await get_latest_price(sym)
-    if price is not None:
-        return {"symbol": sym, "price": price}
-    try:
-        quotes = await _yf_quotes(sym, source="price_fallback")
-        if quotes and quotes[0].get("price"):
-            return {"symbol": sym, "price": quotes[0]["price"], "source": "yahoo"}
-    except Exception as exc:
-        log.warning("Yahoo price fallback failed for %s: %s", sym, exc)
-    raise HTTPException(503, "No market data available")
-
-
-@app.post("/api/market/{symbol}/subscribe")
-async def subscribe_market_bars(symbol: str):
-    sym = symbol.upper()
-    if sym in _active_rt_subs:
-        return {"subscribed": True, "symbol": sym}
-
-    def _on_bar(bar_data: dict) -> None:
-        asyncio.create_task(_broadcast({"type": "bar", "symbol": sym, **bar_data}))
-
-    ok = await subscribe_realtime_bars(sym, _on_bar) if ibkr.is_connected() else False
-    if ok:
-        _active_rt_subs.add(sym)
-    return {"subscribed": ok, "symbol": sym}
-
-
-@app.post("/api/market/{symbol}/unsubscribe")
-async def unsubscribe_market_bars(symbol: str):
-    sym = symbol.upper()
-    unsubscribe_realtime_bars(sym)
-    _active_rt_subs.discard(sym)
-    return {"subscribed": False, "symbol": sym}
-
-
-# ---------------------------------------------------------------------------
-# Yahoo Finance  --  watchlist quotes + bars
-# ---------------------------------------------------------------------------
-
-async def _yf_quotes(symbols_str: str, source: str = "watchlist_quotes") -> list[dict]:
-    import yfinance as yf
-    from concurrent.futures import ThreadPoolExecutor
-
-    syms = [s.strip() for s in symbols_str.split(",") if s.strip()]
-    if not syms:
-        return []
-    started = _time.perf_counter()
-
-    def _one(sym: str):
-        try:
-            fi = yf.Ticker(sym).fast_info
-            prev  = getattr(fi, "previous_close", None) or 0
-            price = getattr(fi, "last_price", None) or 0
-            chg   = price - prev
-            chg_p = (chg / prev * 100) if prev else 0
-            return {
-                "symbol":     sym,
-                "price":      round(price, 4),
-                "change":     round(chg, 4),
-                "change_pct": round(chg_p, 2),
-                "year_high":  getattr(fi, "year_high", None),
-                "year_low":   getattr(fi, "year_low", None),
-                "market_cap": getattr(fi, "market_cap", None),
-                "avg_volume": getattr(fi, "three_month_average_volume", None),
-                "last_update": datetime.now(timezone.utc).isoformat(),
-            }
-        except Exception as e:
-            log.warning("yfinance error %s: %s", sym, e)
-            return None
-
-    def _all():
-        with ThreadPoolExecutor(max_workers=min(len(syms), 10)) as ex:
-            return [r for r in ex.map(_one, syms) if r is not None]
-
-    try:
-        quotes = await asyncio.to_thread(_all)
-    except Exception as exc:
-        duration_ms = (_time.perf_counter() - started) * 1000.0
-        _record_data_failure(source, str(exc), duration_ms=duration_ms)
-        raise
-
-    duration_ms = (_time.perf_counter() - started) * 1000.0
-    if quotes:
-        _record_data_success(source, count=len(quotes), duration_ms=duration_ms)
-    else:
-        _record_data_failure(source, "empty quote response", duration_ms=duration_ms)
-    return quotes
-
-
-async def _yf_bars(symbol: str, period: str, interval: str) -> list[dict]:
-    started = _time.perf_counter()
-
-    def _fetch():
-        import yfinance as yf
-        intraday = interval.endswith("m") or interval.endswith("h")
-        df = yf.Ticker(symbol).history(period=period, interval=interval, prepost=intraday)
-        if df.empty:
-            return []
-        df = df.dropna(subset=["Close"])
-        df = df.fillna(0)  # fill remaining NaN (Volume etc.)
-        if df.empty:
-            return []
-        return [
-            {
-                "time":   int(ts.timestamp()),
-                "open":   round(float(row["Open"]),  4),
-                "high":   round(float(row["High"]),  4),
-                "low":    round(float(row["Low"]),   4),
-                "close":  round(float(row["Close"]), 4),
-                "volume": int(row["Volume"] or 0),
-            }
-            for ts, row in df.iterrows()
-        ]
-    try:
-        bars = await asyncio.to_thread(_fetch)
-    except Exception as exc:
-        duration_ms = (_time.perf_counter() - started) * 1000.0
-        _record_data_failure("yahoo_bars", str(exc), duration_ms=duration_ms)
-        raise
-
-    duration_ms = (_time.perf_counter() - started) * 1000.0
-    if bars:
-        _record_data_success("yahoo_bars", count=len(bars), duration_ms=duration_ms)
-    else:
-        _record_data_failure(
-            "yahoo_bars",
-            f"no bars for {symbol}:{period}:{interval}",
-            duration_ms=duration_ms,
-        )
-    return bars
-
-
-_DEFAULT_WATCHLIST = "BTC-USD,ETH-USD,AAPL,TSLA,SPY,QQQ,NVDA"
-_market_heartbeat_task: asyncio.Task | None = None
-_market_dynamic_symbols: set[str] = set()
-_MARKET_HEARTBEAT_ENABLED = os.getenv("MARKET_HEARTBEAT_ENABLED", "true").lower() == "true"
+# -- Market data routes (moved to routers/market_routes.py + yahoo_data.py) --
 
 
 def _env_int(name: str, fallback: int) -> int:
@@ -1654,7 +990,6 @@ def _env_int(name: str, fallback: int) -> int:
     except ValueError:
         log.warning("Invalid %s=%r. Using %d.", name, raw, fallback)
         return fallback
-
 
 _MARKET_HEARTBEAT_INTERVAL_SECONDS = max(5, _env_int("MARKET_HEARTBEAT_INTERVAL_SECONDS", 30))
 
@@ -1716,7 +1051,8 @@ async def _market_heartbeat_loop() -> None:
         if not symbols:
             continue
         try:
-            quotes = await _yf_quotes(",".join(symbols), source="heartbeat_quotes")
+            from yahoo_data import yf_quotes
+            quotes = await yf_quotes(",".join(symbols), source="heartbeat_quotes")
             if quotes:
                 _cache_prices_from_quotes(quotes)
         except asyncio.CancelledError:
@@ -1767,446 +1103,40 @@ async def _stop_market_heartbeat() -> None:
     log.info("Market heartbeat stopped")
 
 
-@app.get("/api/watchlist")
-async def get_watchlist_quotes(symbols: str = _DEFAULT_WATCHLIST):
-    syms = _split_symbols(symbols)
-    if not syms:
-        return []
-
-    _track_heartbeat_symbols(syms)
-
-    try:
-        quotes = await _yf_quotes(",".join(syms))
-        if quotes:
-            _cache_prices_from_quotes(quotes)
-            return quotes
-    except Exception as exc:
-        log.warning("Yahoo Finance failed: %s ï¿½ ", exc)
-
-    raise HTTPException(503, "No market data available")
-
-
-_VALID_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
-_UNSUPPORTED_INTERVALS = {"4h", "2h"}  # yfinance does not support these natively
-
-# period string â†’ approximate days
-def _period_to_days(p: str) -> int:
-    p = p.lower()
-    if p.endswith("d"):   return int(p[:-1])
-    if p.endswith("mo"):  return int(p[:-2]) * 30
-    if p.endswith("y"):   return int(p[:-1]) * 365
-    return 9999  # "max" or unknown â†’ unlimited
-
-# max period (in days) per interval
-_INTERVAL_MAX_DAYS = {
-    "1m":  7,
-    "2m":  60,
-    "5m":  60,
-    "15m": 60,
-    "30m": 60,
-    "60m": 730,
-    "90m": 60,
-    "1h":  730,
-}
-
-
-@app.get("/api/yahoo/{symbol}/bars")
-async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
-    # Validate interval
-    if interval in _UNSUPPORTED_INTERVALS:
-        raise HTTPException(400, f"Interval '{interval}' is not supported by Yahoo Finance. Use 1h instead.")
-    if interval not in _VALID_INTERVALS:
-        raise HTTPException(400, f"Invalid interval '{interval}'. Valid: {sorted(_VALID_INTERVALS)}")
-
-    # Validate period vs interval limits
-    max_days = _INTERVAL_MAX_DAYS.get(interval)
-    if max_days is not None:
-        req_days = _period_to_days(period)
-        if req_days > max_days:
-            raise HTTPException(
-                400,
-                f"{interval} interval requires period <= {max_days}d, but '{period}' â‰ˆ {req_days}d",
-            )
-
-    try:
-        bars = await _yf_bars(symbol, period, interval)
-        if bars:
-            return bars
-    except Exception as exc:
-        log.warning("Yahoo bars failed for %s: %s", symbol, exc)
-
-    raise HTTPException(404, f"No data for {symbol}")
-
-
-# â"€â"€ Server-side indicator endpoint â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
-
-@app.get("/api/market/{symbol}/indicators")
-async def get_indicators(
-    symbol: str,
-    indicator: str,
-    length: int = 0,
-    period: str = "1y",
-    interval: str = "1d",
-    fast: int = 12,
-    slow: int = 26,
-    signal: int = 9,
-    band: str = "mid",
-):
-    """Calculate a technical indicator server-side and return [{time, value}, ...]."""
-    import pandas as pd
-
-    bars = await _yf_bars(symbol.upper(), period, interval)
-    if not bars:
-        raise HTTPException(404, f"No bar data for {symbol}")
-
-    df = pd.DataFrame(bars)
-
-    # Build params dict
-    params: dict[str, Any] = {}
-    ind = indicator.upper()
-    if length > 0:
-        params["length"] = length
-    if ind == "MACD":
-        params["fast"] = fast
-        params["slow"] = slow
-        params["signal"] = signal
-    if ind == "BBANDS":
-        params["band"] = band
-
-    try:
-        series = ind_calculate(df, ind, params)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-    return series_to_json(series, df)
-
-
 # ---------------------------------------------------------------------------
 # Screener endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/api/screener/scan")
-async def screener_scan(body: ScanRequest):
-    # Validate filters count
-    if len(body.filters) > 15:
-        raise HTTPException(400, "Maximum 15 filters allowed")
-
-    # Validate symbol count
-    if body.symbols and len(body.symbols) > 600:
-        raise HTTPException(400, "Maximum 600 symbols allowed")
-
-    # Validate timeframe combo
-    if not validate_timeframe(body.interval, body.period):
-        raise HTTPException(
-            400,
-            f"Invalid interval/period combination: {body.interval}/{body.period}",
-        )
-
-    response = await run_scan(body)
-    return response.model_dump()
-
-
-@app.get("/api/screener/universes")
-async def screener_universes():
-    return list_universes()
-
-
-@app.get("/api/screener/presets")
-async def screener_list_presets():
-    presets = await get_screener_presets()
-    return [p.model_dump() for p in presets]
-
-
-class SavePresetRequest(BaseModel):
-    name: str
-    filters: list[ScanFilter]
-
-
-@app.post("/api/screener/presets", status_code=201)
-async def screener_save_preset(body: SavePresetRequest):
-    preset = ScreenerPreset(
-        name=body.name,
-        filters=body.filters,
-        built_in=False,
-        user_id="demo",
-        created_at=datetime.now(timezone.utc).isoformat(),
-    )
-    await save_screener_preset(preset)
-    return preset.model_dump()
-
-
-@app.delete("/api/screener/presets/{preset_id}")
-async def screener_delete_preset(preset_id: str):
-    if not await delete_screener_preset(preset_id):
-        raise HTTPException(404, "Preset not found or is built-in")
-    return {"deleted": True}
-
-
-@app.post("/api/screener/enrich")
-async def screener_enrich(body: EnrichRequest):
-    results = await enrich_symbols(body.symbols)
-    return [r.model_dump() for r in results]
+# ── Screener routes (moved to routers/screener_routes.py) ─────────────────────
 
 
 # ---------------------------------------------------------------------------
 # Sector Rotation endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/sectors/rotation")
-async def sector_rotation(lookback_days: int = 90):
-    """Sector RS ratio, momentum, and quadrant placement vs SPY."""
-    return await get_sector_rotation(lookback_days)
-
-
-@app.get("/api/sectors/heatmap")
-async def sector_heatmap():
-    """Multi-timeframe sector performance grid."""
-    return await get_rotation_heatmap()
-
-
-@app.get("/api/sectors/{sector_etf}/leaders")
-async def sector_leaders(sector_etf: str, top_n: int = 10, period: str = "3mo"):
-    """Top performing stocks within a sector."""
-    return await get_sector_leaders(sector_etf.upper(), top_n, period)
+# ── Sector routes (moved to routers/sectors.py) ──────────────────────────────
 
 
 # ---------------------------------------------------------------------------
 # Backtesting endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/api/backtest/run")
-async def api_backtest_run(req: BacktestRequest):
-    """Run a backtest and return results. Does NOT save automatically."""
-    from backtester import run_backtest
-    try:
-        result = await run_backtest(
-            entry_conditions=req.entry_conditions,
-            exit_conditions=req.exit_conditions,
-            symbol=req.symbol.upper(),
-            period=req.period,
-            interval=req.interval,
-            initial_capital=req.initial_capital,
-            position_size_pct=req.position_size_pct,
-            stop_loss_pct=req.stop_loss_pct,
-            take_profit_pct=req.take_profit_pct,
-            condition_logic=req.condition_logic,
-        )
-        return result
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        log.error("Backtest failed: %s", e, exc_info=True)
-        raise HTTPException(500, "Internal error during backtest execution")
-
-
-@app.post("/api/backtest/save")
-async def api_backtest_save(req: BacktestSaveRequest):
-    """Save a backtest result for later retrieval."""
-    created_at = datetime.now(timezone.utc).isoformat()
-    strategy_data = json.dumps({
-        "entry_conditions": [c.model_dump() for c in req.result.entry_conditions],
-        "exit_conditions": [c.model_dump() for c in req.result.exit_conditions],
-        "condition_logic": req.result.condition_logic,
-        "position_size_pct": req.result.position_size_pct,
-        "stop_loss_pct": req.result.stop_loss_pct,
-        "take_profit_pct": req.result.take_profit_pct,
-    })
-    result_data = req.result.model_dump_json()
-    import uuid as _uuid_mod
-    backtest_id = str(_uuid_mod.uuid4())
-    await save_backtest(
-        backtest_id=backtest_id,
-        user_id="demo",
-        name=req.name,
-        strategy_data=strategy_data,
-        result_data=result_data,
-        created_at=created_at,
-    )
-    return {"id": backtest_id, "saved": True}
-
-
-@app.get("/api/backtest/history")
-async def api_backtest_history():
-    """List saved backtests."""
-    return await get_backtests(user_id="demo")
-
-
-@app.get("/api/backtest/{backtest_id}")
-async def api_backtest_get(backtest_id: str):
-    """Retrieve a specific saved backtest."""
-    result = await get_backtest(backtest_id)
-    if not result:
-        raise HTTPException(404, "Backtest not found")
-    return result
-
-
-@app.delete("/api/backtest/{backtest_id}")
-async def api_backtest_delete(backtest_id: str):
-    """Delete a saved backtest."""
-    deleted = await delete_backtest(backtest_id)
-    return {"deleted": deleted}
+# ── Backtest routes (moved to routers/backtest_routes.py) ─────────────────────
 
 
 # ---------------------------------------------------------------------------
 # Alerts endpoints
 # ---------------------------------------------------------------------------
 
-def _alert_condition_summary(alert: Alert | AlertCreate) -> str:
-    params = getattr(alert.condition, "params", {}) or {}
-    params_str = ", ".join(str(value) for value in params.values())
-    indicator = f"{alert.condition.indicator}({params_str})" if params_str else alert.condition.indicator
-    return f"{indicator} {alert.condition.operator} {alert.condition.value}"
-
-
-async def _resolve_alert_test_price(symbol: str, fallback: float | None = None) -> float:
-    sym = symbol.upper()
-    price = await get_latest_price(sym)
-    if price is not None:
-        return float(price)
-    try:
-        quotes = await _yf_quotes(sym, source="price_fallback")
-        if quotes and isinstance(quotes[0].get("price"), (int, float)):
-            return float(quotes[0]["price"])
-    except Exception:
-        pass
-    if fallback is not None:
-        return float(fallback)
-    return 0.0
-
-
-@app.get("/api/alerts")
-async def api_alerts_list(user=Depends(get_current_user)):
-    alerts = await get_alerts(user.id)
-    return [alert.model_dump() for alert in alerts]
-
-
-@app.post("/api/alerts", status_code=201)
-async def api_alerts_create(body: AlertCreate, user=Depends(get_current_user)):
-    alert = Alert(
-        user_id=user.id,
-        name=body.name,
-        symbol=body.symbol.upper(),
-        condition=body.condition,
-        alert_type=body.alert_type,
-        cooldown_minutes=body.cooldown_minutes,
-        enabled=body.enabled,
-    )
-    await save_alert(alert, user.id)
-    return alert.model_dump()
-
-
-@app.get("/api/alerts/history")
-async def api_alerts_history(limit: int = 100, alert_id: str | None = None, user=Depends(get_current_user)):
-    history = await get_alert_history(user.id, limit=limit, alert_id=alert_id)
-    return [entry.model_dump() for entry in history]
-
-
-@app.post("/api/alerts/test")
-async def api_alerts_test(body: AlertCreate, user=Depends(get_current_user)):
-    fallback = None
-    if isinstance(body.condition.value, (int, float)):
-        fallback = float(body.condition.value)
-    price = await _resolve_alert_test_price(body.symbol, fallback=fallback)
-    temp_alert = Alert(
-        user_id=user.id,
-        name=body.name,
-        symbol=body.symbol.upper(),
-        condition=body.condition,
-        alert_type=body.alert_type,
-        cooldown_minutes=body.cooldown_minutes,
-        enabled=body.enabled,
-    )
-    summary = _alert_condition_summary(temp_alert)
-    now = datetime.now(timezone.utc).isoformat()
-    await _broadcast(
-        {
-            "type": "alert_fired",
-            "alert_id": temp_alert.id,
-            "name": temp_alert.name,
-            "symbol": temp_alert.symbol,
-            "condition_summary": summary,
-            "price": price,
-            "timestamp": now,
-        }
-    )
-    return {
-        "alert_id": temp_alert.id,
-        "symbol": temp_alert.symbol,
-        "price": price,
-        "triggered": True,
-        "condition_summary": summary,
-    }
-
-
-@app.get("/api/alerts/{alert_id}")
-async def api_alerts_get(alert_id: str, user=Depends(get_current_user)):
-    alert = await get_alert(alert_id, user.id)
-    if not alert:
-        raise HTTPException(404, "Alert not found")
-    return alert.model_dump()
-
-
-@app.put("/api/alerts/{alert_id}")
-async def api_alerts_update(alert_id: str, body: AlertUpdate, user=Depends(get_current_user)):
-    alert = await get_alert(alert_id, user.id)
-    if not alert:
-        raise HTTPException(404, "Alert not found")
-
-    patch = body.model_dump(exclude_unset=True, exclude_none=True)
-    if "symbol" in patch:
-        patch["symbol"] = str(patch["symbol"]).upper()
-    updated = alert.model_copy(update=patch)
-    await save_alert(updated, user.id)
-    return updated.model_dump()
-
-
-@app.delete("/api/alerts/{alert_id}")
-async def api_alerts_delete(alert_id: str, user=Depends(get_current_user)):
-    deleted = await delete_alert(alert_id, user.id)
-    if not deleted:
-        raise HTTPException(404, "Alert not found")
-    return {"deleted": True}
-
-
-@app.post("/api/alerts/{alert_id}/toggle")
-async def api_alerts_toggle(alert_id: str, user=Depends(get_current_user)):
-    alert = await get_alert(alert_id, user.id)
-    if not alert:
-        raise HTTPException(404, "Alert not found")
-    alert.enabled = not alert.enabled
-    await save_alert(alert, user.id)
-    return {"id": alert.id, "enabled": alert.enabled}
+# ── Alert routes (moved to routers/alerts_routes.py) ──────────────────────────
 
 
 # ---------------------------------------------------------------------------
 # Auth endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/api/auth/me")
-async def auth_me(user=Depends(get_current_user)):
-    return {"id": user.id, "email": user.email, "settings": user.settings}
-
-
-@app.post("/api/auth/token")
-async def auth_token():
-    """Issue a demo token (for frontend bootstrap). Full login in Stage 8."""
-    token = create_token("demo")
-    return {"access_token": token, "token_type": "bearer"}
-
-
-# ---------------------------------------------------------------------------
-# Settings endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/api/settings")
-async def get_user_settings(user=Depends(get_current_user)):
-    return await get_settings(user.id)
-
-
-@app.put("/api/settings")
-async def update_user_settings(request: Request, user=Depends(get_current_user)):
-    body = await request.json()
-    return await update_settings(user.id, body)
+# ── Auth routes (moved to routers/auth.py) ────────────────────────────────────
+# ── Settings routes (moved to routers/settings_routes.py) ─────────────────────
 
 
 # ---------------------------------------------------------------------------
@@ -2216,4 +1146,8 @@ async def update_user_settings(request: Request, user=Depends(get_current_user))
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=cfg.HOST, port=cfg.PORT, reload=True)
+
+
+
+
 

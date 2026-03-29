@@ -3,6 +3,21 @@ __pycache__/
 *.pyc
 nul
 node_modules/
+.pytest_cache/
+coverage/
+.coverage
+*.log
+backend/*.log
+backend/server.log
+*.exe
+
+# Frontend build output
+/dashboard/dist/
+
+# Scratch / local artifacts
+backend/data/event_logs/
+backend/_stage13*.py
+backend/_rm_append.py
 
 # Secrets & local config
 .env
@@ -12,3 +27,5 @@ backend/.env
 *.db
 *.db-wal
 *.db-shm
+.tmp/
+

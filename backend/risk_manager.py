@@ -32,8 +32,9 @@ _SECTOR_MAP: dict[str, str] = {
 }
 
 
-def get_sector(symbol: str) -> str:
-    return _SECTOR_MAP.get(symbol.upper(), "Other")
+def get_sector(symbol: str) -> str | None:
+    """Get sector for symbol. Uses static map first; returns None if unknown."""
+    return _SECTOR_MAP.get(symbol.upper())
 
 
 # ── Account state (fetched once per cycle) ───────────────────────────────────
@@ -75,7 +76,7 @@ def get_account_state(ib) -> dict:
                 "avg_cost": p.averageCost,
                 "market_price": mkt_price,
                 "market_value": p.marketValue,
-                "sector": get_sector(p.contract.symbol),
+                "sector": get_sector(p.contract.symbol) or "Unknown",
             })
     except Exception as e:
         log.warning("Failed to read positions: %s", e)
@@ -153,7 +154,7 @@ def check_trade_risk(
 
     # Sector concentration check
     target_sector = get_sector(symbol)
-    if side == "BUY" and target_sector != "Other":
+    if side == "BUY" and target_sector is not None:
         sector_count = sum(1 for p in positions if get_sector(p.get("symbol", "")) == target_sector and p.get("qty", 0) > 0)
         if sector_count >= cfg.MAX_POSITIONS_PER_SECTOR:
             return RiskCheckResult("BLOCK", [f"Sector '{target_sector}' has {sector_count} positions (limit {cfg.MAX_POSITIONS_PER_SECTOR})."])
@@ -177,6 +178,214 @@ def check_trade_risk(
     if not reasons:
         reasons.append("All risk checks passed.")
     return RiskCheckResult(status=status, reasons=reasons)
+
+
+# ── Portfolio Concentration Enforcement ────────────────────────────────────
+
+
+@dataclass
+class PortfolioImpactResult:
+    """Structured result from check_portfolio_impact(). Serialization-safe."""
+    allowed: bool
+    reason: str  # pass | sell_exit | sector_limit | correlation_limit | error_skip | degraded_data_skip
+    symbol: str = ""
+    side: str = ""
+    sector: str | None = None
+    sector_weight_before: float | None = None
+    sector_weight_after: float | None = None
+    correlated_count: int | None = None
+    corr_threshold: float | None = None
+    max_correlated_positions: int | None = None
+    details: str | None = None
+
+
+def compute_current_sector_exposure(
+    positions: list[dict],
+    net_liq: float,
+) -> dict[str, float]:
+    """Compute current sector exposure as % of net liquidation.
+
+    positions: list of dicts with 'symbol' and 'market_value' (or 'qty'+'market_price').
+    Returns: {sector: pct_of_net_liq}
+    """
+    if net_liq <= 0:
+        return {}
+    sector_notional: dict[str, float] = {}
+    for p in positions:
+        sym = p.get("symbol", "")
+        val = p.get("market_value") or (p.get("qty", 0) * p.get("market_price", 0))
+        if not val or val <= 0:
+            continue
+        sector = get_sector(sym) or "Other"
+        sector_notional[sector] = sector_notional.get(sector, 0) + val
+    return {s: round(v / net_liq * 100, 2) for s, v in sector_notional.items()}
+
+
+def _count_correlated_positions(
+    candidate_symbol: str,
+    held_symbols: list[str],
+    corr_matrix: dict,
+    threshold: float,
+) -> int:
+    """Count held_symbols whose abs(corr) with candidate exceeds threshold.
+
+    corr_matrix format: {"symbols": ["A","B",...], "matrix": [[1.0, 0.9,...], ...]}
+    Ignores self-correlation, NaN, and missing entries. Returns 0 on any issue.
+    """
+    symbols = corr_matrix.get("symbols", [])
+    matrix = corr_matrix.get("matrix", [])
+    cand_upper = candidate_symbol.upper()
+    if cand_upper not in [s.upper() for s in symbols]:
+        return 0
+    cand_idx = next(i for i, s in enumerate(symbols) if s.upper() == cand_upper)
+
+    count = 0
+    for held in held_symbols:
+        held_upper = held.upper()
+        if held_upper == cand_upper:
+            continue  # skip self
+        try:
+            held_idx = next(i for i, s in enumerate(symbols) if s.upper() == held_upper)
+        except StopIteration:
+            continue  # not in matrix
+        try:
+            corr_val = matrix[cand_idx][held_idx]
+            if corr_val is None or (isinstance(corr_val, float) and math.isnan(corr_val)):
+                continue
+            if abs(corr_val) > threshold:
+                count += 1
+        except (IndexError, TypeError):
+            continue
+    return count
+
+
+def check_portfolio_impact(
+    symbol: str,
+    side: str,
+    positions: list[dict],
+    net_liq: float,
+    candidate_notional: float = 0,
+    pending_orders: list[dict] | None = None,
+    approved_candidates: list[dict] | None = None,
+    corr_matrix: dict | None = None,
+    limits: RiskLimits | None = None,
+) -> PortfolioImpactResult:
+    """Check portfolio concentration before placing an order.
+
+    1. Exits always PASS (reason=sell_exit)
+    2. Sector check: project exposure, block if > max_sector_pct
+    3. Correlation check: count correlated positions, block if >= max_correlated_positions
+    4. Wrapped in try/except: on error → allowed=True, reason=error_skip
+    """
+    if limits is None:
+        limits = DEFAULT_LIMITS
+    sym = symbol.upper()
+
+    try:
+        # ── Exits always pass ─────────────────────────────────────────────
+        if side.upper() in ("SELL", "SELL_EXIT", "EXIT"):
+            return PortfolioImpactResult(
+                allowed=True, reason="sell_exit", symbol=sym, side=side,
+            )
+
+        # ── Gather all relevant exposure ──────────────────────────────────
+        all_positions = list(positions or [])
+        for order in (pending_orders or []):
+            if order.get("side", "").upper() == "BUY":
+                all_positions.append(order)
+        for cand in (approved_candidates or []):
+            if cand.get("side", "").upper() == "BUY":
+                all_positions.append(cand)
+
+        # ── Sector check ──────────────────────────────────────────────────
+        candidate_sector = get_sector(sym)
+        sector_degraded = candidate_sector is None
+
+        sector_before: float | None = None
+        sector_after: float | None = None
+
+        if not sector_degraded and net_liq > 0:
+            # Current sector exposure (including pending + approved)
+            exposure = compute_current_sector_exposure(all_positions, net_liq)
+            sector_before = exposure.get(candidate_sector, 0.0)
+            # Project after adding candidate
+            sector_after = sector_before + (candidate_notional / net_liq * 100 if net_liq > 0 else 0)
+
+            if sector_after > limits.max_sector_pct:
+                return PortfolioImpactResult(
+                    allowed=False,
+                    reason="sector_limit",
+                    symbol=sym,
+                    side=side,
+                    sector=candidate_sector,
+                    sector_weight_before=round(sector_before, 2),
+                    sector_weight_after=round(sector_after, 2),
+                    details=f"Sector '{candidate_sector}' would reach {sector_after:.1f}% (limit {limits.max_sector_pct}%)",
+                )
+
+        # ── Correlation check ─────────────────────────────────────────────
+        if corr_matrix is None:
+            if sector_degraded:
+                return PortfolioImpactResult(
+                    allowed=True, reason="degraded_data_skip", symbol=sym, side=side,
+                    sector=candidate_sector,
+                    details="Sector unknown and correlation matrix unavailable",
+                )
+            return PortfolioImpactResult(
+                allowed=True, reason="degraded_data_skip", symbol=sym, side=side,
+                sector=candidate_sector,
+                sector_weight_before=round(sector_before, 2) if sector_before is not None else None,
+                sector_weight_after=round(sector_after, 2) if sector_after is not None else None,
+                details="Correlation matrix unavailable — sector check passed",
+            )
+
+        # Build list of all relevant symbols for correlation counting
+        relevant_symbols = []
+        for p in all_positions:
+            s = p.get("symbol", "")
+            if s and s.upper() != sym:
+                relevant_symbols.append(s.upper())
+        relevant_symbols = list(set(relevant_symbols))
+
+        corr_count = _count_correlated_positions(
+            sym, relevant_symbols, corr_matrix, limits.corr_threshold,
+        )
+
+        if corr_count >= limits.max_correlated_positions:
+            return PortfolioImpactResult(
+                allowed=False,
+                reason="correlation_limit",
+                symbol=sym,
+                side=side,
+                sector=candidate_sector,
+                sector_weight_before=round(sector_before, 2) if sector_before is not None else None,
+                sector_weight_after=round(sector_after, 2) if sector_after is not None else None,
+                correlated_count=corr_count,
+                corr_threshold=limits.corr_threshold,
+                max_correlated_positions=limits.max_correlated_positions,
+                details=f"{corr_count} positions correlated >{limits.corr_threshold} with {sym} (limit {limits.max_correlated_positions})",
+            )
+
+        # ── All clear ─────────────────────────────────────────────────────
+        return PortfolioImpactResult(
+            allowed=True,
+            reason="pass",
+            symbol=sym,
+            side=side,
+            sector=candidate_sector,
+            sector_weight_before=round(sector_before, 2) if sector_before is not None else None,
+            sector_weight_after=round(sector_after, 2) if sector_after is not None else None,
+            correlated_count=corr_count,
+            corr_threshold=limits.corr_threshold,
+            max_correlated_positions=limits.max_correlated_positions,
+        )
+
+    except Exception as exc:
+        log.error("Portfolio impact check FAILED (error_skip) for %s: %s", symbol, exc)
+        return PortfolioImpactResult(
+            allowed=True, reason="error_skip", symbol=sym, side=side,
+            details=f"Internal error: {exc}",
+        )
 
 
 def calculate_position_size(

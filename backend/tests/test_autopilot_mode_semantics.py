@@ -76,4 +76,4 @@ async def test_auto_tighten_level2_reverts_to_paper_mode(anyio_backend):
     saved_config = mock_save.await_args.args[0]
     assert result["actions_taken"] == ["level2_paper_revert"]
     assert saved_config.autopilot_mode == "PAPER"
-    assert ai_params.shadow_mode is False
+    assert ai_params.shadow_mode is False  # PAPER = AI still active (creates paper rules), no live orders

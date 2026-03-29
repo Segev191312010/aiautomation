@@ -115,6 +115,48 @@ describe('AIStatusBar', () => {
     expect(screen.getByRole('button', { name: /resume/i })).toBeInTheDocument()
     expect(screen.getByText('ACTIVE')).toBeInTheDocument()
   })
+
+  it('renders bot health summary when available', async () => {
+    const { default: AIStatusBar } = await import('../AIStatusBar')
+    render(
+      <AIStatusBar
+        status={{
+          mode: 'LIVE',
+          autonomy_active: true,
+          shadow_mode: false,
+          emergency_stop: false,
+          daily_loss_locked: false,
+          daily_loss_limit_pct: 4.0,
+          broker_connected: true,
+          open_positions_count: 1,
+          active_rules_count: 2,
+          direct_ai_open_trades_count: 1,
+          last_action_at: null,
+          changes_today: 3,
+          next_optimization_at: null,
+          daily_budget_remaining: 5,
+          last_optimization_at: null,
+          optimizer_running: false,
+          bot_health: {
+            is_running: true,
+            minutes_since_last_cycle: 1.2,
+            total_cycles_today: 9,
+            error_count_24h: 1,
+            ibkr_connected: true,
+            stale_warning: false,
+            last_signal_symbol: 'NVDA',
+            last_successful_ibkr_heartbeat_at: null,
+            last_order_submit_at: null,
+            last_fill_event_at: null,
+            degraded_mode_count_24h: 2,
+          },
+        }}
+      />,
+    )
+    expect(screen.getByText('Bot Health')).toBeInTheDocument()
+    expect(screen.getByText('9 cycles')).toBeInTheDocument()
+    expect(screen.getByText('NVDA')).toBeInTheDocument()
+  })
 })
 
 // ── Tests: AIActivityFeed ────────────────────────────────────────────────────
@@ -217,25 +259,24 @@ describe('AutopilotRuleLab', () => {
   it('renders rules table with rule names', async () => {
     const { default: AutopilotRuleLab } = await import('../../rules/AutopilotRuleLab')
     render(<AutopilotRuleLab rules={mockRules as any} onRefresh={vi.fn()} />)
-    // First rule appears in table + version history panel (auto-selected), so use getAllByText
-    expect(screen.getAllByText('AI: RSI Bounce').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByText('Manual Momentum')).toBeInTheDocument()
+    const firstRule = await screen.findAllByText('AI: RSI Bounce')
+    expect(firstRule.length).toBeGreaterThanOrEqual(1)
+    expect(await screen.findByText('Manual Momentum')).toBeInTheDocument()
   })
 
   it('shows status badges', async () => {
     const { default: AutopilotRuleLab } = await import('../../rules/AutopilotRuleLab')
     render(<AutopilotRuleLab rules={mockRules as any} onRefresh={vi.fn()} />)
-    const activeBadges = screen.getAllByText('active')
+    const activeBadges = await screen.findAllByText('active')
     expect(activeBadges.length).toBeGreaterThanOrEqual(2)
   })
 
   it('shows emergency Pause and Retire buttons (not Create/Edit)', async () => {
     const { default: AutopilotRuleLab } = await import('../../rules/AutopilotRuleLab')
     render(<AutopilotRuleLab rules={mockRules as any} onRefresh={vi.fn()} />)
-    // Has emergency actions
-    const pauseButtons = screen.getAllByText('Pause')
+    const pauseButtons = await screen.findAllByText('Pause')
     expect(pauseButtons.length).toBeGreaterThan(0)
-    const retireButtons = screen.getAllByText('Retire')
+    const retireButtons = await screen.findAllByText('Retire')
     expect(retireButtons.length).toBeGreaterThan(0)
     // Does NOT have create/edit buttons
     expect(screen.queryByText(/Create Rule/i)).not.toBeInTheDocument()

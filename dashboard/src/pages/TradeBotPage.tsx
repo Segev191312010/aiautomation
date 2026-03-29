@@ -4,7 +4,7 @@
  * Tabs:
  *  1. Positions (default) — KPI cards, quick order, positions table
  *  2. Rules               — inline RulesPage (lazy)
- *  3. AI Insights         — inline AIAdvisorPage (lazy)
+ *  3. Autopilot           — inline AutopilotPage (lazy)
  *  4. Activity            — LiveActivityFeed + recent trades log
  *
  * KPI cards and BotToggle are always visible above the tab bar.
@@ -22,7 +22,7 @@ import LiveActivityFeed from '@/components/tradebot/LiveActivityFeed'
 import type { Trade, SimAccountState, AccountSummary, Position, SimPosition } from '@/types'
 
 const RulesPage      = lazy(() => import('@/pages/RulesPage'))
-const AIAdvisorPage  = lazy(() => import('@/pages/AIAdvisorPage'))
+const AutopilotPage  = lazy(() => import('@/pages/AutopilotPage'))
 
 function fmtUSD(v: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v)
@@ -775,7 +775,7 @@ export default function TradeBotPage() {
           tabs={[
             { id: 'positions', label: 'Positions' },
             { id: 'rules',     label: 'Rules' },
-            { id: 'insights',  label: 'AI Insights' },
+            { id: 'insights',  label: 'Autopilot' },
             { id: 'activity',  label: 'Activity' },
           ]}
         />
@@ -795,7 +795,7 @@ export default function TradeBotPage() {
 
         {tradebotTab === 'insights' && (
           <Suspense fallback={<TabFallback />}>
-            <AIAdvisorPage />
+            <AutopilotPage />
           </Suspense>
         )}
 

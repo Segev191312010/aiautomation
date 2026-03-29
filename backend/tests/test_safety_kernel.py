@@ -1,20 +1,22 @@
-"""Safety Kernel tests — non-negotiable runtime checks."""
-import pytest
+"""Safety Kernel tests - non-negotiable runtime checks."""
+from __future__ import annotations
+
 import time
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from safety_kernel import (
-    assert_not_killed,
-    assert_no_shorts,
-    assert_risk_budget,
-    assert_not_duplicate,
-    check_all,
     SafetyViolation,
     _recent_checks,
+    assert_daily_loss_not_locked,
+    assert_no_shorts,
+    assert_not_duplicate,
+    assert_not_killed,
+    assert_risk_budget,
+    check_all,
 )
 
-
-# ── Kill Switch ──────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_kill_switch_blocks(anyio_backend):
@@ -30,7 +32,7 @@ async def test_kill_switch_allows_when_not_stopped(anyio_backend):
     with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
         mock_config = type("C", (), {"emergency_stop": False, "autopilot_mode": "LIVE"})()
         mock_load.return_value = mock_config
-        await assert_not_killed()  # should not raise
+        await assert_not_killed()
 
 
 @pytest.mark.anyio
@@ -47,25 +49,18 @@ async def test_daily_loss_lock_blocks_entries(anyio_backend):
     with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
         mock_config = type("C", (), {"daily_loss_locked": True})()
         mock_load.return_value = mock_config
-        from safety_kernel import assert_daily_loss_not_locked
-
         with pytest.raises(SafetyViolation, match="Daily loss lock"):
             await assert_daily_loss_not_locked(is_exit=False)
 
 
 @pytest.mark.anyio
 async def test_daily_loss_lock_allows_exits(anyio_backend):
-    from safety_kernel import assert_daily_loss_not_locked
-
     await assert_daily_loss_not_locked(is_exit=True)
 
-
-# ── Risk Budget ──────────────────────────────────────────────────────────────
 
 def test_risk_budget_rejects_oversized():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        # No stop_price → uses notional: 100 * 100 = $10,000 > 1% of $10,000 = $100
         with pytest.raises(SafetyViolation, match="risk"):
             assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=10000.0)
 
@@ -73,14 +68,12 @@ def test_risk_budget_rejects_oversized():
 def test_risk_budget_allows_small_position():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        # 1 share at $100 with stop at $99 → risk = $1, 1% of $10,000 = $100 → allowed
         assert_risk_budget(quantity=1, price_estimate=100.0, account_equity=10000.0, stop_price=99.0)
 
 
 def test_risk_budget_rejects_with_wide_stop():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        # 10 shares at $100 with stop at $50 → risk = $500, 1% of $10,000 = $100 → rejected
         with pytest.raises(SafetyViolation, match="risk"):
             assert_risk_budget(quantity=10, price_estimate=100.0, account_equity=10000.0, stop_price=50.0)
 
@@ -88,29 +81,25 @@ def test_risk_budget_rejects_with_wide_stop():
 def test_risk_budget_skips_when_no_data():
     with patch("safety_kernel.cfg") as mock_cfg:
         mock_cfg.RISK_PER_TRADE_PCT = 1.0
-        assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=0)  # no equity → skip
+        assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=0)
 
-
-# ── No Shorts ────────────────────────────────────────────────────────────────
 
 def test_no_shorts_allows_buy():
-    assert_no_shorts("BUY")  # should not raise
+    assert_no_shorts("BUY")
 
 
 def test_no_shorts_allows_sell_exit():
-    assert_no_shorts("SELL", is_exit=True)  # exit → allowed
+    assert_no_shorts("SELL", is_exit=True)
 
 
 def test_no_shorts_allows_sell_with_position():
-    assert_no_shorts("SELL", has_existing_position=True)  # closing position → allowed
+    assert_no_shorts("SELL", has_existing_position=True)
 
 
 def test_no_shorts_blocks_sell_open():
     with pytest.raises(SafetyViolation, match="Short"):
         assert_no_shorts("SELL", is_exit=False, has_existing_position=False)
 
-
-# ── Dedup ────────────────────────────────────────────────────────────────────
 
 def test_dedup_blocks_rapid_fire():
     _recent_checks.clear()
@@ -131,19 +120,71 @@ def test_dedup_allows_after_window():
     assert_not_duplicate("AAPL", "BUY", "rule")
 
 
-# ── Full Check ───────────────────────────────────────────────────────────────
-
 @pytest.mark.anyio
 async def test_check_all_passes_clean(anyio_backend):
     _recent_checks.clear()
-    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock), \
-         patch("safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock):
+    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
+        "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
+    ) as mock_daily:
         await check_all("AAPL", "BUY", 1, "rule", account_equity=10000, price_estimate=100, stop_price=98.0)
+    mock_kill.assert_awaited_once()
+    mock_daily.assert_awaited_once_with(is_exit=False)
 
 
 @pytest.mark.anyio
 async def test_check_all_rejects_killed(anyio_backend):
     _recent_checks.clear()
-    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock, side_effect=SafetyViolation("Kill switch")):
+    with patch(
+        "safety_kernel.assert_not_killed",
+        new_callable=AsyncMock,
+        side_effect=SafetyViolation("Kill switch"),
+    ):
         with pytest.raises(SafetyViolation, match="Kill switch"):
             await check_all("AAPL", "BUY", 1, "rule")
+
+
+@pytest.mark.anyio
+async def test_check_all_exit_skips_authority_risk_and_dedup(anyio_backend):
+    _recent_checks.clear()
+    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
+        "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
+    ) as mock_daily, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
+        "safety_kernel.assert_not_duplicate", new=Mock()
+    ) as mock_dup:
+        await check_all(
+            "AAPL",
+            "SELL",
+            10,
+            "rule",
+            account_equity=10000,
+            price_estimate=100,
+            is_exit=True,
+            has_existing_position=True,
+        )
+    mock_kill.assert_not_awaited()
+    mock_daily.assert_not_awaited()
+    mock_risk.assert_not_called()
+    mock_dup.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_check_all_manual_bypasses_authority_but_keeps_common_entry_guards(anyio_backend):
+    _recent_checks.clear()
+    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
+        "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
+    ) as mock_daily, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
+        "safety_kernel.assert_not_duplicate", new=Mock()
+    ) as mock_dup:
+        await check_all(
+            "AAPL",
+            "BUY",
+            2,
+            "manual",
+            account_equity=10000,
+            price_estimate=100,
+            require_autopilot_authority=False,
+        )
+    mock_kill.assert_not_awaited()
+    mock_daily.assert_not_awaited()
+    mock_risk.assert_called_once()
+    mock_dup.assert_called_once_with("AAPL", "BUY", "manual")

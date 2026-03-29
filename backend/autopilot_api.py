@@ -26,15 +26,21 @@ from api_contracts import (
     AutopilotModeRequest,
     AutopilotPerformanceResponse,
     CostReportResponse,
+    DecisionItemResponse,
+    DecisionRunResponse,
     EconomicReportResponse,
+    EvaluationCompareResponse,
+    EvaluationRunResponse,
+    EvaluationSliceResponse,
     LearningMetricsResponse,
+    ReplayRequest,
     RulePromotionReadinessResponse,
     RuleValidationRunResponse,
     RuleVersionResponse,
     SourcePerformanceResponse,
 )
 from config import cfg
-from database import get_rule, get_rule_validation_runs, get_rule_versions, save_rule, save_rule_version
+from database import get_rule, get_rule_validation_runs, get_rule_versions, save_rule, save_rule_version, persist_rule_revision
 from direct_ai_trader import execute_direct_trade
 from manual_intervention import (
     acknowledge_intervention,
@@ -250,12 +256,26 @@ async def get_autopilot_rule_promotion_readiness(rule_id: str):
     if not rule:
         raise HTTPException(404, f"Rule '{rule_id}' not found")
     eligible, reasons, latest = await evaluate_promotion_gate(rule)
+    # S9: build data quality note from latest validation evidence
+    data_quality_note = None
+    if latest:
+        canonical = latest.get("evaluated_closed_count")
+        legacy = latest.get("excluded_legacy_count", 0)
+        quality = latest.get("data_quality")
+        if canonical is not None:
+            parts = [f"{canonical} canonical trades"]
+            if legacy:
+                parts.append(f"{legacy} legacy excluded")
+            if quality:
+                parts.append(f"quality: {quality}")
+            data_quality_note = " | ".join(parts)
     return {
         "rule_id": rule.id,
         "status": rule.status or "active",
         "eligible": eligible,
         "reasons": reasons,
         "latest_validation": latest,
+        "data_quality_note": data_quality_note,
     }
 
 
@@ -268,8 +288,7 @@ async def manual_pause_rule(rule_id: str, payload: ManualRuleActionRequest):
     rule.status = "paused"
     rule.enabled = False
     rule.ai_reason = payload.reason or "Paused by operator"
-    await save_rule(rule)
-    await save_rule_version(rule, diff_summary=rule.ai_reason, author="operator")
+    await persist_rule_revision(rule, diff_summary=rule.ai_reason, author="operator")
     await log_ai_action(
         action_type="rule_pause",
         category="operator",
@@ -292,8 +311,7 @@ async def manual_retire_rule(rule_id: str, payload: ManualRuleActionRequest):
     rule.status = "retired"
     rule.enabled = False
     rule.ai_reason = payload.reason or "Retired by operator"
-    await save_rule(rule)
-    await save_rule_version(rule, diff_summary=rule.ai_reason, author="operator")
+    await persist_rule_revision(rule, diff_summary=rule.ai_reason, author="operator")
     await log_ai_action(
         action_type="rule_retire",
         category="operator",
@@ -353,8 +371,7 @@ async def promote_autopilot_rule(rule_id: str, payload: PromoteRuleRequest):
     rule.status = "active"
     rule.enabled = True
     rule.ai_reason = payload.reason
-    await save_rule(rule)
-    await save_rule_version(
+    await persist_rule_revision(
         rule,
         diff_summary=f"{payload.reason} (validated {latest.get('validation_mode', 'paper')})",
         author="operator",
@@ -377,11 +394,13 @@ async def promote_autopilot_rule(rule_id: str, payload: PromoteRuleRequest):
 
 @router.post("/rule-lab/apply")
 async def apply_rule_lab_actions(payload: RuleLabApplyRequest):
+    # Server-side gate: allow_active only when autopilot is actually LIVE
+    effective_allow_active = payload.allow_active and cfg.AUTOPILOT_MODE == "LIVE"
     return {
         "results": await apply_rule_actions(
             payload.actions,
             author=payload.author,
-            allow_active=payload.allow_active,
+            allow_active=effective_allow_active,
         )
     }
 
@@ -484,3 +503,146 @@ async def get_autopilot_economic_report(days: int = Query(default=30, ge=1, le=3
     except Exception as exc:
         log.exception("Autopilot economic report failed: %s", exc)
         raise HTTPException(500, f"Economic report failed: {exc}")
+
+
+# ── S10: Decision Ledger Endpoints ───────────────────────────────────────────
+
+@router.get("/decision-runs", response_model=list[DecisionRunResponse])
+async def get_decision_runs_endpoint(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    source: str | None = Query(default=None),
+    mode: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+):
+    from ai_decision_ledger import get_decision_runs
+    return await get_decision_runs(limit=limit, offset=offset, source=source, mode=mode, status=status)
+
+
+@router.get("/decision-runs/{run_id}", response_model=DecisionRunResponse)
+async def get_decision_run_endpoint(run_id: str):
+    from ai_decision_ledger import get_decision_run
+    run = await get_decision_run(run_id)
+    if not run:
+        raise HTTPException(404, f"Decision run '{run_id}' not found")
+    return run
+
+
+@router.get("/decision-runs/{run_id}/items", response_model=list[DecisionItemResponse])
+async def get_decision_run_items_endpoint(run_id: str):
+    from ai_decision_ledger import get_decision_run, get_decision_items
+    run = await get_decision_run(run_id)
+    if not run:
+        raise HTTPException(404, f"Decision run '{run_id}' not found")
+    return await get_decision_items(run_id)
+
+
+# ── S10: Evaluation Endpoints ────────────────────────────────────────────────
+
+@router.post("/evaluation/replay", response_model=EvaluationRunResponse)
+async def launch_evaluation_replay(payload: ReplayRequest):
+    from ai_evaluator import create_evaluation_run, complete_evaluation_run, build_slices_from_items, save_evaluation_slices, get_evaluation_run
+    from ai_decision_ledger import get_decision_items as get_items
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    window_start = (now - timedelta(days=payload.window_days)).isoformat()
+    window_end = now.isoformat()
+
+    eval_id = await create_evaluation_run(
+        candidate_type=payload.candidate_type,
+        candidate_key=payload.candidate_key,
+        baseline_key=payload.baseline_key,
+        evaluation_mode=payload.evaluation_mode,
+        window_start=window_start,
+        window_end=window_end,
+        request_json=payload.model_dump(),
+    )
+
+    try:
+        if payload.evaluation_mode == "rule_backtest":
+            from ai_replay import run_rule_backtest_replay
+            result = await run_rule_backtest_replay(payload.candidate_key, window_days=payload.window_days)
+            await complete_evaluation_run(eval_id, summary=result)
+
+        elif payload.evaluation_mode == "stored_context_existing":
+            from ai_replay import run_stored_context_existing
+            result = await run_stored_context_existing(
+                window_days=payload.window_days, limit_runs=payload.limit_runs,
+                min_confidence=payload.min_confidence,
+                symbols=payload.symbols or None,
+                action_types=payload.action_types or None,
+            )
+            all_items = result.get("items", [])
+            if all_items:
+                slices = build_slices_from_items(all_items)
+                await save_evaluation_slices(eval_id, slices)
+                overall = next((s for s in slices if s["slice_type"] == "overall"), {})
+                await complete_evaluation_run(eval_id, summary=overall.get("metrics", {}))
+            else:
+                await complete_evaluation_run(eval_id, summary={"warning": "No items to evaluate"})
+
+        elif payload.evaluation_mode == "stored_context_generate":
+            from ai_replay import run_stored_context_generate
+            result = await run_stored_context_generate(
+                candidate_key=payload.candidate_key,
+                baseline_key=payload.baseline_key,
+                candidate_type=payload.candidate_type,
+                window_days=payload.window_days,
+                limit_runs=payload.limit_runs,
+            )
+            scored = result.get("scored_items", [])
+            if scored:
+                slices = build_slices_from_items(scored)
+                await save_evaluation_slices(eval_id, slices)
+                overall = next((s for s in slices if s["slice_type"] == "overall"), {})
+                await complete_evaluation_run(eval_id, summary=overall.get("metrics", {}))
+            else:
+                await complete_evaluation_run(eval_id, summary={
+                    "warning": "No scored items",
+                    "runs_evaluated": result.get("runs_evaluated", 0),
+                    "errors": result.get("errors", []),
+                })
+
+        else:
+            await complete_evaluation_run(eval_id, summary={}, status="failed",
+                                          error=f"Unknown evaluation_mode: {payload.evaluation_mode}")
+
+    except Exception as exc:
+        log.exception("Evaluation replay failed: %s", exc)
+        await complete_evaluation_run(eval_id, summary={}, status="failed", error=str(exc))
+
+    return await get_evaluation_run(eval_id)
+
+
+@router.get("/evaluation/runs", response_model=list[EvaluationRunResponse])
+async def get_evaluation_runs_endpoint(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    from ai_evaluator import get_evaluation_runs
+    return await get_evaluation_runs(limit=limit, offset=offset)
+
+
+@router.get("/evaluation/{evaluation_id}", response_model=EvaluationRunResponse)
+async def get_evaluation_run_endpoint(evaluation_id: str):
+    from ai_evaluator import get_evaluation_run
+    run = await get_evaluation_run(evaluation_id)
+    if not run:
+        raise HTTPException(404, f"Evaluation run '{evaluation_id}' not found")
+    return run
+
+
+@router.get("/evaluation/{evaluation_id}/slices", response_model=list[EvaluationSliceResponse])
+async def get_evaluation_slices_endpoint(evaluation_id: str):
+    from ai_evaluator import get_evaluation_slices
+    return await get_evaluation_slices(evaluation_id)
+
+
+@router.get("/evaluation/compare", response_model=EvaluationCompareResponse)
+async def compare_evaluations_endpoint(
+    baseline: str = Query(..., description="Baseline evaluation run ID"),
+    candidate: str = Query(..., description="Candidate evaluation run ID"),
+):
+    from ai_evaluator import compare_evaluations
+    return await compare_evaluations(baseline, candidate)

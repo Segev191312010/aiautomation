@@ -114,6 +114,8 @@ async def log_ai_action(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     param_type: str | None = None,
+    decision_run_id: str | None = None,
+    decision_item_id: str | None = None,
 ) -> int:
     """Insert an entry into ai_audit_log. Returns the new row ID."""
     now = datetime.now(timezone.utc).isoformat()
@@ -123,10 +125,12 @@ async def log_ai_action(
         cur = await db.execute(
             "INSERT INTO ai_audit_log "
             "(timestamp, action_type, category, description, old_value, new_value, "
-            " reason, confidence, status, input_tokens, output_tokens, param_type) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " reason, confidence, status, input_tokens, output_tokens, param_type, "
+            " decision_run_id, decision_item_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, action_type, category, description, old_json, new_json,
-             reason, confidence, status, input_tokens, output_tokens, param_type),
+             reason, confidence, status, input_tokens, output_tokens, param_type,
+             decision_run_id, decision_item_id),
         )
         await db.commit()
         return cur.lastrowid or 0
@@ -141,7 +145,8 @@ async def get_ai_audit_log(limit: int = 50, offset: int = 0) -> tuple[list[dict]
             "SELECT id, timestamp, action_type, category, description, "
             "old_value, new_value, reason, confidence, "
             "decision_confidence_avg, parameter_uncertainty_width, "
-            "input_tokens, output_tokens, status, reverted_at "
+            "input_tokens, output_tokens, status, reverted_at, "
+            "decision_run_id, decision_item_id "
             "FROM ai_audit_log ORDER BY timestamp DESC LIMIT ? OFFSET ?",
             (limit, offset),
         )
@@ -157,6 +162,7 @@ async def get_ai_audit_log(limit: int = 50, offset: int = 0) -> tuple[list[dict]
             "parameter_uncertainty_width": r[10],
             "input_tokens": r[11], "output_tokens": r[12],
             "status": r[13], "reverted_at": r[14],
+            "decision_run_id": r[15], "decision_item_id": r[16],
         })
     return entries, total
 
@@ -185,6 +191,8 @@ async def log_shadow_decision(
     delta_value: float | None = None,
     confidence: float | None = None,
     regime: str | None = None,
+    decision_run_id: str | None = None,
+    decision_item_id: str | None = None,
 ) -> None:
     """Log a shadow-mode decision (AI suggested but not applied)."""
     now = datetime.now(timezone.utc).isoformat()
@@ -192,11 +200,13 @@ async def log_shadow_decision(
         await db.execute(
             "INSERT INTO ai_shadow_decisions "
             "(timestamp, param_type, symbol, ai_suggested_value, "
-            "actual_value_used, market_condition, delta_value, confidence, regime) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "actual_value_used, market_condition, delta_value, confidence, regime, "
+            "decision_run_id, decision_item_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, param_type, symbol,
              json.dumps(ai_suggested), json.dumps(actual_used),
-             market_condition, delta_value, confidence, regime),
+             market_condition, delta_value, confidence, regime,
+             decision_run_id, decision_item_id),
         )
         await db.commit()
 
@@ -234,7 +244,7 @@ async def get_shadow_decisions(
         cur = await db.execute(
             f"SELECT id, timestamp, param_type, symbol, ai_suggested_value, "
             f"actual_value_used, market_condition, hypothetical_outcome, "
-            f"delta_value, confidence, regime "
+            f"delta_value, confidence, regime, decision_run_id, decision_item_id "
             f"FROM ai_shadow_decisions{where_sql} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
         )
@@ -248,6 +258,7 @@ async def get_shadow_decisions(
             "actual_value_used": r[5], "market_condition": r[6],
             "hypothetical_outcome": r[7], "delta_value": r[8],
             "confidence": r[9], "regime": r[10],
+            "decision_run_id": r[11], "decision_item_id": r[12],
         })
     return entries, total
 
@@ -295,13 +306,15 @@ async def analyze_shadow_performance(
         post_trades = await cur.fetchall()
         all_trades_raw = pre_trades + post_trades
 
-    # B6 FIX: Parse trades with correct PnL extraction
+    # B6 FIX + S9: prefer canonical realized_pnl, fall back to metadata pnl
     trades = []
     for t in all_trades_raw:
         try:
             tdata = json.loads(t[3]) if t[3] else {}
-            raw_pnl = tdata.get("pnl")
-            pnl = float(raw_pnl) if raw_pnl is not None else 0.0
+            pnl_val = tdata.get("realized_pnl")
+            if pnl_val is None:
+                pnl_val = tdata.get("pnl")
+            pnl = float(pnl_val) if pnl_val is not None else 0.0
             trades.append({
                 "id": t[0], "symbol": t[1], "timestamp": t[2],
                 "pnl": pnl,
@@ -535,6 +548,8 @@ class GuardrailEnforcer:
         apply_fn,
         input_tokens: int | None = None,
         output_tokens: int | None = None,
+        decision_run_id: str | None = None,
+        decision_item_id: str | None = None,
     ) -> dict:
         """Execute a change within guardrails, logging to audit table."""
         proposed: dict = {"old": old_value, "new": new_value}
@@ -570,6 +585,7 @@ class GuardrailEnforcer:
                 new_value=new_value, reason=f"BLOCKED: {block_reason}",
                 confidence=confidence, status="blocked",
                 input_tokens=input_tokens, output_tokens=output_tokens,
+                decision_run_id=decision_run_id, decision_item_id=decision_item_id,
             )
             log.info("AI action BLOCKED: %s — %s", description, block_reason)
             return {"applied": False, "reason": block_reason, "entry_id": entry_id}
@@ -587,6 +603,7 @@ class GuardrailEnforcer:
                 description=f"FAILED: {description}",
                 old_value=old_value, new_value=new_value,
                 reason=str(e), confidence=confidence, status="failed",
+                decision_run_id=decision_run_id, decision_item_id=decision_item_id,
             )
             return {"applied": False, "reason": str(e)}
 
@@ -596,6 +613,7 @@ class GuardrailEnforcer:
             new_value=new_value, reason=reason,
             confidence=confidence, status="applied",
             input_tokens=input_tokens, output_tokens=output_tokens,
+            decision_run_id=decision_run_id, decision_item_id=decision_item_id,
         )
         log.info("AI action APPLIED: %s (confidence=%.2f)", description, confidence)
         return {"applied": True, "entry_id": entry_id, "description": description}
@@ -704,6 +722,7 @@ async def get_ai_status_dict() -> dict:
     changes_today = await enforcer._count_today_changes()
     last_change = await enforcer._last_change_at()
     mode = config.autopilot_mode if config.autopilot_mode in ("OFF", "PAPER", "LIVE") else "OFF"
+    bot_health = None
 
     broker_connected = False
     try:
@@ -728,6 +747,16 @@ async def get_ai_status_dict() -> dict:
     except Exception:
         pass
 
+    try:
+        from config import cfg as _cfg_status
+
+        if _cfg_status.ENABLE_BOT_HEALTH_MONITORING:
+            from bot_runner import get_bot_health
+
+            bot_health = get_bot_health()
+    except Exception:
+        bot_health = None
+
     return {
         "mode": mode,
         "autonomy_active": mode in ("PAPER", "LIVE") and not config.emergency_stop,
@@ -745,4 +774,5 @@ async def get_ai_status_dict() -> dict:
         "daily_budget_remaining": max(0, config.max_changes_per_day - changes_today),
         "last_optimization_at": None,
         "optimizer_running": False,
+        "bot_health": bot_health,
     }

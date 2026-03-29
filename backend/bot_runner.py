@@ -13,6 +13,8 @@ Every BOT_INTERVAL_SECONDS:
 from __future__ import annotations
 import asyncio
 import logging
+import hashlib
+import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 from config import cfg
@@ -20,16 +22,19 @@ from database import (
     get_rules,
     save_rule,
     get_trades,
+    get_trade,
     get_open_positions,
     save_open_position,
     delete_open_position,
     save_trade,
+    finalize_trade_outcome,
 )
 from market_data import get_historical_bars, clear_bar_cache, get_latest_price
 from rule_engine import evaluate_all
 from order_executor import OrderError, place_order
 from models import Rule, Trade, TradeAction
 from position_tracker import check_exits, update_watermarks
+from services import order_lifecycle, order_recovery, safety_gate
 from screener import load_universe
 from events import (
     EventBus, EventType, EventQueue,
@@ -53,14 +58,29 @@ _task: Optional[asyncio.Task] = None
 _last_run: Optional[str] = None
 _next_run: Optional[str] = None
 
+# ── Bot health state ────────────────────────────────────────────────────────
+_cycle_day: Optional[str] = None
+_cycle_count_today: int = 0
+_error_timestamps: list[float] = []
+_degraded_timestamps: list[float] = []
+_last_error_message: Optional[str] = None
+_last_signal_symbol: Optional[str] = None
+_last_cycle_started_at: Optional[str] = None
+_last_cycle_completed_at: Optional[str] = None
+_last_successful_ibkr_heartbeat_at: Optional[str] = None
+_last_order_submit_at: Optional[str] = None
+_last_fill_event_at: Optional[str] = None
+_last_bot_health_emit_at: float = 0.0
+
 # ── Liquidity pre-screen cache ─────────────────────────────────────────────
 # Rebuilt once per day from the full us_all universe.
 # Filters: last close > $5, average 5-day volume > 500k shares.
 _PRESCREEN_MIN_PRICE  = 5.0
 _PRESCREEN_MIN_VOLUME = 500_000
 _PRESCREEN_TTL        = 86_400          # refresh every 24 h
-_screened_symbols: list[str] = []
-_screened_at: float = 0.0               # epoch timestamp of last refresh
+_prescreen_cache: dict[str, tuple[list[str], float]] = {}
+_screened_symbols: list[str] = []  # legacy shim for the renamed helper
+_screened_at: float = 0.0
 
 
 def set_broadcast(cb: Callable) -> None:
@@ -80,6 +100,130 @@ def get_next_run() -> Optional[str]:
     return _next_run
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _prune_timestamps(bucket: list[float], *, window_seconds: int = 86_400) -> None:
+    cutoff = time.time() - window_seconds
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+
+
+def _record_cycle_start() -> None:
+    global _cycle_day, _cycle_count_today, _last_cycle_started_at
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _cycle_day != today:
+        _cycle_day = today
+        _cycle_count_today = 0
+    _cycle_count_today += 1
+    _last_cycle_started_at = _now_iso()
+
+
+def _record_cycle_complete() -> None:
+    global _last_cycle_completed_at
+    _last_cycle_completed_at = _now_iso()
+
+
+def _record_bot_error(message: str) -> None:
+    global _last_error_message
+    _error_timestamps.append(time.time())
+    _prune_timestamps(_error_timestamps)
+    _last_error_message = message
+
+
+def _record_degraded_event() -> None:
+    _degraded_timestamps.append(time.time())
+    _prune_timestamps(_degraded_timestamps)
+
+
+def _record_signal_symbol(symbol: str | None) -> None:
+    global _last_signal_symbol
+    if symbol:
+        _last_signal_symbol = symbol.upper()
+
+
+def _record_ibkr_heartbeat() -> None:
+    global _last_successful_ibkr_heartbeat_at
+    _last_successful_ibkr_heartbeat_at = _now_iso()
+
+
+def _record_order_submit() -> None:
+    global _last_order_submit_at
+    _last_order_submit_at = _now_iso()
+
+
+def _record_fill_event() -> None:
+    global _last_fill_event_at
+    _last_fill_event_at = _now_iso()
+
+
+def get_bot_health() -> dict:
+    _prune_timestamps(_error_timestamps)
+    _prune_timestamps(_degraded_timestamps)
+
+    now = datetime.now(timezone.utc)
+    minutes_since_last_cycle: float | None = None
+    stale_warning = False
+    ibkr_connected = False
+
+    if _last_cycle_completed_at:
+        try:
+            last_cycle = datetime.fromisoformat(_last_cycle_completed_at.replace("Z", "+00:00"))
+            minutes_since_last_cycle = round((now - last_cycle).total_seconds() / 60.0, 2)
+            # Use bot interval (not WS threshold) — bot cycles every BOT_INTERVAL_SECONDS
+            stale_threshold = max(cfg.BOT_INTERVAL_SECONDS * 2, 60)
+            stale_warning = (now - last_cycle).total_seconds() > stale_threshold
+        except (TypeError, ValueError):
+            minutes_since_last_cycle = None
+
+    if cfg.SIM_MODE:
+        ibkr_connected = False
+    else:
+        try:
+            from ibkr_client import ibkr as _ibkr_health
+
+            ibkr_connected = bool(_ibkr_health.is_connected())
+            if ibkr_connected:
+                _record_ibkr_heartbeat()
+        except Exception:
+            ibkr_connected = bool(_last_successful_ibkr_heartbeat_at)
+
+    return {
+        "is_running": _running,
+        "minutes_since_last_cycle": minutes_since_last_cycle,
+        "total_cycles_today": _cycle_count_today,
+        "error_count_24h": len(_error_timestamps),
+        "ibkr_connected": ibkr_connected,
+        "stale_warning": stale_warning,
+        "last_error_message": _last_error_message,
+        "last_signal_symbol": _last_signal_symbol,
+        "last_successful_ibkr_heartbeat_at": _last_successful_ibkr_heartbeat_at,
+        "last_order_submit_at": _last_order_submit_at,
+        "last_fill_event_at": _last_fill_event_at,
+        "degraded_mode_count_24h": len(_degraded_timestamps),
+    }
+
+
+async def _emit_bot_health(force: bool = False) -> None:
+    global _last_bot_health_emit_at
+    if not cfg.ENABLE_BOT_HEALTH_MONITORING:
+        return
+    now = time.time()
+    if not force and (now - _last_bot_health_emit_at) < 60:
+        return
+    _last_bot_health_emit_at = now
+    await _emit({
+        "type": "bot_health",
+        **get_bot_health(),
+    })
+
+
+def _prescreen_cache_key(candidates: list[str]) -> str:
+    normalized = ",".join(sorted(sym.upper() for sym in candidates))
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
 def _expand_universe(universe_id: str) -> list[str]:
     """Expand a universe identifier to a list of symbols."""
     if universe_id == "all":
@@ -91,7 +235,7 @@ def _expand_universe(universe_id: str) -> list[str]:
     return load_universe(universe_id)
 
 
-async def _prescreen_universe(candidates: list[str]) -> list[str]:
+async def _legacy_prescreen_universe_unused(candidates: list[str]) -> list[str]:
     """
     Rapidly filter a large symbol list down to liquid, in-range stocks.
 
@@ -148,6 +292,7 @@ async def _prescreen_universe(candidates: list[str]) -> list[str]:
                             if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                                 liquid.append(sym.upper())
                         except Exception:
+                            # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
                             pass
                 else:
                     # Single symbol returned as flat df
@@ -158,6 +303,7 @@ async def _prescreen_universe(candidates: list[str]) -> list[str]:
                         if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                             liquid.append(sym.upper())
                     except Exception:
+                        # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
                         pass
 
                 log.info("Pre-screen batch %d/%d done — %d liquid so far",
@@ -173,6 +319,103 @@ async def _prescreen_universe(candidates: list[str]) -> list[str]:
 
     except Exception as exc:
         log.error("Pre-screen failed, falling back to full list: %s", exc)
+        return candidates
+
+
+async def _prescreen_universe(candidates: list[str]) -> list[str]:
+    """
+    Override the legacy pre-screen helper with a cache keyed by candidate set.
+
+    This avoids cross-contaminating large universes while keeping the call site
+    unchanged.
+    """
+    import asyncio as _asyncio
+    import time as _time_mod
+
+    now = _time_mod.time()
+    cache_key = _prescreen_cache_key(candidates)
+    cached = _prescreen_cache.get(cache_key)
+    if cached and (now - cached[1]) < _PRESCREEN_TTL:
+        log.info("Pre-screen cache hit for %d candidates -> %d liquid symbols", len(candidates), len(cached[0]))
+        return cached[0]
+
+    log.info(
+        "Pre-screening %d symbols (price>$%.0f, vol>%s) ...",
+        len(candidates),
+        _PRESCREEN_MIN_PRICE,
+        f"{_PRESCREEN_MIN_VOLUME:,}",
+    )
+
+    try:
+        import pandas as pd
+        import yfinance as yf
+
+        liquid: list[str] = []
+        batch_size = 1000
+        loop = _asyncio.get_running_loop()
+
+        for i in range(0, len(candidates), batch_size):
+            batch = candidates[i:i + batch_size]
+            try:
+                raw = await loop.run_in_executor(
+                    None,
+                    lambda b=batch: yf.download(
+                        b,
+                        period="5d",
+                        interval="1d",
+                        auto_adjust=True,
+                        progress=False,
+                        group_by="ticker",
+                        threads=True,
+                    ),
+                )
+                if raw.empty:
+                    continue
+
+                if isinstance(raw.columns, pd.MultiIndex):
+                    for sym in batch:
+                        try:
+                            sym_df = raw[sym].dropna(how="all")
+                            if sym_df.empty:
+                                continue
+                            last_close = float(sym_df["Close"].iloc[-1])
+                            avg_volume = float(sym_df["Volume"].mean())
+                            if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
+                                liquid.append(sym.upper())
+                        except Exception:
+                            # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
+                            pass
+                else:
+                    sym = batch[0]
+                    try:
+                        last_close = float(raw["Close"].iloc[-1])
+                        avg_volume = float(raw["Volume"].mean())
+                        if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
+                            liquid.append(sym.upper())
+                    except Exception:
+                        # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
+                        pass
+
+                log.info(
+                    "Pre-screen batch %d/%d done -> %d liquid so far",
+                    i // batch_size + 1,
+                    -(-len(candidates) // batch_size),
+                    len(liquid),
+                )
+            except Exception as exc:
+                log.warning("Pre-screen batch %d failed: %s", i // batch_size, exc)
+
+        screened_symbols = sorted(set(liquid))
+        _prescreen_cache[cache_key] = (screened_symbols, now)
+        log.info(
+            "Pre-screen complete: %d / %d symbols pass liquidity filter",
+            len(screened_symbols),
+            len(candidates),
+        )
+        return screened_symbols
+    except Exception as exc:
+        log.error("Pre-screen failed, falling back to full list: %s", exc)
+        _record_degraded_event()
         return candidates
 
 
@@ -201,7 +444,14 @@ async def stop() -> None:
 async def _loop() -> None:
     global _last_run, _next_run
     while _running:
+        import time as _time
+        cycle_start = _time.monotonic()
+        _record_cycle_start()
         _last_run = datetime.now(timezone.utc).isoformat()
+
+        # Schedule next_run BEFORE the cycle so status event has correct value
+        from datetime import timedelta
+        _next_run = (datetime.now(timezone.utc) + timedelta(seconds=cfg.BOT_INTERVAL_SECONDS)).isoformat()
 
         # Check if AI optimization is due
         try:
@@ -214,14 +464,26 @@ async def _loop() -> None:
 
         try:
             await _run_cycle()
+            _record_cycle_complete()
         except Exception as exc:
             log.exception("Error in bot cycle: %s", exc)
+            _record_bot_error(str(exc))
             await _emit({"type": "error", "message": str(exc)})
+        finally:
+            await _emit_bot_health(force=True)
 
-        # Schedule next run
-        next_dt = datetime.now(timezone.utc).timestamp() + cfg.BOT_INTERVAL_SECONDS
-        _next_run = datetime.fromtimestamp(next_dt, tz=timezone.utc).isoformat()
-        await asyncio.sleep(cfg.BOT_INTERVAL_SECONDS)
+        # Sleep only the remaining interval (cycle_duration + sleep = BOT_INTERVAL)
+        elapsed = _time.monotonic() - cycle_start
+        remaining = max(0, cfg.BOT_INTERVAL_SECONDS - elapsed)
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        else:
+            _record_degraded_event()
+            log.warning(
+                "Bot cycle exceeded configured interval: elapsed=%.2fs interval=%ss",
+                elapsed,
+                cfg.BOT_INTERVAL_SECONDS,
+            )
 
 
 async def _run_cycle() -> None:
@@ -266,7 +528,14 @@ async def _run_cycle() -> None:
     bars_by_symbol: dict = {}
 
     # Fast path: use IBKR scanner for real-time market scanning (2-sec cycles)
-    if cfg.BOT_INTERVAL_SECONDS <= 30 and ibkr.is_connected():
+    _ibkr_connected = False
+    if cfg.BOT_INTERVAL_SECONDS <= 30:
+        try:
+            from ibkr_client import ibkr as _ibkr_scan
+            _ibkr_connected = _ibkr_scan.is_connected()
+        except Exception:
+            pass
+    if cfg.BOT_INTERVAL_SECONDS <= 30 and _ibkr_connected:
         try:
             from ibkr_scanner import get_scan_symbols
             scanner_symbols = await get_scan_symbols(["hot_us_stocks", "top_gainers", "gap_up"])
@@ -460,8 +729,64 @@ async def _run_cycle() -> None:
             log.warning("Execution brain unavailable, falling back to ordered candidates: %s", exc)
             selected_candidates = rule_candidates + direct_candidates
     orders_placed = 0
-    max_orders_per_cycle = 5
+    max_orders_per_cycle = cfg.MAX_TRADES_PER_CYCLE if hasattr(cfg, 'MAX_TRADES_PER_CYCLE') else 5
     executed_symbols: set[str] = set()
+    approved_this_cycle: list[dict] = []
+
+    # -- Fetch positions + pending orders once for risk + concentration checks
+    positions: list[dict] = []
+    pending_buy_orders: list[dict] = []
+    cycle_net_liq: float = 0.0
+    concentration_inputs_ready = True
+    try:
+        if not cfg.SIM_MODE:
+            from ibkr_client import ibkr as _ibkr_pos
+            positions = [p.__dict__ if hasattr(p, '__dict__') else p for p in (await _ibkr_pos.get_positions() or [])]
+            try:
+                cycle_net_liq = (await _ibkr_pos.get_account_summary()).balance or 0.0
+                _record_ibkr_heartbeat()
+            except Exception:
+                cycle_net_liq = 0.0
+        else:
+            from simulation import sim_engine
+            positions = [p.model_dump() for p in await sim_engine.get_positions()]
+            cycle_net_liq = (await sim_engine.get_account()).net_liquidation or 0.0
+        # Gather pending BUY trades as additional exposure for concentration checks
+        try:
+            recent_trades = await get_trades(limit=20)
+            for t in recent_trades:
+                if getattr(t, "status", "") in ("PENDING", "SUBMITTED") and getattr(t, "action", "") == "BUY":
+                    est_price = getattr(t, "limit_price", None) or getattr(t, "fill_price", None) or 100
+                    pending_buy_orders.append({
+                        "symbol": t.symbol,
+                        "market_value": float(est_price) * float(getattr(t, "quantity", 0) or 0),
+                        "side": "BUY",
+                    })
+        except Exception as pending_exc:
+            concentration_inputs_ready = False
+            log.warning("Pending BUY exposure fetch failed; skipping new trades this cycle: %s", pending_exc)
+    except Exception as pos_exc:
+        concentration_inputs_ready = False
+        log.warning("Position fetch for concentration check failed; skipping new trades this cycle: %s", pos_exc)
+
+    # ── Stage 1.8: Build correlation matrix once per cycle ────────────────
+    cycle_corr_matrix: dict | None = None
+    if cfg.ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT:
+        try:
+            corr_syms = set()
+            for p in positions:
+                if isinstance(p, dict) and p.get("symbol"):
+                    corr_syms.add(p["symbol"].upper())
+            for c in selected_candidates:
+                if c.get("symbol"):
+                    corr_syms.add(str(c["symbol"]).upper())
+            corr_syms_list = [s for s in corr_syms if s]
+            if len(corr_syms_list) >= 2:
+                from portfolio_analytics import compute_correlation_matrix
+                cycle_corr_matrix = compute_correlation_matrix(corr_syms_list)
+                log.info("Correlation matrix built for %d symbols", len(corr_syms_list))
+        except Exception as corr_exc:
+            log.debug("Correlation matrix unavailable this cycle: %s", corr_exc)
     for candidate in selected_candidates:
         if orders_placed >= max_orders_per_cycle:
             log.info("Max orders per cycle (%d) reached — deferring remaining signals", max_orders_per_cycle)
@@ -473,15 +798,91 @@ async def _run_cycle() -> None:
             continue
 
         if source == "ai_direct":
+            # Concentration check for direct AI BUYs (same guard as rule path)
+            preview: dict | None = None
+            if cfg.ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT:
+                _ai_action = str(candidate.get("decision", {}).get("action", "BUY")).upper()
+                if _ai_action == "BUY":
+                    try:
+                        from direct_ai_trader import preview_direct_trade
+                        from risk_manager import check_portfolio_impact
+                        preview = await preview_direct_trade(dict(candidate.get("decision", {})))
+                        impact = check_portfolio_impact(
+                            symbol=symbol,
+                            side="BUY",
+                            positions=positions,
+                            net_liq=cycle_net_liq,
+                            candidate_notional=float(preview["notional"]),
+                            pending_orders=pending_buy_orders,
+                            approved_candidates=approved_this_cycle,
+                            corr_matrix=cycle_corr_matrix,
+                        )
+                        if not impact.allowed:
+                            log.warning(
+                                "Concentration BLOCKED ai_direct %s: reason=%s | %s",
+                                symbol, impact.reason, impact.details,
+                            )
+                            continue
+                    except Exception as exc:
+                        # HB1-04: Fail closed � do not execute when concentration check errors
+                        log.warning("Concentration check FAILED for ai_direct %s -- blocking trade: %s", symbol, exc)
+                        continue
+
             try:
                 from api_contracts import AIDirectTrade
                 from direct_ai_trader import execute_direct_trade
 
                 decision = AIDirectTrade(**dict(candidate.get("decision", {})))
+                _record_signal_symbol(decision.symbol)
                 outcome = await execute_direct_trade(decision)
                 trade_payload = outcome.get("trade", {})
+                # Only count if execution actually succeeded (not error/rejected)
+                if outcome.get("status") == "error" or not trade_payload:
+                    log.warning("Direct AI trade for %s returned error/empty — not counting", decision.symbol)
+                    continue
+                direct_rule_id = f"ai-direct:{decision.symbol.upper()}"
+                order_event = OrderEvent(
+                    timestamp=now,
+                    type=EventType.ORDER,
+                    symbol=decision.symbol.upper(),
+                    order_type=decision.order_type,
+                    quantity=float(trade_payload.get("quantity", 0) or 0),
+                    price=trade_payload.get("limit_price"),
+                    direction="LONG" if decision.action == "BUY" else "SHORT",
+                    rule_id=direct_rule_id,
+                    stop_price=decision.stop_price,
+                )
+                event_bus.publish(order_event)
+                event_logger.log_event(order_event)
                 orders_placed += 1
+                _record_order_submit()
+                if decision.action == "BUY":
+                    approved_this_cycle.append({
+                        "symbol": decision.symbol.upper(),
+                        "market_value": float(
+                            preview["notional"] if preview is not None else (
+                                float(trade_payload.get("quantity", 0) or 0)
+                                * float(trade_payload.get("fill_price") or trade_payload.get("limit_price") or 0)
+                            )
+                        ),
+                        "side": "BUY",
+                    })
                 executed_symbols.add(decision.symbol.upper())
+                if trade_payload.get("fill_price") is not None:
+                    fill_event = FillEvent(
+                        timestamp=now,
+                        type=EventType.FILL,
+                        symbol=decision.symbol.upper(),
+                        quantity=float(trade_payload.get("quantity", 0) or 0),
+                        fill_price=float(trade_payload.get("fill_price") or 0),
+                        commission=1.0,
+                        direction="LONG" if decision.action == "BUY" else "SHORT",
+                        rule_id=direct_rule_id,
+                        order_id=trade_payload.get("order_id"),
+                    )
+                    event_bus.publish(fill_event)
+                    event_logger.log_event(fill_event)
+                    _record_fill_event()
                 metrics.record("orders_placed", orders_placed)
                 await _emit({
                     "type": "signal",
@@ -501,6 +902,7 @@ async def _run_cycle() -> None:
         if not isinstance(rule, Rule):
             log.warning("Skipping malformed rule candidate for %s", symbol)
             continue
+        _record_signal_symbol(trigger_symbol)
 
         # For universe rules, set the symbol on the rule copy for order placement
         order_rule = rule.model_copy()
@@ -518,35 +920,15 @@ async def _run_cycle() -> None:
                 from ibkr_client import ibkr
                 acct = await ibkr.get_account_summary()
                 available_cash = float(acct.balance) if acct else 0.0
+                if acct:
+                    _record_ibkr_heartbeat()
             if available_cash < 100:
                 log.warning("Insufficient cash ($%.2f) — skipping remaining signals", available_cash)
                 break
         except Exception as exc:
             log.debug("Cash check failed, proceeding: %s", exc)
 
-        # Risk check
-        try:
-            from risk_manager import check_trade_risk
-            from risk_config import DEFAULT_LIMITS
-            positions = []
-            try:
-                if not cfg.SIM_MODE:
-                    positions = [p.__dict__ if hasattr(p, '__dict__') else p for p in (await ibkr.get_positions() or [])]
-                else:
-                    from simulation import sim_engine
-                    positions = [p.model_dump() for p in await sim_engine.get_positions()]
-            except Exception:
-                pass
-            risk_result = check_trade_risk(
-                order_rule.symbol, order_rule.action.quantity,
-                order_rule.action.type, positions,
-                available_cash, DEFAULT_LIMITS
-            )
-            if risk_result.status == "BLOCK":
-                log.warning("Risk BLOCKED %s %s: %s", order_rule.action.type, order_rule.symbol, risk_result.reasons)
-                continue
-        except Exception as e:
-            log.debug("Risk check skipped: %s", e)
+        # HB1-02: Dynamic sizing MUST run BEFORE risk check so guards see the real quantity
 
         # ── Dynamic position sizing: 0.5% of account NetLiquidation ─────────
         price = 0.0
@@ -579,24 +961,86 @@ async def _run_cycle() -> None:
         except Exception as exc:
             log.warning("Position sizing failed, using rule quantity: %s", exc)
 
+        # Risk check � runs AFTER sizing so guards see the final quantity
         try:
-            from safety_kernel import check_all, SafetyViolation
-
-            await check_all(
-                symbol=order_rule.symbol,
-                side=order_rule.action.type,
-                quantity=order_rule.action.quantity,
-                source="rule",
-                account_equity=available_cash,
-                price_estimate=price,
-                is_exit=False,
-            )
-        except SafetyViolation as exc:
-            log.warning("Safety kernel REJECTED %s %s: %s", order_rule.action.type, order_rule.symbol, exc)
-            continue
+            from risk_manager import check_trade_risk
+            from risk_config import DEFAULT_LIMITS
         except Exception as exc:
-            log.debug("Safety kernel check skipped: %s", exc)
+            log.warning("Risk guard imports failed for %s; skipping trade: %s", order_rule.symbol, exc)
+            continue
 
+        try:
+            if not cfg.SIM_MODE:
+                risk_positions = [p.__dict__ if hasattr(p, '__dict__') else p for p in (await ibkr.get_positions() or [])]
+            else:
+                from simulation import sim_engine
+                risk_positions = [p.model_dump() for p in await sim_engine.get_positions()]
+        except Exception as exc:
+            log.warning("Risk position fetch failed for %s; skipping trade: %s", order_rule.symbol, exc)
+            continue
+
+        try:
+            risk_result = check_trade_risk(
+                order_rule.symbol, order_rule.action.quantity,
+                order_rule.action.type, risk_positions,
+                available_cash, DEFAULT_LIMITS
+            )
+        except Exception as exc:
+            log.warning("Risk check failed closed for %s; skipping trade: %s", order_rule.symbol, exc)
+            continue
+
+        if risk_result.status == "BLOCK":
+            log.warning("Risk BLOCKED %s %s: %s", order_rule.action.type, order_rule.symbol, risk_result.reasons)
+            continue
+
+        # Guard: skip order if price is unknown (safety_kernel will reject anyway)
+        if price <= 0 and order_rule.action.type == "BUY":
+            log.warning("No price available for %s — skipping entry", order_rule.symbol)
+            continue
+
+        # -- Stage 1.9: Portfolio concentration check (after sizing, before safety kernel)
+        if cfg.ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT:
+            if not concentration_inputs_ready:
+                log.warning("Concentration guard unavailable for %s; skipping trade", order_rule.symbol)
+                continue
+            try:
+                from risk_manager import check_portfolio_impact
+                _cand_notional = order_rule.action.quantity * price if price > 0 else order_rule.action.quantity * 100
+                impact = check_portfolio_impact(
+                    symbol=order_rule.symbol,
+                    side=order_rule.action.type,
+                    positions=positions,
+                    net_liq=cycle_net_liq if cycle_net_liq > 0 else available_cash,
+                    candidate_notional=_cand_notional,
+                    pending_orders=pending_buy_orders,
+                    approved_candidates=approved_this_cycle,
+                    corr_matrix=cycle_corr_matrix,
+                )
+                if not impact.allowed:
+                    log.warning(
+                        "Concentration BLOCKED %s %s: reason=%s sector=%s weight=%.1f%%->%.1f%% corr_count=%s | %s",
+                        order_rule.action.type, order_rule.symbol,
+                        impact.reason, impact.sector,
+                        impact.sector_weight_before or 0, impact.sector_weight_after or 0,
+                        impact.correlated_count, impact.details,
+                    )
+                    continue
+            except Exception as exc:
+                log.warning("Portfolio impact check failed closed for %s; skipping trade: %s", order_rule.symbol, exc)
+                continue
+        allowed, reason = await safety_gate.evaluate_runtime_safety(
+            symbol=order_rule.symbol,
+            side=order_rule.action.type,
+            quantity=order_rule.action.quantity,
+            source="rule",
+            account_equity=available_cash,
+            price_estimate=price,
+            is_exit=False,
+            require_autopilot_authority=True,
+        )
+        if not allowed:
+            log.warning("Runtime safety gate REJECTED %s %s: %s", order_rule.action.type, order_rule.symbol, reason)
+            continue
         # Emit OrderEvent
         order_event = OrderEvent(
             timestamp=now, type=EventType.ORDER,
@@ -609,13 +1053,27 @@ async def _run_cycle() -> None:
 
         try:
             if cfg.AUTOPILOT_MODE == "LIVE" and not cfg.SIM_MODE:
-                trade = await place_order(order_rule)
+                trade = await place_order(order_rule, source="rule", skip_safety=True)
             else:
-                trade = await _create_paper_trade(
-                    order_rule,
-                    price if price > 0 else order_rule.action.limit_price,
-                )
+                _fill_price = price if price > 0 else (order_rule.action.limit_price or 0)
+                if _fill_price <= 0:
+                    log.warning("No fill price for paper trade %s — skipping", order_rule.symbol)
+                    continue
+                trade = await _create_paper_trade(order_rule, _fill_price)
+            # Only count as placed if trade is non-null and not ERROR
+            if trade is None or getattr(trade, "status", "") == "ERROR":
+                log.warning("Order for %s returned %s — not counting as placed",
+                            order_rule.symbol, "None" if trade is None else "ERROR")
+                continue
             orders_placed += 1
+            _record_order_submit()
+            # Track approved candidate for same-cycle concentration checks
+            if order_rule.action.type == "BUY":
+                approved_this_cycle.append({
+                    "symbol": order_rule.symbol,
+                    "market_value": order_rule.action.quantity * (price if price > 0 else 100),
+                    "side": "BUY",
+                })
             # Emit FillEvent if trade was placed (PENDING or FILLED)
             if trade and trade.fill_price:
                 fill_event = FillEvent(
@@ -628,6 +1086,7 @@ async def _run_cycle() -> None:
                 event_bus.publish(fill_event)
                 event_logger.log_event(fill_event)
                 metrics.record("fill_price", trade.fill_price)
+                _record_fill_event()
             metrics.record("orders_placed", orders_placed)
         except (OrderError, RuntimeError) as exc:
             log.error("Order failed for rule '%s' on %s: %s", rule.name, trigger_symbol, exc)
@@ -692,6 +1151,7 @@ async def _run_cycle() -> None:
 
 
 async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Trade:
+    now_iso = datetime.now(timezone.utc).isoformat()
     trade = Trade(
         rule_id=order_rule.id,
         rule_name=order_rule.name,
@@ -704,10 +1164,14 @@ async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Tra
         fill_price=fill_price,
         status="FILLED",
         order_id=None,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=now_iso,
         source="rule",
         metadata={"paper": True, "autopilot_mode": cfg.AUTOPILOT_MODE},
+        mode="PAPER",
+        opened_at=now_iso,
+        entry_price=fill_price,
     )
+    trade.position_id = trade.id
     await save_trade(trade)
     return trade
 
@@ -778,27 +1242,29 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
 async def _reconcile_pending_exit(pos) -> None:
     """Resolve a position's pending exit order."""
     from database import get_trade_by_order_id
+
     now = datetime.now(timezone.utc)
-
     trade = await get_trade_by_order_id(pos.exit_pending_order_id, symbol=pos.symbol)
-    if not trade:
-        # Trade record not found — stale order_id, clear and retry
-        pos.exit_pending_order_id = None
-        pos.exit_attempts += 1
-        pos.last_exit_error = "Trade record not found for pending order"
-        await save_open_position(pos)
-        return
+    resolution = order_recovery.evaluate_pending_exit_resolution(
+        pos,
+        trade,
+        now=now,
+        timeout_seconds=EXIT_PENDING_TIMEOUT,
+    )
 
-    if trade.status == "FILLED":
-        # B3 FIX: Mark as resolved BEFORE delete — prevents double event on delete failure
-        pos.exit_pending_order_id = None
+    if resolution.state == "filled" and trade is not None:
+        order_recovery.clear_pending_exit(pos)
         await save_open_position(pos)
 
         current_price = trade.fill_price or pos.entry_price
-        if pos.side == "BUY":
-            pnl = round((current_price - pos.entry_price) * pos.quantity, 2)
-        else:
-            pnl = round((pos.entry_price - current_price) * pos.quantity, 2)
+        finalized = await order_lifecycle.finalize_filled_exit_trade(
+            trade,
+            pos,
+            close_reason="pending_fill",
+            fallback_exit_price=current_price,
+        )
+        pnl = finalized.realized_pnl if finalized else round((current_price - pos.entry_price) * pos.quantity, 2)
+
         await _emit({
             "type": "exit", "symbol": pos.symbol, "reason": "pending_fill",
             "action": "SELL" if pos.side == "BUY" else "BUY",
@@ -806,49 +1272,24 @@ async def _reconcile_pending_exit(pos) -> None:
             "exit_price": current_price, "pnl": pnl,
         })
         log.info("EXIT FILLED %s pnl=%.2f (reconciled pending)", pos.symbol, pnl)
-        await delete_open_position(pos.id)
         return
 
-    if trade.status in ("CANCELLED", "ERROR"):
-        # Failed — clear pending, increment attempts, keep position
-        pos.exit_pending_order_id = None
-        pos.exit_attempts += 1
-        pos.last_exit_error = f"Exit order {trade.status}"
-        pos.last_exit_attempt_at = now.isoformat()
+    if resolution.state == "retry":
+        if resolution.should_cancel and pos.exit_pending_order_id:
+            try:
+                from order_executor import cancel_order
+
+                await cancel_order(pos.exit_pending_order_id)
+                log.warning("Cancelled timed-out exit order %d for %s", pos.exit_pending_order_id, pos.symbol)
+            except Exception as exc:
+                log.warning("Failed to cancel exit order %d: %s", pos.exit_pending_order_id, exc)
+        order_recovery.mark_exit_retry_state(pos, resolution.reason or "Exit reconciliation failed", now=now)
         await save_open_position(pos)
-        log.warning("Exit %s for %s — attempt %d, retrying next cycle",
-                     trade.status, pos.symbol, pos.exit_attempts)
+        log.warning("Exit retry needed for %s - attempt %d: %s", pos.symbol, pos.exit_attempts, resolution.reason)
         await _check_retry_cap(pos)
         return
 
-    # Still PENDING — check timeout
-    if pos.last_exit_attempt_at:
-        try:
-            placed_at = datetime.fromisoformat(pos.last_exit_attempt_at.replace("Z", "+00:00"))
-            elapsed = (now - placed_at).total_seconds()
-        except (ValueError, TypeError):
-            elapsed = 0
-    else:
-        elapsed = EXIT_PENDING_TIMEOUT + 1  # force timeout if no timestamp
-
-    if elapsed < EXIT_PENDING_TIMEOUT:
-        log.debug("Exit pending for %s (%.0fs elapsed, waiting)", pos.symbol, elapsed)
-        return
-
-    # Timed out — attempt cancel
-    try:
-        from order_executor import cancel_order
-        await cancel_order(pos.exit_pending_order_id)
-        log.warning("Cancelled timed-out exit order %d for %s", pos.exit_pending_order_id, pos.symbol)
-    except Exception as exc:
-        log.warning("Failed to cancel exit order %d: %s", pos.exit_pending_order_id, exc)
-
-    pos.exit_pending_order_id = None
-    pos.exit_attempts += 1
-    pos.last_exit_error = f"Exit order timed out after {EXIT_PENDING_TIMEOUT}s"
-    pos.last_exit_attempt_at = now.isoformat()
-    await save_open_position(pos)
-    await _check_retry_cap(pos)
+    log.debug("Exit pending for %s (waiting)", pos.symbol)
 
 
 async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reason: str) -> None:
@@ -871,39 +1312,42 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
     )
     now = datetime.now(timezone.utc)
     try:
-        exit_trade = await place_order(exit_rule)
+        exit_trade = await place_order(exit_rule, source="rule", is_exit=True, has_existing_position=True)
         if not exit_trade:
-            pos.exit_attempts += 1
-            pos.last_exit_error = "place_order returned None"
-            pos.last_exit_attempt_at = now.isoformat()
+            order_recovery.mark_exit_retry_state(pos, "place_order returned None", now=now)
             await save_open_position(pos)
             return
 
-        if exit_trade.status == "FILLED":
-            # B8 FIX: Use actual fill_price, not stale bar close
+        await order_lifecycle.stamp_exit_trade_context(exit_trade, pos)
+        normalized = order_recovery.normalize_trade_status(exit_trade.status)
+
+        if normalized == "FILLED":
             fill = exit_trade.fill_price or current_price
-            if pos.side == "BUY":
-                pnl = round((fill - pos.entry_price) * pos.quantity, 2)
-            else:
-                pnl = round((pos.entry_price - fill) * pos.quantity, 2)
+            finalized = await order_lifecycle.finalize_filled_exit_trade(
+                exit_trade,
+                pos,
+                close_reason=reason,
+                fallback_exit_price=fill,
+            )
+            pnl = finalized.realized_pnl if finalized else round((fill - pos.entry_price) * pos.quantity, 2)
+
             await _emit({
                 "type": "exit", "symbol": sym, "reason": reason,
                 "action": exit_action, "qty": qty,
                 "entry_price": pos.entry_price, "exit_price": fill, "pnl": pnl,
             })
             log.info("EXIT %s qty=%d reason='%s' pnl=%.2f", sym, qty, reason, pnl)
-            await delete_open_position(pos.id)
-        else:
-            # PENDING — track the order_id for reconciliation next cycle
-            pos.exit_pending_order_id = exit_trade.order_id
-            pos.last_exit_attempt_at = now.isoformat()
+        elif normalized == "PENDING":
+            order_recovery.mark_exit_pending_submitted(pos, exit_trade.order_id, now=now)
             await save_open_position(pos)
             log.info("Exit order PENDING for %s (order_id=%s)", sym, exit_trade.order_id)
+        else:
+            order_recovery.mark_exit_retry_state(pos, f"Exit order {normalized}", now=now)
+            await save_open_position(pos)
+            await _check_retry_cap(pos)
 
     except (OrderError, RuntimeError) as exc:
-        pos.exit_attempts += 1
-        pos.last_exit_error = str(exc)
-        pos.last_exit_attempt_at = now.isoformat()
+        order_recovery.mark_exit_retry_state(pos, str(exc), now=now)
         await save_open_position(pos)
         log.error("Exit order FAILED for %s (attempt %d): %s", sym, pos.exit_attempts, exc)
         await _check_retry_cap(pos)
@@ -925,8 +1369,29 @@ async def _check_retry_cap(pos) -> None:
             "symbol": pos.symbol,
             "severity": "critical",
         })
+        try:
+            from manual_intervention import raise_intervention
+
+            await raise_intervention(
+                severity="critical",
+                category="exit_retry_cap",
+                source="bot_runner",
+                symbol=pos.symbol,
+                summary=f"Exit retry cap reached for {pos.symbol}",
+                required_action="Review broker state and manually close or reconcile the position",
+            )
+        except Exception as exc:
+            log.warning("Failed to open intervention for %s retry cap: %s", pos.symbol, exc)
 
 
 async def _emit(payload: dict) -> None:
     if _broadcast:
         await _broadcast(payload)
+
+
+
+
+
+
+
+

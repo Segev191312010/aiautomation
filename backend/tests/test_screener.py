@@ -5,11 +5,13 @@ import json
 import pytest
 import numpy as np
 import pandas as pd
+import time
 from unittest.mock import patch, AsyncMock, MagicMock
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
+import screener as screener_module
 from models import (
     ScanRequest, ScanFilter, FilterValue, ScanResultRow, ScanResponse,
     ScreenerPreset, EnrichRequest,
@@ -17,6 +19,7 @@ from models import (
 from screener import (
     load_universe, list_universes, validate_timeframe,
     make_indicator_key, evaluate_symbol, _compute_indicator_series,
+    compute_screener_snapshot, run_scan, build_market_opportunity_snapshot,
 )
 
 
@@ -46,11 +49,12 @@ class TestUniverses:
 
     def test_list_universes(self):
         universes = list_universes()
-        assert len(universes) == 3
+        assert len(universes) == 4
         ids = [u["id"] for u in universes]
         assert "sp500" in ids
         assert "nasdaq100" in ids
         assert "etfs" in ids
+        assert "us_all" in ids
         for u in universes:
             assert "count" in u
             assert u["count"] > 0
@@ -332,6 +336,80 @@ class TestSpecialIndicators:
         df = _make_df(50)
         series = _compute_indicator_series(df, "CHANGE_PCT", {})
         assert len(series) == 50
+
+
+class TestScreenerRanking:
+    def test_compute_screener_snapshot_scores_constructive_trend(self):
+        df = _make_df(260, start_price=80, seed=77)
+        df.loc[df.index[-80:], "close"] = np.linspace(120, 185, 80)
+        df.loc[df.index[-10:], "volume"] = df["volume"].rolling(20).mean().iloc[-11] * 2.2
+
+        snapshot = compute_screener_snapshot(df)
+
+        assert snapshot["screener_score"] >= 60
+        assert snapshot["setup"] in {"breakout", "trend", "pullback"}
+        assert snapshot["relative_volume"] >= 1.0
+        assert isinstance(snapshot["notes"], list)
+
+    @pytest.mark.anyio
+    async def test_run_scan_ranks_by_screener_score(anyio_backend):
+        screener_module._bar_cache.clear()
+        request = ScanRequest(
+            universe="sp500",
+            filters=[ScanFilter(
+                indicator="PRICE",
+                params={},
+                operator="GT",
+                value=FilterValue(type="number", number=1),
+            )],
+            interval="1d",
+            period="1y",
+            limit=10,
+        )
+
+        strong_df = _make_df(260, start_price=90, seed=88)
+        strong_df.loc[strong_df.index[-70:], "close"] = np.linspace(120, 210, 70)
+        strong_df.loc[strong_df.index[-5:], "volume"] = strong_df["volume"].rolling(20).mean().iloc[-6] * 2.0
+
+        weak_df = _make_df(260, start_price=90, seed=89)
+        weak_df.loc[weak_df.index[-25:], "close"] = np.linspace(95, 102, 25)
+
+        screener_module._bar_cache[("AAA", "1d", "1y")] = screener_module.CacheEntry(strong_df, time.time())
+        screener_module._bar_cache[("BBB", "1d", "1y")] = screener_module.CacheEntry(weak_df, time.time())
+
+        with patch("screener.load_universe", return_value=["AAA", "BBB"]), patch(
+            "screener.refresh_cache",
+            new=AsyncMock(return_value=[]),
+        ):
+            response = await run_scan(request)
+
+        assert response.results[0].symbol == "AAA"
+        assert response.results[0].screener_score >= response.results[1].screener_score
+
+    @pytest.mark.anyio
+    async def test_build_market_opportunity_snapshot_returns_ranked_candidates(anyio_backend):
+        screener_module._bar_cache.clear()
+        trend_df = _make_df(260, start_price=70, seed=90)
+        trend_df.loc[trend_df.index[-70:], "close"] = np.linspace(95, 165, 70)
+        trend_df.loc[trend_df.index[-5:], "volume"] = trend_df["volume"].rolling(20).mean().iloc[-6] * 2.4
+
+        pullback_df = _make_df(260, start_price=110, seed=91)
+        pullback_df.loc[pullback_df.index[-60:], "close"] = np.linspace(130, 175, 60)
+        pullback_df.loc[pullback_df.index[-8:], "close"] = np.linspace(170, 168, 8)
+
+        screener_module._bar_cache[("NVDA", "1d", "6mo")] = screener_module.CacheEntry(trend_df, time.time())
+        screener_module._bar_cache[("MSFT", "1d", "6mo")] = screener_module.CacheEntry(pullback_df, time.time())
+
+        with patch("screener.load_universe", side_effect=lambda uid: ["NVDA", "MSFT"] if uid == "nasdaq100" else []), patch(
+            "screener.refresh_cache",
+            new=AsyncMock(return_value=[]),
+        ):
+            snapshot = await build_market_opportunity_snapshot(universe_ids=("nasdaq100",), limit=5)
+
+        assert snapshot["available"] is True
+        assert snapshot["candidate_count"] >= 1
+        assert snapshot["candidates"][0]["screener_score"] >= snapshot["candidates"][-1]["screener_score"]
+        assert "setup_counts" in snapshot
 
 
 # ---------------------------------------------------------------------------

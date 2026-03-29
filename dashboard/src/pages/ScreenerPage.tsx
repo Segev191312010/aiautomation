@@ -100,6 +100,7 @@ export default function ScreenerPage() {
   }
 
   const availablePeriods = PERIODS[interval] ?? PERIODS['1d']
+  const topResult = results[0] ?? null
 
   const handleIntervalChange = (newInterval: string) => {
     setInterval(newInterval)
@@ -138,8 +139,10 @@ export default function ScreenerPage() {
               <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">{interval.toUpperCase()} / {period.toUpperCase()}</div>
             </div>
             <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5">
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Matches</div>
-              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">{results.length}</div>
+              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Top Setup</div>
+              <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
+                {topResult ? `${topResult.symbol} ${topResult.screener_score.toFixed(1)}` : '--'}
+              </div>
             </div>
           </div>
         </div>
@@ -244,8 +247,20 @@ export default function ScreenerPage() {
             eyebrow="Results"
             title="Scan Output"
             meta={(
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-mono text-zinc-400">
-                {results.length} match{results.length === 1 ? '' : 'es'}
+              <div className="flex items-center gap-2">
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-mono text-zinc-400">
+                  {results.length} match{results.length === 1 ? '' : 'es'}{topResult ? ` | top ${topResult.symbol} ${topResult.setup}` : ''}
+                </div>
+                {results.length > 0 && (
+                  <a
+                    href={`http://127.0.0.1:5001/ib_multichart.html?symbols=${results.slice(0, 9).map(r => r.symbol).join(',')}&tf=D`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-[11px] font-semibold text-indigo-400 hover:bg-indigo-500/20"
+                  >
+                    Multi-Chart ({Math.min(results.length, 9)})
+                  </a>
+                )}
               </div>
             )}
           />

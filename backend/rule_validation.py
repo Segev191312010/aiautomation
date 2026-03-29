@@ -5,9 +5,11 @@ import logging
 from datetime import datetime, timezone
 
 from ai_guardrails import log_ai_action
-from database import get_rules, get_trades, get_rule_validation_runs, save_rule_validation_run, save_rule, save_rule_version
+from database import get_rules, get_trades, get_rule_validation_runs, save_rule_validation_run, persist_rule_revision
 from models import Rule
 from safety_kernel import is_autopilot_live
+from screener import load_universe
+from trade_utils import get_trade_realized_pnl, is_closed_canonical
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +59,7 @@ async def record_validation_result(
     overlap_score: float | None,
     passed: bool,
     notes: str | None = None,
+    details: dict | None = None,
 ) -> None:
     await save_rule_validation_run(
         rule_id=rule.id,
@@ -70,6 +73,7 @@ async def record_validation_result(
         overlap_score=overlap_score,
         passed=passed,
         notes=notes,
+        details=details,
     )
 
 
@@ -89,6 +93,12 @@ async def evaluate_promotion_gate(rule: Rule) -> tuple[bool, list[str], dict | N
         return False, ["No validation runs recorded"], None
 
     latest = history[0]
+
+    # HB1-03: Require canonical evidence for promotion — legacy fallback is diagnostic only
+    data_quality = latest.get("data_quality")
+    if data_quality and data_quality != "canonical":
+        return False, [f"Promotion requires canonical evidence, got '{data_quality}'"], latest
+
     metrics_ok, metric_errors = evaluate_validation_run(
         trades_count=int(latest.get("trades_count", 0) or 0),
         expectancy=latest.get("expectancy"),
@@ -103,40 +113,135 @@ async def evaluate_promotion_gate(rule: Rule) -> tuple[bool, list[str], dict | N
 # ── Paper Rule Evaluation ────────────────────────────────────────────────────
 
 async def evaluate_paper_rules() -> list[dict]:
-    """Evaluate all paper rules against recent trade history and record validation runs."""
+    """Evaluate all paper rules against canonical closed trade outcomes."""
     rules = await get_rules()
     paper_rules = [r for r in rules if r.status == "paper" and r.ai_generated]
 
     if not paper_rules:
         return []
 
-    trades = await get_trades(limit=500)
+    trades = await get_trades(limit=2000)
     results = []
 
     for rule in paper_rules:
-        # Count how many trades this rule WOULD have triggered
-        # Simple heuristic: count trades on the same symbol or universe
-        relevant = [t for t in trades if t.symbol == rule.symbol or (rule.universe and True)]
-        trade_count = len(relevant)
+        # Primary: match by rule_id with canonical closed outcomes
+        primary = [
+            t for t in trades
+            if t.rule_id == rule.id and is_closed_canonical(t)
+        ]
+
+        # Legacy fallback: symbol/universe match with metadata pnl
+        legacy = []
+        if not primary:
+            if rule.universe:
+                try:
+                    _universe_syms = set(load_universe(rule.universe))
+                except Exception:
+                    _universe_syms = set()
+            else:
+                _universe_syms = set()
+            legacy = [
+                t for t in trades
+                if (t.symbol == rule.symbol or (rule.universe and t.symbol in _universe_syms))
+                and t.status == "FILLED"
+                and t.metadata.get("pnl") is not None
+            ]
+
+        evaluated = primary or legacy
+        is_canonical = bool(primary)
+        trade_count = len(evaluated)
+        symbols_seen = sorted(set(t.symbol for t in evaluated))
 
         if trade_count < 3:
-            results.append({"rule_id": rule.id, "status": "insufficient_data", "trades": trade_count})
+            results.append({
+                "rule_id": rule.id,
+                "status": "insufficient_data",
+                "trades": trade_count,
+                "evaluated_closed_count": len(primary),
+                "excluded_legacy_count": len(legacy) if not primary else 0,
+                "data_quality": "canonical" if is_canonical else "legacy_fallback",
+            })
             continue
 
-        # Simple metrics from relevant trades
-        pnls = []
-        for t in relevant:
-            fp = getattr(t, 'fill_price', None)
-            if fp and fp > 0:
-                pnls.append(fp)
+        # Extract P&L — canonical first, never fall back if realized_pnl present
+        pnl_entries: list[tuple[float, float | None, str | None]] = []  # (pnl, pnl_pct, closed_at)
+        for t in evaluated:
+            pnl = get_trade_realized_pnl(t)
+            if pnl is not None:
+                pnl_entries.append((pnl, t.pnl_pct, t.closed_at))
 
-        hit_rate = 0.5  # placeholder until real paper execution tracking
-        expectancy = 0.01 if trade_count >= 5 else None  # positive placeholder
-        net_pnl = 0.0
-        max_dd = 5.0  # conservative placeholder
+        # Sort by closed_at for drawdown computation
+        pnl_entries.sort(key=lambda x: x[2] or "")
+        pnls = [e[0] for e in pnl_entries]
+        pnl_pcts = [e[1] for e in pnl_entries if e[1] is not None]
 
-        # Record the validation run
-        passed = trade_count >= 5 and (expectancy or 0) > 0
+        if pnls:
+            wins = sum(1 for p in pnls if p > 0)
+            hit_rate = wins / len(pnls)
+            avg_win = sum(p for p in pnls if p > 0) / max(wins, 1)
+            losses = sum(1 for p in pnls if p <= 0)
+            avg_loss = abs(sum(p for p in pnls if p <= 0) / max(losses, 1))
+            expectancy = (hit_rate * avg_win) - ((1 - hit_rate) * avg_loss) if len(pnls) >= 5 else None
+            net_pnl = sum(pnls)
+
+            # Drawdown: use pnl_pct when available (canonical), fall back to dollar-based percent
+            if pnl_pcts and len(pnl_pcts) == len(pnls):
+                # Compute max drawdown from pnl_pct series
+                cumulative_pct = 0.0
+                peak_pct = 0.0
+                max_dd = 0.0
+                for pp in pnl_pcts:
+                    cumulative_pct += pp
+                    if cumulative_pct > peak_pct:
+                        peak_pct = cumulative_pct
+                    dd = peak_pct - cumulative_pct
+                    if dd > max_dd:
+                        max_dd = dd
+            else:
+                # Fallback: approximate from dollar P&L as percent of peak
+                cumulative = 0.0
+                peak = 0.0
+                max_dd = 0.0
+                for p in pnls:
+                    cumulative += p
+                    if cumulative > peak:
+                        peak = cumulative
+                    if peak > 0:
+                        dd_pct = ((peak - cumulative) / peak) * 100.0
+                        if dd_pct > max_dd:
+                            max_dd = dd_pct
+        else:
+            hit_rate = None
+            expectancy = None
+            net_pnl = 0.0
+            max_dd = 0.0
+
+        # Gate: only pass if we have real evidence
+        passed = (
+            len(pnls) >= 5
+            and hit_rate is not None
+            and hit_rate >= 0.4
+            and (expectancy or 0) > 0
+        )
+
+        # Build evidence details for S9-02b persistence
+        # Compute validation window from trade timestamps
+        eval_timestamps = [t.closed_at or t.timestamp for t in evaluated if (t.closed_at or t.timestamp)]
+        if eval_timestamps:
+            window_start = min(eval_timestamps)[:10]
+            window_end = max(eval_timestamps)[:10]
+            validation_window = f"{window_start} to {window_end}"
+        else:
+            validation_window = None
+
+        evidence = {
+            "evaluated_closed_count": len(primary),
+            "excluded_legacy_count": len(legacy) if not primary else 0,
+            "symbols_evaluated": symbols_seen,
+            "data_quality": "canonical" if is_canonical else "legacy_fallback",
+            "validation_window": validation_window,
+        }
+
         await record_validation_result(
             rule=rule,
             validation_mode="paper_auto",
@@ -147,7 +252,8 @@ async def evaluate_paper_rules() -> list[dict]:
             max_drawdown=max_dd,
             overlap_score=0.0,
             passed=passed,
-            notes=f"Auto-evaluated: {trade_count} relevant trades",
+            notes=f"Auto-evaluated: {trade_count} trades ({len(primary)} canonical, {len(legacy)} legacy)",
+            details=evidence,
         )
 
         results.append({
@@ -156,6 +262,9 @@ async def evaluate_paper_rules() -> list[dict]:
             "status": "passed" if passed else "needs_more_data",
             "trades": trade_count,
             "passed": passed,
+            "evaluated_closed_count": len(primary),
+            "excluded_legacy_count": len(legacy) if not primary else 0,
+            "data_quality": "canonical" if is_canonical else "legacy_fallback",
         })
 
     return results
@@ -180,9 +289,7 @@ async def auto_promote_paper_rules() -> list[dict]:
             # Promote: paper → active
             rule.status = "active"
             rule.enabled = True
-            rule.version += 1
-            await save_rule(rule)
-            await save_rule_version(rule, diff_summary=f"Auto-promoted: passed validation", author="ai")
+            await persist_rule_revision(rule, diff_summary="Auto-promoted: passed validation", author="ai")
 
             await log_ai_action(
                 action_type="rule_promote",

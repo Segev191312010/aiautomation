@@ -1,182 +1,176 @@
-# TradeBot — IBKR Automated Trading
+﻿# TradeBot Trading Platform
 
-A full-stack automated trading app that connects to Interactive Brokers via IB Gateway, evaluates technical indicator rules, and executes orders automatically.
+TradeBot is a full-stack trading platform with a FastAPI backend, a React + TypeScript dashboard, Interactive Brokers connectivity, analytics, diagnostics, alerts, stock research, and an AI/autopilot control plane.
 
----
+This README is the Stage 0 truth-reset version. It describes the system that is actually in the repo today, not the smaller historical version of the project.
+
+## Current baseline
+
+As of 2026-03-27:
+
+- Backend tests: `392/392` passing
+- Frontend typecheck: passing
+- Frontend build: passing
+- Frontend vitest: `78/78` passing
+
+## Tech stack
+
+- Backend: Python 3.11+, FastAPI, aiosqlite, ib_insync
+- Frontend: React 18, TypeScript 5.5, Vite, Tailwind, Zustand, lightweight-charts
+- Broker/runtime: Interactive Brokers / IB Gateway
+- AI/autopilot: optimizer, decision ledger, replay, evaluation, rule lab
 
 ## Architecture
 
-```
+```text
 trading/
-├── backend/           # Python FastAPI server
-│   ├── main.py        # App entry point — API routes + WebSocket
-│   ├── ibkr_client.py # IBKR connection (ib_insync)
-│   ├── market_data.py # Historical + real-time price data
-│   ├── indicators.py  # RSI, SMA, EMA, MACD, BBANDS, ATR, STOCH
-│   ├── rule_engine.py # Condition evaluator
-│   ├── order_executor.py # Order placement + trade logging
-│   ├── bot_runner.py  # Async loop (runs every N seconds)
-│   ├── database.py    # SQLite (rules + trade log)
-│   ├── models.py      # Pydantic data models
-│   ├── config.py      # Settings from .env
-│   ├── requirements.txt
-│   └── .env.example
-└── frontend/          # Vanilla JS single-page app
-    ├── trading.html
-    ├── trading.css
-    └── trading.js
+|- backend/                 FastAPI backend, broker/runtime services, AI/autopilot, persistence
+|- dashboard/               React + TypeScript operator dashboard
+|- ib_chart/                chart sidecar assets
+|- sessions/                roadmap and review specs
+|- docs/                    architecture, baseline, ADRs, runbooks (being filled in)
+`- backend/tests/           backend regression and integration coverage
 ```
 
----
+Main backend responsibilities today:
 
-## Step 1 — Install IB Gateway
+- broker and simulation runtime
+- order execution and reconciliation
+- rule engine and validation
+- analytics and diagnostics APIs
+- stock profile and research APIs
+- alerts and notifications
+- AI/autopilot decisioning
+- decision ledger, replay, and evaluation plumbing
 
-IB Gateway is a lightweight process that bridges your IBKR account to the API.
+Main dashboard responsibilities today:
 
-1. Download IB Gateway from:
-   https://www.interactivebrokers.com/en/trading/ibgateway-latest.php
+- dashboard, market, charts, screener, and backtest workflows
+- rules, trade bot, analytics, and stock profile pages
+- autopilot control plane
+- alerts, settings, and simulation pages
 
-2. Run the installer and follow the prompts.
+See `docs/architecture.md` for the short system map and `docs/baseline.md` for the current validation baseline.
 
-3. Launch IB Gateway and log in with your IBKR credentials.
-   - Select **Paper Trading** on the login screen to use a simulated account (recommended for testing).
+## Operating modes
 
-4. Enable the API inside IB Gateway:
-   - Go to **Configuration → Settings → API → Settings**
-   - Check **Enable ActiveX and Socket Clients**
-   - Set **Socket port** to `4002` (paper) or `4001` (live)
-   - Add `127.0.0.1` to **Trusted IP Addresses**
-   - Click **Apply** and **OK**
+The platform has multiple mode layers. They are related, but they are not the same thing.
 
-5. Leave IB Gateway running while the bot is active.
+### Broker environment
 
-**Port reference:**
+- `PAPER`: IBKR paper account / paper broker environment
+- `LIVE`: IBKR live account / live broker environment
 
-| Mode        | TWS   | IB Gateway |
-|-------------|-------|------------|
-| Live        | 7497  | 4001       |
-| Paper       | 7496  | 4002       |
+### Simulation mode
 
----
+- `SIM_MODE` means the frontend/backend are operating against simulation state instead of broker state for parts of the workflow.
+- This is useful for UI/runtime rehearsal and flows that must not touch a broker account.
 
-## Step 2 — Install Python dependencies
+### Autopilot authority
+
+- `OFF`: AI/autopilot can observe and score, but it does not take execution authority
+- `PAPER`: autopilot can act in paper-mode paths
+- `LIVE`: autopilot is allowed to participate in live decision paths
+
+These layers must be interpreted together. A paper broker session does not automatically mean autopilot is active, and an active autopilot mode does not replace broker mode semantics.
+
+## AI and autopilot
+
+The AI/autopilot system is not just advisory anymore.
+
+Important current architecture points:
+
+- Stage 9 introduced the trade truth layer so realized trade outcomes come from canonical fields, not ad hoc metadata parsing.
+- Stage 10 introduced decision ledger and evaluation plumbing so AI runs, items, replay, and scoring can be inspected and compared.
+- The operator dashboard already contains autopilot controls, status, evaluation, and rule-lab surfaces.
+
+## Main product surfaces
+
+- `Dashboard`: summary, watchlists, and live quote overview
+- `Trade Bot`: runtime operations and bot state
+- `Market`: charting and symbol analysis
+- `Charts`: dedicated chart workflows
+- `Screener`: market scan and filter workflows
+- `Backtest`: rule and strategy testing
+- `Rules`: manual and AI-assisted rule management
+- `Autopilot`: AI activity, rule lab, evaluation, interventions
+- `Analytics`: portfolio KPIs, equity, exposure, risk, trade history, correlation
+- `Stock Profile`: fundamentals, analyst, events, financials, and narrative
+- `Alerts`: alert creation and alert history
+- `Settings`: operator and runtime configuration
+
+## Setup
+
+### 1. Install backend dependencies
 
 ```bash
-cd trading/backend
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Requires Python 3.11+. Using a virtualenv is recommended:
+### 2. Install dashboard dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+cd dashboard
+npm install
 ```
 
----
+### 3. Configure environment
 
-## Step 3 — Configure
+Create the backend `.env` from the example and set your IBKR / runtime values.
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
+Typical paper defaults:
 
 ```env
 IBKR_HOST=127.0.0.1
-IBKR_PORT=4002          # Use 4002 for IB Gateway paper
+IBKR_PORT=4002
 IBKR_CLIENT_ID=1
-IS_PAPER=true           # Keep true until you trust your rules
-BOT_INTERVAL_SECONDS=60 # Evaluate rules every 60 seconds
+IS_PAPER=true
+BOT_INTERVAL_SECONDS=60
 ```
 
----
-
-## Step 4 — Run the server
+### 4. Run backend
 
 ```bash
-cd trading/backend
+cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
----
+### 5. Run dashboard
 
-## Step 5 — Open the web app
+```bash
+cd dashboard
+npm run dev
+```
 
-Navigate to: **http://localhost:8000/trading**
+## Quality gates
 
----
+Backend:
 
-## Using the App
+```bash
+cd backend
+python -m pytest tests -v
+```
 
-### Dashboard
-- Toggle the **Automated Trading** switch to start/stop the bot loop.
-- If IBKR is not connected, press **Connect to IB Gateway**.
-- View account balance, open positions, recent signals, and trade log.
+Dashboard:
 
-### Rules
-- Lists all automation rules.
-- Toggle the switch on each rule to enable/disable it.
-- Three starter rules are pre-loaded (disabled by default):
-  - **RSI Oversold Bounce** — Buy 100 AAPL when RSI(14) crosses below 30
-  - **Golden Cross** — Buy 50 AAPL when SMA(50) crosses above SMA(200)
-  - **RSI Overbought Exit** — Sell 100 AAPL when RSI(14) crosses above 70
+```bash
+cd dashboard
+npm run typecheck
+npm run build
+npx vitest run
+```
 
-### Rule Builder
-- Click **+ New Rule** to create your own.
-- Add as many conditions as needed, combined with AND/OR logic.
-- Condition format: `INDICATOR(param) OPERATOR VALUE`
-  - Example: `RSI(14) crosses_below 30`
-  - Example: `SMA(50) crosses_above SMA_200`
-  - Example: `PRICE > 200`
+## Repo boundary rules
 
-### Market
-- Enter any stock symbol and press **Go** to fetch 60 days of price history.
-- A candlestick-style chart is rendered, plus the last 10 bars in a table.
+- Build output like `dashboard/dist/` should not be treated as core source.
+- Ad hoc backend helper scripts belong under `backend/scripts/`, not mixed into runtime modules.
+- Operator-facing degraded state must be explicit. Fake numeric fallback in production UI is not acceptable.
 
-### Trades
-- Full log of every order placed by the bot, including status (PENDING, FILLED, CANCELLED, ERROR).
+## Safety notes
 
----
-
-## Rule Condition Reference
-
-| Indicator | Param key | Example params |
-|-----------|-----------|----------------|
-| RSI       | length    | `{"length": 14}` |
-| SMA       | length    | `{"length": 200}` |
-| EMA       | length    | `{"length": 50}` |
-| MACD      | fast, slow, signal | `{"fast": 12, "slow": 26, "signal": 9}` |
-| BBANDS    | length, std, band | `{"length": 20, "std": 2, "band": "upper"}` |
-| ATR       | length    | `{"length": 14}` |
-| STOCH     | k, d, smooth_k | `{"k": 14, "d": 3, "smooth_k": 3}` |
-| PRICE     | (none)    | `{}` |
-
-**Operators:** `crosses_above`, `crosses_below`, `>`, `<`, `>=`, `<=`, `==`
-
-**Value examples:**
-- `30` — numeric threshold
-- `PRICE` — current closing price
-- `SMA_200` — 200-period SMA of the same symbol
-
----
-
-## Safety Notes
-
-- **Always test on paper trading first.**
-- Keep `IS_PAPER=true` in `.env` while experimenting with new rules.
-- The cooldown period on each rule prevents it from firing too frequently.
-- Rules are created with `enabled=false` by default — you must explicitly enable them.
-
----
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| "IBKR not connected" | Make sure IB Gateway is running and logged in. Check port in `.env` matches IB Gateway settings. |
-| "No bars returned" | Market may be closed. Use `duration=60 D` and `bar_size=1D` for reliable data. |
-| Orders not filling | Check IB Gateway has API enabled with Trusted IP `127.0.0.1`. Ensure the symbol is qualified (check logs). |
-| Bot not evaluating | Check that at least one rule is enabled and the bot is started via the Dashboard toggle. |
+- Always test new runtime or rule behavior in paper/sim paths first.
+- Do not treat green tests as proof that degraded data behavior is acceptable.
+- Treat autopilot authority changes like release events, not casual toggles.

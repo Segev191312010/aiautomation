@@ -289,6 +289,19 @@ export interface Trade {
   stop_price?: number | null
   invalidation?: string | null
   metadata?: Record<string, unknown>
+  // S9 canonical outcome fields
+  mode?: 'LIVE' | 'PAPER' | 'SIM' | null
+  decision_id?: string | null
+  position_id?: string | null
+  opened_at?: string | null
+  closed_at?: string | null
+  entry_price?: number | null
+  exit_price?: number | null
+  fees?: number
+  realized_pnl?: number | null
+  pnl_pct?: number | null
+  close_reason?: string | null
+  outcome_quality?: 'canonical' | 'legacy_enriched' | 'legacy_unverified' | null
 }
 
 // ── System status ─────────────────────────────────────────────────────────────
@@ -482,7 +495,7 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'rotation' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics' | 'advisor'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'charts' | 'rotation' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics' | 'advisor'
 
 // ── Chart types ─────────────────────────────────────────────────────────────
 
@@ -586,6 +599,12 @@ export interface ScanResultRow {
   change_pct: number
   volume: number
   indicators: Record<string, number>
+  screener_score: number
+  setup: string
+  relative_volume: number
+  momentum_20d: number
+  trend_strength: number
+  notes: string[]
 }
 
 export interface ScanResponse {

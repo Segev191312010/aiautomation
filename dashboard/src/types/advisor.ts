@@ -1,5 +1,5 @@
-// ── AI Advisor Types ────────────────────────────────────────────────────────
-// Mirrors backend/api_contracts.py — single source of truth for advisor API shapes.
+// ── Autopilot Types ──────────────────────────────────────────────────────────
+// Mirrors backend/api_contracts.py — single source of truth for autopilot API shapes.
 
 // ── Score Bucket ────────────────────────────────────────────────────────────
 
@@ -206,6 +206,8 @@ export interface AuditLogEntry {
   output_tokens?: number | null
   status: string
   reverted_at?: string | null
+  decision_run_id?: string | null
+  decision_item_id?: string | null
 }
 
 export interface AuditLogPage {
@@ -234,6 +236,22 @@ export interface AIStatus {
   daily_budget_remaining: number
   last_optimization_at?: string | null
   optimizer_running: boolean
+  bot_health?: BotHealth | null
+}
+
+export interface BotHealth {
+  is_running: boolean
+  minutes_since_last_cycle?: number | null
+  total_cycles_today: number
+  error_count_24h: number
+  ibkr_connected: boolean
+  stale_warning: boolean
+  last_error_message?: string | null
+  last_signal_symbol?: string | null
+  last_successful_ibkr_heartbeat_at?: string | null
+  last_order_submit_at?: string | null
+  last_fill_event_at?: string | null
+  degraded_mode_count_24h: number
 }
 
 // ── AI Decision Payload ─────────────────────────────────────────────────────
@@ -326,6 +344,35 @@ export interface RuleVersionRecord {
   status?: import('@/types').RuleStatus
 }
 
+export interface RuleValidationRecord {
+  version: number
+  validation_mode: string
+  trades_count: number
+  hit_rate?: number | null
+  net_pnl?: number | null
+  expectancy?: number | null
+  max_drawdown?: number | null
+  overlap_score?: number | null
+  passed: boolean
+  notes?: string | null
+  created_at: string
+  // S9: evidence quality
+  evaluated_closed_count?: number | null
+  excluded_legacy_count?: number | null
+  validation_window?: string | null
+  symbols_evaluated?: string[] | null
+  data_quality?: 'canonical' | 'legacy_fallback' | 'mixed' | null
+}
+
+export interface RulePromotionReadiness {
+  rule_id: string
+  status: import('@/types').RuleStatus
+  eligible: boolean
+  reasons: string[]
+  latest_validation?: RuleValidationRecord | null
+  data_quality_note?: string | null
+}
+
 export interface SourcePerformance {
   source: 'rule' | 'ai_direct' | 'manual' | 'combined'
   trades_count: number
@@ -411,6 +458,97 @@ export interface ShadowPerformance {
   gating_conditions: GatingCondition[]
   ready_for_live: boolean
   ready_reasons: string[]
+}
+
+// ── S10: Decision Ledger Types ──────────────────────────────────────────────
+
+export interface DecisionRun {
+  id: string
+  source: string
+  mode: 'OFF' | 'PAPER' | 'LIVE'
+  provider?: string | null
+  model?: string | null
+  prompt_version?: string | null
+  aggregate_confidence?: number | null
+  abstained: boolean
+  input_tokens?: number | null
+  output_tokens?: number | null
+  status: string
+  error?: string | null
+  created_at: string
+  completed_at?: string | null
+  item_counts: Record<string, number>
+}
+
+export interface DecisionItem {
+  id: string
+  run_id: string
+  item_index: number
+  item_type: string
+  action_name?: string | null
+  target_key?: string | null
+  symbol?: string | null
+  gate_status: string
+  gate_reason?: string | null
+  confidence?: number | null
+  regime?: string | null
+  created_rule_id?: string | null
+  created_trade_id?: string | null
+  realized_trade_id?: string | null
+  realized_pnl?: number | null
+  realized_at?: string | null
+  score_status: string
+  score_source?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface EvaluationRun {
+  id: string
+  candidate_type: string
+  candidate_key: string
+  baseline_key?: string | null
+  evaluation_mode: string
+  window_start?: string | null
+  window_end?: string | null
+  status: string
+  summary: Record<string, unknown>
+  created_at: string
+  completed_at?: string | null
+}
+
+export interface EvaluationSlice {
+  slice_type: string
+  slice_key: string
+  count: number
+  scored_count: number
+  hit_rate?: number | null
+  net_pnl?: number | null
+  expectancy?: number | null
+  max_drawdown?: number | null
+  coverage?: number | null
+  abstain_rate?: number | null
+  avg_confidence?: number | null
+  calibration_error?: number | null
+}
+
+export interface EvaluationCompare {
+  baseline?: EvaluationRun | null
+  candidate?: EvaluationRun | null
+  baseline_slices: EvaluationSlice[]
+  candidate_slices: EvaluationSlice[]
+}
+
+export interface ReplayRequest {
+  candidate_type: 'prompt_version' | 'model_version' | 'rule_snapshot' | 'decision_run'
+  candidate_key: string
+  baseline_key?: string | null
+  evaluation_mode?: 'stored_context_existing' | 'stored_context_generate' | 'rule_backtest'
+  window_days?: number
+  limit_runs?: number
+  min_confidence?: number | null
+  symbols?: string[]
+  action_types?: string[]
 }
 
 export interface ShadowFilters {

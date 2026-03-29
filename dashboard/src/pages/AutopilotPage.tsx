@@ -8,6 +8,9 @@ import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { useAutopilotStore } from '@/store'
 import type {
   AutopilotIntervention,
+  DecisionRun,
+  EvaluationRun,
+  EvaluationSlice,
   RulePerformanceRow,
   SourcePerformance,
 } from '@/types/advisor'
@@ -19,6 +22,9 @@ import {
   fetchAutopilotRulePerformance,
   fetchAutopilotRules,
   fetchAutopilotSourcePerformance,
+  fetchDecisionRuns,
+  fetchEvaluationRuns,
+  fetchEvaluationSlices,
   postEmergencyStop,
   resetDailyLossLock,
   resetEmergencyStop,
@@ -26,7 +32,7 @@ import {
   setAutopilotMode,
 } from '@/services/api'
 
-type ConsoleTab = 'feed' | 'performance' | 'rule-lab'
+type ConsoleTab = 'feed' | 'performance' | 'rule-lab' | 'evaluation'
 
 function fmtUsd(value: number | null | undefined) {
   if (value == null) return '--'
@@ -134,11 +140,17 @@ export default function AutopilotPage() {
     }
   }, [guardrails?.daily_loss_limit_pct])
 
+  // S10: evaluation state
+  const [decisionRuns, setDecisionRuns] = useState<DecisionRun[]>([])
+  const [evaluationRuns, setEvaluationRuns] = useState<EvaluationRun[]>([])
+  const [selectedEvalSlices, setSelectedEvalSlices] = useState<EvaluationSlice[]>([])
+
   const tabs = useMemo(() => [
     { id: 'feed', label: 'Feed', count: auditLog.length },
     { id: 'performance', label: 'Performance', count: sourcePerformance.reduce((sum, item) => sum + item.trades_count, 0) },
     { id: 'rule-lab', label: 'Rule Lab', count: rules.length },
-  ], [auditLog.length, sourcePerformance, rules.length])
+    { id: 'evaluation', label: 'Evaluation', count: evaluationRuns.length },
+  ], [auditLog.length, sourcePerformance, rules.length, evaluationRuns.length])
 
   async function handleKillToggle() {
     try {
@@ -423,6 +435,129 @@ export default function AutopilotPage() {
         ) : (
           <AutopilotRuleLab rules={rules} onRefresh={loadRules} />
         )
+      )}
+
+      {activeTab === 'evaluation' && (
+        <div className="space-y-5">
+          {/* Decision Runs */}
+          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Decision Runs</h2>
+              <button
+                type="button"
+                onClick={() => { void fetchDecisionRuns(20).then(setDecisionRuns) }}
+                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs hover:bg-slate-50"
+              >
+                Refresh
+              </button>
+            </div>
+            {decisionRuns.length ? (
+              <div className="space-y-2">
+                {decisionRuns.map(run => (
+                  <div key={run.id} className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${
+                        run.status === 'completed' ? 'border-emerald-200 text-emerald-700' : 'border-amber-200 text-amber-700'
+                      }`}>{run.status}</span>
+                      <span className="text-[var(--text-primary)]">{run.source}</span>
+                      <span className="text-[var(--text-muted)]">{run.mode}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-[var(--text-muted)]">
+                      {run.model && <span>{run.model}</span>}
+                      {run.aggregate_confidence != null && <span>conf: {(run.aggregate_confidence * 100).toFixed(0)}%</span>}
+                      <span>{Object.values(run.item_counts).reduce((a, b) => a + b, 0)} items</span>
+                      <span>{new Date(run.created_at).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-[var(--text-muted)]">No decision runs yet. Click Refresh to load.</div>
+            )}
+          </div>
+
+          {/* Evaluation Runs */}
+          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Evaluation Runs</h2>
+              <button
+                type="button"
+                onClick={() => { void fetchEvaluationRuns(20).then(setEvaluationRuns) }}
+                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs hover:bg-slate-50"
+              >
+                Refresh
+              </button>
+            </div>
+            {evaluationRuns.length ? (
+              <div className="space-y-2">
+                {evaluationRuns.map(evalRun => (
+                  <div key={evalRun.id} className="rounded-lg border border-[var(--border)] px-3 py-2">
+                    <div className="flex items-center justify-between gap-2 text-sm">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${
+                          evalRun.status === 'completed' ? 'border-emerald-200 text-emerald-700' : 'border-amber-200 text-amber-700'
+                        }`}>{evalRun.status}</span>
+                        <span className="text-[var(--text-primary)]">{evalRun.evaluation_mode}</span>
+                        <span className="text-[var(--text-muted)]">{evalRun.candidate_key}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void fetchEvaluationSlices(evalRun.id).then(setSelectedEvalSlices)
+                          }}
+                          className="rounded border border-[var(--border)] px-2 py-1 text-xs hover:bg-slate-50"
+                        >
+                          Slices
+                        </button>
+                        <span className="text-xs text-[var(--text-muted)]">{new Date(evalRun.created_at).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-[var(--text-muted)]">No evaluation runs yet. Click Refresh to load.</div>
+            )}
+          </div>
+
+          {/* Evaluation Slices Detail */}
+          {selectedEvalSlices.length > 0 && (
+            <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
+              <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Evaluation Slices</h2>
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border)] text-left text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">
+                      <th className="pb-2 pr-3">Type</th>
+                      <th className="pb-2 pr-3">Key</th>
+                      <th className="pb-2 pr-3">Count</th>
+                      <th className="pb-2 pr-3">Scored</th>
+                      <th className="pb-2 pr-3">Hit Rate</th>
+                      <th className="pb-2 pr-3">Net P&L</th>
+                      <th className="pb-2 pr-3">Coverage</th>
+                      <th className="pb-2 pr-3">Calibration</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedEvalSlices.map((slice, idx) => (
+                      <tr key={idx} className="border-b border-[var(--border)]">
+                        <td className="py-2 pr-3 font-medium text-[var(--text-primary)]">{slice.slice_type}</td>
+                        <td className="py-2 pr-3 text-[var(--text-secondary)]">{slice.slice_key}</td>
+                        <td className="py-2 pr-3">{slice.count}</td>
+                        <td className="py-2 pr-3">{slice.scored_count}</td>
+                        <td className="py-2 pr-3">{slice.hit_rate != null ? `${(slice.hit_rate * 100).toFixed(1)}%` : '--'}</td>
+                        <td className="py-2 pr-3">{slice.net_pnl != null ? fmtUsd(slice.net_pnl) : '--'}</td>
+                        <td className="py-2 pr-3">{slice.coverage != null ? `${(slice.coverage * 100).toFixed(0)}%` : '--'}</td>
+                        <td className="py-2 pr-3">{slice.calibration_error != null ? slice.calibration_error.toFixed(3) : '--'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
