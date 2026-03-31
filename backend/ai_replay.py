@@ -112,12 +112,20 @@ async def run_stored_context_generate(
     candidate_type: str = "model_version",
     window_days: int = 90,
     limit_runs: int = 500,
+    min_confidence: float | None = None,
+    symbols: list[str] | None = None,
+    action_types: list[str] | None = None,
     user_id: str = "demo",
 ) -> dict:
-    """Select stored contexts, generate candidate items via LLM, score matchable items."""
+    """Select stored contexts, generate candidate items via LLM, score matchable items.
+
+    Filters (min_confidence, symbols, action_types) are applied to generated items
+    post-generation — matching the filter semantics of stored_context_existing mode.
+    """
     from candidate_registry import resolve_candidate
     from replay_scoring import score_candidate_item_against_historical
     from ai_decision_ledger import get_decision_items
+    from decision_item_factory import build_ledger_items
 
     now = datetime.now(timezone.utc)
     window_start = (now - timedelta(days=window_days)).isoformat()
@@ -131,7 +139,7 @@ async def run_stored_context_generate(
     )
 
     if not contexts:
-        return {"mode": "stored_context_generate", "runs_evaluated": 0, "candidate_items": [], "errors": ["No runs in window"]}
+        return {"mode": "stored_context_generate", "runs_evaluated": 0, "candidate_items": [], "scored_items": [], "errors": ["No runs in window"]}
 
     candidate_items: list[dict] = []
     scored_items: list[dict] = []
@@ -146,11 +154,17 @@ async def run_stored_context_generate(
         # Get baseline items for scoring
         baseline_items = await get_decision_items(ctx["run_id"], user_id=user_id)
 
-        # Build candidate item dicts from the AI response
-        from ai_optimizer import _build_ledger_items
-        generated = _build_ledger_items(result)
+        generated = build_ledger_items(result)
 
         for gen_item in generated:
+            # Apply filters (parity with stored_context_existing)
+            if min_confidence is not None and (gen_item.get("confidence") or 0) < min_confidence:
+                continue
+            if symbols and gen_item.get("symbol") and gen_item["symbol"] not in symbols:
+                continue
+            if action_types and gen_item.get("item_type") not in action_types:
+                continue
+
             score = score_candidate_item_against_historical(gen_item, baseline_items)
             gen_item.update(score)
             gen_item["original_run_id"] = ctx["run_id"]
@@ -159,7 +173,7 @@ async def run_stored_context_generate(
         candidate_items.append({
             "original_run_id": ctx["run_id"],
             "candidate_decisions": result,
-            "scored_count": sum(1 for g in generated if g.get("score_status") != "unscored"),
+            "scored_count": sum(1 for g in scored_items if g.get("original_run_id") == ctx["run_id"] and g.get("score_status") != "unscored"),
         })
 
     return {
@@ -168,6 +182,11 @@ async def run_stored_context_generate(
         "candidate_items": candidate_items,
         "scored_items": scored_items,
         "errors": errors,
+        "filters_applied": {
+            "min_confidence": min_confidence,
+            "symbols": symbols,
+            "action_types": action_types,
+        },
         "window_start": window_start,
         "window_end": window_end,
     }
@@ -261,16 +280,9 @@ async def run_rule_backtest_replay(
     }
 
 
-# ── Confidence Buckets ───────────────────────────────────────────────────────
+# ── Confidence Buckets (delegated to evaluation_math) ───────────────────────
 
 def _make_confidence_buckets(items: list[dict]) -> dict[str, list[dict]]:
-    """Bucket decision items by confidence into 0.0-0.1, 0.1-0.2, ... 0.9-1.0."""
-    buckets: dict[str, list[dict]] = {}
-    for item in items:
-        conf = item.get("confidence") or 0.0
-        bucket_idx = min(int(conf * 10), 9)
-        lower = bucket_idx / 10
-        upper = (bucket_idx + 1) / 10
-        key = f"{lower:.1f}-{upper:.1f}"
-        buckets.setdefault(key, []).append(item)
-    return buckets
+    """Backward-compat wrapper. Use evaluation_math.make_confidence_buckets directly."""
+    from evaluation_math import make_confidence_buckets
+    return make_confidence_buckets(items)

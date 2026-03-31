@@ -54,12 +54,13 @@ def build_candidate_prompt(context_json: str, candidate_config: dict) -> tuple[s
 
     Returns the same prompt structure the optimizer uses.
     """
-    from ai_optimizer import (
+    from optimizer_prompts import (
         OPTIMIZER_SYSTEM_PROMPT,
         OPTIMIZER_USER_TEMPLATE,
-        _format_market_snapshot,
-        _format_sector_performance,
-        _format_time_patterns,
+        format_market_snapshot,
+        format_sector_performance,
+        format_time_patterns,
+        format_rule_performance,
     )
 
     try:
@@ -67,13 +68,7 @@ def build_candidate_prompt(context_json: str, candidate_config: dict) -> tuple[s
     except Exception:
         return OPTIMIZER_SYSTEM_PROMPT, "Error: could not parse stored context"
 
-    rule_perf = context.get("rule_performance", [])
-    rule_perf_text = "\n".join(
-        f"  - {r.get('rule_name', '?')}: {r.get('total_trades', 0)} trades, "
-        f"{r.get('win_rate', 0)}% WR, PF {r.get('profit_factor', 0)}, "
-        f"${r.get('total_pnl', 0):.0f} P&L, verdict={r.get('verdict', '?')}"
-        for r in rule_perf[:15]
-    ) or "  No trade data available."
+    rule_perf_text = format_rule_performance(context.get("rule_performance", []))
 
     user_prompt = OPTIMIZER_USER_TEMPLATE.format(
         lookback_days=context.get("lookback_days", 90),
@@ -81,12 +76,12 @@ def build_candidate_prompt(context_json: str, candidate_config: dict) -> tuple[s
         current_regime=context.get("current_regime", "unknown"),
         pnl_summary=json.dumps(context.get("pnl_summary", {})),
         rule_perf_text=rule_perf_text,
-        sector_perf_text=_format_sector_performance(context.get("sector_performance", [])),
-        time_pattern_text=_format_time_patterns(context.get("time_patterns", [])),
+        sector_perf_text=format_sector_performance(context.get("sector_performance", [])),
+        time_pattern_text=format_time_patterns(context.get("time_patterns", [])),
         score_analysis=json.dumps(context.get("score_analysis", {})),
         bracket_analysis=json.dumps(context.get("bracket_analysis", {})),
         current_params=json.dumps(context.get("current_params", {})),
-        market_snapshot_text=_format_market_snapshot(context.get("market_snapshot", {})),
+        market_snapshot_text=format_market_snapshot(context.get("market_snapshot", {})),
     )
 
     return OPTIMIZER_SYSTEM_PROMPT, user_prompt

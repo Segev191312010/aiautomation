@@ -175,8 +175,8 @@ def build_slices_from_items(items: list[dict]) -> list[dict]:
         slices.append({"slice_type": "regime", "slice_key": key, "metrics": compute_slice_metrics(group)})
 
     # By confidence bucket
-    from ai_replay import _make_confidence_buckets
-    buckets = _make_confidence_buckets(items)
+    from evaluation_math import make_confidence_buckets
+    buckets = make_confidence_buckets(items)
     for key, group in buckets.items():
         slices.append({"slice_type": "confidence_bucket", "slice_key": key, "metrics": compute_slice_metrics(group)})
 

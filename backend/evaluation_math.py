@@ -88,3 +88,12 @@ def bucket_confidence(confidence: float | None) -> str:
     lower = bucket_idx / 10
     upper = (bucket_idx + 1) / 10
     return f"{lower:.1f}-{upper:.1f}"
+
+
+def make_confidence_buckets(items: list[dict]) -> dict[str, list[dict]]:
+    """Bucket decision items by confidence into 0.0-0.1, 0.1-0.2, ... 0.9-1.0."""
+    buckets: dict[str, list[dict]] = {}
+    for item in items:
+        key = bucket_confidence(item.get("confidence"))
+        buckets.setdefault(key, []).append(item)
+    return buckets

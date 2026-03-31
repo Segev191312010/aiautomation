@@ -386,6 +386,9 @@ class EvaluationRunResponse(BaseModel):
     window_end: Optional[str] = None
     status: str
     summary: dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    runs_evaluated: Optional[int] = None
+    filters_applied: Optional[dict[str, Any]] = None
     created_at: str
     completed_at: Optional[str] = None
 
@@ -415,7 +418,11 @@ class EvaluationCompareResponse(BaseModel):
 class ReplayRequest(BaseModel):
     candidate_type: Literal["prompt_version", "model_version", "rule_snapshot", "decision_run"]
     candidate_key: str
-    baseline_key: Optional[str] = None
+    baseline_key: Optional[str] = Field(
+        default=None,
+        description="Reserved for future baseline-vs-candidate comparison. "
+        "Currently stored as metadata but not used in scoring.",
+    )
     evaluation_mode: Literal["stored_context_existing", "stored_context_generate", "rule_backtest"] = "stored_context_existing"
     window_days: int = Field(default=90, ge=7, le=365)
     limit_runs: int = Field(default=500, ge=1, le=5000)
@@ -572,3 +579,5 @@ class EconomicReportResponse(BaseModel):
     roi_estimate: Optional[float] = None
     cost_as_pct_pnl: Optional[float] = None
     decisions_per_day: float = 0
+    data_quality: Optional[str] = None
+    metric_source: Optional[str] = None

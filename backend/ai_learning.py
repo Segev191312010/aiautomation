@@ -399,7 +399,11 @@ def _empty_metrics(window_days: int, warning: str) -> dict:
 # ── Economic Report ──────────────────────────────────────────────────────────
 
 async def compute_economic_report(days: int = 30) -> dict:
-    """S10: ROI analysis from evaluated decision impact vs actual token cost."""
+    """S10: ROI analysis from evaluated decision impact vs actual token cost.
+
+    Threads data_quality and metric_source so operators know if the ROI
+    numbers are canonical (ledger-backed) or degraded (audit-log proxy).
+    """
     learning = await evaluate_past_decisions(days)
     costs = await compute_cost_report(days)
 
@@ -407,6 +411,7 @@ async def compute_economic_report(days: int = 30) -> dict:
     total_cost = costs.get("total_cost_usd", 0)
     total_decisions = learning.get("total_decisions", 0)
     total_runs = learning.get("total_runs", total_decisions)
+    learning_quality = learning.get("data_quality", "insufficient")
 
     return {
         "days": days,
@@ -416,6 +421,8 @@ async def compute_economic_report(days: int = 30) -> dict:
         "roi_estimate": round(ai_pnl / max(total_cost, 0.001), 2) if total_cost > 0 else None,
         "cost_as_pct_pnl": round((total_cost / max(abs(ai_pnl), 1.0)) * 100, 2) if ai_pnl != 0 else None,
         "decisions_per_day": round(total_runs / max(days, 1), 2),
+        "data_quality": learning_quality,
+        "metric_source": "ledger" if learning_quality == "canonical" else "legacy_fallback" if learning_quality == "legacy_fallback" else "insufficient",
     }
 
 

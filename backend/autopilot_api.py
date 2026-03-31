@@ -574,13 +574,22 @@ async def launch_evaluation_replay(payload: ReplayRequest):
                 action_types=payload.action_types or None,
             )
             all_items = result.get("items", [])
+            replay_meta = {
+                "runs_evaluated": result.get("runs_evaluated", 0),
+                "items_count": result.get("items_count", len(all_items)),
+                "filters_applied": {
+                    "min_confidence": payload.min_confidence,
+                    "symbols": payload.symbols or [],
+                    "action_types": payload.action_types or [],
+                },
+            }
             if all_items:
                 slices = build_slices_from_items(all_items)
                 await save_evaluation_slices(eval_id, slices)
                 overall = next((s for s in slices if s["slice_type"] == "overall"), {})
-                await complete_evaluation_run(eval_id, summary=overall.get("metrics", {}))
+                await complete_evaluation_run(eval_id, summary={**overall.get("metrics", {}), **replay_meta})
             else:
-                await complete_evaluation_run(eval_id, summary={"warning": "No items to evaluate"})
+                await complete_evaluation_run(eval_id, summary={"warning": "No items to evaluate", **replay_meta})
 
         elif payload.evaluation_mode == "stored_context_generate":
             from ai_replay import run_stored_context_generate
@@ -590,18 +599,24 @@ async def launch_evaluation_replay(payload: ReplayRequest):
                 candidate_type=payload.candidate_type,
                 window_days=payload.window_days,
                 limit_runs=payload.limit_runs,
+                min_confidence=payload.min_confidence,
+                symbols=payload.symbols or None,
+                action_types=payload.action_types or None,
             )
             scored = result.get("scored_items", [])
+            replay_meta = {
+                "runs_evaluated": result.get("runs_evaluated", 0),
+                "errors": result.get("errors", []),
+                "filters_applied": result.get("filters_applied", {}),
+            }
             if scored:
                 slices = build_slices_from_items(scored)
                 await save_evaluation_slices(eval_id, slices)
                 overall = next((s for s in slices if s["slice_type"] == "overall"), {})
-                await complete_evaluation_run(eval_id, summary=overall.get("metrics", {}))
+                await complete_evaluation_run(eval_id, summary={**overall.get("metrics", {}), **replay_meta})
             else:
                 await complete_evaluation_run(eval_id, summary={
-                    "warning": "No scored items",
-                    "runs_evaluated": result.get("runs_evaluated", 0),
-                    "errors": result.get("errors", []),
+                    "warning": "No scored items", **replay_meta,
                 })
 
         else:
