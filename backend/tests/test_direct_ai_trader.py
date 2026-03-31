@@ -177,6 +177,9 @@ async def test_execute_direct_trade_live_buy_uses_order_executor(anyio_backend):
         "direct_ai_trader.place_order",
         new=AsyncMock(return_value=live_trade),
     ) as mock_place, patch("direct_ai_trader.save_trade", new=AsyncMock()) as mock_save, patch(
+        "direct_ai_trader.order_lifecycle.register_entry_position_from_fill",
+        new=AsyncMock(return_value=True),
+    ) as mock_register, patch(
         "direct_ai_trader.log_ai_action",
         new=AsyncMock(),
     ):
@@ -193,6 +196,8 @@ async def test_execute_direct_trade_live_buy_uses_order_executor(anyio_backend):
     assert kwargs["require_autopilot_authority"] is True
     assert kwargs["is_exit"] is False
     mock_save.assert_awaited_once()
+    # HB1-01: live BUY must register tracked open-position lifecycle
+    mock_register.assert_awaited_once()
 
 
 @pytest.mark.anyio

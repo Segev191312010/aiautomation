@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import patch
 
 from execution_brain import (
-    _pending_direct_candidates,
+    _pending_direct_queue,
     choose_candidates,
     drain_direct_candidates,
     queue_direct_candidates,
@@ -10,7 +10,12 @@ from execution_brain import (
 
 
 def setup_function():
-    _pending_direct_candidates.clear()
+    # Drain queue to ensure clean state between tests
+    while not _pending_direct_queue.empty():
+        try:
+            _pending_direct_queue.get_nowait()
+        except Exception:
+            break
 
 
 def test_choose_candidates_prefers_exit_for_same_symbol():

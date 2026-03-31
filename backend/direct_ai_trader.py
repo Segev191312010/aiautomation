@@ -178,8 +178,8 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
                 from ai_decision_ledger import mark_decision_item_applied
 
                 await mark_decision_item_applied(trade.decision_id, created_trade_id=trade.id)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("Failed to mark decision item applied: %s", exc)
         return {"mode": cfg.AUTOPILOT_MODE, "simulated": True, "status": "applied", "trade": trade.model_dump()}
 
     trade = await place_order(
@@ -231,6 +231,8 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
         if trade.fill_price is not None:
             trade.entry_price = trade.fill_price
         await save_trade(trade)
+        # HB1-01: register tracked open-position lifecycle (parity with paper path)
+        await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
 
     await log_ai_action(
         action_type=f"direct_trade_{decision.action.lower()}",

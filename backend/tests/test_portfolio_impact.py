@@ -217,15 +217,16 @@ def test_unknown_sector_still_checks_correlation():
     assert result.reason == "correlation_limit"
 
 
-def test_error_skip_on_exception():
+def test_error_blocked_on_exception():
+    """HB1-04: exceptions in portfolio impact checks must fail CLOSED."""
     result = check_portfolio_impact(
         "AAPL", "BUY",
         positions="not_a_list",  # type: ignore
         net_liq=NET_LIQ,
         candidate_notional=5_000,
     )
-    assert result.allowed is True
-    assert result.reason == "error_skip"
+    assert result.allowed is False
+    assert result.reason == "error_blocked"
 
 
 # ── check_portfolio_impact — approved candidates in same cycle ────────────

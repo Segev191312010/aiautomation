@@ -80,6 +80,36 @@ async def test_evaluate_promotion_gate_accepts_latest_passing_validation(anyio_b
 
 
 @pytest.mark.anyio
+async def test_promotion_gate_rejects_legacy_fallback_evidence(anyio_backend):
+    """HB1-03: non-canonical evidence must not allow promotion."""
+    from database import init_db, save_rule
+    from rule_validation import record_validation_result
+
+    await init_db()
+    rule = _make_rule(status="paper", enabled=False)
+    await save_rule(rule)
+    await record_validation_result(
+        rule=rule,
+        validation_mode="paper",
+        trades_count=8,
+        hit_rate=0.62,
+        net_pnl=145.0,
+        expectancy=0.35,
+        max_drawdown=8.5,
+        overlap_score=0.2,
+        passed=True,
+        notes="Legacy fallback evidence",
+        details={"data_quality": "legacy_fallback"},
+    )
+
+    eligible, reasons, latest = await evaluate_promotion_gate(rule)
+    assert eligible is False
+    assert any("canonical" in r for r in reasons)
+    assert latest is not None
+    assert latest["data_quality"] == "legacy_fallback"
+
+
+@pytest.mark.anyio
 async def test_promotion_readiness_endpoint_exposes_latest_validation(tmp_path, anyio_backend):
     from config import cfg
     import database
