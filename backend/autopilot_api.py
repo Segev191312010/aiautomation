@@ -604,9 +604,10 @@ async def launch_evaluation_replay(payload: ReplayRequest):
                 action_types=payload.action_types or None,
             )
             scored = result.get("scored_items", [])
+            raw_errors = result.get("errors", [])
             replay_meta = {
                 "runs_evaluated": result.get("runs_evaluated", 0),
-                "errors": result.get("errors", []),
+                "error": "; ".join(raw_errors) if raw_errors else None,
                 "filters_applied": result.get("filters_applied", {}),
             }
             if scored:

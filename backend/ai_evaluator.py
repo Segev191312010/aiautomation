@@ -210,6 +210,8 @@ async def get_evaluation_run(evaluation_id: str, user_id: str = "demo") -> dict 
         "baseline_key": r[3], "evaluation_mode": r[4],
         "window_start": r[5], "window_end": r[6],
         "summary": summary, "status": r[8], "error": r[9],
+        "runs_evaluated": summary.get("runs_evaluated"),
+        "filters_applied": summary.get("filters_applied"),
         "created_at": r[10], "completed_at": r[11],
     }
 
@@ -221,7 +223,7 @@ async def get_evaluation_runs(
     async with get_db() as db:
         async with db.execute(
             "SELECT id, candidate_type, candidate_key, baseline_key, evaluation_mode, "
-            "window_start, window_end, summary_json, status, created_at, completed_at "
+            "window_start, window_end, summary_json, status, error, created_at, completed_at "
             "FROM ai_evaluation_runs WHERE user_id=? "
             "ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (user_id, limit, offset),
@@ -240,8 +242,10 @@ async def get_evaluation_runs(
             "id": r[0], "candidate_type": r[1], "candidate_key": r[2],
             "baseline_key": r[3], "evaluation_mode": r[4],
             "window_start": r[5], "window_end": r[6],
-            "summary": summary, "status": r[8],
-            "created_at": r[9], "completed_at": r[10],
+            "summary": summary, "status": r[8], "error": r[9],
+            "runs_evaluated": summary.get("runs_evaluated"),
+            "filters_applied": summary.get("filters_applied"),
+            "created_at": r[10], "completed_at": r[11],
         })
     return results
 

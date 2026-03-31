@@ -34,10 +34,11 @@ def compute_expectancy(pnls: list[float], *, min_samples: int = 3) -> float | No
 
     wins = sum(1 for pnl in pnls if pnl > 0)
     avg_win = sum(pnl for pnl in pnls if pnl > 0) / max(wins, 1)
-    losses_count = sum(1 for pnl in pnls if pnl <= 0)
-    avg_loss = abs(sum(pnl for pnl in pnls if pnl <= 0) / max(losses_count, 1))
-    hit_rate = compute_hit_rate(pnls) or 0.0
-    return (hit_rate * avg_win) - ((1 - hit_rate) * avg_loss)
+    losses_count = sum(1 for pnl in pnls if pnl < 0)  # strict negative; break-even is neither
+    avg_loss = abs(sum(pnl for pnl in pnls if pnl < 0) / max(losses_count, 1))
+    win_rate = wins / len(pnls)
+    loss_rate = losses_count / len(pnls)
+    return (win_rate * avg_win) - (loss_rate * avg_loss)
 
 
 def compute_max_drawdown_pct_from_pnls(pnls: list[float]) -> float | None:
@@ -56,7 +57,7 @@ def compute_max_drawdown_pct_from_pnls(pnls: list[float]) -> float | None:
             if drawdown > max_dd:
                 max_dd = drawdown
 
-    return max_dd if max_dd else None
+    return max_dd  # 0.0 means no drawdown (valid); None only for empty input (line above)
 
 
 def compute_coverage(total_count: int, scored_count: int) -> float | None:

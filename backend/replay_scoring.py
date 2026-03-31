@@ -55,7 +55,11 @@ def score_candidate_item_against_historical(
     match_keys = ("item_type", "action_name", "symbol", "target_key")
 
     for baseline in baseline_items:
-        if all(candidate_item.get(k) == baseline.get(k) for k in match_keys if candidate_item.get(k)):
+        # Compare all keys where at least one side has a value.
+        # Skip keys only when BOTH sides are None (key doesn't apply to this item type).
+        relevant_keys = [k for k in match_keys
+                         if candidate_item.get(k) is not None or baseline.get(k) is not None]
+        if relevant_keys and all(candidate_item.get(k) == baseline.get(k) for k in relevant_keys):
             if baseline.get("realized_pnl") is not None:
                 return {
                     "score_status": baseline.get("score_status", "proxy_scored"),

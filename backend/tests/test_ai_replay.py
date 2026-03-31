@@ -77,11 +77,9 @@ async def test_existing_mode_filters_by_symbols(_isolated_db, anyio_backend):
     from ai_replay import run_stored_context_existing
     result = await run_stored_context_existing(window_days=365, symbols=["AAPL"])
 
-    # Only AAPL items or items without symbol (score_threshold) should pass
+    # Only AAPL items should pass — items without symbol are EXCLUDED by the filter
     for item in result["items"]:
-        sym = item.get("symbol")
-        if sym:
-            assert sym == "AAPL"
+        assert item.get("symbol") == "AAPL"
 
 
 @pytest.mark.anyio
@@ -94,6 +92,35 @@ async def test_existing_mode_filters_by_action_types(_isolated_db, anyio_backend
 
     for item in result["items"]:
         assert item["item_type"] == "direct_trade"
+
+
+@pytest.mark.anyio
+async def test_existing_mode_window_uses_sql_not_python(_isolated_db, anyio_backend):
+    """Existing mode must use SQL-windowed selection, not post-fetch Python filter.
+    Seeds 5 runs, requests limit_runs=2 with wide window — both modes must see same count."""
+    await init_db()
+    await _seed_runs(5)
+
+    from ai_replay import run_stored_context_existing
+    result = await run_stored_context_existing(window_days=365, limit_runs=2)
+
+    # With SQL window + limit=2, we get exactly 2 runs (not 5 fetched then filtered)
+    assert result["runs_evaluated"] == 2
+
+
+@pytest.mark.anyio
+async def test_symbols_filter_excludes_none_symbol_items(_isolated_db, anyio_backend):
+    """Items with symbol=None must be excluded when a symbols filter is active."""
+    await init_db()
+    await _seed_runs(1)
+
+    from ai_replay import run_stored_context_existing
+    result = await run_stored_context_existing(window_days=365, symbols=["AAPL"])
+
+    # score_threshold items have no symbol — they must be excluded
+    for item in result["items"]:
+        assert item.get("symbol") is not None, "Item with None symbol should be filtered out"
+        assert item["symbol"] == "AAPL"
 
 
 # ── stored_context_generate: calls generation path ──────────────────────────

@@ -110,22 +110,19 @@ async def test_evaluate_audit_fallback(_isolated_db, anyio_backend):
     result = await evaluate_past_decisions(30)
 
     # Should use legacy path since no decision_runs exist
-    assert result["data_quality"] in ("legacy_fallback", "insufficient")
+    assert result["data_quality"] in ("insufficient", "low", "moderate", "good")
 
 
 # ── Economic Report ─────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
 async def test_economic_report_surfaces_data_quality(_isolated_db, anyio_backend):
-    """Economic report must thread data_quality and metric_source."""
+    """Economic report must thread data_quality and metric_source from _source key."""
     await init_db()
 
     from ai_learning import compute_economic_report
     result = await compute_economic_report(days=30)
 
-    # With no data, should be "insufficient"
-    assert "data_quality" in result
-    assert "metric_source" in result
     assert result["data_quality"] == "insufficient"
     assert result["metric_source"] == "insufficient"
 
@@ -146,13 +143,9 @@ async def test_economic_report_with_ledger_data(_isolated_db, anyio_backend):
     from ai_learning import compute_economic_report
     result = await compute_economic_report(days=30)
 
-    # data_quality is threaded from learning — with unscored items it may be
-    # "canonical" (ledger has data) or "insufficient" (no scored items).
-    # The critical assertion is that the field EXISTS and is not None.
-    assert "data_quality" in result
-    assert result["data_quality"] is not None
-    assert "metric_source" in result
-    assert result["metric_source"] is not None
+    # Ledger has data (even if unscored), so _source should be "ledger"
+    assert result["metric_source"] == "ledger"
+    assert result["data_quality"] in ("insufficient", "low", "moderate", "good")
     assert result["total_cost"] > 0
 
 

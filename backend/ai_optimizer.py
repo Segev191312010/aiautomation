@@ -62,6 +62,7 @@ from optimizer_prompts import (
     format_market_snapshot as _format_market_snapshot,
     format_sector_performance as _format_sector_performance,
     format_time_patterns as _format_time_patterns,
+    format_rule_performance as _format_rule_performance,
 )
 
 
@@ -75,13 +76,7 @@ async def _get_ai_decisions(context: dict) -> dict | None:
         log.info("No ANTHROPIC_API_KEY set — skipping AI optimization")
         return None
 
-    rule_perf = context.get("rule_performance", [])
-    rule_perf_text = "\n".join(
-        f"  - {r['rule_name']}: {r['total_trades']} trades, "
-        f"{r['win_rate']}% WR, PF {r['profit_factor']}, "
-        f"${r['total_pnl']:.0f} P&L, verdict={r['verdict']}"
-        for r in rule_perf[:15]
-    ) or "  No trade data available."
+    rule_perf_text = _format_rule_performance(context.get("rule_performance", []))
     sector_perf_text = _format_sector_performance(context.get("sector_performance", []))
     time_pattern_text = _format_time_patterns(context.get("time_patterns", []))
     market_snapshot_text = _format_market_snapshot(context.get("market_snapshot", {}))

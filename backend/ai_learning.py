@@ -267,6 +267,7 @@ async def _evaluate_from_ledger(window_days: int, cutoff: str) -> dict:
         "net_score": wins - (scored_count - wins),
         "net_pnl_impact": round(net_pnl, 2) if net_pnl else None,
         "data_quality": quality,
+        "_source": "ledger",
         "abstain_rate": round(abstained_runs / max(total_runs, 1), 4) if total_runs else None,
         "avg_confidence": round(avg_confidence, 4) if avg_confidence is not None else None,
         "calibration_error": calibration_error,
@@ -373,6 +374,7 @@ async def _evaluate_from_audit_log(window_days: int, cutoff: str) -> dict:
         "net_score": hits - misses,
         "net_pnl_impact": None,
         "data_quality": quality,
+        "_source": "legacy_fallback",
         "by_action_type": action_breakdown,
         "warning": f"Legacy heuristic evaluation ({scored} scored)" if scored > 0 else "No scored decisions",
     }
@@ -394,6 +396,7 @@ def _empty_metrics(window_days: int, warning: str) -> dict:
         "net_score": 0,
         "net_pnl_impact": None,
         "data_quality": "insufficient",
+        "_source": "insufficient",
         "by_action_type": {},
         "warning": warning,
     }
@@ -415,6 +418,7 @@ async def compute_economic_report(days: int = 30) -> dict:
     total_decisions = learning.get("total_decisions", 0)
     total_runs = learning.get("total_runs", total_decisions)
     learning_quality = learning.get("data_quality", "insufficient")
+    metric_source = learning.pop("_source", "insufficient")
 
     return {
         "days": days,
@@ -425,7 +429,7 @@ async def compute_economic_report(days: int = 30) -> dict:
         "cost_as_pct_pnl": round((total_cost / max(abs(ai_pnl), 1.0)) * 100, 2) if ai_pnl != 0 else None,
         "decisions_per_day": round(total_runs / max(days, 1), 2),
         "data_quality": learning_quality,
-        "metric_source": "ledger" if learning_quality == "canonical" else "legacy_fallback" if learning_quality == "legacy_fallback" else "insufficient",
+        "metric_source": metric_source,
     }
 
 

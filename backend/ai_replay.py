@@ -71,16 +71,22 @@ async def run_stored_context_existing(
     action_types: list[str] | None = None,
     user_id: str = "demo",
 ) -> dict:
-    """Summarize already-persisted decision items. NO LLM call. Honors all filters."""
-    from ai_decision_ledger import get_decision_runs, get_decision_items
+    """Summarize already-persisted decision items. NO LLM call. Honors all filters.
+
+    Uses the same SQL-windowed run selector as generate mode to ensure
+    both modes see the identical population for the same request params.
+    """
+    from ai_decision_ledger import get_decision_items
 
     now = datetime.now(timezone.utc)
     window_start = (now - timedelta(days=window_days)).isoformat()
     window_end = now.isoformat()
 
-    runs = await get_decision_runs(limit=limit_runs, source="optimizer", user_id=user_id)
-    # Filter by window
-    runs = [r for r in runs if r["created_at"] >= window_start]
+    contexts = await _select_replay_contexts(
+        window_start=window_start, window_end=window_end,
+        limit=limit_runs, user_id=user_id,
+    )
+    runs = [{"id": ctx["run_id"], "created_at": ctx["created_at"]} for ctx in contexts]
 
     all_items: list[dict] = []
     for run in runs:
@@ -89,7 +95,7 @@ async def run_stored_context_existing(
             # Apply filters
             if min_confidence is not None and (item.get("confidence") or 0) < min_confidence:
                 continue
-            if symbols and item.get("symbol") and item["symbol"] not in symbols:
+            if symbols and (not item.get("symbol") or item["symbol"] not in symbols):
                 continue
             if action_types and item.get("item_type") not in action_types:
                 continue
@@ -160,7 +166,7 @@ async def run_stored_context_generate(
             # Apply filters (parity with stored_context_existing)
             if min_confidence is not None and (gen_item.get("confidence") or 0) < min_confidence:
                 continue
-            if symbols and gen_item.get("symbol") and gen_item["symbol"] not in symbols:
+            if symbols and (not gen_item.get("symbol") or gen_item["symbol"] not in symbols):
                 continue
             if action_types and gen_item.get("item_type") not in action_types:
                 continue

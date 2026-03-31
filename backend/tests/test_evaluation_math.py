@@ -41,8 +41,9 @@ def test_compute_max_drawdown_empty_returns_none():
     assert compute_max_drawdown_pct_from_pnls([]) is None
 
 
-def test_compute_max_drawdown_no_peak_returns_none():
-    assert compute_max_drawdown_pct_from_pnls([-5.0, 0.0, -1.0]) is None
+def test_compute_max_drawdown_no_peak_returns_zero():
+    # All-negative PnL series never reaches a positive peak, so drawdown is 0.0 (not None)
+    assert compute_max_drawdown_pct_from_pnls([-5.0, 0.0, -1.0]) == 0.0
 
 
 def test_compute_coverage_basic():
@@ -80,6 +81,21 @@ def test_empty_slice_metrics_shape():
         "avg_confidence": None,
         "calibration_error": None,
     }
+
+
+def test_expectancy_breakeven_not_counted_as_loss():
+    """Break-even trades (pnl=0.0) should not inflate loss count or deflate expectancy."""
+    # [10, 0, -10]: 1 win, 1 loss, 1 break-even
+    result = compute_expectancy([10.0, 0.0, -10.0], min_samples=3)
+    # win_rate=1/3, loss_rate=1/3, avg_win=10, avg_loss=10
+    # expectancy = (1/3)*10 - (1/3)*10 = 0.0
+    assert result is not None
+    assert abs(result - 0.0) < 0.001
+
+
+def test_max_drawdown_monotonic_up_returns_zero():
+    """Monotonically increasing PnL series should have 0.0 drawdown, not None."""
+    assert compute_max_drawdown_pct_from_pnls([5.0, 3.0, 2.0]) == 0.0
 
 
 def test_bucket_confidence_boundaries():
