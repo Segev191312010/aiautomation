@@ -61,6 +61,11 @@ class Config:
     AI_MODEL_NARRATIVE: str = os.getenv("AI_MODEL_NARRATIVE", "claude-sonnet-4-20250514")
     AI_MODEL_REGIME: str = os.getenv("AI_MODEL_REGIME", "claude-sonnet-4-20250514")
     AI_MODEL_PORTFOLIO: str = os.getenv("AI_MODEL_PORTFOLIO", "claude-sonnet-4-20250514")
+    AI_MODEL_FALLBACK: str = os.getenv("AI_MODEL_FALLBACK", "claude-haiku-4-5-20251001")
+
+    # ── Circuit breaker / AI resilience ─────────────────────────────────────
+    AI_CONSECUTIVE_FAILURE_THRESHOLD: int = int(os.getenv("AI_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
+    AI_FALLBACK_ENABLED: bool = os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true"
 
     # ── Shadow → Live gating ────────────────────────────────────────────────
     SHADOW_TO_LIVE_MIN_DECISIONS: int = int(os.getenv("SHADOW_TO_LIVE_MIN_DECISIONS", "100"))

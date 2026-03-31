@@ -646,3 +646,86 @@ async def compare_evaluations_endpoint(
 ):
     from ai_evaluator import compare_evaluations
     return await compare_evaluations(baseline, candidate)
+
+
+# ── Circuit Breaker & AI Resilience (inspired by nofx) ─────────────────────
+
+@router.get("/circuit-breaker")
+async def get_circuit_breaker_status():
+    """Get current circuit breaker / consecutive failure status."""
+    from safety_kernel import get_failure_status
+    return get_failure_status()
+
+
+@router.post("/circuit-breaker/reset")
+async def reset_circuit_breaker_endpoint():
+    """Manually reset the circuit breaker after human review."""
+    from safety_kernel import reset_circuit_breaker
+    reset_circuit_breaker()
+    await log_ai_action(
+        action_type="circuit_breaker_reset",
+        category="safety",
+        description="Circuit breaker manually reset by operator",
+        old_value=None,
+        new_value={"reset": True},
+        reason="Manual operator reset",
+        confidence=1.0,
+        status="applied",
+    )
+    return {"ok": True, "message": "Circuit breaker reset"}
+
+
+# ── Bull/Bear Debate (inspired by TradingAgents) ───────────────────────────
+
+class DebateRequest(BaseModel):
+    symbol: str
+    price: float = 0
+    change_pct: float = 0
+    sector: str = "Unknown"
+    technicals: str = "N/A"
+    market_context: str = "Normal conditions"
+
+
+@router.post("/debate")
+async def run_debate_endpoint(req: DebateRequest):
+    """Run adversarial bull/bear debate for a symbol before trading."""
+    from ai_advisor import run_bull_bear_debate
+    from context_builder import _load_current_regime
+
+    regime = await _load_current_regime() or "unknown"
+    result = await run_bull_bear_debate(
+        req.symbol,
+        price=req.price,
+        change_pct=req.change_pct,
+        sector=req.sector,
+        regime=regime,
+        technicals=req.technicals,
+        market_context=req.market_context,
+    )
+    return result
+
+
+# ── Multi-Persona Analysis (inspired by ai-hedge-fund) ─────────────────────
+
+class PersonaAnalysisRequest(BaseModel):
+    symbol: str
+    price: float = 0
+    sector: str = "Unknown"
+    data_summary: str = "No data available"
+
+
+@router.post("/persona-analysis")
+async def run_persona_analysis_endpoint(req: PersonaAnalysisRequest):
+    """Analyze a stock from multiple investment philosophy perspectives."""
+    from ai_advisor import run_multi_persona_analysis
+    from context_builder import _load_current_regime
+
+    regime = await _load_current_regime() or "unknown"
+    result = await run_multi_persona_analysis(
+        req.symbol,
+        price=req.price,
+        sector=req.sector,
+        regime=regime,
+        data_summary=req.data_summary,
+    )
+    return result

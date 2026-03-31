@@ -376,28 +376,27 @@ async def apply_auto_tune(tune_result: dict) -> dict:
 # ── Layer 5: AI Narrative ────────────────────────────────────────────────────
 
 async def generate_daily_report(data: dict, recommendations: list[dict], use_ai: bool = True) -> str:
-    """Generate natural language daily report. Uses Claude API if available."""
+    """Generate natural language daily report. Uses ai_model_router with fallback."""
     api_key = getattr(cfg, "ANTHROPIC_API_KEY", "")
 
     if use_ai and api_key:
-        try:
-            import anthropic
-            client = anthropic.AsyncAnthropic(api_key=api_key)
-            prompt = f"""Trading bot performance data (last {data.get('lookback_days', 90)} days):
+        from ai_model_router import ai_call
+
+        prompt = f"""Trading bot performance data (last {data.get('lookback_days', 90)} days):
 {_format_metrics_for_ai(data, recommendations)}
 
 Write a 3-paragraph daily briefing: (1) overall performance, (2) what's working vs not, (3) top 3 actions for tomorrow. Be specific with numbers. Plain prose."""
 
-            msg = await client.messages.create(
-                model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
-                max_tokens=800,
-                temperature=0,
-                system="You are a quantitative trading analyst. Write concise, actionable briefings.",
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text
-        except Exception as e:
-            log.warning("Claude API unavailable (%s) — using template", e)
+        result = await ai_call(
+            system="You are a quantitative trading analyst. Write concise, actionable briefings.",
+            prompt=prompt,
+            source="daily_report",
+            model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
+            max_tokens=800,
+        )
+        if result.ok:
+            return result.text
+        log.warning("AI daily report unavailable (%s) — using template", result.error)
 
     return _template_report(data, recommendations)
 
@@ -442,6 +441,277 @@ def _template_report(data: dict, recommendations: list[dict]) -> str:
         report += "No actionable recommendations at this time. Continue monitoring."
 
     return report
+
+
+# ── Layer 5b: Bull/Bear Debate (inspired by TradingAgents) ──────────────────
+# Before committing to a trade or recommendation, generate adversarial
+# perspectives and let them argue. Only proceed when one side has clear conviction.
+
+DEBATE_SYSTEM_PROMPT = (
+    "You are a {role} analyst on a trading desk. Your job is to argue "
+    "the {role} case for {symbol} as convincingly as possible using the data provided. "
+    "Be specific with numbers. Return JSON: "
+    '{{"conviction": 0.0-1.0, "thesis": "2-3 sentences", '
+    '"key_factors": ["factor1", "factor2", "factor3"]}}'
+)
+
+DEBATE_USER_TEMPLATE = """Argue the {role} case for {symbol}:
+
+Price: ${price:.2f} | Change: {change_pct:+.2f}%
+Sector: {sector}
+Regime: {regime}
+
+Technical snapshot:
+{technicals}
+
+Recent rule performance for this stock:
+{rule_history}
+
+Market context:
+{market_context}
+
+Make your {role} argument. Be specific."""
+
+
+async def run_bull_bear_debate(
+    symbol: str,
+    *,
+    price: float = 0,
+    change_pct: float = 0,
+    sector: str = "Unknown",
+    regime: str = "unknown",
+    technicals: str = "N/A",
+    rule_history: str = "No history",
+    market_context: str = "Normal conditions",
+    max_rounds: int = 1,
+) -> dict:
+    """
+    Run adversarial bull/bear debate for a symbol.
+
+    Returns:
+        {
+            "winner": "BULL" | "BEAR" | "NEUTRAL",
+            "bull": {"conviction": 0.7, "thesis": "...", "key_factors": [...]},
+            "bear": {"conviction": 0.4, "thesis": "...", "key_factors": [...]},
+            "net_conviction": 0.3,  # bull - bear, positive = bullish
+            "should_trade": True/False,
+            "debate_rounds": 1,
+        }
+    """
+    from ai_model_router import ai_call
+    import json as _json
+
+    results = {"bull": None, "bear": None, "debate_rounds": max_rounds}
+
+    for role in ("BULL", "BEAR"):
+        prompt = DEBATE_USER_TEMPLATE.format(
+            role=role.lower(),
+            symbol=symbol,
+            price=price,
+            change_pct=change_pct,
+            sector=sector,
+            regime=regime,
+            technicals=technicals,
+            rule_history=rule_history,
+            market_context=market_context,
+        )
+
+        result = await ai_call(
+            system=DEBATE_SYSTEM_PROMPT.format(role=role.lower(), symbol=symbol),
+            prompt=prompt,
+            source="debate",
+            model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
+            max_tokens=500,
+            temperature=0.3,
+        )
+
+        if result.ok:
+            text = result.text.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                text = "\n".join(lines).strip()
+            try:
+                parsed = _json.loads(text)
+                results[role.lower()] = {
+                    "conviction": max(0.0, min(1.0, float(parsed.get("conviction", 0.5)))),
+                    "thesis": parsed.get("thesis", ""),
+                    "key_factors": parsed.get("key_factors", []),
+                }
+            except (_json.JSONDecodeError, ValueError):
+                results[role.lower()] = {
+                    "conviction": 0.5,
+                    "thesis": text[:200],
+                    "key_factors": [],
+                }
+        else:
+            results[role.lower()] = {
+                "conviction": 0.5,
+                "thesis": f"Analysis unavailable: {result.error}",
+                "key_factors": [],
+            }
+
+    bull_conv = results["bull"]["conviction"]
+    bear_conv = results["bear"]["conviction"]
+    net = bull_conv - bear_conv
+
+    if net > 0.15:
+        winner = "BULL"
+    elif net < -0.15:
+        winner = "BEAR"
+    else:
+        winner = "NEUTRAL"
+
+    # Only recommend trading when one side has clear conviction advantage
+    should_trade = abs(net) >= 0.2 and max(bull_conv, bear_conv) >= 0.6
+
+    results["winner"] = winner
+    results["net_conviction"] = round(net, 3)
+    results["should_trade"] = should_trade
+
+    log.info(
+        "Bull/Bear debate for %s: winner=%s net=%.3f bull=%.2f bear=%.2f trade=%s",
+        symbol, winner, net, bull_conv, bear_conv, should_trade,
+    )
+
+    return results
+
+
+# ── Layer 5c: Multi-Persona Analysis (inspired by ai-hedge-fund) ───────────
+# Analyze a stock from multiple investment philosophy perspectives,
+# then synthesize into a weighted view.
+
+PERSONA_PROMPTS = {
+    "momentum": {
+        "system": "You are a momentum trader. You look for stocks with strong price trends, "
+                  "high relative volume, and sector leadership. Ignore valuation — focus on "
+                  "price action, trend strength, and institutional money flow.",
+        "weight": 0.35,
+    },
+    "value": {
+        "system": "You are a deep value investor like Ben Graham. You look for stocks trading "
+                  "below intrinsic value with a margin of safety. Focus on P/E, P/B, free cash "
+                  "flow yield, and balance sheet strength. Be skeptical of momentum.",
+        "weight": 0.25,
+    },
+    "growth": {
+        "system": "You are a growth investor like Peter Lynch. You look for companies with "
+                  "accelerating revenue/earnings growth, expanding TAM, and strong competitive "
+                  "moats. Accept higher multiples for superior growth.",
+        "weight": 0.20,
+    },
+    "risk": {
+        "system": "You are a risk manager. Your only job is to identify what could go wrong. "
+                  "Focus on downside risk, position sizing, sector concentration, correlation "
+                  "risk, and macro headwinds. Always err on the side of caution.",
+        "weight": 0.20,
+    },
+}
+
+PERSONA_USER_TEMPLATE = """Analyze {symbol} from your perspective:
+
+Price: ${price:.2f} | Sector: {sector} | Regime: {regime}
+
+Data:
+{data_summary}
+
+Return JSON: {{"score": -1.0 to 1.0, "reasoning": "2 sentences", "key_insight": "one line"}}
+Score: -1.0 = strong avoid, 0 = neutral, 1.0 = strong buy."""
+
+
+async def run_multi_persona_analysis(
+    symbol: str,
+    *,
+    price: float = 0,
+    sector: str = "Unknown",
+    regime: str = "unknown",
+    data_summary: str = "No data available",
+) -> dict:
+    """
+    Analyze a symbol from 4 investment philosophy perspectives.
+
+    Returns:
+        {
+            "symbol": "AAPL",
+            "composite_score": 0.35,
+            "verdict": "BULLISH" | "BEARISH" | "NEUTRAL",
+            "personas": {
+                "momentum": {"score": 0.8, "reasoning": "...", "weight": 0.35},
+                "value": {"score": -0.2, "reasoning": "...", "weight": 0.25},
+                ...
+            },
+        }
+    """
+    import asyncio
+    from ai_model_router import ai_call
+    import json as _json
+
+    async def _analyze_persona(name: str, persona: dict) -> tuple[str, dict]:
+        prompt = PERSONA_USER_TEMPLATE.format(
+            symbol=symbol,
+            price=price,
+            sector=sector,
+            regime=regime,
+            data_summary=data_summary,
+        )
+        result = await ai_call(
+            system=persona["system"],
+            prompt=prompt,
+            source="persona_analysis",
+            model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
+            max_tokens=300,
+            temperature=0.2,
+        )
+        if result.ok:
+            text = result.text.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                text = "\n".join(lines).strip()
+            try:
+                parsed = _json.loads(text)
+                return name, {
+                    "score": max(-1.0, min(1.0, float(parsed.get("score", 0)))),
+                    "reasoning": parsed.get("reasoning", ""),
+                    "key_insight": parsed.get("key_insight", ""),
+                    "weight": persona["weight"],
+                }
+            except (_json.JSONDecodeError, ValueError):
+                pass
+        return name, {"score": 0.0, "reasoning": "Analysis unavailable", "key_insight": "", "weight": persona["weight"]}
+
+    # Run all persona analyses concurrently
+    tasks = [_analyze_persona(name, p) for name, p in PERSONA_PROMPTS.items()]
+    persona_results = dict(await asyncio.gather(*tasks))
+
+    # Compute weighted composite score
+    composite = sum(
+        persona_results[name]["score"] * persona_results[name]["weight"]
+        for name in PERSONA_PROMPTS
+    )
+
+    if composite > 0.2:
+        verdict = "BULLISH"
+    elif composite < -0.2:
+        verdict = "BEARISH"
+    else:
+        verdict = "NEUTRAL"
+
+    log.info(
+        "Multi-persona analysis for %s: composite=%.3f verdict=%s",
+        symbol, composite, verdict,
+    )
+
+    return {
+        "symbol": symbol,
+        "composite_score": round(composite, 3),
+        "verdict": verdict,
+        "personas": persona_results,
+    }
 
 
 # ── Layer 6: Orchestrator ────────────────────────────────────────────────────

@@ -763,3 +763,61 @@ export const fetchEvaluationSlices = (evaluationId: string) =>
 export const fetchEvaluationCompare = (baselineId: string, candidateId: string) =>
   get<EvaluationCompare>(`/api/autopilot/evaluation/compare?baseline=${baselineId}&candidate=${candidateId}`)
 
+// ── Circuit Breaker (inspired by nofx) ─────────────────────────────────────
+
+export interface CircuitBreakerStatus {
+  breaker_tripped: boolean
+  threshold: number
+  counts: Record<string, number>
+  last_failure_times: Record<string, string>
+}
+
+export const fetchCircuitBreakerStatus = () =>
+  get<CircuitBreakerStatus>('/api/autopilot/circuit-breaker')
+
+export const resetCircuitBreaker = () =>
+  post<{ ok: boolean; message: string }>('/api/autopilot/circuit-breaker/reset')
+
+// ── Bull/Bear Debate (inspired by TradingAgents) ───────────────────────────
+
+export interface DebateResult {
+  winner: 'BULL' | 'BEAR' | 'NEUTRAL'
+  bull: { conviction: number; thesis: string; key_factors: string[] }
+  bear: { conviction: number; thesis: string; key_factors: string[] }
+  net_conviction: number
+  should_trade: boolean
+  debate_rounds: number
+}
+
+export const runBullBearDebate = (params: {
+  symbol: string
+  price?: number
+  change_pct?: number
+  sector?: string
+  technicals?: string
+  market_context?: string
+}) => post<DebateResult>('/api/autopilot/debate', params)
+
+// ── Multi-Persona Analysis (inspired by ai-hedge-fund) ─────────────────────
+
+export interface PersonaResult {
+  score: number
+  reasoning: string
+  key_insight: string
+  weight: number
+}
+
+export interface PersonaAnalysisResult {
+  symbol: string
+  composite_score: number
+  verdict: 'BULLISH' | 'BEARISH' | 'NEUTRAL'
+  personas: Record<string, PersonaResult>
+}
+
+export const runPersonaAnalysis = (params: {
+  symbol: string
+  price?: number
+  sector?: string
+  data_summary?: string
+}) => post<PersonaAnalysisResult>('/api/autopilot/persona-analysis', params)
+

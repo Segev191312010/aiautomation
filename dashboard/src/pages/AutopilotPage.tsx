@@ -4,6 +4,7 @@ import AIActivityFeed from '@/components/autopilot/AIActivityFeed'
 import AIStatusBar from '@/components/autopilot/AIStatusBar'
 import AIPerformanceCard from '@/components/autopilot/AIPerformanceCard'
 import CostReportPanel from '@/components/autopilot/CostReportPanel'
+import CircuitBreakerPanel from '@/components/autopilot/CircuitBreakerPanel'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { useAutopilotStore } from '@/store'
 import type {
@@ -277,6 +278,8 @@ export default function AutopilotPage() {
           </div>
         </div>
       </div>
+
+      <CircuitBreakerPanel />
 
       <TradeBotTabs activeTab={activeTab} onTabChange={(tab) => setActiveTab(tab as ConsoleTab)} tabs={tabs} />
 

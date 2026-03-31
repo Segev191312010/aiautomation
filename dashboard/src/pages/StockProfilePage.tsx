@@ -17,6 +17,7 @@ import AnalystDetailModule from '@/components/stock-profile/AnalystDetailModule'
 import OwnershipModule from '@/components/stock-profile/OwnershipModule'
 import EventsModule from '@/components/stock-profile/EventsModule'
 import NarrativeModule from '@/components/stock-profile/NarrativeModule'
+import AIAnalysisModule from '@/components/stock-profile/AIAnalysisModule'
 
 export default function StockProfilePage() {
   const toast = useToast()
@@ -157,6 +158,10 @@ export default function StockProfilePage() {
           <StockSplitsModule data={stockSplits} loading={loading} />
         </ErrorBoundary>
       </div>
+
+      <ErrorBoundary>
+        <AIAnalysisModule symbol={symbol} price={overview?.price ?? undefined} sector={overview?.sector ?? undefined} />
+      </ErrorBoundary>
 
       <ErrorBoundary>
         <RatingScorecardModule data={ratingScorecard} loading={loading} />

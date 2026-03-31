@@ -234,7 +234,10 @@ Rules:
 
 
 async def _get_ai_decisions(context: dict) -> dict | None:
-    """Call Claude API for structured parameter recommendations."""
+    """Call Claude API for structured parameter recommendations.
+
+    Uses ai_model_router for automatic fallback and circuit breaker integration.
+    """
     api_key = cfg.ANTHROPIC_API_KEY
     if not api_key:
         log.info("No ANTHROPIC_API_KEY set — skipping AI optimization")
@@ -265,46 +268,48 @@ async def _get_ai_decisions(context: dict) -> dict | None:
         market_snapshot_text=market_snapshot_text,
     )
 
+    from ai_model_router import ai_call
+
+    result = await ai_call(
+        system=OPTIMIZER_SYSTEM_PROMPT,
+        prompt=prompt,
+        source="optimizer",
+        model=cfg.AI_MODEL_OPTIMIZER,
+        max_tokens=2000,
+        temperature=0,
+    )
+
+    if not result.ok:
+        log.warning("AI optimizer call failed (all models): %s", result.error)
+        return None
+
+    # Parse JSON from response (handle ```json fences)
+    text = result.text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        lines = lines[1:]  # drop opening fence (```json or ```)
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]  # drop closing fence
+        text = "\n".join(lines).strip()
+
     try:
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-
-        msg = await client.messages.create(
-            model=cfg.AI_MODEL_OPTIMIZER,
-            max_tokens=2000,
-            temperature=0,
-            system=OPTIMIZER_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        input_tokens = msg.usage.input_tokens
-        output_tokens = msg.usage.output_tokens
-        raw_text = msg.content[0].text
-
-        # Parse JSON from response (handle ```json fences)
-        text = raw_text.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            lines = lines[1:]  # drop opening fence (```json or ```)
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]  # drop closing fence
-            text = "\n".join(lines).strip()
-
         decisions = json.loads(text)
-        decisions["_input_tokens"] = input_tokens
-        decisions["_output_tokens"] = output_tokens
-        log.info(
-            "AI optimizer returned decisions (confidence=%.2f, tokens=%d/%d)",
-            decisions.get("confidence", 0), input_tokens, output_tokens,
-        )
-        return decisions
-
     except json.JSONDecodeError as e:
         log.warning("AI optimizer returned invalid JSON: %s", e)
         return None
-    except Exception as e:
-        log.warning("AI optimizer API call failed: %s", e)
-        return None
+
+    decisions["_input_tokens"] = result.tokens_in
+    decisions["_output_tokens"] = result.tokens_out
+    decisions["_model_used"] = result.model_used
+    decisions["_fallback_used"] = result.fallback_used
+
+    log.info(
+        "AI optimizer returned decisions (confidence=%.2f, model=%s, tokens=%d/%d%s)",
+        decisions.get("confidence", 0), result.model_used,
+        result.tokens_in, result.tokens_out,
+        " [FALLBACK]" if result.fallback_used else "",
+    )
+    return decisions
 
 
 # ── Decision Application ─────────────────────────────────────────────────────
