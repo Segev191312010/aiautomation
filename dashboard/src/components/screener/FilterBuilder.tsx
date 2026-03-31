@@ -17,12 +17,12 @@ const INDICATORS: { value: ScreenerIndicator; label: string; defaultParams: Reco
 ]
 
 const OPERATORS: { value: ScreenerOperator; label: string; tone: string }[] = [
-  { value: 'GT', label: '>', tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-200' },
-  { value: 'GTE', label: '>=', tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-200' },
-  { value: 'LT', label: '<', tone: 'text-red-700 bg-red-500/10 border-red-200' },
-  { value: 'LTE', label: '<=', tone: 'text-red-700 bg-red-500/10 border-red-200' },
-  { value: 'CROSSES_ABOVE', label: 'Crosses Up', tone: 'text-sky-700 bg-sky-50 border-sky-200' },
-  { value: 'CROSSES_BELOW', label: 'Crosses Down', tone: 'text-amber-700 bg-amber-50 border-amber-200' },
+  { value: 'GT', label: '>', tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30' },
+  { value: 'GTE', label: '>=', tone: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30' },
+  { value: 'LT', label: '<', tone: 'text-red-400 bg-red-500/10 border-red-500/30' },
+  { value: 'LTE', label: '<=', tone: 'text-red-400 bg-red-500/10 border-red-500/30' },
+  { value: 'CROSSES_ABOVE', label: 'Crosses Up', tone: 'text-sky-300 bg-sky-500/10 border-sky-500/30' },
+  { value: 'CROSSES_BELOW', label: 'Crosses Down', tone: 'text-amber-300 bg-amber-500/10 border-amber-500/30' },
 ]
 
 const isCrossOperator = (op: string) => op === 'CROSSES_ABOVE' || op === 'CROSSES_BELOW'

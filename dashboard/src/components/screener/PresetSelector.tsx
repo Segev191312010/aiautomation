@@ -102,7 +102,7 @@ export default function PresetSelector() {
         </div>
       )}
 
-      <div className="rounded-lg border border-[#E8E4DF] bg-[#FAF8F5] p-4">
+      <div className="rounded-lg border border-zinc-700 bg-zinc-800/50 p-4">
         <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Save Current Screen</div>
         <div className="mt-3 flex items-center gap-2">
           <input
