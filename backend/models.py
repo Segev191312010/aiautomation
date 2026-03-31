@@ -409,6 +409,8 @@ class ScanResultRow(BaseModel):
 class ScanResponse(BaseModel):
     results: list[ScanResultRow]
     skipped_symbols: list[str]
+    elapsed_ms: int = 0
+    total_symbols: int = 0
 
 
 class EnrichRequest(BaseModel):
@@ -446,6 +448,11 @@ class BacktestRequest(BaseModel):
     position_size_pct: float = Field(default=100.0, gt=0, le=100)
     stop_loss_pct: float = Field(default=0.0, ge=0, le=50)
     take_profit_pct: float = Field(default=0.0, ge=0, le=100)
+    exit_mode: Literal["simple", "atr_trail"] = "simple"
+    atr_stop_mult: float = Field(default=0.0, ge=0, le=10)
+    atr_trail_mult: float = Field(default=0.0, ge=0, le=10)
+    start_date: str | None = None
+    end_date: str | None = None
 
 
 class BacktestTrade(BaseModel):
@@ -497,6 +504,9 @@ class BacktestResult(BaseModel):
     position_size_pct: float
     stop_loss_pct: float
     take_profit_pct: float
+    exit_mode: str = "simple"
+    atr_stop_mult: float = 0.0
+    atr_trail_mult: float = 0.0
     created_at: str = ""
 
 

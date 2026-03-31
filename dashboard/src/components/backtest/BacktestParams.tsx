@@ -1,4 +1,5 @@
 import { useBacktestStore } from '@/store'
+import type { ExitMode } from '@/types'
 
 interface ParamInputProps {
   label: string
@@ -105,7 +106,9 @@ const IconTakeProfit = () => (
 export function BacktestParams() {
   const {
     initialCapital, positionSizePct, stopLossPct, takeProfitPct,
+    exitMode, atrStopMult, atrTrailMult,
     setInitialCapital, setPositionSizePct, setStopLossPct, setTakeProfitPct,
+    setExitMode, setAtrStopMult, setAtrTrailMult,
   } = useBacktestStore()
 
   return (
@@ -143,28 +146,89 @@ export function BacktestParams() {
           max={100}
           isPct
         />
-        <ParamInput
-          label="Stop Loss"
-          icon={<IconStopLoss />}
-          value={stopLossPct}
-          onChange={setStopLossPct}
-          help="0 = disabled"
-          min={0}
-          max={50}
-          step={0.5}
-          isPct
-        />
-        <ParamInput
-          label="Take Profit"
-          icon={<IconTakeProfit />}
-          value={takeProfitPct}
-          onChange={setTakeProfitPct}
-          help="0 = disabled"
-          min={0}
-          max={100}
-          step={0.5}
-          isPct
-        />
+      </div>
+
+      {/* Exit Mode Toggle */}
+      <div className="mt-3 bg-zinc-900/60 rounded-xl border border-zinc-800 p-3.5">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-6 h-6 rounded-md bg-zinc-900 flex items-center justify-center text-zinc-400">
+            <IconStopLoss />
+          </div>
+          <label className="text-xs font-sans font-medium text-zinc-400">Exit Mode</label>
+        </div>
+        <div className="flex gap-1 bg-zinc-900 rounded-lg p-0.5">
+          {(['simple', 'atr_trail'] as const).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setExitMode(mode)}
+              className={`flex-1 py-1.5 px-3 text-xs font-mono rounded-md transition-all ${
+                exitMode === mode
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {mode === 'simple' ? '% SL/TP' : 'ATR Trail'}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10px] font-sans text-zinc-500 mt-1.5 block">
+          {exitMode === 'simple'
+            ? 'Fixed percentage stop-loss and take-profit'
+            : 'ATR-based stops matching live bot behavior'}
+        </span>
+      </div>
+
+      {/* Conditional params based on exit mode */}
+      <div className="grid grid-cols-2 gap-3 mt-3">
+        {exitMode === 'simple' ? (
+          <>
+            <ParamInput
+              label="Stop Loss"
+              icon={<IconStopLoss />}
+              value={stopLossPct}
+              onChange={setStopLossPct}
+              help="0 = disabled"
+              min={0}
+              max={50}
+              step={0.5}
+              isPct
+            />
+            <ParamInput
+              label="Take Profit"
+              icon={<IconTakeProfit />}
+              value={takeProfitPct}
+              onChange={setTakeProfitPct}
+              help="0 = disabled"
+              min={0}
+              max={100}
+              step={0.5}
+              isPct
+            />
+          </>
+        ) : (
+          <>
+            <ParamInput
+              label="ATR Stop Mult"
+              icon={<IconStopLoss />}
+              value={atrStopMult}
+              onChange={setAtrStopMult}
+              help="Hard stop: entry - N x ATR"
+              min={0.5}
+              max={10}
+              step={0.1}
+            />
+            <ParamInput
+              label="ATR Trail Mult"
+              icon={<IconTakeProfit />}
+              value={atrTrailMult}
+              onChange={setAtrTrailMult}
+              help="Trail: watermark - N x ATR"
+              min={0.5}
+              max={10}
+              step={0.1}
+            />
+          </>
+        )}
       </div>
     </div>
   )

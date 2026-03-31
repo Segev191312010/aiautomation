@@ -30,6 +30,11 @@ async def api_backtest_run(req: BacktestRequest):
             stop_loss_pct=req.stop_loss_pct,
             take_profit_pct=req.take_profit_pct,
             condition_logic=req.condition_logic,
+            exit_mode=req.exit_mode,
+            atr_stop_mult=req.atr_stop_mult,
+            atr_trail_mult=req.atr_trail_mult,
+            start_date=req.start_date,
+            end_date=req.end_date,
         )
         return result
     except ValueError as e:

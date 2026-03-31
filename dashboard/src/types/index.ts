@@ -610,6 +610,29 @@ export interface ScanResultRow {
 export interface ScanResponse {
   results: ScanResultRow[]
   skipped_symbols: string[]
+  elapsed_ms: number
+  total_symbols: number
+}
+
+export interface IBKRScanTemplate {
+  id: string
+  name: string
+  max_results: number
+}
+
+export interface IBKRScanResult {
+  symbol: string
+  exchange: string
+  con_id: number
+  rank: number
+  scan: string
+  timestamp: string
+}
+
+export interface IBKRScanResponse {
+  scan: string
+  results: IBKRScanResult[]
+  count: number
 }
 
 export interface EnrichResult {
@@ -635,6 +658,8 @@ export interface UniverseInfo {
 
 // ── Backtesting ─────────────────────────────────────────────────────────
 
+export type ExitMode = 'simple' | 'atr_trail'
+
 export interface BacktestRequest {
   symbol: string
   period: string
@@ -646,6 +671,11 @@ export interface BacktestRequest {
   position_size_pct: number
   stop_loss_pct: number
   take_profit_pct: number
+  exit_mode: ExitMode
+  atr_stop_mult: number
+  atr_trail_mult: number
+  start_date?: string | null
+  end_date?: string | null
 }
 
 export interface BacktestTrade {
@@ -697,6 +727,9 @@ export interface BacktestResult {
   position_size_pct: number
   stop_loss_pct: number
   take_profit_pct: number
+  exit_mode: ExitMode
+  atr_stop_mult: number
+  atr_trail_mult: number
   created_at?: string
 }
 

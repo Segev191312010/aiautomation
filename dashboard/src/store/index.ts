@@ -31,6 +31,7 @@ import type {
   Drawing,
   DrawingType,
   EnrichResult,
+  ExitMode,
   MarketQuote,
   OHLCVBar,
   OpenOrder,
@@ -641,6 +642,8 @@ interface ScreenerState {
   scanning:         boolean
   enriching:        boolean
   presetsLoaded:    boolean
+  elapsedMs:        number
+  totalSymbols:     number
 
   addFilter:        () => void
   removeFilter:     (index: number) => void
@@ -685,6 +688,8 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   scanning:         false,
   enriching:        false,
   presetsLoaded:    false,
+  elapsedMs:        0,
+  totalSymbols:     0,
 
   addFilter: () =>
     set((s) => ({ filters: [...s.filters, makeDefaultFilter()] })),
@@ -744,7 +749,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
 
   runScan: async () => {
     const { filters, selectedUniverse, customSymbols, interval, period } = get()
-    set({ scanning: true, results: [], skippedSymbols: [], enriched: {} })
+    set({ scanning: true, results: [], skippedSymbols: [], enriched: {}, elapsedMs: 0, totalSymbols: 0 })
     try {
       const symbols = selectedUniverse === 'custom'
         ? customSymbols.split(',').map((s) => s.trim()).filter(Boolean)
@@ -757,7 +762,12 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
         period,
         limit: 100,
       })
-      set({ results: resp.results, skippedSymbols: resp.skipped_symbols })
+      set({
+        results: resp.results,
+        skippedSymbols: resp.skipped_symbols,
+        elapsedMs: resp.elapsed_ms ?? 0,
+        totalSymbols: resp.total_symbols ?? 0,
+      })
       // Auto-enrich (await so scanning spinner covers enrichment)
       if (resp.results.length > 0) {
         await get().enrichResults()
@@ -1111,6 +1121,11 @@ interface BacktestState {
   positionSizePct: number
   stopLossPct: number
   takeProfitPct: number
+  exitMode: ExitMode
+  atrStopMult: number
+  atrTrailMult: number
+  startDate: string | null
+  endDate: string | null
 
   // Results
   result: BacktestResult | null
@@ -1131,6 +1146,11 @@ interface BacktestState {
   setPositionSizePct: (v: number) => void
   setStopLossPct: (v: number) => void
   setTakeProfitPct: (v: number) => void
+  setExitMode: (m: ExitMode) => void
+  setAtrStopMult: (v: number) => void
+  setAtrTrailMult: (v: number) => void
+  setStartDate: (d: string | null) => void
+  setEndDate: (d: string | null) => void
   setResult: (r: BacktestResult | null) => void
   setLoading: (v: boolean) => void
   setError: (e: string | null) => void
@@ -1149,6 +1169,11 @@ export const useBacktestStore = create<BacktestState>((set) => ({
   positionSizePct: 100,
   stopLossPct: 0,
   takeProfitPct: 0,
+  exitMode: 'simple',
+  atrStopMult: 3.0,
+  atrTrailMult: 2.0,
+  startDate: null,
+  endDate: null,
 
   result: null,
   loading: false,
@@ -1166,6 +1191,11 @@ export const useBacktestStore = create<BacktestState>((set) => ({
   setPositionSizePct: (v) => set({ positionSizePct: v }),
   setStopLossPct: (v) => set({ stopLossPct: v }),
   setTakeProfitPct: (v) => set({ takeProfitPct: v }),
+  setExitMode: (m) => set({ exitMode: m }),
+  setAtrStopMult: (v) => set({ atrStopMult: v }),
+  setAtrTrailMult: (v) => set({ atrTrailMult: v }),
+  setStartDate: (d) => set({ startDate: d }),
+  setEndDate: (d) => set({ endDate: d }),
   setResult: (r) => set({ result: r }),
   setLoading: (v) => set({ loading: v }),
   setError: (e) => set({ error: e }),
@@ -1181,6 +1211,11 @@ export const useBacktestStore = create<BacktestState>((set) => ({
     positionSizePct: 100,
     stopLossPct: 0,
     takeProfitPct: 0,
+    exitMode: 'simple',
+    atrStopMult: 3.0,
+    atrTrailMult: 2.0,
+    startDate: null,
+    endDate: null,
     result: null,
     error: null,
     loading: false,

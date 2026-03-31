@@ -7,6 +7,7 @@ SL/TP gap-aware fills, metrics computation, and full backtest flow.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
@@ -653,3 +654,341 @@ class TestCommission:
                 raw_pnl = (trade["exit_price"] - trade["entry_price"]) * qty
                 # PnL should be raw_pnl minus 2x commission ($1 each)
                 assert trade["pnl"] == pytest.approx(raw_pnl - 2.0, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# 9. ATR-based exit mode
+# ---------------------------------------------------------------------------
+
+class TestATRExitMode:
+    """Test the atr_trail exit mode that mirrors live bot behavior."""
+
+    @pytest.mark.asyncio
+    async def test_atr_trail_hard_stop(self):
+        """Hard stop should trigger when price drops below entry - ATR_STOP_MULT * ATR."""
+        n = 80
+        # Start with stable prices, then a sharp drop after entry
+        closes = [100.0] * 30 + [100.0] * 10 + [85.0] * 40  # sharp drop at bar 40
+        opens = [c for c in closes]
+        highs = [c * 1.01 for c in closes]
+        lows = [c * 0.99 for c in closes]
+
+        dates = pd.date_range("2023-01-01", periods=n, freq="B")
+        mock_df = pd.DataFrame({
+            "Date": dates,
+            "Open": opens[:n],
+            "High": highs[:n],
+            "Low": lows[:n],
+            "Close": closes[:n],
+            "Volume": [1000] * n,
+        }).set_index("Date")
+
+        with patch("backtester.yf") as mock_yf:
+            mock_ticker = mock_yf.Ticker.return_value
+            mock_ticker.history.return_value = mock_df
+
+            entry = [Condition(indicator="PRICE", params={}, operator=">", value=0)]
+            exit_ = []  # No signal-based exits — rely on ATR stops
+
+            result = await run_backtest(
+                entry_conditions=entry,
+                exit_conditions=exit_,
+                symbol="TEST",
+                period="1y",
+                interval="1d",
+                initial_capital=100_000,
+                position_size_pct=100,
+                exit_mode="atr_trail",
+                atr_stop_mult=3.0,
+                atr_trail_mult=2.0,
+            )
+
+            # Should have at least one trade exited by ATR stops
+            assert len(result["trades"]) >= 1
+            assert result["exit_mode"] == "atr_trail"
+            assert result["atr_stop_mult"] == 3.0
+            assert result["atr_trail_mult"] == 2.0
+
+    @pytest.mark.asyncio
+    async def test_atr_trail_returns_new_fields(self):
+        """ATR trail mode should include exit_mode/atr fields in result."""
+        n = 50
+        closes = _trending_up(100, n, 0.5)
+        dates = pd.date_range("2023-01-01", periods=n, freq="B")
+        mock_df = pd.DataFrame({
+            "Date": dates,
+            "Open": [c * 0.999 for c in closes],
+            "High": [c * 1.02 for c in closes],
+            "Low": [c * 0.98 for c in closes],
+            "Close": closes,
+            "Volume": [1000] * n,
+        }).set_index("Date")
+
+        with patch("backtester.yf") as mock_yf:
+            mock_ticker = mock_yf.Ticker.return_value
+            mock_ticker.history.return_value = mock_df
+
+            entry = [Condition(indicator="PRICE", params={}, operator=">", value=0)]
+            exit_ = []
+
+            result = await run_backtest(
+                entry_conditions=entry,
+                exit_conditions=exit_,
+                symbol="TEST",
+                period="1y",
+                interval="1d",
+                initial_capital=100_000,
+                position_size_pct=100,
+                exit_mode="atr_trail",
+            )
+
+            assert result["exit_mode"] == "atr_trail"
+            assert result["atr_stop_mult"] > 0  # should use config defaults
+            assert result["atr_trail_mult"] > 0
+
+    @pytest.mark.asyncio
+    async def test_simple_mode_backward_compat(self):
+        """Simple mode should still work and not include ATR multipliers."""
+        n = 50
+        closes = _trending_up(100, n, 0.5)
+        dates = pd.date_range("2023-01-01", periods=n, freq="B")
+        mock_df = pd.DataFrame({
+            "Date": dates,
+            "Open": [c * 0.999 for c in closes],
+            "High": [c * 1.02 for c in closes],
+            "Low": [c * 0.98 for c in closes],
+            "Close": closes,
+            "Volume": [1000] * n,
+        }).set_index("Date")
+
+        with patch("backtester.yf") as mock_yf:
+            mock_ticker = mock_yf.Ticker.return_value
+            mock_ticker.history.return_value = mock_df
+
+            entry = [Condition(indicator="PRICE", params={}, operator=">", value=0)]
+            exit_ = [Condition(indicator="PRICE", params={}, operator=">", value=999)]
+
+            result = await run_backtest(
+                entry_conditions=entry,
+                exit_conditions=exit_,
+                symbol="TEST",
+                period="1y",
+                interval="1d",
+                initial_capital=100_000,
+                position_size_pct=100,
+                stop_loss_pct=0,
+                take_profit_pct=0,
+            )
+
+            assert result["exit_mode"] == "simple"
+            assert result["atr_stop_mult"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 10. Date range support
+# ---------------------------------------------------------------------------
+
+class TestDateRange:
+    @pytest.mark.asyncio
+    async def test_start_date_passed_to_yfinance(self):
+        """start_date should be passed to yfinance instead of period."""
+        n = 50
+        closes = _trending_up(100, n, 0.5)
+        dates = pd.date_range("2023-01-01", periods=n, freq="B")
+        mock_df = pd.DataFrame({
+            "Date": dates,
+            "Open": [c * 0.999 for c in closes],
+            "High": [c * 1.02 for c in closes],
+            "Low": [c * 0.98 for c in closes],
+            "Close": closes,
+            "Volume": [1000] * n,
+        }).set_index("Date")
+
+        with patch("backtester.yf") as mock_yf:
+            mock_ticker = mock_yf.Ticker.return_value
+            mock_ticker.history.return_value = mock_df
+
+            entry = [Condition(indicator="PRICE", params={}, operator=">", value=0)]
+            exit_ = [Condition(indicator="PRICE", params={}, operator=">", value=999)]
+
+            result = await run_backtest(
+                entry_conditions=entry,
+                exit_conditions=exit_,
+                symbol="TEST",
+                period="2y",
+                interval="1d",
+                initial_capital=100_000,
+                position_size_pct=100,
+                start_date="2023-01-01",
+                end_date="2023-12-31",
+            )
+
+            # Verify yfinance was called with start/end
+            call_kwargs = mock_ticker.history.call_args
+            assert call_kwargs.kwargs.get("start") == "2023-01-01"
+            assert call_kwargs.kwargs.get("end") == "2023-12-31"
+            assert len(result["equity_curve"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# 11. ATR exit checking unit tests
+# ---------------------------------------------------------------------------
+
+class TestCheckATRExits:
+    """Unit tests for the _check_atr_exits function."""
+
+    def test_hard_stop_buy(self):
+        """Hard stop should trigger for BUY when price <= hard_stop_price."""
+        from backtester import _check_atr_exits
+
+        df = _make_df([100.0] * 20)
+        should_exit, reason, _ = _check_atr_exits(
+            df, current_price=90.0, entry_price=100.0,
+            hard_stop_price=95.0, high_watermark=105.0,
+            atr_trail_mult=2.0, side="BUY",
+        )
+        assert should_exit is True
+        assert reason == "hard_stop"
+
+    def test_no_exit_above_stops(self):
+        """No exit when price is above all stop levels."""
+        from backtester import _check_atr_exits
+
+        df = _make_df(_trending_up(100, 20, 0.5))
+        should_exit, reason, _ = _check_atr_exits(
+            df, current_price=110.0, entry_price=100.0,
+            hard_stop_price=90.0, high_watermark=110.0,
+            atr_trail_mult=2.0, side="BUY",
+        )
+        assert should_exit is False
+        assert reason == ""
+
+    def test_insufficient_bars(self):
+        """With very few bars, only hard stop should be checked."""
+        from backtester import _check_atr_exits
+
+        df = _make_df([100.0, 101.0])  # only 2 bars
+        # Price is above hard stop — should not exit
+        should_exit, reason, _ = _check_atr_exits(
+            df, current_price=100.0, entry_price=100.0,
+            hard_stop_price=95.0, high_watermark=101.0,
+            atr_trail_mult=2.0, side="BUY",
+        )
+        assert should_exit is False
+
+
+# ---------------------------------------------------------------------------
+# 12. Event-driven engine tests
+# ---------------------------------------------------------------------------
+
+class TestBacktestEngine:
+    """Tests for the event-driven BacktestEngine."""
+
+    def test_portfolio_mark_to_market(self):
+        """Portfolio equity should reflect current market prices, not avg_cost."""
+        from backtest_engine import Portfolio
+        from datetime import datetime, timezone
+
+        port = Portfolio(initial_capital=100_000)
+        # Simulate a fill
+        from events import FillEvent, EventType
+        fill = FillEvent(
+            timestamp=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            type=EventType.FILL,
+            symbol="AAPL",
+            quantity=100,
+            fill_price=100.0,
+            commission=1.0,
+            direction="LONG",
+        )
+        port.update_fill(fill)
+        assert "AAPL" in port.positions
+
+        # Mark to market at higher price
+        port.update_mark_to_market(
+            {"AAPL": 110.0},
+            datetime(2023, 1, 2, tzinfo=timezone.utc),
+        )
+        # Equity should reflect 100 shares * $110 + remaining cash
+        expected_positions_val = 100 * 110.0
+        expected_equity = port.cash + expected_positions_val
+        assert port.equity == pytest.approx(expected_equity, abs=1.0)
+
+    def test_portfolio_close_position(self):
+        """Closing a position should record a trade with correct PnL."""
+        from backtest_engine import Portfolio
+        from events import FillEvent, EventType
+
+        port = Portfolio(initial_capital=100_000)
+        ts1 = datetime(2023, 1, 1, tzinfo=timezone.utc)
+        ts2 = datetime(2023, 1, 10, tzinfo=timezone.utc)
+
+        # Open
+        fill_open = FillEvent(
+            timestamp=ts1, type=EventType.FILL,
+            symbol="MSFT", quantity=50, fill_price=200.0,
+            commission=1.0, direction="LONG",
+        )
+        port.update_fill(fill_open)
+
+        # Close at higher price
+        fill_close = FillEvent(
+            timestamp=ts2, type=EventType.FILL,
+            symbol="MSFT", quantity=50, fill_price=210.0,
+            commission=1.0, direction="LONG",
+        )
+        port.update_fill(fill_close)
+
+        assert len(port.trades) == 1
+        trade = port.trades[0]
+        assert trade["symbol"] == "MSFT"
+        assert trade["entry_price"] == 200.0
+        assert trade["exit_price"] == 210.0
+        expected_pnl = (210.0 - 200.0) * 50 - 2 * 1.0  # $500 - $2 = $498
+        assert trade["pnl"] == pytest.approx(expected_pnl, abs=0.1)
+
+    def test_rule_strategy_generates_signals(self):
+        """RuleStrategy should generate entry/exit signals."""
+        from backtest_engine import RuleStrategy
+        from events import MarketEvent, EventType
+
+        strategy = RuleStrategy(
+            entry_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=0)],
+            exit_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=999)],
+            condition_logic="AND",
+        )
+
+        event = MarketEvent(
+            timestamp=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            type=EventType.MARKET,
+            symbol="TEST",
+            open=100, high=102, low=98, close=100, volume=1000,
+        )
+
+        df = _make_df([100.0] * 20)
+        signals = strategy.on_market_event(event, bars=df, held_symbols=set())
+        assert len(signals) == 1
+        assert signals[0].signal_type == "LONG"
+
+    def test_rule_strategy_exit_signal(self):
+        """RuleStrategy should generate exit signals for held positions."""
+        from backtest_engine import RuleStrategy
+        from events import MarketEvent, EventType
+
+        strategy = RuleStrategy(
+            entry_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=0)],
+            exit_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=0)],
+            condition_logic="AND",
+        )
+
+        event = MarketEvent(
+            timestamp=datetime(2023, 1, 1, tzinfo=timezone.utc),
+            type=EventType.MARKET,
+            symbol="TEST",
+            open=100, high=102, low=98, close=100, volume=1000,
+        )
+
+        df = _make_df([100.0] * 20)
+        signals = strategy.on_market_event(event, bars=df, held_symbols={"TEST"})
+        assert len(signals) == 1
+        assert signals[0].signal_type == "EXIT"

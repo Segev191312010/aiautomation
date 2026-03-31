@@ -4,6 +4,11 @@ Backtesting engine — event-driven, bar-by-bar.
 Processes historical bars sequentially. Each bar only sees data up to
 that point (no look-ahead bias). Uses the same ``_evaluate_condition()``
 logic as the live rule engine via ``evaluate_conditions()``.
+
+Exit modes:
+  - ``simple``    : percentage-based SL/TP (original behavior)
+  - ``atr_trail`` : ATR hard stop + trailing stop + EMA/SMA/RSI/MACD exits
+                    (mirrors position_tracker.check_exits from the live bot)
 """
 from __future__ import annotations
 
@@ -12,13 +17,14 @@ import logging
 import math
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from config import cfg
+from indicators import _atr, _ema, _macd, _rsi, _sma, detect_cross
 from models import BacktestMetrics, BacktestResult, BacktestTrade, Condition
 from rule_engine import evaluate_conditions
 
@@ -75,6 +81,102 @@ def _determine_warmup(
         log.warning("Warmup %d exceeds MAX_WARMUP=%d — clamping", warmup, MAX_WARMUP)
         warmup = MAX_WARMUP
     return warmup
+
+
+# ---------------------------------------------------------------------------
+# ATR-based exit checks (mirrors position_tracker.check_exits)
+# ---------------------------------------------------------------------------
+
+def _check_atr_exits(
+    df_slice: pd.DataFrame,
+    current_price: float,
+    entry_price: float,
+    hard_stop_price: float,
+    high_watermark: float,
+    atr_trail_mult: float,
+    side: str = "BUY",
+) -> tuple[bool, str, float]:
+    """
+    Check ATR-based exit conditions matching live bot's position_tracker.
+
+    Checks in priority order:
+      1. Hard stop (ATR-based, fixed at entry)
+      2. Trailing stop (ATR-based, from watermark)
+      3. EMA(21) cross below (needs 21+ bars)
+      4. SMA(50) cross below (needs 50+ bars)
+      5. RSI > 70 overbought (needs 30+ bars)
+      6. MACD histogram < 0 cross (needs 35+ bars)
+
+    Returns (should_exit, reason, exit_price).
+    """
+    close = df_slice["close"]
+    n = len(df_slice)
+
+    # 1. Hard stop
+    if side == "BUY" and current_price <= hard_stop_price:
+        return True, "hard_stop", current_price
+    if side == "SELL" and current_price >= hard_stop_price:
+        return True, "hard_stop", current_price
+
+    # 2. Trailing stop
+    if n >= 14:
+        atr_series = _atr(df_slice["high"], df_slice["low"], close, 14)
+        atr_raw = atr_series.iloc[-1]
+        if pd.notna(atr_raw):
+            current_atr = float(atr_raw)
+            if side == "BUY":
+                trail = round(high_watermark - atr_trail_mult * current_atr, 4)
+                effective = max(hard_stop_price, trail)
+                if current_price <= effective:
+                    return True, "trail_stop", current_price
+            else:
+                trail = round(high_watermark + atr_trail_mult * current_atr, 4)
+                effective = min(hard_stop_price, trail)
+                if current_price >= effective:
+                    return True, "trail_stop", current_price
+
+    # 3. EMA(21) cross below
+    if n >= 21:
+        ema21 = _ema(close, 21)
+        cross = detect_cross(close, ema21)
+        if side == "BUY" and cross == "below":
+            return True, "ema21_cross", current_price
+        if side == "SELL" and cross == "above":
+            return True, "ema21_cross", current_price
+
+    # 4. SMA(50) cross below
+    if n >= 50:
+        sma50 = _sma(close, 50)
+        cross = detect_cross(close, sma50)
+        if side == "BUY" and cross == "below":
+            return True, "sma50_cross", current_price
+        if side == "SELL" and cross == "above":
+            return True, "sma50_cross", current_price
+
+    # 5. RSI overbought / oversold
+    if n >= 30:
+        rsi_series = _rsi(close, 14)
+        rsi_raw = rsi_series.iloc[-1]
+        if pd.notna(rsi_raw):
+            rsi_val = float(rsi_raw)
+            if side == "BUY" and rsi_val > 70:
+                return True, "rsi_overbought", current_price
+            if side == "SELL" and rsi_val < 30:
+                return True, "rsi_oversold", current_price
+
+    # 6. MACD histogram zero-cross
+    if n >= 35:
+        _, _, hist = _macd(close)
+        hist_clean = hist.dropna()
+        if len(hist_clean) >= 2:
+            prev_h = float(hist_clean.iloc[-2])
+            curr_h = float(hist_clean.iloc[-1])
+            if side == "BUY" and prev_h >= 0 and curr_h < 0:
+                return True, "macd_cross", current_price
+            if side == "SELL" and prev_h <= 0 and curr_h > 0:
+                return True, "macd_cross", current_price
+
+    return False, "", 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +315,11 @@ async def run_backtest(
     stop_loss_pct: float = 0.0,
     take_profit_pct: float = 0.0,
     condition_logic: str = "AND",
+    exit_mode: str = "simple",
+    atr_stop_mult: float = 0.0,
+    atr_trail_mult: float = 0.0,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """
     Run an event-driven, bar-by-bar backtest.
@@ -221,10 +328,27 @@ async def run_backtest(
     current bar's low/high; fills happen at the detected price (or
     gap-open if the gap is worse for SL / better for TP).
     Entry fills at current bar's close price.
+
+    Args:
+        exit_mode: ``"simple"`` for percentage SL/TP (default), or
+                   ``"atr_trail"`` for ATR-based exits matching the live bot.
+        atr_stop_mult: ATR multiplier for hard stop (0 = use config default).
+        atr_trail_mult: ATR multiplier for trailing stop (0 = use config default).
+        start_date: ISO date string for custom date range (overrides period).
+        end_date: ISO date string for custom date range end.
     """
+    # Resolve ATR multipliers
+    _atr_stop_m = atr_stop_mult if atr_stop_mult > 0 else cfg.ATR_STOP_MULT
+    _atr_trail_m = atr_trail_mult if atr_trail_mult > 0 else cfg.ATR_TRAIL_MULT
 
     # -- Fetch historical data (in thread to avoid blocking event loop) --
     def _fetch() -> Any:
+        if start_date:
+            return yf.Ticker(symbol).history(
+                start=start_date,
+                end=end_date or None,
+                interval=interval,
+            )
         return yf.Ticker(symbol).history(period=period, interval=interval)
 
     raw = await asyncio.to_thread(_fetch)
@@ -273,6 +397,10 @@ async def run_backtest(
     tp_price = 0.0
     commission = cfg.SIM_COMMISSION
 
+    # ATR-trail state (only used when exit_mode == "atr_trail")
+    hard_stop_price = 0.0
+    high_watermark = 0.0
+
     just_exited = False  # prevents same-bar re-entry after an exit
     trades: list[dict] = []
     equity_curve: list[dict] = []
@@ -298,24 +426,33 @@ async def run_backtest(
         exit_reason = ""
 
         if position_qty > 0:
-            # -- Check stop-loss (gap-aware) --
-            if stop_loss_pct > 0 and sl_price > 0:
-                if current_low <= sl_price:
-                    # Intraday hit: fill at SL price
-                    # Gap-down: fill at open (worse than SL)
-                    exit_price = min(sl_price, current_open)
-                    exit_reason = "stop_loss"
+            # -- Update watermark for ATR trail mode --
+            if exit_mode == "atr_trail" and current_close > high_watermark:
+                high_watermark = current_close
 
-            # -- Check take-profit (gap-aware) --
-            if not exit_reason and take_profit_pct > 0 and tp_price > 0:
-                if current_high >= tp_price:
-                    # Intraday hit: fill at TP price
-                    # Gap-up: fill at open (better than TP)
-                    exit_price = max(tp_price, current_open)
-                    exit_reason = "take_profit"
+            if exit_mode == "atr_trail":
+                # ATR-based exit checks (mirrors live bot position_tracker)
+                should_exit, reason, _ep = _check_atr_exits(
+                    df_slice, current_close, entry_price,
+                    hard_stop_price, high_watermark, _atr_trail_m,
+                )
+                if should_exit:
+                    exit_price = current_close
+                    exit_reason = reason
+            else:
+                # Simple percentage SL/TP mode
+                if stop_loss_pct > 0 and sl_price > 0:
+                    if current_low <= sl_price:
+                        exit_price = min(sl_price, current_open)
+                        exit_reason = "stop_loss"
 
-            # -- Check exit conditions --
-            if not exit_reason:
+                if not exit_reason and take_profit_pct > 0 and tp_price > 0:
+                    if current_high >= tp_price:
+                        exit_price = max(tp_price, current_open)
+                        exit_reason = "take_profit"
+
+            # -- Check user-defined exit conditions (both modes) --
+            if not exit_reason and exit_conditions:
                 if evaluate_conditions(exit_conditions, df_slice, condition_logic):
                     exit_price = current_close
                     exit_reason = "signal"
@@ -350,6 +487,8 @@ async def run_backtest(
                 entry_price = 0.0
                 sl_price = 0.0
                 tp_price = 0.0
+                hard_stop_price = 0.0
+                high_watermark = 0.0
                 just_exited = True
 
         # -- Check entry conditions (only if not in position and no exit this bar) --
@@ -366,11 +505,27 @@ async def run_backtest(
                     entry_bar = i
                     entry_time = bar_time
 
-                    # Set SL/TP levels
-                    if stop_loss_pct > 0:
-                        sl_price = entry_price * (1 - stop_loss_pct / 100)
-                    if take_profit_pct > 0:
-                        tp_price = entry_price * (1 + take_profit_pct / 100)
+                    if exit_mode == "atr_trail":
+                        # Compute ATR(14) at entry for hard stop
+                        atr_at_entry = 0.0
+                        if len(df_slice) >= 14:
+                            atr_s = _atr(df_slice["high"], df_slice["low"],
+                                         df_slice["close"], 14)
+                            atr_raw = atr_s.iloc[-1]
+                            if pd.notna(atr_raw):
+                                atr_at_entry = float(atr_raw)
+                        hard_stop_price = (
+                            entry_price - _atr_stop_m * atr_at_entry
+                            if atr_at_entry > 0
+                            else entry_price * 0.97
+                        )
+                        high_watermark = entry_price
+                    else:
+                        # Simple percentage SL/TP
+                        if stop_loss_pct > 0:
+                            sl_price = entry_price * (1 - stop_loss_pct / 100)
+                        if take_profit_pct > 0:
+                            tp_price = entry_price * (1 + take_profit_pct / 100)
 
         # -- Mark-to-market equity --
         equity = cash + position_qty * current_close
@@ -441,4 +596,7 @@ async def run_backtest(
         "position_size_pct": position_size_pct,
         "stop_loss_pct": stop_loss_pct,
         "take_profit_pct": take_profit_pct,
+        "exit_mode": exit_mode,
+        "atr_stop_mult": _atr_stop_m if exit_mode == "atr_trail" else 0.0,
+        "atr_trail_mult": _atr_trail_m if exit_mode == "atr_trail" else 0.0,
     }

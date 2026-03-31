@@ -119,6 +119,11 @@ export default function BacktestPage() {
   const positionSizePct  = useBacktestStore((s) => s.positionSizePct)
   const stopLossPct      = useBacktestStore((s) => s.stopLossPct)
   const takeProfitPct    = useBacktestStore((s) => s.takeProfitPct)
+  const exitMode         = useBacktestStore((s) => s.exitMode)
+  const atrStopMult      = useBacktestStore((s) => s.atrStopMult)
+  const atrTrailMult     = useBacktestStore((s) => s.atrTrailMult)
+  const startDate        = useBacktestStore((s) => s.startDate)
+  const endDate          = useBacktestStore((s) => s.endDate)
   const result           = useBacktestStore((s) => s.result)
   const loading          = useBacktestStore((s) => s.loading)
   const error            = useBacktestStore((s) => s.error)
@@ -151,6 +156,11 @@ export default function BacktestPage() {
         position_size_pct: positionSizePct,
         stop_loss_pct: stopLossPct,
         take_profit_pct: takeProfitPct,
+        exit_mode: exitMode,
+        atr_stop_mult: atrStopMult,
+        atr_trail_mult: atrTrailMult,
+        start_date: startDate,
+        end_date: endDate,
       })
       setResult(backtestResult)
     } catch (err: unknown) {
@@ -381,6 +391,13 @@ export default function BacktestPage() {
                       </span>
                       <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-400 text-xs font-mono">
                         {result.period}
+                      </span>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-mono ${
+                        result.exit_mode === 'atr_trail'
+                          ? 'bg-amber-500/10 text-amber-400'
+                          : 'bg-zinc-900 text-zinc-500'
+                      }`}>
+                        {result.exit_mode === 'atr_trail' ? 'ATR Trail' : 'Simple'}
                       </span>
                       <span className="text-xs font-mono text-zinc-500">
                         {result.total_bars.toLocaleString()} bars
