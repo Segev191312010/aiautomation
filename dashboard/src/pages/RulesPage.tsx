@@ -1,5 +1,6 @@
 ﻿import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
+import { ConditionBuilder } from '@/components/rules/ConditionBuilder'
 import {
   createRule,
   deleteRule,
@@ -37,7 +38,7 @@ interface RuleFormState {
   quantity: string
   orderType: OrderType
   limitPrice: string
-  conditionsJson: string
+  conditions: Condition[]
 }
 
 const DEFAULT_CONDITIONS: Condition[] = [
@@ -64,7 +65,7 @@ const EMPTY_FORM: RuleFormState = {
   quantity: '10',
   orderType: 'MKT',
   limitPrice: '',
-  conditionsJson: JSON.stringify(DEFAULT_CONDITIONS, null, 2),
+  conditions: DEFAULT_CONDITIONS,
 }
 
 const RULE_STATUSES: RuleStatus[] = ['draft', 'paper', 'active', 'paused', 'retired']
@@ -87,25 +88,15 @@ function toFormState(rule: Rule): RuleFormState {
     quantity: String(rule.action.quantity),
     orderType: rule.action.order_type,
     limitPrice: rule.action.limit_price != null ? String(rule.action.limit_price) : '',
-    conditionsJson: JSON.stringify(rule.conditions, null, 2),
+    conditions: rule.conditions ?? DEFAULT_CONDITIONS,
   }
 }
 
 function buildRulePayload(form: RuleFormState): RuleCreate {
-  let parsedConditions: Condition[]
-  try {
-    const parsed = JSON.parse(form.conditionsJson)
-    if (!Array.isArray(parsed)) {
-      throw new Error('Conditions JSON must be an array.')
-    }
-    parsedConditions = parsed as Condition[]
-  } catch (error) {
-    throw new Error(error instanceof Error ? error.message : 'Invalid conditions JSON')
-  }
-
-  if (parsedConditions.length === 0) {
+  if (form.conditions.length === 0) {
     throw new Error('At least one condition is required.')
   }
+  const parsedConditions = form.conditions
 
   const quantity = Number(form.quantity)
   if (!Number.isFinite(quantity) || quantity <= 0) {
@@ -495,18 +486,10 @@ export default function RulesPage() {
               Enabled
             </label>
 
-            <label className="space-y-1 text-sm text-[var(--text-secondary)] block">
-              <span>Conditions JSON</span>
-              <textarea
-                value={form.conditionsJson}
-                onChange={(event) => setForm((current) => ({ ...current, conditionsJson: event.target.value }))}
-                className="min-h-[180px] w-full rounded-lg border border-[var(--border)] px-3 py-2 font-mono text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-                spellCheck={false}
-              />
-              <span className="text-xs text-[var(--text-muted)]">
-                Direct condition JSON is exposed here until a richer standard rule builder is restored.
-              </span>
-            </label>
+            <ConditionBuilder
+              conditions={form.conditions}
+              onChange={(conditions) => setForm((current) => ({ ...current, conditions }))}
+            />
 
             <div className="flex items-center gap-3">
               <button
