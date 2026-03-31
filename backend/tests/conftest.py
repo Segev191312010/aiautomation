@@ -4,6 +4,8 @@ Shared test fixtures.
 import os
 import shutil
 import sys
+from pathlib import Path
+
 import pytest
 
 # Ensure backend package is importable
@@ -11,8 +13,10 @@ _BACKEND_DIR = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, _BACKEND_DIR)
 
 # Repo-local temp root avoids Windows permission issues with the global
-# temp directory that pytest uses by default.
-_LOCAL_TMP = os.path.join(_BACKEND_DIR, ".tmp", "pytest")
+# temp directory that pytest uses by default.  Never touch getbasetemp()
+# or tempfile.gettempdir() — both can hit unwritable global paths on
+# Windows cold starts.
+_LOCAL_TMP = os.path.join(os.path.abspath(_BACKEND_DIR), ".tmp", "pytest")
 os.makedirs(_LOCAL_TMP, exist_ok=True)
 
 # Use a real temp file for the test DB.
@@ -32,11 +36,15 @@ def anyio_backend():
 
 
 @pytest.fixture
-def tmp_path(request, tmp_path_factory):
-    """Repo-local tmp_path that avoids Windows permission errors."""
-    p = os.path.join(_LOCAL_TMP, request.node.name)
-    os.makedirs(p, exist_ok=True)
-    yield type(tmp_path_factory.getbasetemp())(p)
+def tmp_path(request):
+    """Repo-local tmp_path that never touches the global temp root.
+
+    Uses pathlib.Path directly instead of tmp_path_factory.getbasetemp()
+    which would create dirs inside the unwritable global temp on Windows.
+    """
+    p = Path(_LOCAL_TMP) / request.node.name
+    p.mkdir(parents=True, exist_ok=True)
+    yield p
     # Best-effort cleanup; Windows may hold file locks
     shutil.rmtree(p, ignore_errors=True)
 

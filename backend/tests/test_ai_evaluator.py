@@ -198,3 +198,47 @@ async def test_get_evaluation_runs_list(_isolated_db, anyio_backend):
 
     runs = await get_evaluation_runs(limit=10)
     assert len(runs) == 2
+
+
+@pytest.mark.anyio
+async def test_evaluation_run_error_field_persists(_isolated_db, anyio_backend):
+    """error field must persist through create → complete → get."""
+    await init_db()
+
+    eval_id = await create_evaluation_run(
+        candidate_type="prompt_version", candidate_key="v2",
+        evaluation_mode="stored_context", request_json={},
+    )
+    await complete_evaluation_run(eval_id, summary={}, status="failed", error="Timeout during generation")
+
+    run = await get_evaluation_run(eval_id)
+    assert run["status"] == "failed"
+    assert run["error"] == "Timeout during generation"
+
+
+@pytest.mark.anyio
+async def test_evaluation_run_summary_carries_metadata(_isolated_db, anyio_backend):
+    """runs_evaluated and filters_applied must survive in summary."""
+    await init_db()
+
+    eval_id = await create_evaluation_run(
+        candidate_type="prompt_version", candidate_key="v2",
+        evaluation_mode="stored_context_existing", request_json={},
+    )
+    summary = {
+        "runs_evaluated": 5,
+        "items_count": 15,
+        "filters_applied": {
+            "min_confidence": 0.6,
+            "symbols": ["AAPL"],
+            "action_types": [],
+        },
+        "hit_rate": 0.72,
+    }
+    await complete_evaluation_run(eval_id, summary=summary)
+
+    run = await get_evaluation_run(eval_id)
+    assert run["summary"]["runs_evaluated"] == 5
+    assert run["summary"]["filters_applied"]["min_confidence"] == 0.6
+    assert run["summary"]["filters_applied"]["symbols"] == ["AAPL"]
+    assert run["summary"]["hit_rate"] == 0.72

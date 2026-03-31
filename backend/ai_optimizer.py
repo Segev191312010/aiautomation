@@ -500,8 +500,8 @@ async def run_full_optimization() -> dict:
         if run_id:
             try:
                 await finalize_decision_run(run_id, status="completed")
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("Failed to finalize decision run %s: %s", run_id, exc)
 
         # Step 4: Evaluate paper rules + auto-promote if ready
         try:

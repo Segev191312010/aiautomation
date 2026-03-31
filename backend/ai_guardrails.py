@@ -320,7 +320,8 @@ async def analyze_shadow_performance(
                 "pnl": pnl,
                 "rule_id": tdata.get("rule_id", ""),
             })
-        except Exception:
+        except Exception as exc:
+            log.debug("Skipping malformed audit trade row: %s", exc)
             continue
 
     # Pre-compute sorted trade timestamps for bisect (B17 FIX)
@@ -480,9 +481,9 @@ class GuardrailEnforcer:
             if elapsed_h < config.min_hours_between_changes:
                 return False, f"Cooldown active ({elapsed_h:.1f}h < {config.min_hours_between_changes}h)"
 
-        return self._check_action_limits(action_type, proposed_change, confidence, config)
+        return await self._check_action_limits(action_type, proposed_change, confidence, config)
 
-    def _check_action_limits(
+    async def _check_action_limits(
         self,
         action_type: str,
         change: dict,
@@ -495,10 +496,21 @@ class GuardrailEnforcer:
         if action_type == "rule_disable":
             if change.get("disabled_today", 0) >= config.max_rules_disabled_per_day:
                 return False, f"Max rule disables/day reached ({config.max_rules_disabled_per_day})"
+            # Prevent oscillation: same rule toggled more than once per day
+            rule_id = change.get("rule_id") or (change.get("old", {}) if isinstance(change.get("old"), dict) else {}).get("rule_id")
+            if rule_id:
+                oscillation = await self._check_rule_oscillation(rule_id, action_type)
+                if oscillation:
+                    return False, oscillation
 
         elif action_type == "rule_enable":
             if change.get("enabled_today", 0) >= config.max_rules_enabled_per_day:
                 return False, f"Max rule enables/day reached ({config.max_rules_enabled_per_day})"
+            rule_id = change.get("rule_id") or (change.get("old", {}) if isinstance(change.get("old"), dict) else {}).get("rule_id")
+            if rule_id:
+                oscillation = await self._check_rule_oscillation(rule_id, action_type)
+                if oscillation:
+                    return False, oscillation
 
         elif action_type == "weight_change":
             delta = abs(change.get("delta_pct", 0))
@@ -698,6 +710,25 @@ class GuardrailEnforcer:
             )
             return (await cur.fetchone())[0]
 
+    async def _check_rule_oscillation(self, rule_id: str, action_type: str) -> str | None:
+        """Prevent toggling the same rule more than once per day."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        opposite = "rule_enable" if action_type == "rule_disable" else "rule_disable"
+        try:
+            async with get_db() as db:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM ai_audit_log "
+                    "WHERE status = 'applied' AND action_type IN (?, ?) "
+                    "AND timestamp >= ? AND description LIKE ?",
+                    (action_type, opposite, today, f"%{rule_id}%"),
+                )
+                count = (await cur.fetchone())[0]
+                if count >= 1:
+                    return f"Rule {rule_id} already toggled today ({count} times) — preventing oscillation"
+        except Exception as exc:
+            log.warning("Oscillation check failed for %s: %s", rule_id, exc)
+        return None
+
     async def _last_change_at(self) -> datetime | None:
         async with get_db() as db:
             cur = await db.execute(
@@ -730,7 +761,8 @@ async def get_ai_status_dict() -> dict:
         if not cfg.SIM_MODE:
             from ibkr_client import ibkr
             broker_connected = ibkr.is_connected()
-    except Exception:
+    except Exception as exc:
+        log.debug("Broker connection check failed: %s", exc)
         broker_connected = False
 
     open_positions_count = 0
@@ -744,8 +776,8 @@ async def get_ai_status_dict() -> dict:
         open_positions_count = len(positions)
         active_rules_count = len([r for r in rules if r.enabled and r.status == "active"])
         direct_ai_open_trades_count = len([p for p in positions if p.rule_id.startswith("ai-direct:")])
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("AI status: positions/rules fetch failed: %s", exc)
 
     try:
         from config import cfg as _cfg_status
@@ -754,7 +786,8 @@ async def get_ai_status_dict() -> dict:
             from bot_runner import get_bot_health
 
             bot_health = get_bot_health()
-    except Exception:
+    except Exception as exc:
+        log.debug("Bot health fetch failed: %s", exc)
         bot_health = None
 
     return {

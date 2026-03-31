@@ -53,7 +53,8 @@ async def compute_cost_report(days: int = 30) -> dict:
                 (cutoff,),
             )
             rows = await cur.fetchall()
-        except Exception:
+        except Exception as exc:
+            log.debug("Decision run query failed, falling back to audit_log: %s", exc)
             rows = []
 
     # Fallback: audit_log if no decision runs yet
@@ -151,7 +152,8 @@ async def evaluate_past_decisions(window_days: int = 30) -> dict:
                 "SELECT COUNT(*) FROM ai_decision_runs WHERE created_at >= ?", (cutoff,)
             )
             run_count = (await cur.fetchone())[0]
-        except Exception:
+        except Exception as exc:
+            log.debug("Decision run count query failed: %s", exc)
             run_count = 0
 
     if run_count > 0:
@@ -314,7 +316,8 @@ async def _evaluate_from_audit_log(window_days: int, cutoff: str) -> dict:
                 pnl_val = tdata.get("pnl")
             pnl = float(pnl_val) if pnl_val is not None else 0.0
             trades.append({"id": t[0], "symbol": t[1], "timestamp": t[2], "pnl": pnl})
-        except Exception:
+        except Exception as exc:
+            log.debug("Skipping malformed trade row: %s", exc)
             continue
 
     if not trades:

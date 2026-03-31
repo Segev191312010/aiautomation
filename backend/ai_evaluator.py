@@ -202,8 +202,8 @@ async def get_evaluation_run(evaluation_id: str, user_id: str = "demo") -> dict 
     if r[7]:
         try:
             summary = json.loads(r[7])
-        except Exception:
-            pass
+        except (json.JSONDecodeError, ValueError) as exc:
+            log.debug("Malformed summary_json for evaluation %s: %s", evaluation_id, exc)
 
     return {
         "id": r[0], "candidate_type": r[1], "candidate_key": r[2],
@@ -234,8 +234,8 @@ async def get_evaluation_runs(
         if r[7]:
             try:
                 summary = json.loads(r[7])
-            except Exception:
-                pass
+            except (json.JSONDecodeError, ValueError) as exc:
+                log.debug("Malformed summary_json in evaluation list: %s", exc)
         results.append({
             "id": r[0], "candidate_type": r[1], "candidate_key": r[2],
             "baseline_key": r[3], "evaluation_mode": r[4],
@@ -264,8 +264,8 @@ async def get_evaluation_slices(
         metrics = {}
         try:
             metrics = json.loads(r[2])
-        except Exception:
-            pass
+        except (json.JSONDecodeError, ValueError) as exc:
+            log.debug("Malformed metrics_json in evaluation slice: %s", exc)
         results.append({
             "slice_type": r[0], "slice_key": r[1], **metrics,
         })

@@ -249,8 +249,8 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
             from ai_decision_ledger import mark_decision_item_applied
 
             await mark_decision_item_applied(trade.decision_id, created_trade_id=trade.id)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to mark decision item applied for live trade: %s", exc)
     return {"mode": cfg.AUTOPILOT_MODE, "simulated": False, "status": "applied", "trade": trade.model_dump()}
 
 

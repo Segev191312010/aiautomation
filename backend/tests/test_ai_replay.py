@@ -217,3 +217,35 @@ async def test_rule_backtest_missing_rule(_isolated_db, anyio_backend):
     result = await run_rule_backtest_replay("nonexistent-id")
 
     assert "error" in result
+
+
+# ── rule_backtest: rejects unsupported filter fields ─────────────────────────
+
+def test_rule_backtest_rejects_filter_fields():
+    """rule_backtest must 422 when filter fields are supplied."""
+    from api_contracts import ReplayRequest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="rule_backtest mode does not support filter fields"):
+        ReplayRequest(
+            candidate_type="rule_snapshot",
+            candidate_key="test-rule",
+            evaluation_mode="rule_backtest",
+            min_confidence=0.7,
+        )
+
+    with pytest.raises(ValidationError, match="rule_backtest mode does not support filter fields"):
+        ReplayRequest(
+            candidate_type="rule_snapshot",
+            candidate_key="test-rule",
+            evaluation_mode="rule_backtest",
+            symbols=["AAPL"],
+        )
+
+    # Without filters, rule_backtest should be accepted
+    req = ReplayRequest(
+        candidate_type="rule_snapshot",
+        candidate_key="test-rule",
+        evaluation_mode="rule_backtest",
+    )
+    assert req.evaluation_mode == "rule_backtest"

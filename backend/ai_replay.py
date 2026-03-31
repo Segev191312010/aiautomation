@@ -227,7 +227,8 @@ async def run_rule_backtest_replay(
             from screener import load_universe
             all_syms = load_universe(rule.universe)
             symbols = all_syms[:5]
-        except Exception:
+        except Exception as exc:
+            log.debug("Universe load failed for rule %s, falling back to SPY: %s", rule_id, exc)
             symbols = ["SPY"]
     else:
         symbols = ["SPY"]

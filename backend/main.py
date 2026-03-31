@@ -177,7 +177,8 @@ class ConnectionManager:
         for ws in list(self._connections):
             try:
                 await ws.send_text(json.dumps(data))
-            except Exception:
+            except Exception as exc:
+                log.debug("Broadcast: websocket send failed, marking dead: %s", exc)
                 dead.append(ws)
         for ws in dead:
             self.disconnect(ws)
@@ -697,7 +698,8 @@ async def _ws_batch_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
             for candidate in _ws_symbol_variants(sym):
                 try:
                     fi = yf.Ticker(candidate).fast_info
-                except Exception:
+                except Exception as exc:
+                    log.debug("fast_info failed for %s: %s", candidate, exc)
                     continue
                 raw_price = (
                     getattr(fi, "last_price", None)
@@ -781,7 +783,8 @@ async def _ws_batch_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
                         quote_ts = int(pd.Timestamp(idx).timestamp())
                         state = _market_state_from_schedule(sym, quote_ts)
                         out[sym] = (round(price, 4), quote_ts, state)
-                    except Exception:
+                    except Exception as exc:
+                        log.debug("yfinance download parse failed for %s: %s", sym, exc)
                         continue
             return out
 
@@ -878,7 +881,8 @@ async def ws_market_data(ws: WebSocket):
                 for payload in quotes.values():
                     try:
                         await ws.send_text(json.dumps(payload))
-                    except Exception:
+                    except Exception as exc:
+                        log.debug("WS quote send failed, closing: %s", exc)
                         return
 
             now = _time.time()
@@ -888,7 +892,8 @@ async def ws_market_data(ws: WebSocket):
                         json.dumps({"type": "heartbeat", "time": int(now)})
                     )
                     last_heartbeat = now
-                except Exception:
+                except Exception as exc:
+                    log.debug("WS heartbeat send failed, closing: %s", exc)
                     return
             await asyncio.sleep(_WS_PUSH_INTERVAL)
 

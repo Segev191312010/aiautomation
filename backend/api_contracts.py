@@ -7,7 +7,7 @@ enforcing consistency between backend, frontend, and the AI optimizer.
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Score bucket (used in score analysis) ────────────────────────────────────
@@ -429,6 +429,23 @@ class ReplayRequest(BaseModel):
     min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     symbols: list[str] = Field(default_factory=list)
     action_types: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def reject_filters_for_rule_backtest(self) -> "ReplayRequest":
+        if self.evaluation_mode == "rule_backtest":
+            unsupported = []
+            if self.min_confidence is not None:
+                unsupported.append("min_confidence")
+            if self.symbols:
+                unsupported.append("symbols")
+            if self.action_types:
+                unsupported.append("action_types")
+            if unsupported:
+                raise ValueError(
+                    f"rule_backtest mode does not support filter fields: {', '.join(unsupported)}. "
+                    "Use stored_context_existing or stored_context_generate for filtered replay."
+                )
+        return self
 
 
 class RuleVersionResponse(BaseModel):
