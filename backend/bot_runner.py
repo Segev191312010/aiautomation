@@ -292,8 +292,8 @@ async def _legacy_prescreen_universe_unused(candidates: list[str]) -> list[str]:
                             if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                                 liquid.append(sym.upper())
                         except Exception:
-                            # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
-                            pass
+                            log.debug("Pre-screen: malformed bars for %s", sym)
+                            _record_degraded_event()
                 else:
                     # Single symbol returned as flat df
                     sym = batch[0]
@@ -302,9 +302,8 @@ async def _legacy_prescreen_universe_unused(candidates: list[str]) -> list[str]:
                         avg_volume = float(raw["Volume"].mean())
                         if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                             liquid.append(sym.upper())
-                    except Exception:
-                        # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
-                        pass
+                    except Exception as exc:
+                        log.debug("Pre-screen %s skipped (malformed bars): %s", sym, exc)
 
                 log.info("Pre-screen batch %d/%d done — %d liquid so far",
                          i // BATCH + 1, -(-len(candidates) // BATCH), len(liquid))
@@ -383,8 +382,8 @@ async def _prescreen_universe(candidates: list[str]) -> list[str]:
                             if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                                 liquid.append(sym.upper())
                         except Exception:
-                            # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
-                            pass
+                            log.debug("Pre-screen: malformed bars for %s", sym)
+                            _record_degraded_event()
                 else:
                     sym = batch[0]
                     try:
@@ -392,9 +391,8 @@ async def _prescreen_universe(candidates: list[str]) -> list[str]:
                         avg_volume = float(raw["Volume"].mean())
                         if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                             liquid.append(sym.upper())
-                    except Exception:
-                        # TODO(STAGE3): treat malformed pre-screen bars as an explicit degraded-state signal instead of silent pass.
-                        pass
+                    except Exception as exc:
+                        log.debug("Pre-screen %s skipped (malformed bars): %s", sym, exc)
 
                 log.info(
                     "Pre-screen batch %d/%d done -> %d liquid so far",
@@ -533,8 +531,8 @@ async def _run_cycle() -> None:
         try:
             from ibkr_client import ibkr as _ibkr_scan
             _ibkr_connected = _ibkr_scan.is_connected()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("IBKR scanner check failed, using yfinance fallback: %s", exc)
     if cfg.BOT_INTERVAL_SECONDS <= 30 and _ibkr_connected:
         try:
             from ibkr_scanner import get_scan_symbols
@@ -584,8 +582,8 @@ async def _run_cycle() -> None:
                                 df.columns = [c.lower() for c in df.columns]
                                 # adj close rename removed — auto_adjust=True already handles this
                                 bars_by_symbol[sym.upper()] = df
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                log.debug("Skipped %s in bulk fetch (parse error): %s", sym, exc)
                     else:
                         # Single ticker returned as flat df
                         sym = batch[0]
@@ -620,6 +618,7 @@ async def _run_cycle() -> None:
     log.info("Fetched bars for %d / %d symbols", len(bars_by_symbol), len(all_symbols))
 
     # ── Phase 1: Process exits for tracked positions ──────────────────────────
+    _exited_this_cycle.clear()
     try:
         await _process_exits(open_positions, bars_by_symbol)
     except Exception as exc:
@@ -745,7 +744,8 @@ async def _run_cycle() -> None:
             try:
                 cycle_net_liq = (await _ibkr_pos.get_account_summary()).balance or 0.0
                 _record_ibkr_heartbeat()
-            except Exception:
+            except Exception as exc:
+                log.warning("Account summary fetch failed, using zero net_liq (will block trades): %s", exc)
                 cycle_net_liq = 0.0
         else:
             from simulation import sim_engine
@@ -795,6 +795,12 @@ async def _run_cycle() -> None:
         source = str(candidate.get("source", "rule"))
         symbol = str(candidate.get("symbol", "")).upper()
         if not symbol or symbol in executed_symbols:
+            continue
+
+        # Prevent same-cycle exit+re-entry churn (double slippage + commissions)
+        is_exit = bool(candidate.get("is_exit"))
+        if not is_exit and symbol in _exited_this_cycle:
+            log.info("Skipping re-entry of %s — exited this cycle (churn prevention)", symbol)
             continue
 
         if source == "ai_direct":
@@ -1053,7 +1059,8 @@ async def _run_cycle() -> None:
 
         try:
             if cfg.AUTOPILOT_MODE == "LIVE" and not cfg.SIM_MODE:
-                trade = await place_order(order_rule, source="rule", skip_safety=True)
+                trade = await place_order(order_rule, source="rule", skip_safety=False,
+                                        is_exit=is_exit, has_existing_position=is_exit)
             else:
                 _fill_price = price if price > 0 else (order_rule.action.limit_price or 0)
                 if _fill_price <= 0:
@@ -1110,8 +1117,8 @@ async def _run_cycle() -> None:
                 "action": rule.action.type,
                 "qty": rule.action.quantity,
             })
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Signal notification failed for %s/%s: %s", rule.name, trigger_symbol, exc)
 
         if trade:
             executed_symbols.add(trigger_symbol.upper())
@@ -1178,6 +1185,10 @@ async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Tra
 
 MAX_EXIT_ATTEMPTS = 3
 EXIT_PENDING_TIMEOUT = 90  # seconds
+
+
+# Symbols that exited this cycle — prevents same-cycle re-entry churn
+_exited_this_cycle: set[str] = set()
 
 
 async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
@@ -1272,6 +1283,7 @@ async def _reconcile_pending_exit(pos) -> None:
             "exit_price": current_price, "pnl": pnl,
         })
         log.info("EXIT FILLED %s pnl=%.2f (reconciled pending)", pos.symbol, pnl)
+        _exited_this_cycle.add(pos.symbol.upper())
         return
 
     if resolution.state == "retry":
@@ -1337,6 +1349,7 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
                 "entry_price": pos.entry_price, "exit_price": fill, "pnl": pnl,
             })
             log.info("EXIT %s qty=%d reason='%s' pnl=%.2f", sym, qty, reason, pnl)
+            _exited_this_cycle.add(sym.upper())
         elif normalized == "PENDING":
             order_recovery.mark_exit_pending_submitted(pos, exit_trade.order_id, now=now)
             await save_open_position(pos)

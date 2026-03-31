@@ -641,8 +641,8 @@ def _fetch_coinbase_spot(symbol: str) -> tuple[float, int, str] | None:
                     except ValueError:
                         pass
                 return (round(price, 4), quote_ts, "open")
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Coinbase exchange API failed for %s: %s", sym, exc)
 
     try:
         spot_req = urllib.request.Request(
@@ -656,7 +656,8 @@ def _fetch_coinbase_spot(symbol: str) -> tuple[float, int, str] | None:
         if price <= 0:
             return None
         return (round(price, 4), int(_time.time()), "open")
-    except Exception:
+    except Exception as exc:
+        log.debug("Coinbase spot API failed for %s: %s", sym, exc)
         return None
 
 
@@ -1071,8 +1072,8 @@ async def _market_heartbeat_loop() -> None:
                     "positions": positions,
                     "account": acct.model_dump(),
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Position broadcast failed: %s", exc)
 
 
 async def _start_market_heartbeat() -> None:
