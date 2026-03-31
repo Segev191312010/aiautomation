@@ -58,7 +58,11 @@ function PageSwitch() {
     default:           page = <Dashboard />
   }
 
-  return <Suspense fallback={<PageFallback />}>{page}</Suspense>
+  return (
+    <ErrorBoundary key={route}>
+      <Suspense fallback={<PageFallback />}>{page}</Suspense>
+    </ErrorBoundary>
+  )
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -93,9 +97,7 @@ export default function App() {
 
   return (
     <Layout>
-      <ErrorBoundary>
-        <PageSwitch />
-      </ErrorBoundary>
+      <PageSwitch />
     </Layout>
   )
 }
