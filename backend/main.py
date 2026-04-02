@@ -155,40 +155,11 @@ _diag_service = DiagnosticsService(
 
 
 # ---------------------------------------------------------------------------
-# WebSocket connection manager
+# WebSocket connection manager (extracted to ws_manager.py)
 # ---------------------------------------------------------------------------
+from ws_manager import ConnectionManager, manager, _broadcast  # noqa: E402
 
-class ConnectionManager:
-    def __init__(self) -> None:
-        self._connections: list[WebSocket] = []
-
-    async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
-        self._connections.append(ws)
-
-    def disconnect(self, ws: WebSocket) -> None:
-        try:
-            self._connections.remove(ws)
-        except ValueError:
-            pass
-
-    async def broadcast(self, data: dict) -> None:
-        dead: list[WebSocket] = []
-        for ws in list(self._connections):
-            try:
-                await ws.send_text(json.dumps(data))
-            except Exception as exc:
-                log.debug("Broadcast: websocket send failed, marking dead: %s", exc)
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
-
-
-manager = ConnectionManager()
 initialize_runtime_state(ws_manager=manager, data_health=_data_health, diag_service=_diag_service)
-
-async def _broadcast(payload: dict) -> None:
-    await manager.broadcast(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -443,86 +414,17 @@ async def ws_general(ws: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Shared live quote fanout cache/state for WebSocket streaming
+# Shared live quote fanout state (extracted to ws_quote_state.py)
 # ---------------------------------------------------------------------------
-
-_ws_price_cache: dict[str, tuple[float, float, int, str]] = {}  # symbol -> (price, fetch_ts, quote_ts, market_state)
-_ws_ibkr_quotes: dict[str, tuple[float, int, str]] = {}         # symbol -> (price, quote_ts, market_state)
-_ws_symbol_ref_counts: dict[str, int] = {}                      # symbol -> subscriber count
-_ws_ibkr_subscribed_symbols: set[str] = set()
-_market_dynamic_symbols: set[str] = set()
-_ws_lock = threading.Lock()
-
-_ws_last_ibkr_quote_ts: float = 0.0
-_ws_last_yahoo_quote_ts: float = 0.0
-
-_WS_CACHE_TTL = max(0.5, float(cfg.WS_CACHE_TTL_SECONDS))
-_WS_PUSH_INTERVAL = max(0.5, float(cfg.WS_PUSH_INTERVAL_SECONDS))
-_WS_STALE_WARN_SECONDS = max(1.0, float(cfg.WS_STALE_WARN_SECONDS))
-_WS_STALE_CRITICAL_SECONDS = max(_WS_STALE_WARN_SECONDS, float(cfg.WS_STALE_CRITICAL_SECONDS))
-_WS_HEARTBEAT_INTERVAL_SECONDS = 5.0
-
-_US_EASTERN = ZoneInfo("America/New_York")
-
-
-def _normalize_symbol(symbol: str) -> str:
-    return symbol.strip().upper()
-
-
-def _ws_symbol_variants(symbol: str) -> list[str]:
-    base = _normalize_symbol(symbol)
-    variants = [base]
-    dash = base.replace(".", "-")
-    dot = base.replace("-", ".")
-    for candidate in (dash, dot):
-        if candidate and candidate not in variants:
-            variants.append(candidate)
-    return variants
-
-
-def _market_state_from_schedule(symbol: str, quote_ts: int | None = None) -> str:
-    # Crypto pairs are effectively always open.
-    if symbol.endswith("-USD"):
-        return "open"
-    ts = quote_ts or int(_time.time())
-    dt = datetime.fromtimestamp(ts, tz=_US_EASTERN)
-    if dt.weekday() >= 5:
-        return "closed"
-    minutes = dt.hour * 60 + dt.minute
-    if 9 * 60 + 30 <= minutes < 16 * 60:
-        return "open"
-    if 4 * 60 <= minutes < 9 * 60 + 30 or 16 * 60 <= minutes < 20 * 60:
-        return "extended"
-    return "closed"
-
-
-def _normalize_market_state(state: str | None, symbol: str, quote_ts: int | None = None) -> str:
-    if state:
-        candidate = str(state).strip().lower()
-        if candidate in {"open", "extended", "closed", "unknown"}:
-            return candidate
-    return _market_state_from_schedule(symbol, quote_ts)
-
-
-def _build_ws_quote(
-    symbol: str,
-    price: float,
-    quote_ts: int,
-    source: str,
-    market_state: str | None = None,
-) -> dict[str, Any]:
-    now_ts = _time.time()
-    safe_ts = int(quote_ts or now_ts)
-    stale_s = round(max(0.0, now_ts - safe_ts), 3)
-    return {
-        "type": "quote",
-        "symbol": symbol,
-        "price": round(float(price), 4),
-        "time": safe_ts,
-        "source": source,
-        "market_state": _normalize_market_state(market_state, symbol, safe_ts),
-        "stale_s": stale_s,
-    }
+from ws_quote_state import (  # noqa: E402
+    _ws_price_cache, _ws_ibkr_quotes, _ws_symbol_ref_counts,
+    _ws_ibkr_subscribed_symbols, _market_dynamic_symbols, _ws_lock,
+    _ws_last_ibkr_quote_ts, _ws_last_yahoo_quote_ts,
+    _WS_CACHE_TTL, _WS_PUSH_INTERVAL, _WS_STALE_WARN_SECONDS,
+    _WS_STALE_CRITICAL_SECONDS, _WS_HEARTBEAT_INTERVAL_SECONDS, _US_EASTERN,
+    _normalize_symbol, _ws_symbol_variants, _market_state_from_schedule,
+    _normalize_market_state, _build_ws_quote,
+)
 
 
 def _on_ibkr_tick(symbol: str, price: float) -> None:
@@ -987,129 +889,15 @@ async def ws_market_data(ws: WebSocket):
 # -- Market data routes (moved to routers/market_routes.py + yahoo_data.py) --
 
 
-def _env_int(name: str, fallback: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return fallback
-    try:
-        return int(raw)
-    except ValueError:
-        log.warning("Invalid %s=%r. Using %d.", name, raw, fallback)
-        return fallback
-
-_MARKET_HEARTBEAT_INTERVAL_SECONDS = max(5, _env_int("MARKET_HEARTBEAT_INTERVAL_SECONDS", 30))
-_MARKET_HEARTBEAT_ENABLED = os.getenv("MARKET_HEARTBEAT_ENABLED", "true").lower() not in ("false", "0", "no")
-_DEFAULT_WATCHLIST = "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,XLU,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
-
-
-def _split_symbols(raw: str) -> list[str]:
-    return [s.strip().upper() for s in raw.split(",") if s.strip()]
-
-
-def _core_heartbeat_symbols() -> list[str]:
-    configured = _split_symbols(os.getenv("MARKET_HEARTBEAT_SYMBOLS", _DEFAULT_WATCHLIST))
-    if configured:
-        return configured
-    return _split_symbols(_DEFAULT_WATCHLIST)
-
-
-def _all_heartbeat_symbols() -> list[str]:
-    merged = set(_core_heartbeat_symbols())
-    merged.update(_market_dynamic_symbols)
-    return sorted(merged)
-
-
-def _track_heartbeat_symbols(symbols: list[str]) -> None:
-    for sym in symbols:
-        if sym:
-            _market_dynamic_symbols.add(sym.upper())
-
-
-def _untrack_heartbeat_symbols(symbols: list[str]) -> None:
-    for sym in symbols:
-        if sym:
-            _market_dynamic_symbols.discard(sym.upper())
-
-
-def _cache_prices_from_quotes(quotes: list[dict]) -> None:
-    global _ws_last_yahoo_quote_ts
-    ts = _time.time()
-    quote_ts = int(ts)
-    updated = False
-    for quote in quotes:
-        sym = str(quote.get("symbol", "")).upper()
-        price = quote.get("price")
-        if not sym:
-            continue
-        if isinstance(price, (int, float)) and price > 0:
-            state = _normalize_market_state(None, sym, quote_ts)
-            _ws_price_cache[sym] = (round(float(price), 4), ts, quote_ts, state)
-            updated = True
-    if updated:
-        _ws_last_yahoo_quote_ts = ts
-
-
-_position_push_counter = 0
-_market_heartbeat_task: asyncio.Task | None = None
-
-async def _market_heartbeat_loop() -> None:
-    global _position_push_counter
-    while True:
-        await asyncio.sleep(_MARKET_HEARTBEAT_INTERVAL_SECONDS)
-        symbols = _all_heartbeat_symbols()
-        if not symbols:
-            continue
-        try:
-            from yahoo_data import yf_quotes
-            quotes = await yf_quotes(",".join(symbols), source="heartbeat_quotes")
-            if quotes:
-                _cache_prices_from_quotes(quotes)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.debug("Market heartbeat fetch failed: %s", exc)
-
-        # Push live position + account updates every 3rd cycle (~15s)
-        _position_push_counter += 1
-        if _position_push_counter % 3 == 0 and ibkr.is_connected() and not cfg.SIM_MODE:
-            try:
-                positions = [p.model_dump() for p in await ibkr.get_positions()]
-                acct = await ibkr.get_account_summary()
-                await _broadcast({
-                    "type": "positions_update",
-                    "positions": positions,
-                    "account": acct.model_dump(),
-                })
-            except Exception as exc:
-                log.debug("Position broadcast failed: %s", exc)
-
-
-async def _start_market_heartbeat() -> None:
-    global _market_heartbeat_task
-    if not _MARKET_HEARTBEAT_ENABLED:
-        log.info("Market heartbeat disabled via MARKET_HEARTBEAT_ENABLED=false")
-        return
-    if _market_heartbeat_task and not _market_heartbeat_task.done():
-        return
-    _market_heartbeat_task = asyncio.create_task(_market_heartbeat_loop())
-    log.info(
-        "Market heartbeat started (interval=%ds, symbols=%d)",
-        _MARKET_HEARTBEAT_INTERVAL_SECONDS,
-        len(_all_heartbeat_symbols()),
-    )
-
-
-async def _stop_market_heartbeat() -> None:
-    global _market_heartbeat_task
-    if not _market_heartbeat_task:
-        return
-    _market_heartbeat_task.cancel()
-    try:
-        await _market_heartbeat_task
-    except asyncio.CancelledError:
-        pass
-    _market_heartbeat_task = None
-    log.info("Market heartbeat stopped")
+# ---------------------------------------------------------------------------
+# Market heartbeat (extracted to market_heartbeat.py)
+# ---------------------------------------------------------------------------
+from market_heartbeat import (  # noqa: E402
+    _start_market_heartbeat, _stop_market_heartbeat,
+    _track_heartbeat_symbols, _untrack_heartbeat_symbols,
+    _cache_prices_from_quotes, _all_heartbeat_symbols,
+    _MARKET_HEARTBEAT_ENABLED, _DEFAULT_WATCHLIST,
+)
 
 
 # ---------------------------------------------------------------------------
