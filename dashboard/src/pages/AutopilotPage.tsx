@@ -9,9 +9,11 @@ import { SectionHeader } from '@/components/common/SectionHeader'
 import PageErrorBanner from '@/components/common/PageErrorBanner'
 import { IconArrows, IconBarChart, IconDollar, IconGrid, IconHistory, IconLightning, IconShield, IconTrendUp } from '@/components/icons'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
+import { DecisionDrilldown } from '@/components/autopilot/DecisionDrilldown'
+import { EvaluationReplay } from '@/components/autopilot/EvaluationReplay'
 import { useAutopilotStore } from '@/store'
 import type { Rule } from '@/types'
-import type { AutopilotIntervention, DecisionRun, EvaluationRun, EvaluationSlice, RulePerformanceRow, SourcePerformance } from '@/types/advisor'
+import type { AutopilotIntervention, RulePerformanceRow, SourcePerformance } from '@/types/advisor'
 import {
   acknowledgeAutopilotIntervention,
   fetchAutopilotInterventions,
@@ -19,9 +21,6 @@ import {
   fetchAutopilotRulePerformance,
   fetchAutopilotRules,
   fetchAutopilotSourcePerformance,
-  fetchDecisionRuns,
-  fetchEvaluationRuns,
-  fetchEvaluationSlices,
   postEmergencyStop,
   resetDailyLossLock,
   resetEmergencyStop,
@@ -94,9 +93,7 @@ export default function AutopilotPage() {
   const [sourcePerformance, setSourcePerformance] = useState<SourcePerformance[]>([])
   const [rulePerformance, setRulePerformance] = useState<RulePerformanceRow[]>([])
   const [interventions, setInterventions] = useState<AutopilotIntervention[]>([])
-  const [decisionRuns, setDecisionRuns] = useState<DecisionRun[]>([])
-  const [evaluationRuns, setEvaluationRuns] = useState<EvaluationRun[]>([])
-  const [selectedEvalSlices, setSelectedEvalSlices] = useState<EvaluationSlice[]>([])
+  // Decision/evaluation rendering delegated to DecisionDrilldown + EvaluationReplay components
   const [pageError, setPageError] = useState<string | null>(null)
   const [dailyLossLimitInput, setDailyLossLimitInput] = useState('2.0')
 
@@ -126,16 +123,6 @@ export default function AutopilotPage() {
     catch (err) { throw new Error(err instanceof Error ? err.message : 'Failed to load interventions') }
   }, [])
 
-  const loadDecisionRuns = useCallback(async () => {
-    try { setDecisionRuns(await fetchDecisionRuns(20)) }
-    catch (err) { setPageError(err instanceof Error ? err.message : 'Failed to load decision runs') }
-  }, [])
-
-  const loadEvaluationRuns = useCallback(async () => {
-    try { setEvaluationRuns(await fetchEvaluationRuns(20)) }
-    catch (err) { setPageError(err instanceof Error ? err.message : 'Failed to load evaluation runs') }
-  }, [])
-
   const refreshOperatorConsole = useCallback(async () => {
     const results = await Promise.allSettled([
       fetchGuardrails(),
@@ -147,12 +134,10 @@ export default function AutopilotPage() {
       loadRules(),
       loadPerformanceData(),
       loadInterventions(),
-      loadDecisionRuns(),
-      loadEvaluationRuns(),
     ])
     const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     setPageError(rejected ? (rejected.reason instanceof Error ? rejected.reason.message : 'Some autopilot sections failed to refresh.') : null)
-  }, [fetchGuardrails, fetchAuditLog, fetchAIStatus, fetchLearningMetrics, fetchCostReport, fetchEconomicReport, loadRules, loadPerformanceData, loadInterventions, loadDecisionRuns, loadEvaluationRuns])
+  }, [fetchGuardrails, fetchAuditLog, fetchAIStatus, fetchLearningMetrics, fetchCostReport, fetchEconomicReport, loadRules, loadPerformanceData, loadInterventions])
 
   useEffect(() => {
     void refreshOperatorConsole()
@@ -170,8 +155,8 @@ export default function AutopilotPage() {
     { id: 'feed', label: 'Feed', count: auditLog.length },
     { id: 'performance', label: 'Performance', count: sourcePerformance.reduce((sum, item) => sum + item.trades_count, 0) },
     { id: 'rule-lab', label: 'Rule Lab', count: rules.length },
-    { id: 'evaluation', label: 'Evaluation', count: decisionRuns.length + evaluationRuns.length },
-  ], [auditLog.length, sourcePerformance, rules.length, decisionRuns.length, evaluationRuns.length])
+    { id: 'evaluation', label: 'Evaluation' },
+  ], [auditLog.length, sourcePerformance, rules.length])
 
   async function handleKillToggle() {
     try {
@@ -338,16 +323,17 @@ export default function AutopilotPage() {
       {activeTab === 'evaluation' && (
         <div className="space-y-6">
           <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
-            <SectionHeader icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Decision Ledger" title="Decision Runs" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{decisionRuns.length} runs</span>} />
-            <div className="mt-4 flex justify-end"><button type="button" onClick={() => void loadDecisionRuns()} className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]">Refresh</button></div>
-            <div className="mt-4">{decisionRuns.length ? <div className="space-y-2">{decisionRuns.map((run) => <div key={run.id} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-sm"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><span className="shell-chip px-3 py-1 text-[10px] font-mono">{run.status}</span><span className="text-[var(--text-primary)]">{run.source}</span><span className="text-[var(--text-muted)]">{run.mode}</span></div><div className="flex items-center gap-3 text-xs text-[var(--text-muted)]">{run.model && <span>{run.model}</span>}{run.aggregate_confidence != null && <span>conf {(run.aggregate_confidence * 100).toFixed(0)}%</span>}<span>{Object.values(run.item_counts).reduce((a, b) => a + b, 0)} items</span><span>{formatTimestamp(run.created_at)}</span></div></div></div>)}</div> : <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">No decision runs yet.</div>}</div>
+            <SectionHeader icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Decision Ledger" title="Decision Runs" />
+            <div className="mt-4">
+              <DecisionDrilldown />
+            </div>
           </section>
           <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '90ms' }}>
-            <SectionHeader icon={<IconGrid className="h-3.5 w-3.5 text-slate-500" />} eyebrow="Evaluation" title="Evaluation Runs" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{evaluationRuns.length} runs</span>} />
-            <div className="mt-4 flex justify-end"><button type="button" onClick={() => void loadEvaluationRuns()} className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]">Refresh</button></div>
-            <div className="mt-4">{evaluationRuns.length ? <div className="space-y-2">{evaluationRuns.map((evaluationRun) => <div key={evaluationRun.id} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3"><div className="flex items-center justify-between gap-2 text-sm"><div className="flex items-center gap-2"><span className="shell-chip px-3 py-1 text-[10px] font-mono">{evaluationRun.status}</span><span className="text-[var(--text-primary)]">{evaluationRun.evaluation_mode}</span><span className="text-[var(--text-muted)]">{evaluationRun.candidate_key}</span></div><div className="flex items-center gap-2"><button type="button" onClick={() => { void fetchEvaluationSlices(evaluationRun.id).then(setSelectedEvalSlices) }} className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]">View slices</button><span className="text-xs text-[var(--text-muted)]">{formatTimestamp(evaluationRun.created_at)}</span></div></div></div>)}</div> : <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">No evaluation runs yet.</div>}</div>
+            <SectionHeader icon={<IconGrid className="h-3.5 w-3.5 text-slate-500" />} eyebrow="Evaluation" title="Evaluation Runs" />
+            <div className="mt-4">
+              <EvaluationReplay />
+            </div>
           </section>
-          {selectedEvalSlices.length > 0 && <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '120ms' }}><SectionHeader icon={<IconBarChart className="h-3.5 w-3.5 text-[var(--accent)]" />} eyebrow="Slices" title="Evaluation Slice Detail" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{selectedEvalSlices.length} slices</span>} /><div className="mt-4 overflow-x-auto"><table className="min-w-full text-sm"><thead><tr className="border-b border-[var(--border)] text-left text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]"><th className="pb-2 pr-3">Type</th><th className="pb-2 pr-3">Key</th><th className="pb-2 pr-3">Count</th><th className="pb-2 pr-3">Scored</th><th className="pb-2 pr-3">Hit Rate</th><th className="pb-2 pr-3">Net P&L</th><th className="pb-2 pr-3">Coverage</th><th className="pb-2 pr-3">Calibration</th></tr></thead><tbody>{selectedEvalSlices.map((slice, index) => <tr key={`${slice.slice_type}:${slice.slice_key}:${index}`} className="border-b border-[var(--border)]/60 last:border-b-0"><td className="py-2 pr-3 font-medium text-[var(--text-primary)]">{slice.slice_type}</td><td className="py-2 pr-3 text-[var(--text-secondary)]">{slice.slice_key}</td><td className="py-2 pr-3">{slice.count}</td><td className="py-2 pr-3">{slice.scored_count}</td><td className="py-2 pr-3">{slice.hit_rate != null ? `${(slice.hit_rate * 100).toFixed(1)}%` : '--'}</td><td className="py-2 pr-3">{slice.net_pnl != null ? fmtUsd(slice.net_pnl) : '--'}</td><td className="py-2 pr-3">{slice.coverage != null ? `${(slice.coverage * 100).toFixed(0)}%` : '--'}</td><td className="py-2 pr-3">{slice.calibration_error != null ? slice.calibration_error.toFixed(3) : '--'}</td></tr>)}</tbody></table></div></section>}
         </div>
       )}
     </div>
