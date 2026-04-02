@@ -16,7 +16,6 @@ from ws_quote_state import (
     _market_dynamic_symbols,
     _normalize_market_state,
     _ws_price_cache,
-    _ws_last_yahoo_quote_ts,
 )
 import time as _time
 

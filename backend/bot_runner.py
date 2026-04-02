@@ -620,7 +620,7 @@ async def _run_cycle() -> None:
     log.info("Fetched bars for %d / %d symbols", len(bars_by_symbol), len(all_symbols))
 
     # ── Phase 1: Process exits for tracked positions ──────────────────────────
-    _exited_this_cycle.clear()
+    clear_exited_this_cycle()
     try:
         await _process_exits(open_positions, bars_by_symbol)
     except Exception as exc:
@@ -1192,17 +1192,6 @@ from bot_exits import (  # noqa: E402
     _exited_this_cycle, clear_exited_this_cycle, was_exited_this_cycle,
     set_broadcast as _set_exit_broadcast,
 )
-
-
-async def _emit(payload: dict) -> None:
-    if _broadcast:
-        await _broadcast(payload)
-
-
-
-# _reconcile_pending_exit, _place_exit_order, _check_retry_cap — extracted to bot_exits.py
-
-
 
 
 async def _emit(payload: dict) -> None:

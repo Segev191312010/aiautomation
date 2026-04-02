@@ -418,10 +418,10 @@ async def ws_general(ws: WebSocket):
 # ---------------------------------------------------------------------------
 # Shared live quote fanout state (extracted to ws_quote_state.py)
 # ---------------------------------------------------------------------------
+import ws_quote_state  # noqa: E402  -- mutable timestamps read/written via module attr
 from ws_quote_state import (  # noqa: E402
     _ws_price_cache, _ws_ibkr_quotes, _ws_symbol_ref_counts,
     _ws_ibkr_subscribed_symbols, _market_dynamic_symbols, _ws_lock,
-    _ws_last_ibkr_quote_ts, _ws_last_yahoo_quote_ts,
     _WS_CACHE_TTL, _WS_PUSH_INTERVAL, _WS_STALE_WARN_SECONDS,
     _WS_STALE_CRITICAL_SECONDS, _WS_HEARTBEAT_INTERVAL_SECONDS, _US_EASTERN,
     _normalize_symbol, _ws_symbol_variants, _market_state_from_schedule,
@@ -430,7 +430,6 @@ from ws_quote_state import (  # noqa: E402
 
 
 def _on_ibkr_tick(symbol: str, price: float) -> None:
-    global _ws_last_ibkr_quote_ts
     try:
         value = float(price)
     except (TypeError, ValueError):
@@ -442,7 +441,7 @@ def _on_ibkr_tick(symbol: str, price: float) -> None:
     state = _market_state_from_schedule(sym, ts)
     with _ws_lock:
         _ws_ibkr_quotes[sym] = (round(value, 4), ts, state)
-        _ws_last_ibkr_quote_ts = _time.time()
+        ws_quote_state._ws_last_ibkr_quote_ts = _time.time()
     _record_data_success("ws_ibkr_quotes", count=1)
 
 
@@ -577,7 +576,6 @@ async def _ws_batch_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
     import pandas as pd
     import yfinance as yf
 
-    global _ws_last_yahoo_quote_ts
     started = _time.perf_counter()
     now = _time.time()
     results: dict[str, dict[str, Any]] = {}
@@ -696,7 +694,7 @@ async def _ws_batch_prices(symbols: list[str]) -> dict[str, dict[str, Any]]:
             fetched = await asyncio.to_thread(_fetch_batch)
             fetch_ts = _time.time()
             if fetched:
-                _ws_last_yahoo_quote_ts = fetch_ts
+                ws_quote_state._ws_last_yahoo_quote_ts = fetch_ts
             for sym, (price, quote_ts, state) in fetched.items():
                 _ws_price_cache[sym] = (price, fetch_ts, quote_ts, state)
                 results[sym] = _build_ws_quote(sym, price, quote_ts, "yahoo", state)

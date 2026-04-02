@@ -108,19 +108,19 @@ async def get_data_health_route():
     snapshot = data_health.snapshot()
 
     try:
-        import main as main_module
+        import ws_quote_state
 
         now = _time.time()
-        ibkr_age = None if main_module._ws_last_ibkr_quote_ts <= 0 else round(max(0.0, now - main_module._ws_last_ibkr_quote_ts), 3)
-        yahoo_age = None if main_module._ws_last_yahoo_quote_ts <= 0 else round(max(0.0, now - main_module._ws_last_yahoo_quote_ts), 3)
-        with main_module._ws_lock:
-            active_symbols = sum(1 for count in main_module._ws_symbol_ref_counts.values() if count > 0)
-            ibkr_symbols = len(main_module._ws_ibkr_subscribed_symbols)
+        ibkr_age = None if ws_quote_state._ws_last_ibkr_quote_ts <= 0 else round(max(0.0, now - ws_quote_state._ws_last_ibkr_quote_ts), 3)
+        yahoo_age = None if ws_quote_state._ws_last_yahoo_quote_ts <= 0 else round(max(0.0, now - ws_quote_state._ws_last_yahoo_quote_ts), 3)
+        with ws_quote_state._ws_lock:
+            active_symbols = sum(1 for count in ws_quote_state._ws_symbol_ref_counts.values() if count > 0)
+            ibkr_symbols = len(ws_quote_state._ws_ibkr_subscribed_symbols)
         snapshot["streaming"] = {
-            "push_interval_s": main_module._WS_PUSH_INTERVAL,
-            "cache_ttl_s": main_module._WS_CACHE_TTL,
-            "stale_warn_s": main_module._WS_STALE_WARN_SECONDS,
-            "stale_critical_s": main_module._WS_STALE_CRITICAL_SECONDS,
+            "push_interval_s": ws_quote_state._WS_PUSH_INTERVAL,
+            "cache_ttl_s": ws_quote_state._WS_CACHE_TTL,
+            "stale_warn_s": ws_quote_state._WS_STALE_WARN_SECONDS,
+            "stale_critical_s": ws_quote_state._WS_STALE_CRITICAL_SECONDS,
             "active_symbols": active_symbols,
             "ibkr_subscribed_symbols": ibkr_symbols,
             "ibkr_connected": ibkr.is_connected(),
