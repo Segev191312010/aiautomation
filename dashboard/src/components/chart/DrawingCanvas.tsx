@@ -634,6 +634,8 @@ export default function DrawingCanvas({ chart, series, symbol, timeframe }: Prop
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full"
+        role="img"
+        aria-label="Chart drawing overlay"
         style={{ pointerEvents, cursor }}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}

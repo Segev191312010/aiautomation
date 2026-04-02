@@ -427,7 +427,7 @@ export default function TradingChart({
 
   return (
     <div className={clsx('relative w-full h-full', className)} style={{ touchAction: 'none' }}>
-      <div ref={containerRef} className="w-full h-full" />
+      <div ref={containerRef} className="w-full h-full" role="img" aria-label="Price chart" />
       {chartReady && chartRef.current && mainSeriesRef.current && (
         <DrawingCanvas
           key={`${symbol}_${timeframe}_${chartType}`}
