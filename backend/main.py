@@ -63,7 +63,7 @@ from zoneinfo import ZoneInfo
 
 import time as _time
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -95,12 +95,12 @@ from models import (
 )
 from order_executor import OrderError, cancel_order, get_open_orders, on_fill, place_order
 from simulation import replay_engine, sim_engine
-from auth import create_token, get_current_user
 from indicators import calculate as ind_calculate, series_to_json
 from settings import get_settings, update_settings
 from data_health import DataFreshnessMonitor
 from diagnostics_api import create_diagnostics_router
 from diagnostics_service import DiagnosticsService
+from middleware import RateLimitMiddleware, SecurityHeadersMiddleware
 from screener import (
     run_scan, list_universes, validate_timeframe, enrich_symbols,
 )
@@ -265,6 +265,8 @@ register_routers(app)
 
 # â"€â"€ CORS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
+app.add_middleware(RateLimitMiddleware, general_limit=1000, auth_limit=200)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

@@ -2,8 +2,9 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import get_current_user
 from config import cfg
 from database import get_trades
 from ibkr_client import ibkr
@@ -11,7 +12,7 @@ from simulation import sim_engine
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(tags=["positions"])
+router = APIRouter(tags=["positions"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/api/account/summary")

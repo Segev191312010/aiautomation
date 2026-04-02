@@ -1,15 +1,20 @@
 """Order routes — /api/orders/*"""
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from auth import get_current_user
 from config import cfg
 from market_data import get_latest_price
 from models import Rule, TradeAction
 from order_executor import OrderError, cancel_order, get_open_orders, place_order
 
-router = APIRouter(prefix="/api/orders", tags=["orders"])
+router = APIRouter(
+    prefix="/api/orders",
+    tags=["orders"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 class ManualOrderRequest(BaseModel):
@@ -79,4 +84,3 @@ async def place_manual_order(body: ManualOrderRequest):
     if not trade:
         raise HTTPException(502, "Order placement failed — check IBKR logs")
     return trade.model_dump()
-

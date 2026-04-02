@@ -2,15 +2,20 @@
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from auth import get_current_user
 from config import cfg
 from simulation import replay_engine, sim_engine
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/simulation", tags=["simulation"])
+router = APIRouter(
+    prefix="/api/simulation",
+    tags=["simulation"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("/account")

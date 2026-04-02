@@ -140,7 +140,12 @@ async def test_promotion_readiness_endpoint_exposes_latest_validation(tmp_path, 
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.get(f"/api/autopilot/rules/{rule.id}/promotion-readiness")
+        token_resp = await client.post("/api/auth/token")
+        assert token_resp.status_code == 200
+        resp = await client.get(
+            f"/api/autopilot/rules/{rule.id}/promotion-readiness",
+            headers={"Authorization": f"Bearer {token_resp.json()['access_token']}"},
+        )
 
     assert resp.status_code == 200
     body = resp.json()

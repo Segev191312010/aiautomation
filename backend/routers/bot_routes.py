@@ -1,10 +1,11 @@
 """Bot control + trade log routes — /api/bot/*, /api/trades"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from auth import get_current_user
 import bot_runner
 from database import get_trades
 
-router = APIRouter(tags=["bot"])
+router = APIRouter(tags=["bot"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/api/trades")

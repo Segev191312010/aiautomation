@@ -22,6 +22,12 @@ from httpx import ASGITransport, AsyncClient
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
+async def issue_auth_headers(client: AsyncClient) -> dict[str, str]:
+    resp = await client.post("/api/auth/token")
+    assert resp.status_code == 200
+    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
 @pytest.fixture
 async def client(tmp_path):
     db_path = str(tmp_path / "alert_test.db")
@@ -62,7 +68,7 @@ ALERT_BODY = {
 
 @pytest.mark.asyncio
 async def test_create_alert(client):
-    resp = await client.post("/api/alerts", json=ALERT_BODY)
+    resp = await client.post("/api/alerts", headers=await issue_auth_headers(client), json=ALERT_BODY)
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "AAPL above 250"
@@ -75,8 +81,9 @@ async def test_create_alert(client):
 
 @pytest.mark.asyncio
 async def test_list_alerts(client):
-    await client.post("/api/alerts", json=ALERT_BODY)
-    resp = await client.get("/api/alerts")
+    headers = await issue_auth_headers(client)
+    await client.post("/api/alerts", headers=headers, json=ALERT_BODY)
+    resp = await client.get("/api/alerts", headers=headers)
     assert resp.status_code == 200
     alerts = resp.json()
     assert len(alerts) >= 1
@@ -85,19 +92,22 @@ async def test_list_alerts(client):
 
 @pytest.mark.asyncio
 async def test_get_alert(client):
-    create_resp = await client.post("/api/alerts", json=ALERT_BODY)
+    headers = await issue_auth_headers(client)
+    create_resp = await client.post("/api/alerts", headers=headers, json=ALERT_BODY)
     alert_id = create_resp.json()["id"]
-    resp = await client.get(f"/api/alerts/{alert_id}")
+    resp = await client.get(f"/api/alerts/{alert_id}", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["id"] == alert_id
 
 
 @pytest.mark.asyncio
 async def test_update_alert(client):
-    create_resp = await client.post("/api/alerts", json=ALERT_BODY)
+    headers = await issue_auth_headers(client)
+    create_resp = await client.post("/api/alerts", headers=headers, json=ALERT_BODY)
     alert_id = create_resp.json()["id"]
     resp = await client.put(
         f"/api/alerts/{alert_id}",
+        headers=headers,
         json={"name": "Updated Name", "symbol": "TSLA"},
     )
     assert resp.status_code == 200
@@ -107,41 +117,43 @@ async def test_update_alert(client):
 
 @pytest.mark.asyncio
 async def test_delete_alert(client):
-    create_resp = await client.post("/api/alerts", json=ALERT_BODY)
+    headers = await issue_auth_headers(client)
+    create_resp = await client.post("/api/alerts", headers=headers, json=ALERT_BODY)
     alert_id = create_resp.json()["id"]
-    resp = await client.delete(f"/api/alerts/{alert_id}")
+    resp = await client.delete(f"/api/alerts/{alert_id}", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["deleted"] is True
     # Subsequent GET should 404
-    get_resp = await client.get(f"/api/alerts/{alert_id}")
+    get_resp = await client.get(f"/api/alerts/{alert_id}", headers=headers)
     assert get_resp.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_toggle_alert(client):
-    create_resp = await client.post("/api/alerts", json=ALERT_BODY)
+    headers = await issue_auth_headers(client)
+    create_resp = await client.post("/api/alerts", headers=headers, json=ALERT_BODY)
     alert_id = create_resp.json()["id"]
     assert create_resp.json()["enabled"] is True
     # Toggle off
-    resp = await client.post(f"/api/alerts/{alert_id}/toggle")
+    resp = await client.post(f"/api/alerts/{alert_id}/toggle", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["enabled"] is False
     # Toggle back on
-    resp2 = await client.post(f"/api/alerts/{alert_id}/toggle")
+    resp2 = await client.post(f"/api/alerts/{alert_id}/toggle", headers=headers)
     assert resp2.json()["enabled"] is True
 
 
 @pytest.mark.asyncio
 async def test_history_route_not_captured(client):
     """GET /api/alerts/history must return 200, not be treated as alert_id='history'."""
-    resp = await client.get("/api/alerts/history")
+    resp = await client.get("/api/alerts/history", headers=await issue_auth_headers(client))
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 
 
 @pytest.mark.asyncio
 async def test_test_notification_endpoint(client):
-    resp = await client.post("/api/alerts/test", json=ALERT_BODY)
+    resp = await client.post("/api/alerts/test", headers=await issue_auth_headers(client), json=ALERT_BODY)
     assert resp.status_code == 200
     data = resp.json()
     assert "triggered" in data

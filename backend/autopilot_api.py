@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from auth import get_current_user
 from ai_guardrails import (
     GuardrailEnforcer,
     get_ai_audit_log,
@@ -56,7 +57,11 @@ from rule_validation import evaluate_promotion_gate, evaluate_validation_run, re
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
+router = APIRouter(
+    prefix="/api/autopilot",
+    tags=["autopilot"],
+    dependencies=[Depends(get_current_user)],
+)
 _enforcer = GuardrailEnforcer()
 
 

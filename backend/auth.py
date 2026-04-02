@@ -1,9 +1,8 @@
 """
 Authentication scaffold — JWT tokens + demo user.
 
-This is a lightweight auth layer. The demo user auto-authenticates
-when no token is provided (for development convenience).
-Full login/registration UI comes in Stage 8.
+The demo user remains available through the explicit /api/auth/token bootstrap
+flow, but protected routes now require a bearer token on every request.
 """
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 
 import bcrypt
 import aiosqlite
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 from jose import JWTError, jwt
 
 from config import cfg
@@ -108,24 +107,29 @@ async def get_user(user_id: str) -> User | None:
 # FastAPI dependency
 # ---------------------------------------------------------------------------
 
-async def get_current_user(request: Request) -> User:
-    """
-    Extract user from Authorization header.
-    Falls back to demo user if no token is provided.
-    """
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        user_id = verify_token(token)
-        if user_id:
-            user = await get_user(user_id)
-            if user:
-                return user
-            raise HTTPException(401, "User not found")
-        raise HTTPException(401, "Invalid or expired token")
+def _raise_unauthorized(detail: str) -> None:
+    raise HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
-    # No token → return demo user
-    user = await get_user(DEMO_USER_ID)
+
+async def get_current_user(request: Request) -> User:
+    """Extract the authenticated user from the Authorization header."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        _raise_unauthorized("Missing bearer token")
+
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        _raise_unauthorized("Invalid authorization header")
+
+    user_id = verify_token(token)
+    if not user_id:
+        _raise_unauthorized("Invalid or expired token")
+
+    user = await get_user(user_id)
     if not user:
-        raise HTTPException(500, "Demo user not initialized")
+        raise HTTPException(401, "User not found", headers={"WWW-Authenticate": "Bearer"})
     return user

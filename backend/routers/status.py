@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import get_current_user
 import bot_runner
 from config import cfg
 from ibkr_client import ibkr
@@ -80,7 +81,7 @@ async def get_data_health_route():
 
 
 @router.post("/api/ibkr/connect")
-async def connect_ibkr():
+async def connect_ibkr(_user=Depends(get_current_user)):
     ok = await ibkr.connect()
     if not ok:
         raise HTTPException(502, "Could not connect to IBKR. Is IB Gateway running?")
@@ -89,6 +90,6 @@ async def connect_ibkr():
 
 
 @router.post("/api/ibkr/disconnect")
-async def disconnect_ibkr():
+async def disconnect_ibkr(_user=Depends(get_current_user)):
     await ibkr.disconnect()
     return {"connected": False}

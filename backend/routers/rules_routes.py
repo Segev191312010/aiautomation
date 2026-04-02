@@ -1,10 +1,15 @@
 """Rules CRUD routes — /api/rules/* (CRUD only, not templates/validate/export/import)"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import get_current_user
 from database import get_rules, get_rule, save_rule, delete_rule
 from models import Rule, RuleCreate, RuleUpdate
 
-router = APIRouter(prefix="/api/rules", tags=["rules"])
+router = APIRouter(
+    prefix="/api/rules",
+    tags=["rules"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 @router.get("")
