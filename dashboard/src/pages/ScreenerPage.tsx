@@ -26,8 +26,8 @@ function SectionHeader({ eyebrow, title, meta }: { eyebrow: string; title: strin
   return (
     <div className="flex items-end justify-between gap-4">
       <div>
-        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">{eyebrow}</div>
-        <h2 className="mt-1 text-lg font-sans font-semibold text-zinc-50">{title}</h2>
+        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-[var(--text-muted)]">{eyebrow}</div>
+        <h2 className="mt-1 text-lg font-sans font-semibold text-[var(--text-primary)]">{title}</h2>
       </div>
       {meta}
     </div>
@@ -37,10 +37,10 @@ function SectionHeader({ eyebrow, title, meta }: { eyebrow: string; title: strin
 function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
-      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900">
+      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--bg-primary)]">
         <svg
           xmlns="http://www.w3.org/2000/svg"
-          className="h-6 w-6 text-zinc-500"
+          className="h-6 w-6 text-[var(--text-muted)]"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -53,9 +53,9 @@ function EmptyState() {
           <path d="M8 11h6M11 8v6" />
         </svg>
       </div>
-      <p className="text-sm font-sans font-medium text-zinc-400">No scan results yet</p>
-      <p className="mt-1 max-w-sm text-xs font-sans text-zinc-500">
-        Build your filter stack, choose a universe, then hit <kbd className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 font-mono text-zinc-300">Ctrl+Enter</kbd> to scan.
+      <p className="text-sm font-sans font-medium text-[var(--text-secondary)]">No scan results yet</p>
+      <p className="mt-1 max-w-sm text-xs font-sans text-[var(--text-muted)]">
+        Build your filter stack, choose a universe, then hit <kbd className="rounded border border-[var(--border)] bg-[var(--bg-hover)] px-1.5 py-0.5 font-mono text-[var(--text-secondary)]">Ctrl+Enter</kbd> to scan.
       </p>
     </div>
   )
@@ -150,29 +150,29 @@ export default function ScreenerPage() {
         <section className="card rounded-lg p-5">
           <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
             <div className="min-w-0">
-              <div className="text-[10px] font-sans uppercase tracking-[0.24em] text-zinc-500">Scanner</div>
-              <h1 className="mt-1 text-3xl font-sans font-semibold tracking-tight text-zinc-50">Stock Screener</h1>
-              <p className="mt-2 max-w-2xl text-sm font-sans text-zinc-400">
+              <div className="text-[10px] font-sans uppercase tracking-[0.24em] text-[var(--text-muted)]">Scanner</div>
+              <h1 className="mt-1 text-3xl font-sans font-semibold tracking-tight text-[var(--text-primary)]">Stock Screener</h1>
+              <p className="mt-2 max-w-2xl text-sm font-sans text-[var(--text-secondary)]">
                 Scan a defined universe, layer technical filters, save reusable presets, and jump directly into charting or full stock analysis.
               </p>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-4">
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Universe</div>
-                <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">{selectedUniverse.toUpperCase()}</div>
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-3 py-2.5">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-secondary)]">Universe</div>
+                <div className="mt-1 text-sm font-mono font-semibold text-[var(--text-primary)]">{selectedUniverse.toUpperCase()}</div>
               </div>
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Filters</div>
-                <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">{filters.length}</div>
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-3 py-2.5">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-secondary)]">Filters</div>
+                <div className="mt-1 text-sm font-mono font-semibold text-[var(--text-primary)]">{filters.length}</div>
               </div>
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Window</div>
-                <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">{interval.toUpperCase()} / {period.toUpperCase()}</div>
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-3 py-2.5">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-secondary)]">Window</div>
+                <div className="mt-1 text-sm font-mono font-semibold text-[var(--text-primary)]">{interval.toUpperCase()} / {period.toUpperCase()}</div>
               </div>
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Top Setup</div>
-                <div className="mt-1 text-sm font-mono font-semibold text-zinc-50">
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-3 py-2.5">
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-secondary)]">Top Setup</div>
+                <div className="mt-1 text-sm font-mono font-semibold text-[var(--text-primary)]">
                   {topResult ? `${topResult.symbol} ${topResult.screener_score.toFixed(0)}` : '--'}
                 </div>
               </div>
@@ -183,13 +183,13 @@ export default function ScreenerPage() {
           {results.length > 0 && (
             <div className="mt-4 flex flex-wrap gap-2">
               {Object.entries(setupCounts).sort((a, b) => b[1] - a[1]).map(([setup, count]) => (
-                <div key={setup} className="rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-[11px] font-sans">
-                  <span className="text-zinc-400">{setup}</span>{' '}
-                  <span className="font-mono font-bold text-zinc-200">{count}</span>
+                <div key={setup} className="rounded-md border border-[var(--border)] bg-[var(--bg-hover)] px-2.5 py-1 text-[11px] font-sans">
+                  <span className="text-[var(--text-secondary)]">{setup}</span>{' '}
+                  <span className="font-mono font-bold text-[var(--text-primary)]">{count}</span>
                 </div>
               ))}
               {elapsedMs > 0 && (
-                <div className="rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-[11px] font-mono text-zinc-500">
+                <div className="rounded-md border border-[var(--border)] bg-[var(--bg-hover)] px-2.5 py-1 text-[11px] font-mono text-[var(--text-muted)]">
                   {totalSymbols} scanned in {elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`}
                 </div>
               )}
@@ -214,7 +214,7 @@ export default function ScreenerPage() {
             <SectionHeader eyebrow="Window" title="Scan Settings" />
             <div className="mt-4 space-y-4">
               <div>
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Interval</div>
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-muted)]">Interval</div>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {INTERVALS.map((item) => (
                     <button
@@ -223,8 +223,8 @@ export default function ScreenerPage() {
                       onClick={() => handleIntervalChange(item.value)}
                       className={
                         interval === item.value
-                          ? 'rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-[11px] font-sans font-medium text-white'
-                          : 'rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-sans font-medium text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-50'
+                          ? 'rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-sans font-medium text-white'
+                          : 'rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-sans font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]'
                       }
                     >
                       {item.label}
@@ -234,7 +234,7 @@ export default function ScreenerPage() {
               </div>
 
               <div>
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Lookback</div>
+                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-muted)]">Lookback</div>
                 <div className="mt-2 flex flex-wrap gap-2">
                   {availablePeriods.map((item) => (
                     <button
@@ -243,8 +243,8 @@ export default function ScreenerPage() {
                       onClick={() => setPeriod(item.value)}
                       className={
                         period === item.value
-                          ? 'rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-[11px] font-sans font-medium text-zinc-50'
-                          : 'rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-[11px] font-sans font-medium text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-50'
+                          ? 'rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-sans font-medium text-white'
+                          : 'rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-3 py-2 text-[11px] font-sans font-medium text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]'
                       }
                     >
                       {item.label}
@@ -253,14 +253,14 @@ export default function ScreenerPage() {
                 </div>
               </div>
 
-              <div className="rounded-lg border border-zinc-700 bg-zinc-800/50 p-4">
+              <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-hover)] p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Execution</div>
-                    <div className="mt-1 text-sm font-sans text-zinc-400">
+                    <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-[var(--text-muted)]">Execution</div>
+                    <div className="mt-1 text-sm font-sans text-[var(--text-secondary)]">
                       Run filters against the selected universe.
                     </div>
-                    <div className="mt-1 text-[10px] font-sans text-zinc-600">
+                    <div className="mt-1 text-[10px] font-sans text-[var(--text-muted)]">
                       Ctrl+Enter
                     </div>
                   </div>
@@ -270,13 +270,13 @@ export default function ScreenerPage() {
                     disabled={scanning}
                     className={
                       scanning
-                        ? 'rounded-lg border border-zinc-700 bg-zinc-800 px-5 py-2.5 text-[11px] font-sans font-medium text-zinc-500 cursor-not-allowed'
-                        : 'rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-5 py-2.5 text-[11px] font-sans font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/25'
+                        ? 'rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] px-5 py-2.5 text-[11px] font-sans font-medium text-[var(--text-muted)] cursor-not-allowed'
+                        : 'rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-5 py-2.5 text-[11px] font-sans font-semibold text-white transition-colors hover:bg-[color:rgba(245,158,11,0.24)]'
                     }
                   >
                     {scanning ? (
                       <span className="flex items-center gap-2">
-                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-zinc-600 border-t-cyan-400" />
+                        <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
                         Scanning...
                       </span>
                     ) : 'Run Scan'}
@@ -323,7 +323,7 @@ export default function ScreenerPage() {
       {/* Results */}
       <ErrorBoundary>
         <section className="card rounded-lg flex-1 min-h-0">
-          <div className="flex items-center justify-between gap-4 border-b border-zinc-800 px-5 py-4">
+          <div className="flex items-center justify-between gap-4 border-b border-[var(--border)] px-5 py-4">
             <SectionHeader
               eyebrow="Results"
               title="Scan Output"
@@ -334,7 +334,7 @@ export default function ScreenerPage() {
                       href={`http://127.0.0.1:5001/ib_multichart.html?symbols=${results.slice(0, 9).map(r => r.symbol).join(',')}&tf=D`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-[11px] font-semibold text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+                      className="rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-semibold text-white transition-colors hover:bg-[color:rgba(245,158,11,0.24)]"
                     >
                       Multi-Chart ({Math.min(results.length, 9)})
                     </a>

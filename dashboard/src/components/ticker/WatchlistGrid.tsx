@@ -163,21 +163,21 @@ export default function WatchlistGrid() {
   }
 
   return (
-    <div className="bg-zinc-900 border border-[#E8E4DF] rounded-lg overflow-hidden">
+    <div className="bg-[var(--bg-primary)] border border-[var(--border)] rounded-lg overflow-hidden">
       {/* Watchlist header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#E8E4DF]">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--border)]">
         <div className="flex items-center gap-2">
-          <span className="text-[11px] font-mono font-semibold text-zinc-50 uppercase tracking-wider">
+          <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)] uppercase tracking-wider">
             Watchlist
           </span>
-          <span className="flex items-center gap-1 text-[10px] font-mono text-zinc-500">
-            <span className="w-1 h-1 rounded-full bg-emerald-500" />
+          <span className="flex items-center gap-1 text-[10px] font-mono text-[var(--text-muted)]">
+            <span className="w-1 h-1 rounded-full bg-[var(--success)]" />
             LIVE
           </span>
         </div>
         <button
           title="Watchlist settings"
-          className="p-1 rounded text-zinc-500 hover:text-zinc-400 transition-colors"
+          className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
         >
           <IconSettings className="w-3.5 h-3.5" />
         </button>
@@ -197,15 +197,15 @@ export default function WatchlistGrid() {
                   'shrink-0 flex items-center gap-1.5',
                   'text-[11px] font-mono px-2.5 py-1 rounded border transition-colors',
                   isActive
-                    ? 'border-zinc-800 bg-zinc-950 text-white'
-                    : 'border-[#E8E4DF] text-zinc-400 hover:text-zinc-50 hover:border-zinc-700',
+                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-white'
+                    : 'border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent)]',
                 )}
               >
                 {wl.name}
                 <span
                   className={clsx(
                     'text-[9px] font-mono tabular-nums',
-                    isActive ? 'text-zinc-500' : 'text-zinc-500',
+                    'text-[var(--text-muted)]',
                   )}
                 >
                   {count}
@@ -217,13 +217,13 @@ export default function WatchlistGrid() {
           <button
             onClick={openAdd}
             title="Add symbols"
-            className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-dashed border-[#E8E4DF] text-zinc-500 hover:text-zinc-50 hover:border-zinc-700 transition-colors"
+            className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-dashed border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors"
           >
             + Add
           </button>
 
           <div className="ml-auto flex items-center gap-1">
-            <span className="text-[10px] font-mono text-zinc-500 mr-1">Sort:</span>
+            <span className="text-[10px] font-mono text-[var(--text-muted)] mr-1">Sort:</span>
             {SORT_OPTIONS.map(({ field, label }) => (
               <button
                 key={field}
@@ -231,8 +231,8 @@ export default function WatchlistGrid() {
                 className={clsx(
                   'text-[10px] font-mono px-2 py-0.5 rounded border transition-colors',
                   sortField === field
-                    ? 'border-zinc-800 text-zinc-50 bg-zinc-900'
-                    : 'border-[#E8E4DF] text-zinc-500 hover:text-zinc-400 hover:border-zinc-700',
+                    ? 'border-[var(--accent)] text-white bg-[var(--accent-soft)]'
+                    : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--accent)]',
                 )}
               >
                 {label}
@@ -246,24 +246,24 @@ export default function WatchlistGrid() {
 
         {/* ── Bulk add panel ───────────────────────────────────────── */}
         {showAdd && (
-          <div className="mb-3 rounded-xl border border-zinc-800 bg-zinc-900/60  p-3 flex flex-col gap-2">
+          <div className="mb-3 rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] p-3 flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-mono text-zinc-100 font-semibold">
+              <span className="text-xs font-mono text-[var(--text-primary)] font-semibold">
                 Add Symbols
               </span>
               <button
                 onClick={() => { setShowAdd(false); setAddInput(''); setFeedback('') }}
-                className="text-[10px] font-mono text-zinc-500 hover:text-red-400 transition-colors"
+                className="text-[10px] font-mono text-[var(--text-muted)] hover:text-[var(--danger)] transition-colors"
               >
                 ✕ Cancel
               </button>
             </div>
 
-            <p className="text-[10px] font-sans text-zinc-500 leading-relaxed">
+            <p className="text-[10px] font-sans text-[var(--text-muted)] leading-relaxed">
               Paste comma-separated symbols or TradingView export (e.g.{' '}
-              <span className="text-zinc-400 font-mono">AAPL, TSLA</span> or{' '}
-              <span className="text-zinc-400 font-mono">NASDAQ:AAPL</span>).
-              Crypto: <span className="text-zinc-400 font-mono">BTCUSDT → BTC-USD</span> auto-converted.
+              <span className="text-[var(--text-secondary)] font-mono">AAPL, TSLA</span> or{' '}
+              <span className="text-[var(--text-secondary)] font-mono">NASDAQ:AAPL</span>).
+              Crypto: <span className="text-[var(--text-secondary)] font-mono">BTCUSDT → BTC-USD</span> auto-converted.
             </p>
 
             <textarea
@@ -272,18 +272,18 @@ export default function WatchlistGrid() {
               onChange={(e) => { setAddInput(e.target.value); setFeedback('') }}
               placeholder={'AAPL, TSLA, NVDA\nNASDAQ:MSFT\nBINANCE:BTCUSDT'}
               rows={4}
-              className="w-full text-xs font-sans bg-[#FAF8F5] border border-zinc-800 rounded-xl px-3 py-2 text-zinc-100 focus:border-indigo-600/50 focus:outline-none resize-none"
+              className="w-full text-xs font-sans bg-[var(--bg-card)] border border-[var(--border)] rounded-xl px-3 py-2 text-[var(--text-primary)] focus:border-[var(--accent)] focus:outline-none resize-none"
             />
 
             {addFeedback && (
-              <span className="text-[10px] font-sans text-zinc-500">{addFeedback}</span>
+              <span className="text-[10px] font-sans text-[var(--text-muted)]">{addFeedback}</span>
             )}
 
             <div className="flex items-center gap-2">
               <button
                 onClick={handleBulkAdd}
                 disabled={addLoading || parsedCount === 0}
-                className="text-xs font-mono px-4 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-600/40 text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="text-xs font-mono px-4 py-1.5 rounded-xl bg-[var(--accent-soft)] border border-[var(--accent)] text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {addLoading
                   ? 'Loading…'
@@ -292,7 +292,7 @@ export default function WatchlistGrid() {
                     : 'Add'}
               </button>
               {parsedCount > 0 && (
-                <span className="text-[10px] font-sans text-zinc-500">
+                <span className="text-[10px] font-sans text-[var(--text-muted)]">
                   {parseSymbols(addInput)
                     .filter((s) => !symbols.includes(s))
                     .slice(0, 5)
@@ -354,7 +354,7 @@ function RemovableCard({
         <button
           onClick={(e) => { e.stopPropagation(); onRemove(symbol) }}
           title={`Remove ${symbol}`}
-          className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-[#FAF8F5]/80 border border-zinc-800 text-zinc-500 hover:text-red-400 hover:border-red-300 text-[9px] flex items-center justify-center transition-colors z-10"
+          className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--danger)] hover:border-[var(--danger)] text-[9px] flex items-center justify-center transition-colors z-10"
         >
           ✕
         </button>
@@ -367,20 +367,20 @@ function RemovableCard({
 
 function SkeletonCard({ label }: { label?: string }) {
   return (
-    <div className="card rounded-2xl p-3 animate-pulse border-l-2 border-l-zinc-800 border-t border-r border-b border-zinc-800">
+    <div className="card rounded-2xl p-3 animate-pulse border-l-2 border-l-[var(--border)] border-t border-r border-b border-[var(--border)]">
       <div className="flex justify-between mb-2">
-        <div className="h-3 w-16 bg-zinc-800 rounded" />
-        <div className="h-3 w-12 bg-zinc-800 rounded" />
+        <div className="h-3 w-16 bg-[var(--border)] rounded" />
+        <div className="h-3 w-12 bg-[var(--border)] rounded" />
       </div>
-      <div className="h-6 w-24 bg-zinc-800 rounded mb-1" />
-      <div className="h-2 w-16 bg-zinc-800 rounded mb-3" />
-      <div className="h-1 w-full bg-zinc-800 rounded mb-2" />
+      <div className="h-6 w-24 bg-[var(--border)] rounded mb-1" />
+      <div className="h-2 w-16 bg-[var(--border)] rounded mb-3" />
+      <div className="h-1 w-full bg-[var(--border)] rounded mb-2" />
       <div className="flex gap-4">
-        <div className="h-2 w-12 bg-zinc-800 rounded" />
-        <div className="h-2 w-12 bg-zinc-800 rounded" />
+        <div className="h-2 w-12 bg-[var(--border)] rounded" />
+        <div className="h-2 w-12 bg-[var(--border)] rounded" />
       </div>
       {label && (
-        <div className="mt-1 text-[10px] font-mono text-zinc-500">{label}</div>
+        <div className="mt-1 text-[10px] font-mono text-[var(--text-muted)]">{label}</div>
       )}
     </div>
   )
