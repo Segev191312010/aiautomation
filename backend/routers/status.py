@@ -1,7 +1,9 @@
-"""Status & IBKR connection routes - /api/status, /api/data/health, /api/ibkr/*"""
+"""Status & IBKR connection routes - /api/status, /api/health, /api/data/health, /api/ibkr/*"""
 from __future__ import annotations
 
 import logging
+import os
+import time as _time
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -14,6 +16,61 @@ from runtime_state import get_data_health, get_diag_service
 log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["status"])
+
+_START_TIME = _time.time()
+
+
+@router.get("/api/health")
+async def health_check():
+    """Deep health check — DB writable, IBKR status, bot alive, memory."""
+    checks: dict = {}
+    overall = "healthy"
+
+    # DB writable check
+    try:
+        from database import get_db
+        t0 = _time.time()
+        async with get_db() as db:
+            await db.execute("SELECT 1")
+        checks["database"] = {"status": "ok", "latency_ms": round((_time.time() - t0) * 1000, 1)}
+    except Exception as e:
+        checks["database"] = {"status": "error", "detail": str(e)}
+        overall = "unhealthy"
+
+    # IBKR connection
+    connected = ibkr.is_connected()
+    if cfg.SIM_MODE:
+        checks["ibkr"] = {"status": "skipped", "detail": "SIM_MODE"}
+    elif connected:
+        checks["ibkr"] = {"status": "connected"}
+    else:
+        checks["ibkr"] = {"status": "disconnected"}
+        overall = "degraded" if overall == "healthy" else overall
+
+    # Bot status
+    bot_running = bot_runner.is_running()
+    last_run = bot_runner.get_last_run()
+    next_run = bot_runner.get_next_run()
+    checks["bot"] = {
+        "status": "running" if bot_running else "stopped",
+        "last_cycle": last_run,
+        "next_cycle": next_run,
+    }
+
+    # Memory usage
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+        checks["memory_mb"] = round(proc.memory_info().rss / 1024 / 1024, 1)
+    except ImportError:
+        checks["memory_mb"] = None
+
+    return {
+        "status": overall,
+        "checks": checks,
+        "uptime_seconds": round(_time.time() - _START_TIME, 0),
+        "version": "1.0.0-beta",
+    }
 
 
 @router.get("/api/status")
