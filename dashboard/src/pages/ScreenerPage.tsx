@@ -129,11 +129,22 @@ export default function ScreenerPage() {
     }
   }
 
-  const handleIBKRSymbols = (symbols: string[]) => {
+  const handleIBKRSymbols = useCallback((symbols: string[]) => {
     setUniverse('custom')
     setCustomSymbols(symbols.join(', '))
     toast.success(`Loaded ${symbols.length} symbols from IBKR scan`)
-  }
+  }, [setUniverse, setCustomSymbols, toast])
+
+  // Triggered after handleIBKRSymbols — runs the main filter scan on IBKR results
+  const handleIBKRRunScan = useCallback(async () => {
+    hasScannedRef.current = true
+    try {
+      await runScan()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Scan failed'
+      toast.error(msg)
+    }
+  }, [runScan, toast])
 
   const showPrescanEmpty = !hasScannedRef.current && !scanning && results.length === 0
 
@@ -313,7 +324,10 @@ export default function ScreenerPage() {
             <div className="card rounded-lg p-5">
               <SectionHeader eyebrow="IBKR" title="Quick Scans" />
               <div className="mt-4">
-                <IBKRQuickScans onSelectSymbols={handleIBKRSymbols} />
+                <IBKRQuickScans
+                  onSelectSymbols={handleIBKRSymbols}
+                  onRunScan={handleIBKRRunScan}
+                />
               </div>
             </div>
           </ErrorBoundary>

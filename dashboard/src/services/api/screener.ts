@@ -1,6 +1,7 @@
 import type {
   EnrichResult,
   IBKRScanResponse,
+  IBKRScanResult,
   IBKRScanTemplate,
   ScanFilter,
   ScanResponse,
@@ -36,3 +37,9 @@ export const fetchIBKRScans = () =>
 
 export const runIBKRScan = (scanName: string, maxResults: number = 50) =>
   get<IBKRScanResponse>(`/api/screener/ibkr-scan/${scanName}?max_results=${maxResults}`)
+
+export const runIBKRMultiScan = (scans?: string[]) =>
+  post<Record<string, { results: IBKRScanResult[]; count: number }>>(
+    '/api/screener/ibkr-multi-scan',
+    { scans: scans ?? null },
+  )
