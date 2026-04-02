@@ -215,7 +215,7 @@ export default function AnalyticsPage() {
     }
   }, [analytics, displayAccount])
 
-  const kpis: KpiCardProps[] = liveAnalytics ? [
+  const kpis = useMemo<KpiCardProps[]>(() => liveAnalytics ? [
     {
       label:       'Portfolio Value',
       value:       fmtUSDCompact(liveAnalytics.total_value),
@@ -269,20 +269,31 @@ export default function AnalyticsPage() {
       iconBg:      'bg-rose-50',
       accentColor: 'border-l-rose-400/50',
     },
-  ] : []
+  ] : [], [liveAnalytics])
 
-  const unavailableSections = [
+  const unavailableSections = useMemo(() => [
     portfolioStatus    === 'unavailable' ? 'portfolio KPIs'    : null,
     dailyPnlStatus     === 'unavailable' ? 'daily P&L'         : null,
     exposureStatus     === 'unavailable' ? 'position exposure' : null,
     riskLimitsStatus   === 'unavailable' ? 'risk limits'       : null,
     tradeHistoryStatus === 'unavailable' ? 'trade history'     : null,
     correlationStatus  === 'unavailable' ? 'correlation matrix': null,
-  ].filter((s): s is string => s !== null)
+  ].filter((s): s is string => s !== null), [
+    portfolioStatus, dailyPnlStatus, exposureStatus,
+    riskLimitsStatus, tradeHistoryStatus, correlationStatus,
+  ])
 
-  const showCorrelation = correlation !== null
-    && correlation.symbols.length >= 3
-    && isCorrelationMatrixPayload(correlation)
+  const showCorrelation = useMemo(
+    () => correlation !== null
+      && correlation.symbols.length >= 3
+      && isCorrelationMatrixPayload(correlation),
+    [correlation],
+  )
+
+  const handleTabChange = useCallback(
+    (t: string) => setAnalyticsTab(t as AnalyticsTab),
+    [],
+  )
 
   return (
     <div className="flex flex-col gap-6 pb-4">
@@ -406,7 +417,7 @@ export default function AnalyticsPage() {
 
             <TradeBotTabs
               activeTab={analyticsTab}
-              onTabChange={(t) => setAnalyticsTab(t as AnalyticsTab)}
+              onTabChange={handleTabChange}
               tabs={[
                 { id: 'performance', label: 'Performance' },
                 { id: 'risk', label: 'Risk' },

@@ -124,6 +124,31 @@ function ActionCard({
   )
 }
 
+function DiagnosticsChip({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string
+  value: React.ReactNode
+  tone?: 'default' | 'success' | 'warning' | 'danger'
+}) {
+  const toneClass = tone === 'success'
+    ? 'border-[rgba(31,157,104,0.28)] bg-[rgba(31,157,104,0.08)] text-[var(--success)]'
+    : tone === 'warning'
+      ? 'border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.08)] text-[var(--accent)]'
+      : tone === 'danger'
+        ? 'border-[rgba(217,76,61,0.28)] bg-[rgba(217,76,61,0.08)] text-[var(--danger)]'
+        : 'border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-primary)]'
+
+  return (
+    <div className={`rounded-2xl border px-3 py-2 ${toneClass}`}>
+      <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--text-muted)]">{label}</div>
+      <div className="mt-1 text-sm font-mono font-semibold">{value}</div>
+    </div>
+  )
+}
+
 export default function Dashboard() {
   useDiagnostics()
 
@@ -153,6 +178,7 @@ export default function Dashboard() {
   const refreshing = useDiagnosticsStore((s) => s.refreshing)
   const refreshRun = useDiagnosticsStore((s) => s.refreshRun)
   const [diagnosticsExpanded, setDiagnosticsExpanded] = React.useState(false)
+  const [radarTab, setRadarTab] = React.useState<'watchlist' | 'signals'>('watchlist')
 
   const onSetLookback = React.useCallback(
     (days: 90 | 180 | 365) => {
@@ -173,8 +199,8 @@ export default function Dashboard() {
   const feedLabel = selectedQuote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback'
 
   return (
-    <div className="flex flex-col gap-6 pb-4">
-      <section className="grid gap-6 2xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.85fr)]">
+    <div className="shell-stack pb-4">
+      <section className="shell-columns shell-columns--sidebar">
         <ErrorBoundary>
           <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
@@ -235,7 +261,7 @@ export default function Dashboard() {
           </div>
         </ErrorBoundary>
 
-        <div className="flex flex-col gap-6">
+        <div className="shell-stack">
           <ErrorBoundary>
             <div className="shell-panel p-5">
               <SectionHeading
@@ -284,7 +310,7 @@ export default function Dashboard() {
         </div>
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+      <section className="shell-columns shell-columns--sidebar-tight">
         <ErrorBoundary>
           <div className="shell-panel overflow-hidden">
             <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] px-5 py-4">
@@ -335,29 +361,43 @@ export default function Dashboard() {
           </div>
         </ErrorBoundary>
 
-        <div className="grid gap-6">
+        <div className="shell-stack">
           <ErrorBoundary>
-            <div>
-              <SectionHeading
-                eyebrow="Watchlist"
-                title="Radar Grid"
-                description="Sort, prune, and switch into symbols without leaving the overview."
-              />
-              <div className="mt-3">
-                <WatchlistGrid />
+            <div className="shell-panel p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="shell-kicker">Radar</div>
+                  <h2 className="display-font mt-2 text-[1.5rem] leading-none text-[var(--text-primary)]">
+                    Watchlist & Signals
+                  </h2>
+                  <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                    Stay focused on one density-heavy surface at a time.
+                  </p>
+                </div>
+                <div className="inline-flex items-center gap-2 rounded-[999px] border border-[var(--border)] bg-[var(--bg-hover)] p-1">
+                  {([
+                    { id: 'watchlist', label: 'Watchlist' },
+                    { id: 'signals', label: 'Signals' },
+                  ] as const).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setRadarTab(tab.id)}
+                      className={clsx(
+                        'rounded-[999px] px-3 py-1.5 text-xs font-semibold transition-colors',
+                        radarTab === tab.id
+                          ? 'bg-[var(--accent)] text-white shadow'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
+                      )}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
-          </ErrorBoundary>
 
-          <ErrorBoundary>
-            <div>
-              <SectionHeading
-                eyebrow="Signals"
-                title="Opportunity Board"
-                description="Quick ranking of buy and sell pressure across the active watchlist."
-              />
-              <div className="mt-3">
-                <OpportunityBoard />
+              <div className="mt-4">
+                {radarTab === 'watchlist' ? <WatchlistGrid /> : <OpportunityBoard />}
               </div>
             </div>
           </ErrorBoundary>
@@ -385,14 +425,29 @@ export default function Dashboard() {
             <ErrorBoundary>
               <div className="shell-panel gradient-surface mt-4 p-5">
                 <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm leading-7 text-[var(--text-secondary)]">
-                      Keep the command deck lean by default, then expand into breadth, Dow confirmation,
-                      allocation signals, and news flow when you need context around a move.
+                  <div className="space-y-3">
+                    <p className="text-sm leading-6 text-[var(--text-secondary)]">
+                      Stay fast by default. Expand diagnostics when you need macro + breadth detail.
                     </p>
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      <DiagnosticsChip
+                        label="State"
+                        value={overview?.state ?? '—'}
+                        tone={overview?.state === 'GREEN' ? 'success' : overview?.state === 'YELLOW' ? 'warning' : overview?.state === 'RED' ? 'danger' : 'default'}
+                      />
+                      <DiagnosticsChip
+                        label="Composite"
+                        value={overview?.composite_score != null ? overview.composite_score.toFixed(2) : '—'}
+                      />
+                      <DiagnosticsChip
+                        label="Indicators"
+                        value={`${overview?.warn_count ?? 0} warn / ${overview?.stale_count ?? 0} stale`}
+                        tone={(overview?.warn_count ?? 0) > 0 ? 'warning' : 'default'}
+                      />
+                    </div>
                     {overview?.last_run_ts && (
-                      <p className="mt-2 text-xs font-medium uppercase tracking-[0.16em] text-[var(--text-muted)]">
-                        Last diagnostic run {new Date(overview.last_run_ts).toLocaleString()}
+                      <p className="text-xs font-medium uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                        Last run {new Date(overview.last_run_ts).toLocaleString()}
                       </p>
                     )}
                   </div>
@@ -407,7 +462,7 @@ export default function Dashboard() {
               </div>
             </ErrorBoundary>
           ) : (
-            <div className="mt-4 flex flex-col gap-4">
+            <div className="mt-4 shell-stack">
               <ErrorBoundary>
                 <DiagnosticHeaderRow
                   lookbackDays={lookbackDays}

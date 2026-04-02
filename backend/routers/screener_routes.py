@@ -1,7 +1,10 @@
 """Screener routes — /api/screener/*"""
+import csv
+import io
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from database import get_screener_presets, save_screener_preset, delete_screener_preset
@@ -103,3 +106,76 @@ async def screener_ibkr_multi_scan(body: MultiScanRequest):
         name: {"results": items, "count": len(items)}
         for name, items in results.items()
     }
+
+
+# ── CSV export ────────────────────────────────────────────────────────────────
+
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: str) -> str:
+    """Prevent CSV formula injection by prefixing dangerous values with apostrophe."""
+    s = str(value)
+    if s and s[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + s
+    return s
+
+
+@router.post("/export-csv")
+async def screener_export_csv(body: ScanRequest):
+    """Run a scan and return results as a downloadable CSV file.
+
+    Columns: Symbol, Price, Change%, Volume, Score, Setup, RVOL, Mom20D,
+    Trend, Notes, then one column per indicator key (sorted alphabetically).
+    """
+    if len(body.filters) > 15:
+        raise HTTPException(400, "Maximum 15 filters allowed")
+    if body.symbols and len(body.symbols) > 600:
+        raise HTTPException(400, "Maximum 600 symbols allowed")
+    if not validate_timeframe(body.interval, body.period):
+        raise HTTPException(400, f"Invalid interval/period combination: {body.interval}/{body.period}")
+
+    # Cap result size to prevent unbounded memory allocation
+    body.limit = min(body.limit, 600)
+
+    scan_response = await run_scan(body)
+    rows = scan_response.results
+
+    # Collect all indicator keys across every result row, then sort for a
+    # deterministic column order.
+    all_indicator_keys: set[str] = set()
+    for row in rows:
+        all_indicator_keys.update(row.indicators.keys())
+    indicator_cols = sorted(all_indicator_keys)
+
+    output = io.StringIO()
+    output.write("\ufeff")  # UTF-8 BOM for Excel auto-detection
+    writer = csv.writer(output)
+
+    # Header
+    fixed_cols = ["Symbol", "Price", "Change%", "Volume", "Score", "Setup",
+                  "RVOL", "Mom20D", "Trend", "Notes"]
+    writer.writerow(fixed_cols + [_csv_safe(col) for col in indicator_cols])
+
+    # Data rows — sanitize all string fields against formula injection
+    for row in rows:
+        writer.writerow([
+            _csv_safe(row.symbol),
+            f"{row.price:.2f}",
+            f"{row.change_pct:.2f}",
+            row.volume,
+            f"{row.screener_score:.1f}",
+            _csv_safe(row.setup),
+            f"{row.relative_volume:.2f}",
+            f"{row.momentum_20d:.2f}",
+            f"{row.trend_strength:.1f}",
+            _csv_safe("; ".join(row.notes)),
+        ] + [f"{row.indicators.get(col, 0):.4f}" for col in indicator_cols])
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=screener_results.csv"},
+    )

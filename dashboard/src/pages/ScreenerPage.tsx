@@ -155,7 +155,7 @@ export default function ScreenerPage() {
   }, {})
 
   return (
-    <div className="flex flex-col gap-5 h-full overflow-y-auto">
+    <div className="shell-stack h-full overflow-y-auto">
       {/* Header */}
       <ErrorBoundary>
         <section className="card rounded-lg p-5">
@@ -210,7 +210,7 @@ export default function ScreenerPage() {
       </ErrorBoundary>
 
       {/* Universe + Scan Settings */}
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)]">
+      <section className="shell-columns shell-columns--wide">
         <ErrorBoundary>
           <div className="card rounded-lg p-5">
             <SectionHeader eyebrow="Universe" title="Scan Coverage" />
@@ -300,7 +300,7 @@ export default function ScreenerPage() {
       </section>
 
       {/* Filter Stack + Presets + IBKR Quick Scans */}
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
+      <section className="shell-columns shell-columns--asymmetric">
         <ErrorBoundary>
           <div className="card rounded-lg p-5">
             <SectionHeader eyebrow="Rules" title="Filter Stack" />

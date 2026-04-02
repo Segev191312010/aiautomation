@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import KPICard from '@/components/tradebot/KPICard'
 import { PositionsContent } from '@/components/tradebot/PositionsContent'
 import { ActivityContent } from '@/components/tradebot/ActivityContent'
@@ -9,20 +9,6 @@ import { useAccountStore, useBotStore, useSimStore, useUIStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, fetchAccountSummary, fetchPositions } from '@/services/api'
 import type { AccountSummary } from '@/types'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
-
-const RulesPage = lazy(() => import('@/pages/RulesPage'))
-const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
-
-function TabFallback() {
-  return (
-    <div className="flex items-center justify-center py-20">
-      <div className="flex flex-col items-center gap-3">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
-        <span className="text-xs font-sans text-[var(--text-muted)]">Loading...</span>
-      </div>
-    </div>
-  )
-}
 
 function HeroSignal({
   label,
@@ -56,6 +42,13 @@ export default function TradeBotPage() {
 
   const tradebotTab = useUIStore((s) => s.tradebotTab)
   const setTradebotTab = useUIStore((s) => s.setTradebotTab)
+  const setRoute = useUIStore((s) => s.setRoute)
+
+  useEffect(() => {
+    if (tradebotTab !== 'positions' && tradebotTab !== 'activity') {
+      setTradebotTab('positions')
+    }
+  }, [tradebotTab, setTradebotTab])
 
   const displayAccount = simMode ? simAccount : account
   const netLiq = displayAccount
@@ -103,9 +96,9 @@ export default function TradeBotPage() {
   }, [simMode, setTrades, setSimAccount, setSimPositions])
 
   return (
-    <div className="flex flex-col gap-6 pb-4">
+    <div className="shell-stack pb-4">
       <ErrorBoundary>
-        <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+        <section className="shell-columns shell-columns--sidebar">
           <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
             <div className="relative">
@@ -224,17 +217,31 @@ export default function TradeBotPage() {
             <div>
               <div className="shell-kicker">Workspace</div>
               <p className="mt-2 max-w-xl text-sm leading-6 text-[var(--text-secondary)]">
-                Switch between position management, rules, autopilot, and live activity without leaving the execution desk.
+                Switch between position management and live activity without embedding whole pages.
               </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRoute('advisor')}
+                  className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-2 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                >
+                  Open Autopilot
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRoute('rules')}
+                  className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-2 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                >
+                  Open Rule Lab
+                </button>
+              </div>
             </div>
 
             <TradeBotTabs
               activeTab={tradebotTab}
-              onTabChange={(tab) => setTradebotTab(tab as 'positions' | 'rules' | 'insights' | 'activity')}
+              onTabChange={(tab) => setTradebotTab(tab as 'positions' | 'activity')}
               tabs={[
                 { id: 'positions', label: 'Positions' },
-                { id: 'rules', label: 'Rules' },
-                { id: 'insights', label: 'Autopilot' },
                 { id: 'activity', label: 'Activity' },
               ]}
             />
@@ -246,22 +253,6 @@ export default function TradeBotPage() {
         {tradebotTab === 'positions' && (
           <ErrorBoundary>
             <PositionsContent positions={positions} initialLoad={initialLoad} />
-          </ErrorBoundary>
-        )}
-
-        {tradebotTab === 'rules' && (
-          <ErrorBoundary>
-            <Suspense fallback={<TabFallback />}>
-              <RulesPage />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {tradebotTab === 'insights' && (
-          <ErrorBoundary>
-            <Suspense fallback={<TabFallback />}>
-              <AutopilotPage />
-            </Suspense>
           </ErrorBoundary>
         )}
 

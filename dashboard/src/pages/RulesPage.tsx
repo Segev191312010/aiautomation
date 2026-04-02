@@ -1,4 +1,4 @@
-﻿import { type FormEvent, useEffect, useMemo, useState } from 'react'
+﻿import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { ConditionBuilder } from '@/components/rules/ConditionBuilder'
@@ -176,7 +176,7 @@ export default function RulesPage() {
     [manualRules],
   )
 
-  async function loadManualRules() {
+  const loadManualRules = useCallback(async () => {
     setManualLoading(true)
     setManualError(null)
     try {
@@ -187,9 +187,9 @@ export default function RulesPage() {
     } finally {
       setManualLoading(false)
     }
-  }
+  }, [])
 
-  async function loadAiRules() {
+  const loadAiRules = useCallback(async () => {
     setAiLoading(true)
     setAiError(null)
     try {
@@ -199,29 +199,29 @@ export default function RulesPage() {
     } finally {
       setAiLoading(false)
     }
-  }
+  }, [])
 
-  async function refreshAll() {
+  const refreshAll = useCallback(async () => {
     await Promise.allSettled([loadManualRules(), loadAiRules()])
-  }
+  }, [loadManualRules, loadAiRules])
 
   useEffect(() => {
     void refreshAll()
-  }, [])
+  }, [refreshAll])
 
-  function resetForm() {
+  const resetForm = useCallback(() => {
     setEditingRuleId(null)
     setForm(EMPTY_FORM)
     setFormError(null)
-  }
+  }, [])
 
-  function startEdit(rule: Rule) {
+  const startEdit = useCallback((rule: Rule) => {
     setEditingRuleId(rule.id)
     setForm(toFormState(rule))
     setFormError(null)
-  }
+  }, [])
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  const handleSubmit = useCallback(async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setFormError(null)
     setSaving(true)
@@ -246,9 +246,9 @@ export default function RulesPage() {
     } finally {
       setSaving(false)
     }
-  }
+  }, [form, editingRuleId, loadManualRules, resetForm])
 
-  async function handleToggle(rule: Rule) {
+  const handleToggle = useCallback(async (rule: Rule) => {
     setManualError(null)
     try {
       await toggleRule(rule.id)
@@ -256,9 +256,9 @@ export default function RulesPage() {
     } catch (error) {
       setManualError(error instanceof Error ? error.message : `Failed to toggle ${rule.name}`)
     }
-  }
+  }, [loadManualRules])
 
-  async function handleDelete(rule: Rule) {
+  const handleDelete = useCallback(async (rule: Rule) => {
     setManualError(null)
     try {
       await deleteRule(rule.id)
@@ -269,7 +269,7 @@ export default function RulesPage() {
     } catch (error) {
       setManualError(error instanceof Error ? error.message : `Failed to delete ${rule.name}`)
     }
-  }
+  }, [editingRuleId, loadManualRules, resetForm])
 
   return (
     <div className="space-y-6 pb-8">
