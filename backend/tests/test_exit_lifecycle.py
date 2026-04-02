@@ -1,4 +1,4 @@
-﻿"""
+"""
 Exit lifecycle tests — Phase 1 account safety.
 
 Verifies that tracked positions are NEVER deleted unless the exit
@@ -9,7 +9,14 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch, MagicMock
 
+from database import init_db
 from models import OpenPosition, Trade
+
+
+@pytest.fixture(autouse=True)
+async def _ensure_schema():
+    """Ensure DB tables exist for all tests in this module."""
+    await init_db()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -62,11 +69,11 @@ async def test_failed_exit_keeps_position(anyio_backend):
     pos = _make_position()
     saved_positions = []
 
-    with patch("bot_runner.place_order", side_effect=RuntimeError("IBKR connection lost")), \
-         patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved_positions.append(p)), \
-         patch("bot_runner._emit", new_callable=AsyncMock), \
-         patch("bot_runner.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
-         patch("bot_runner.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock):
+    with patch("order_executor.place_order", side_effect=RuntimeError("IBKR connection lost")), \
+         patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved_positions.append(p)), \
+         patch("bot_exits._emit", new_callable=AsyncMock), \
+         patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
+         patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock):
 
         await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
 
@@ -84,9 +91,9 @@ async def test_pending_exit_blocks_duplicate(anyio_backend):
 
     pos = _make_position(exit_pending_order_id=99999)
 
-    with patch("bot_runner.update_watermarks", return_value=[]), \
-         patch("bot_runner._reconcile_pending_exit", new_callable=AsyncMock) as mock_reconcile, \
-         patch("bot_runner._place_exit_order", new_callable=AsyncMock) as mock_place:
+    with patch("position_tracker.update_watermarks", return_value=[]), \
+         patch("bot_exits._reconcile_pending_exit", new_callable=AsyncMock) as mock_reconcile, \
+         patch("bot_exits._place_exit_order", new_callable=AsyncMock) as mock_place:
 
         await _process_exits([pos], {"AAPL": MagicMock()})
 
@@ -108,9 +115,9 @@ async def test_filled_exit_deletes_position(anyio_backend):
     finalized_trade.realized_pnl = -20.0  # (148-150)*10
 
     with patch("database.get_trade_by_order_id", new_callable=AsyncMock, return_value=filled_trade), \
-         patch("bot_runner.save_open_position", new_callable=AsyncMock), \
-         patch("bot_runner._emit", new_callable=AsyncMock) as mock_emit, \
-         patch("bot_runner.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade) as mock_finalize:
+         patch("database.save_open_position", new_callable=AsyncMock), \
+         patch("bot_exits._emit", new_callable=AsyncMock) as mock_emit, \
+         patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade) as mock_finalize:
 
         await _reconcile_pending_exit(pos)
 
@@ -134,8 +141,8 @@ async def test_cancelled_exit_clears_pending(anyio_backend):
 
     saved = []
     with patch("database.get_trade_by_order_id", new_callable=AsyncMock, return_value=cancelled_trade), \
-         patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
-         patch("bot_runner.delete_open_position", new_callable=AsyncMock) as mock_delete:
+         patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
+         patch("database.delete_open_position", new_callable=AsyncMock) as mock_delete:
 
         await _reconcile_pending_exit(pos)
 
@@ -160,8 +167,8 @@ async def test_timeout_triggers_cancel_and_retry(anyio_backend):
     saved = []
     with patch("database.get_trade_by_order_id", new_callable=AsyncMock, return_value=pending_trade), \
          patch("order_executor.cancel_order", new_callable=AsyncMock) as mock_cancel, \
-         patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
-         patch("bot_runner.delete_open_position", new_callable=AsyncMock) as mock_delete:
+         patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
+         patch("database.delete_open_position", new_callable=AsyncMock) as mock_delete:
 
         await _reconcile_pending_exit(pos)
 
@@ -182,9 +189,9 @@ async def test_retry_cap_stops_automation(anyio_backend):
 
     pos = _make_position(exit_attempts=MAX_EXIT_ATTEMPTS)
 
-    with patch("bot_runner.update_watermarks", return_value=[]), \
-         patch("bot_runner._place_exit_order", new_callable=AsyncMock) as mock_place, \
-         patch("bot_runner.check_exits", return_value=(True, "hard_stop")):
+    with patch("position_tracker.update_watermarks", return_value=[]), \
+         patch("bot_exits._place_exit_order", new_callable=AsyncMock) as mock_place, \
+         patch("position_tracker.check_exits", return_value=(True, "hard_stop")):
 
         await _process_exits([pos], {"AAPL": MagicMock()})
 
@@ -205,10 +212,10 @@ async def test_short_pnl_positive_when_price_falls(anyio_backend):
     finalized_trade.realized_pnl = 100.0  # (150-140)*10
 
     emitted = []
-    with patch("bot_runner.place_order", new_callable=AsyncMock, return_value=filled_trade), \
-         patch("bot_runner._emit", new_callable=AsyncMock, side_effect=lambda p: emitted.append(p)), \
-         patch("bot_runner.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
-         patch("bot_runner.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
+    with patch("order_executor.place_order", new_callable=AsyncMock, return_value=filled_trade), \
+         patch("bot_exits._emit", new_callable=AsyncMock, side_effect=lambda p: emitted.append(p)), \
+         patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
+         patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
 
         await _place_exit_order(pos, "AAPL", 10, 140.0, "trail_stop")
 
@@ -228,9 +235,9 @@ async def test_place_order_returns_none_keeps_position(anyio_backend):
     pos = _make_position()
     saved = []
 
-    with patch("bot_runner.place_order", new_callable=AsyncMock, return_value=None), \
-         patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
-         patch("bot_runner.delete_open_position", new_callable=AsyncMock) as mock_delete:
+    with patch("order_executor.place_order", new_callable=AsyncMock, return_value=None), \
+         patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
+         patch("database.delete_open_position", new_callable=AsyncMock) as mock_delete:
 
         await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
 
@@ -250,7 +257,7 @@ async def test_error_exit_trade_retries_instead_of_pending(anyio_backend):
     errored_trade = _make_trade(status="ERROR", order_id=77777)
     saved = []
 
-    with patch("bot_runner.place_order", new_callable=AsyncMock, return_value=errored_trade),          patch("bot_runner.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)),          patch("bot_runner._check_retry_cap", new_callable=AsyncMock) as mock_retry_cap,          patch("bot_runner.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock):
+    with patch("order_executor.place_order", new_callable=AsyncMock, return_value=errored_trade),          patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)),          patch("bot_exits._check_retry_cap", new_callable=AsyncMock) as mock_retry_cap,          patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock):
 
         await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
 

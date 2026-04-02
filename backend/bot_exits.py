@@ -103,7 +103,8 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
 
 async def _reconcile_pending_exit(pos) -> None:
     """Resolve a position's pending exit order."""
-    from database import get_trade_by_order_id
+    from database import get_trade_by_order_id, save_open_position
+    from services import order_lifecycle, order_recovery
 
     now = datetime.now(timezone.utc)
     trade = await get_trade_by_order_id(pos.exit_pending_order_id, symbol=pos.symbol)
@@ -157,6 +158,10 @@ async def _reconcile_pending_exit(pos) -> None:
 
 async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reason: str) -> None:
     """Place a fresh exit order and track it on the position."""
+    from database import save_open_position
+    from order_executor import OrderError, place_order
+    from services import order_lifecycle, order_recovery
+
     exit_action = "SELL" if pos.side == "BUY" else "BUY"
     exit_rule = Rule(
         id=pos.rule_id,
