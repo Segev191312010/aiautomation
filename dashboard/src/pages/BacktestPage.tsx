@@ -6,6 +6,7 @@ import { BacktestParams } from '@/components/backtest/BacktestParams'
 import { EquityCurve } from '@/components/backtest/EquityCurve'
 import { MetricsPanel } from '@/components/backtest/MetricsPanel'
 import { BacktestTradeLog } from '@/components/backtest/BacktestTradeLog'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import type { BacktestResult } from '@/types'
 
 const PERIODS = ['6mo', '1y', '2y', '5y']
@@ -208,102 +209,110 @@ export default function BacktestPage() {
       <div className="w-[40%] flex flex-col gap-5 overflow-y-auto pr-2">
 
         {/* Config card */}
-        <div className="card rounded-2xl  p-5">
-          {/* Section header */}
-          <div className="flex items-center gap-2 mb-5 pb-4 border-b border-zinc-800">
-            <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600">
-              <IconBeaker className="w-4 h-4" />
-            </span>
-            <h2 className="text-sm font-sans font-semibold text-zinc-100">Strategy Configuration</h2>
-          </div>
+        <ErrorBoundary>
+          <div className="card rounded-2xl  p-5">
+            {/* Section header */}
+            <div className="flex items-center gap-2 mb-5 pb-4 border-b border-zinc-800">
+              <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600">
+                <IconBeaker className="w-4 h-4" />
+              </span>
+              <h2 className="text-sm font-sans font-semibold text-zinc-100">Strategy Configuration</h2>
+            </div>
 
-          {/* Inputs row */}
-          <div className="flex items-end gap-4 flex-wrap">
+            {/* Inputs row */}
+            <div className="flex items-end gap-4 flex-wrap">
 
-            {/* Symbol */}
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Symbol</label>
-              <div className="relative flex items-center">
-                <span className="absolute left-2.5 text-zinc-500 pointer-events-none">
-                  <IconTicker className="w-3.5 h-3.5" />
-                </span>
-                <input
-                  className="bg-zinc-900 border border-zinc-800 rounded-xl pl-8 pr-3 py-1.5 text-sm font-mono text-zinc-100 w-24 uppercase focus:outline-none focus:border-indigo-100 focus:ring-1 focus:ring-indigo-300 transition-all placeholder:text-zinc-500"
-                  placeholder="SPY"
-                  value={symbol}
-                  onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+              {/* Symbol */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Symbol</label>
+                <div className="relative flex items-center">
+                  <span className="absolute left-2.5 text-zinc-500 pointer-events-none">
+                    <IconTicker className="w-3.5 h-3.5" />
+                  </span>
+                  <input
+                    className="bg-zinc-900 border border-zinc-800 rounded-xl pl-8 pr-3 py-1.5 text-sm font-mono text-zinc-100 w-24 uppercase focus:outline-none focus:border-indigo-100 focus:ring-1 focus:ring-indigo-300 transition-all placeholder:text-zinc-500"
+                    placeholder="SPY"
+                    value={symbol}
+                    onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+                  />
+                </div>
+              </div>
+
+              {/* Period */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Period</label>
+                <PillSelector
+                  options={PERIODS}
+                  value={period}
+                  onChange={setPeriod}
+                />
+              </div>
+
+              {/* Interval */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Interval</label>
+                <PillSelector
+                  options={INTERVALS}
+                  value={interval}
+                  onChange={setInterval}
                 />
               </div>
             </div>
 
-            {/* Period */}
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Period</label>
-              <PillSelector
-                options={PERIODS}
-                value={period}
-                onChange={setPeriod}
-              />
-            </div>
-
-            {/* Interval */}
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-sans font-medium text-zinc-400 tracking-wide">Interval</label>
-              <PillSelector
-                options={INTERVALS}
-                value={interval}
-                onChange={setInterval}
-              />
+            {/* Divider */}
+            <div className="mt-5 pt-4 border-t border-zinc-800">
+              <button
+                onClick={handleRun}
+                disabled={!isReady}
+                className={`
+                  w-full flex items-center justify-center gap-2.5 px-6 py-2.5 rounded-xl text-sm font-sans font-semibold
+                  transition-all duration-200 select-none
+                  ${isReady
+                    ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-400 hover:to-purple-400 text-white shadow-glow-blue hover:shadow-[0_0_28px_rgba(99,102,241,0.35)]'
+                    : 'bg-gradient-to-r from-indigo-700 to-purple-800 text-white/40 cursor-not-allowed'
+                  }
+                `}
+              >
+                {loading ? (
+                  <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                ) : (
+                  <IconPlay className="w-4 h-4 shrink-0" />
+                )}
+                {loading ? 'Running...' : 'Run Backtest'}
+              </button>
             </div>
           </div>
-
-          {/* Divider */}
-          <div className="mt-5 pt-4 border-t border-zinc-800">
-            <button
-              onClick={handleRun}
-              disabled={!isReady}
-              className={`
-                w-full flex items-center justify-center gap-2.5 px-6 py-2.5 rounded-xl text-sm font-sans font-semibold
-                transition-all duration-200 select-none
-                ${isReady
-                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-400 hover:to-purple-400 text-white shadow-glow-blue hover:shadow-[0_0_28px_rgba(99,102,241,0.35)]'
-                  : 'bg-gradient-to-r from-indigo-700 to-purple-800 text-white/40 cursor-not-allowed'
-                }
-              `}
-            >
-              {loading ? (
-                <svg className="animate-spin h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                </svg>
-              ) : (
-                <IconPlay className="w-4 h-4 shrink-0" />
-              )}
-              {loading ? 'Running...' : 'Run Backtest'}
-            </button>
-          </div>
-        </div>
+        </ErrorBoundary>
 
         {/* Strategy builder + params */}
-        <StrategyBuilder />
-        <BacktestParams />
+        <ErrorBoundary>
+          <StrategyBuilder />
+        </ErrorBoundary>
+        <ErrorBoundary>
+          <BacktestParams />
+        </ErrorBoundary>
 
         {/* Saved backtests */}
         {savedBacktests.length > 0 && (
-          <div className="card rounded-2xl  p-5">
-            <div className="flex items-center gap-2 mb-3 pb-3 border-b border-zinc-800">
-              <h3 className="text-xs font-sans font-medium text-zinc-400 tracking-wide uppercase">Saved Backtests</h3>
-              <span className="ml-auto text-xs font-mono text-zinc-500">{savedBacktests.length}</span>
+          <ErrorBoundary>
+            <div className="card rounded-2xl  p-5">
+              <div className="flex items-center gap-2 mb-3 pb-3 border-b border-zinc-800">
+                <h3 className="text-xs font-sans font-medium text-zinc-400 tracking-wide uppercase">Saved Backtests</h3>
+                <span className="ml-auto text-xs font-mono text-zinc-500">{savedBacktests.length}</span>
+              </div>
+              <div className="space-y-1.5">
+                {savedBacktests.map((bt) => (
+                  <div key={bt.id} className="flex items-center justify-between bg-zinc-900/50 hover:bg-zinc-900/80 rounded-xl px-3 py-2 text-xs transition-colors group">
+                    <span className="font-sans text-zinc-100 group-hover:text-white transition-colors">{bt.name}</span>
+                    <span className="font-mono text-zinc-500">{bt.symbol} &bull; {bt.num_trades} trades</span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="space-y-1.5">
-              {savedBacktests.map((bt) => (
-                <div key={bt.id} className="flex items-center justify-between bg-zinc-900/50 hover:bg-zinc-900/80 rounded-xl px-3 py-2 text-xs transition-colors group">
-                  <span className="font-sans text-zinc-100 group-hover:text-white transition-colors">{bt.name}</span>
-                  <span className="font-mono text-zinc-500">{bt.symbol} &bull; {bt.num_trades} trades</span>
-                </div>
-              ))}
-            </div>
-          </div>
+          </ErrorBoundary>
         )}
       </div>
 
@@ -312,63 +321,69 @@ export default function BacktestPage() {
 
         {/* Error state */}
         {error && (
-          <div className="card rounded-2xl border border-red-300/25 bg-red-600/[0.06] p-5 animate-fade-in-up">
-            <div className="flex items-start gap-3">
-              <span className="shrink-0 text-red-400 mt-0.5">
-                <IconWarning className="w-5 h-5" />
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-sans font-medium text-red-400 mb-0.5">Backtest Failed</p>
-                <p className="text-xs font-mono text-red-400/70 break-words">{error}</p>
+          <ErrorBoundary>
+            <div className="card rounded-2xl border border-red-300/25 bg-red-600/[0.06] p-5 animate-fade-in-up">
+              <div className="flex items-start gap-3">
+                <span className="shrink-0 text-red-400 mt-0.5">
+                  <IconWarning className="w-5 h-5" />
+                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-sans font-medium text-red-400 mb-0.5">Backtest Failed</p>
+                  <p className="text-xs font-mono text-red-400/70 break-words">{error}</p>
+                </div>
+                <button
+                  onClick={handleRun}
+                  className="shrink-0 flex items-center gap-1.5 text-xs font-sans font-medium text-red-400/80 hover:text-red-400 bg-red-600/10 hover:bg-red-600/20 px-3 py-1.5 rounded-lg border border-red-300/20 transition-all"
+                >
+                  <IconPlay className="w-3 h-3" />
+                  Retry
+                </button>
               </div>
-              <button
-                onClick={handleRun}
-                className="shrink-0 flex items-center gap-1.5 text-xs font-sans font-medium text-red-400/80 hover:text-red-400 bg-red-600/10 hover:bg-red-600/20 px-3 py-1.5 rounded-lg border border-red-300/20 transition-all"
-              >
-                <IconPlay className="w-3 h-3" />
-                Retry
-              </button>
             </div>
-          </div>
+          </ErrorBoundary>
         )}
 
         {/* Loading state */}
         {loading && !result && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-5 animate-fade-in-up">
-            {/* Animated ring */}
-            <div className="relative flex items-center justify-center w-16 h-16">
-              <div className="absolute inset-0 rounded-full border-2 border-indigo-600/10" />
-              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-indigo-400 animate-spin" />
-              <div className="absolute inset-2 rounded-full border border-purple-500/20 border-t-purple-400 animate-[spin_1.5s_linear_infinite_reverse]" />
-              <IconChart className="w-5 h-5 text-indigo-600/60" />
+          <ErrorBoundary>
+            <div className="flex-1 flex flex-col items-center justify-center gap-5 animate-fade-in-up">
+              {/* Animated ring */}
+              <div className="relative flex items-center justify-center w-16 h-16">
+                <div className="absolute inset-0 rounded-full border-2 border-indigo-600/10" />
+                <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-indigo-400 animate-spin" />
+                <div className="absolute inset-2 rounded-full border border-purple-500/20 border-t-purple-400 animate-[spin_1.5s_linear_infinite_reverse]" />
+                <IconChart className="w-5 h-5 text-indigo-600/60" />
+              </div>
+              <div className="text-center space-y-1.5">
+                <p className="text-sm font-sans font-medium text-zinc-400">
+                  Running backtest for{' '}
+                  <span className="font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-md">
+                    {symbol || 'symbol'}
+                  </span>
+                </p>
+                <p className="text-xs font-sans text-zinc-500">Processing bar-by-bar simulation...</p>
+              </div>
             </div>
-            <div className="text-center space-y-1.5">
-              <p className="text-sm font-sans font-medium text-zinc-400">
-                Running backtest for{' '}
-                <span className="font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded-md">
-                  {symbol || 'symbol'}
-                </span>
-              </p>
-              <p className="text-xs font-sans text-zinc-500">Processing bar-by-bar simulation...</p>
-            </div>
-          </div>
+          </ErrorBoundary>
         )}
 
         {/* Empty state */}
         {!result && !error && !loading && (
-          <div className="flex-1 flex items-center justify-center animate-fade-in-up">
-            <div className="flex flex-col items-center gap-4 p-10 rounded-2xl border border-zinc-800 bg-zinc-900/[0.01] max-w-sm text-center">
-              <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800">
-                <IconBeaker className="w-7 h-7 text-zinc-500" />
-              </div>
-              <div className="space-y-1.5">
-                <p className="text-sm font-sans font-medium text-zinc-400">No Results Yet</p>
-                <p className="text-xs font-sans text-zinc-500 leading-relaxed">
-                  Configure a strategy on the left and run a backtest to see your equity curve, metrics, and trade log here.
-                </p>
+          <ErrorBoundary>
+            <div className="flex-1 flex items-center justify-center animate-fade-in-up">
+              <div className="flex flex-col items-center gap-4 p-10 rounded-2xl border border-zinc-800 bg-zinc-900/[0.01] max-w-sm text-center">
+                <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800">
+                  <IconBeaker className="w-7 h-7 text-zinc-500" />
+                </div>
+                <div className="space-y-1.5">
+                  <p className="text-sm font-sans font-medium text-zinc-400">No Results Yet</p>
+                  <p className="text-xs font-sans text-zinc-500 leading-relaxed">
+                    Configure a strategy on the left and run a backtest to see your equity curve, metrics, and trade log here.
+                  </p>
+                </div>
               </div>
             </div>
-          </div>
+          </ErrorBoundary>
         )}
 
         {/* Results */}
@@ -376,77 +391,85 @@ export default function BacktestPage() {
           <div className="flex flex-col gap-5 animate-fade-in-up">
 
             {/* Results header */}
-            <div className="card rounded-2xl  p-4">
-              <div className="flex items-center justify-between gap-3 flex-wrap">
-                {/* Title + metadata */}
-                <div className="flex items-center gap-3">
-                  <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-500/15 text-emerald-400">
-                    <IconChart className="w-4 h-4" />
-                  </span>
-                  <div>
-                    <h2 className="text-sm font-sans font-semibold text-zinc-100">Backtest Results</h2>
-                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600 text-xs font-mono font-medium">
-                        {result.symbol}
-                      </span>
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-400 text-xs font-mono">
-                        {result.period}
-                      </span>
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-mono ${
-                        result.exit_mode === 'atr_trail'
-                          ? 'bg-amber-500/10 text-amber-400'
-                          : 'bg-zinc-900 text-zinc-500'
-                      }`}>
-                        {result.exit_mode === 'atr_trail' ? 'ATR Trail' : 'Simple'}
-                      </span>
-                      <span className="text-xs font-mono text-zinc-500">
-                        {result.total_bars.toLocaleString()} bars
-                      </span>
-                      {result.created_at && (
-                        <>
-                          <span className="text-zinc-500/40 text-xs">&bull;</span>
-                          <span className="text-xs font-mono text-zinc-500">
-                            {new Date(result.created_at).toLocaleString()}
-                          </span>
-                        </>
-                      )}
+            <ErrorBoundary>
+              <div className="card rounded-2xl  p-4">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  {/* Title + metadata */}
+                  <div className="flex items-center gap-3">
+                    <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-500/15 text-emerald-400">
+                      <IconChart className="w-4 h-4" />
+                    </span>
+                    <div>
+                      <h2 className="text-sm font-sans font-semibold text-zinc-100">Backtest Results</h2>
+                      <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-600 text-xs font-mono font-medium">
+                          {result.symbol}
+                        </span>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-900 text-zinc-400 text-xs font-mono">
+                          {result.period}
+                        </span>
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-mono ${
+                          result.exit_mode === 'atr_trail'
+                            ? 'bg-amber-500/10 text-amber-400'
+                            : 'bg-zinc-900 text-zinc-500'
+                        }`}>
+                          {result.exit_mode === 'atr_trail' ? 'ATR Trail' : 'Simple'}
+                        </span>
+                        <span className="text-xs font-mono text-zinc-500">
+                          {result.total_bars.toLocaleString()} bars
+                        </span>
+                        {result.created_at && (
+                          <>
+                            <span className="text-zinc-500/40 text-xs">&bull;</span>
+                            <span className="text-xs font-mono text-zinc-500">
+                              {new Date(result.created_at).toLocaleString()}
+                            </span>
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                {/* Save / Export controls */}
-                <div className="flex items-center gap-2">
-                  <input
-                    className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1 text-xs font-sans text-zinc-100 w-36 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-100 focus:ring-1 focus:ring-indigo-300 transition-all"
-                    placeholder="Name to save..."
-                    value={saveName}
-                    onChange={(e) => setSaveName(e.target.value)}
-                  />
-                  <button
-                    onClick={handleSave}
-                    disabled={saving || !saveName.trim()}
-                    className="flex items-center gap-1.5 text-xs font-sans font-medium bg-zinc-900 hover:bg-zinc-900/80 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-100 px-3 py-1.5 rounded-xl border border-zinc-800 transition-all hover:border-white/10"
-                    title="Save backtest"
-                  >
-                    <IconSave />
-                    {saving ? 'Saving...' : 'Save'}
-                  </button>
-                  <button
-                    onClick={handleExport}
-                    className="flex items-center gap-1.5 text-xs font-sans font-medium bg-zinc-900 hover:bg-zinc-900/80 text-zinc-100 px-3 py-1.5 rounded-xl border border-zinc-800 transition-all hover:border-white/10"
-                    title="Export as JSON"
-                  >
-                    <IconDownload />
-                    Export
-                  </button>
+                  {/* Save / Export controls */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      className="bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-1 text-xs font-sans text-zinc-100 w-36 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-100 focus:ring-1 focus:ring-indigo-300 transition-all"
+                      placeholder="Name to save..."
+                      value={saveName}
+                      onChange={(e) => setSaveName(e.target.value)}
+                    />
+                    <button
+                      onClick={handleSave}
+                      disabled={saving || !saveName.trim()}
+                      className="flex items-center gap-1.5 text-xs font-sans font-medium bg-zinc-900 hover:bg-zinc-900/80 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-100 px-3 py-1.5 rounded-xl border border-zinc-800 transition-all hover:border-white/10"
+                      title="Save backtest"
+                    >
+                      <IconSave />
+                      {saving ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      onClick={handleExport}
+                      className="flex items-center gap-1.5 text-xs font-sans font-medium bg-zinc-900 hover:bg-zinc-900/80 text-zinc-100 px-3 py-1.5 rounded-xl border border-zinc-800 transition-all hover:border-white/10"
+                      title="Export as JSON"
+                    >
+                      <IconDownload />
+                      Export
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
+            </ErrorBoundary>
 
             {/* Charts + tables */}
-            <EquityCurve result={result} />
-            <MetricsPanel metrics={result.metrics} />
-            <BacktestTradeLog trades={result.trades} />
+            <ErrorBoundary>
+              <EquityCurve result={result} />
+            </ErrorBoundary>
+            <ErrorBoundary>
+              <MetricsPanel metrics={result.metrics} />
+            </ErrorBoundary>
+            <ErrorBoundary>
+              <BacktestTradeLog trades={result.trades} />
+            </ErrorBoundary>
           </div>
         )}
       </div>

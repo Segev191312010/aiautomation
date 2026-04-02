@@ -3,6 +3,7 @@
  * the sim account KPIs, and order history.
  */
 import React, { useEffect, useState } from 'react'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import SimController from '@/components/simulation/SimController'
 import TradingChart from '@/components/chart/TradingChart'
 import KPICard from '@/components/tradebot/KPICard'
@@ -112,6 +113,7 @@ export default function SimulationPage() {
       </div>
 
       {/* ── KPIs ─────────────────────────────────────────────────────── */}
+      <ErrorBoundary>
       <section className="card rounded-2xl  p-4">
         <div className="flex items-center justify-between mb-3.5">
           <SectionLabel>Virtual Account</SectionLabel>
@@ -156,8 +158,10 @@ export default function SimulationPage() {
           </div>
         )}
       </section>
+      </ErrorBoundary>
 
       {/* ── Chart (replay symbol) ────────────────────────────────────── */}
+      <ErrorBoundary>
       <section className="flex-1 min-h-0 card rounded-2xl  overflow-hidden flex flex-col">
         {/* Chart header */}
         <div className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 shrink-0">
@@ -198,8 +202,10 @@ export default function SimulationPage() {
           <TradingChart symbol={replaySymbol} className="h-full" />
         </div>
       </section>
+      </ErrorBoundary>
 
       {/* ── Positions + Orders ─────────────────────────────────────────── */}
+      <ErrorBoundary>
       <section className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
         {/* Virtual Positions */}
@@ -303,9 +309,12 @@ export default function SimulationPage() {
         </div>
 
       </section>
+      </ErrorBoundary>
 
       {/* ── Sticky replay controller ───────────────────────────────────── */}
-      <SimController />
+      <ErrorBoundary>
+        <SimController />
+      </ErrorBoundary>
     </div>
   )
 }

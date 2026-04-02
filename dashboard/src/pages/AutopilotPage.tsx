@@ -1,10 +1,23 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import TradeBotTabs from '@/components/tradebot/TradeBotTabs'
 import AIActivityFeed from '@/components/autopilot/AIActivityFeed'
 import AIStatusBar from '@/components/autopilot/AIStatusBar'
 import AIPerformanceCard from '@/components/autopilot/AIPerformanceCard'
 import CostReportPanel from '@/components/autopilot/CostReportPanel'
 import CircuitBreakerPanel from '@/components/autopilot/CircuitBreakerPanel'
+import { SectionHeader } from '@/components/common/SectionHeader'
+import PageErrorBanner from '@/components/common/PageErrorBanner'
+import {
+  IconArrows,
+  IconBarChart,
+  IconDollar,
+  IconGrid,
+  IconHistory,
+  IconLightning,
+  IconShield,
+  IconTrendUp,
+} from '@/components/icons'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { useAutopilotStore } from '@/store'
 import type {
@@ -46,8 +59,41 @@ function fmtUsd(value: number | null | undefined) {
 
 function modeButtonClass(active: boolean) {
   return active
-    ? 'bg-indigo-600 text-white shadow-sm'
-    : 'bg-white text-[var(--text-secondary)] border border-[var(--border)] hover:bg-[var(--bg-hover)]'
+    ? 'rounded-2xl bg-[var(--accent)] px-4 py-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[var(--accent-hover)]'
+    : 'rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]'
+}
+
+function AutopilotSignalCard({
+  label,
+  value,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  tone?: 'default' | 'success' | 'warning'
+}) {
+  const toneClass =
+    tone === 'success'
+      ? 'border-[rgba(31,157,104,0.18)] bg-[rgba(31,157,104,0.1)] text-[var(--success)]'
+      : tone === 'warning'
+        ? 'border-[rgba(245,158,11,0.2)] bg-[rgba(245,158,11,0.1)] text-[var(--accent)]'
+        : 'border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-primary)]'
+
+  return (
+    <div className={`rounded-[24px] border p-4 ${toneClass}`}>
+      <div className="shell-kicker">{label}</div>
+      <div className="mt-3 text-2xl font-semibold leading-none">{value}</div>
+    </div>
+  )
+}
+
+function formatTimestamp(value: string) {
+  return new Date(value).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 export default function AutopilotPage() {
@@ -80,18 +126,18 @@ export default function AutopilotPage() {
   const [pageError, setPageError] = useState<string | null>(null)
   const [dailyLossLimitInput, setDailyLossLimitInput] = useState('2.0')
 
-  async function loadRules() {
+  const loadRules = useCallback(async () => {
     setRulesLoading(true)
     try {
       setRules(await fetchAutopilotRules())
     } catch (err) {
-      setPageError(err instanceof Error ? err.message : 'Failed to load rules')
+      throw new Error(err instanceof Error ? err.message : 'Failed to load rules')
     } finally {
       setRulesLoading(false)
     }
-  }
+  }, [])
 
-  async function loadPerformanceData() {
+  const loadPerformanceData = useCallback(async () => {
     try {
       const [perf, sources, rulesTable] = await Promise.all([
         fetchAutopilotPerformance(30),
@@ -101,20 +147,36 @@ export default function AutopilotPage() {
       setSourcePerformance(sources.length ? sources : perf.by_source)
       setRulePerformance(rulesTable)
     } catch (err) {
-      setPageError(err instanceof Error ? err.message : 'Failed to load performance breakdown')
+      throw new Error(err instanceof Error ? err.message : 'Failed to load performance breakdown')
     }
-  }
+  }, [])
 
-  async function loadInterventions() {
+  const loadInterventions = useCallback(async () => {
     try {
       setInterventions(await fetchAutopilotInterventions(false))
     } catch (err) {
-      setPageError(err instanceof Error ? err.message : 'Failed to load interventions')
+      throw new Error(err instanceof Error ? err.message : 'Failed to load interventions')
     }
-  }
+  }, [])
 
-  async function refreshOperatorConsole() {
-    await Promise.all([
+  const loadDecisionRuns = useCallback(async () => {
+    try {
+      setDecisionRuns(await fetchDecisionRuns(20))
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to load decision runs')
+    }
+  }, [])
+
+  const loadEvaluationRuns = useCallback(async () => {
+    try {
+      setEvaluationRuns(await fetchEvaluationRuns(20))
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to load evaluation runs')
+    }
+  }, [])
+
+  const refreshOperatorConsole = useCallback(async () => {
+    const results = await Promise.allSettled([
       fetchGuardrails(),
       fetchAuditLog(),
       fetchAIStatus(),
@@ -124,16 +186,39 @@ export default function AutopilotPage() {
       loadRules(),
       loadPerformanceData(),
       loadInterventions(),
+      loadDecisionRuns(),
+      loadEvaluationRuns(),
     ])
-  }
+
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    setPageError(
+      rejected
+        ? rejected.reason instanceof Error
+          ? rejected.reason.message
+          : 'Some autopilot sections failed to refresh.'
+        : null,
+    )
+  }, [
+    fetchGuardrails,
+    fetchAuditLog,
+    fetchAIStatus,
+    fetchLearningMetrics,
+    fetchCostReport,
+    fetchEconomicReport,
+    loadRules,
+    loadPerformanceData,
+    loadInterventions,
+    loadDecisionRuns,
+    loadEvaluationRuns,
+  ])
 
   useEffect(() => {
     void refreshOperatorConsole()
     const timer = window.setInterval(() => {
-      void Promise.all([fetchAuditLog(), fetchAIStatus(), loadRules(), loadInterventions()])
+      void Promise.allSettled([fetchAuditLog(), fetchAIStatus(), loadRules(), loadInterventions()])
     }, 30000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [refreshOperatorConsole, fetchAuditLog, fetchAIStatus, loadRules, loadInterventions])
 
   useEffect(() => {
     if (guardrails?.daily_loss_limit_pct != null) {
@@ -146,12 +231,22 @@ export default function AutopilotPage() {
   const [evaluationRuns, setEvaluationRuns] = useState<EvaluationRun[]>([])
   const [selectedEvalSlices, setSelectedEvalSlices] = useState<EvaluationSlice[]>([])
 
+  const openInterventions = useMemo(
+    () => interventions.filter((item) => !item.resolved_at),
+    [interventions],
+  )
+
+  const topSource = useMemo(
+    () => [...sourcePerformance].sort((a, b) => (b.realized_pnl + b.unrealized_pnl) - (a.realized_pnl + a.unrealized_pnl))[0] ?? null,
+    [sourcePerformance],
+  )
+
   const tabs = useMemo(() => [
     { id: 'feed', label: 'Feed', count: auditLog.length },
     { id: 'performance', label: 'Performance', count: sourcePerformance.reduce((sum, item) => sum + item.trades_count, 0) },
     { id: 'rule-lab', label: 'Rule Lab', count: rules.length },
-    { id: 'evaluation', label: 'Evaluation', count: evaluationRuns.length },
-  ], [auditLog.length, sourcePerformance, rules.length, evaluationRuns.length])
+    { id: 'evaluation', label: 'Evaluation', count: decisionRuns.length + evaluationRuns.length },
+  ], [auditLog.length, sourcePerformance, rules.length, decisionRuns.length, evaluationRuns.length])
 
   async function handleKillToggle() {
     try {
@@ -217,114 +312,223 @@ export default function AutopilotPage() {
   }
 
   return (
-    <div className="space-y-6 pb-8">
-      <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-2xl font-semibold text-[var(--text-primary)]">AI Autopilot</h1>
-          <p className="text-sm text-[var(--text-muted)] mt-1">
-            Autonomous rule management, direct trade execution, live traceability, and emergency operator controls.
-          </p>
-        </div>
+    <div className="flex flex-col gap-6 pb-4">
+      <ErrorBoundary>
+        <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+          <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
+            <div className="relative">
+              <div className="shell-kicker">Operator console</div>
+              <div className="mt-3 flex flex-wrap items-center gap-2.5">
+                <h1 className="display-font text-[2.7rem] leading-none text-[var(--text-primary)] sm:text-[3.2rem]">
+                  AI Autopilot
+                </h1>
+                <span className="shell-chip text-[11px] font-semibold">
+                  Mode {aiStatus?.mode ?? 'OFF'}
+                </span>
+                <span className="shell-chip text-[11px] font-semibold">
+                  {aiStatus?.emergency_stop ? 'Emergency stop active' : 'Runtime armed'}
+                </span>
+                <span className="shell-chip text-[11px] font-semibold">
+                  {openInterventions.length} open intervention{openInterventions.length === 1 ? '' : 's'}
+                </span>
+              </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          {(['OFF', 'PAPER', 'LIVE'] as const).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => void handleModeChange(mode)}
-              className={`rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${modeButtonClass(aiStatus?.mode === mode)}`}
-            >
-              {mode}
-            </button>
-          ))}
-        </div>
-      </div>
+              <p className="mt-4 max-w-3xl text-sm leading-7 text-[var(--text-secondary)]">
+                Keep AI authority, intervention handling, cost visibility, and evaluation evidence in one operator desk.
+                The page now matches the newer workspace shell instead of the older utility layout.
+              </p>
 
-      {(pageError || error) && (
-        <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {pageError || error}
-        </div>
-      )}
+              <div className="mt-5 flex flex-wrap gap-2">
+                <span className="shell-chip text-[11px] font-medium">
+                  Learning window {learningWindow}d
+                </span>
+                <span className="shell-chip text-[11px] font-medium">
+                  {auditLog.length} recent audit event{auditLog.length === 1 ? '' : 's'}
+                </span>
+                {topSource && (
+                  <span className="shell-chip text-[11px] font-medium">
+                    Best source {topSource.source}
+                  </span>
+                )}
+              </div>
 
-      <AIStatusBar
-        status={aiStatus}
-        onKillToggle={() => void handleKillToggle()}
-        onDailyLossReset={() => void handleDailyLossReset()}
+              <div className="mt-6 flex flex-wrap gap-2">
+                {(['OFF', 'PAPER', 'LIVE'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => void handleModeChange(mode)}
+                    className={modeButtonClass(aiStatus?.mode === mode)}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-3 xl:grid-cols-1">
+            <AutopilotSignalCard
+              label="Autonomy"
+              value={aiStatus?.mode ?? 'OFF'}
+              tone={aiStatus?.mode === 'LIVE' ? 'success' : aiStatus?.mode === 'PAPER' ? 'warning' : 'default'}
+            />
+            <AutopilotSignalCard
+              label="Interventions"
+              value={String(openInterventions.length)}
+              tone={openInterventions.length === 0 ? 'success' : 'warning'}
+            />
+            <AutopilotSignalCard
+              label="Learning Window"
+              value={`${learningWindow}d`}
+            />
+          </div>
+        </section>
+      </ErrorBoundary>
+
+      <PageErrorBanner
+        show={Boolean(pageError || error)}
+        message={pageError || error || undefined}
       />
 
-      <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
+      <ErrorBoundary>
+        <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
+          <div className="space-y-6">
+            <ErrorBoundary>
+              <div className="shell-panel p-5 sm:p-6">
+                <SectionHeader
+                  icon={<IconShield className="h-3.5 w-3.5 text-rose-500" />}
+                  eyebrow="Runtime"
+                  title="Autopilot Control"
+                  badge={aiStatus ? (
+                    <span className="shell-chip px-3 py-1 text-[10px] font-mono">
+                      {aiStatus.broker_connected ? 'Broker connected' : 'Broker offline'}
+                    </span>
+                  ) : null}
+                />
+                <div className="mt-4">
+                  <AIStatusBar
+                    status={aiStatus}
+                    onKillToggle={() => void handleKillToggle()}
+                    onDailyLossReset={() => void handleDailyLossReset()}
+                  />
+                </div>
+              </div>
+            </ErrorBoundary>
+
+            <ErrorBoundary>
+              <div className="shell-panel p-5 sm:p-6">
+                <SectionHeader
+                  icon={<IconDollar className="h-3.5 w-3.5 text-emerald-500" />}
+                  eyebrow="Guardrail"
+                  title="Daily Loss Control"
+                  badge={guardrails?.daily_loss_locked ? (
+                    <span className="shell-chip px-3 py-1 text-[10px] font-mono border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.12)] text-[var(--accent)]">
+                      Locked
+                    </span>
+                  ) : null}
+                />
+                <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="max-w-2xl text-sm leading-6 text-[var(--text-secondary)]">
+                    This is the operator-owned runtime loss limit. New AI entries stop when daily loss exceeds the configured percent of net liquidation.
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      value={dailyLossLimitInput}
+                      onChange={(event) => setDailyLossLimitInput(event.target.value)}
+                      className="w-28 rounded-2xl border border-[var(--border)] bg-[var(--bg-input)] px-4 py-3 text-sm font-medium text-[var(--text-primary)] outline-none transition-colors focus:border-[var(--accent)]"
+                      inputMode="decimal"
+                    />
+                    <span className="text-sm text-[var(--text-muted)]">% of net liq</span>
+                    <button
+                      type="button"
+                      onClick={() => void handleDailyLossSave()}
+                      className="rounded-2xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
+                    >
+                      Save limit
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </ErrorBoundary>
+          </div>
+
+          <ErrorBoundary>
+            <div className="shell-panel p-5 sm:p-6">
+              <SectionHeader
+                icon={<IconLightning className="h-3.5 w-3.5 text-[var(--accent)]" />}
+                eyebrow="Protection"
+                title="Circuit Breaker"
+                badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">30s refresh</span>}
+              />
+              <div className="mt-4">
+                <CircuitBreakerPanel />
+              </div>
+            </div>
+          </ErrorBoundary>
+        </section>
+      </ErrorBoundary>
+
+      <section className="animate-fade-in-up" style={{ animationDelay: '40ms' }}>
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <h2 className="text-sm font-semibold text-[var(--text-primary)]">Daily Loss Control</h2>
-            <p className="text-xs text-[var(--text-muted)]">
-              The only editable runtime safety control in the operator console. New AI entries stop when breached.
+            <div className="shell-kicker">Workspace</div>
+            <p className="mt-2 max-w-xl text-sm leading-6 text-[var(--text-secondary)]">
+              Move between audit feed, learning performance, rule inventory, and evaluation evidence without leaving the operator console.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <input
-              value={dailyLossLimitInput}
-              onChange={(event) => setDailyLossLimitInput(event.target.value)}
-              className="w-24 rounded-lg border border-[var(--border)] px-3 py-2 text-sm"
-              inputMode="decimal"
-            />
-            <span className="text-sm text-[var(--text-muted)]">% of net liq</span>
-            <button
-              type="button"
-              onClick={() => void handleDailyLossSave()}
-              className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
-            >
-              Save Limit
-            </button>
-          </div>
+
+          <TradeBotTabs activeTab={activeTab} onTabChange={(tab) => setActiveTab(tab as ConsoleTab)} tabs={tabs} />
         </div>
-      </div>
-
-      <CircuitBreakerPanel />
-
-      <TradeBotTabs activeTab={activeTab} onTabChange={(tab) => setActiveTab(tab as ConsoleTab)} tabs={tabs} />
+      </section>
 
       {activeTab === 'feed' && (
-        <div className="grid grid-cols-1 xl:grid-cols-[1.2fr,0.8fr] gap-5">
-          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-            <div className="flex items-center justify-between gap-2 mb-4">
-              <div>
-                <h2 className="text-sm font-semibold text-[var(--text-primary)]">Live Activity Feed</h2>
-                <p className="text-xs text-[var(--text-muted)]">
-                  Every meaningful autopilot action, rejection, revert, and manual override.
-                </p>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
+          <ErrorBoundary>
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
+              <SectionHeader
+                icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />}
+                eyebrow="Audit"
+                title="Live Activity Feed"
+                badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">Realtime operator trail</span>}
+              />
+              <div className="mt-4">
+                <AIActivityFeed entries={auditLog} onRevert={(id) => void revertAction(id)} />
               </div>
-            </div>
-            <AIActivityFeed entries={auditLog} onRevert={(id) => void revertAction(id)} />
-          </div>
+            </section>
+          </ErrorBoundary>
 
-          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-            <div className="flex items-center justify-between gap-2 mb-4">
-              <div>
-                <h2 className="text-sm font-semibold text-[var(--text-primary)]">Intervention Queue</h2>
-                <p className="text-xs text-[var(--text-muted)]">
-                  Operational issues that need human acknowledgement, mode changes, or reconciliation.
-                </p>
-              </div>
-              <div className="text-xs text-[var(--text-muted)]">{interventions.length} open</div>
-            </div>
+          <ErrorBoundary>
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '90ms' }}>
+            <SectionHeader
+              icon={<IconShield className="h-3.5 w-3.5 text-rose-500" />}
+              eyebrow="Operations"
+              title="Intervention Queue"
+              badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{openInterventions.length} open</span>}
+            />
 
-            {interventions.length ? (
-              <div className="space-y-3">
-                {interventions.map((item) => (
-                  <div key={item.id} className="rounded-xl border border-[var(--border)] px-4 py-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="font-medium text-[var(--text-primary)]">{item.summary}</div>
-                      <span className="text-xs font-semibold uppercase tracking-[0.12em] text-red-700">
-                        {item.severity}
-                      </span>
+            <div className="mt-4 space-y-3">
+              {openInterventions.length ? (
+                openInterventions.map((item) => (
+                  <div key={item.id} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold text-[var(--text-primary)]">{item.summary}</div>
+                      <span className="shell-chip px-3 py-1 text-[10px] font-mono">{item.severity}</span>
                     </div>
-                    <div className="mt-1 text-sm text-[var(--text-secondary)]">{item.required_action}</div>
-                    <div className="mt-3 flex items-center justify-end gap-2">
+                    <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">{item.required_action}</p>
+                    <div className="mt-3 flex flex-wrap gap-3 text-[11px] font-mono text-[var(--text-muted)]">
+                      <span>{item.category}</span>
+                      <span>{item.source}</span>
+                      <span>{item.symbol ?? 'system'}</span>
+                      <span>{formatTimestamp(item.opened_at)}</span>
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
                       {!item.acknowledged_at && (
                         <button
                           type="button"
                           onClick={() => void handleAcknowledgeIntervention(item.id)}
-                          className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                          className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
                         >
                           Acknowledge
                         </button>
@@ -332,61 +536,93 @@ export default function AutopilotPage() {
                       <button
                         type="button"
                         onClick={() => void handleResolveIntervention(item.id)}
-                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                        className="rounded-2xl bg-[var(--accent)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
                       >
                         Resolve
                       </button>
                     </div>
-                    <div className="mt-2 text-xs text-[var(--text-muted)]">
-                      {item.category} - {item.source} - {item.symbol ?? 'system'} - {new Date(item.opened_at).toLocaleString()}
-                    </div>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-sm text-[var(--text-muted)]">No open intervention items.</div>
-            )}
-          </div>
+                ))
+              ) : (
+                <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">
+                  No open intervention items.
+                </div>
+              )}
+            </div>
+          </section>
+          </ErrorBoundary>
         </div>
       )}
 
       {activeTab === 'performance' && (
-        <div className="space-y-5">
-          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-            <AIPerformanceCard
-              metrics={learningMetrics}
-              economicReport={economicReport}
-              activeWindow={learningWindow}
-              onWindowChange={setLearningWindow}
-            />
+        <div className="space-y-6">
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
+              <SectionHeader
+                icon={<IconTrendUp className="h-3.5 w-3.5 text-emerald-500" />}
+                eyebrow="Learning"
+                title="AI Performance"
+                badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{learningWindow}d window</span>}
+              />
+              <div className="mt-4">
+                <AIPerformanceCard
+                  metrics={learningMetrics}
+                  economicReport={economicReport}
+                  activeWindow={learningWindow}
+                  onWindowChange={setLearningWindow}
+                />
+              </div>
+            </section>
+
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '90ms' }}>
+              <SectionHeader
+                icon={<IconDollar className="h-3.5 w-3.5 text-indigo-500" />}
+                eyebrow="Costs"
+                title="AI Cost Report"
+              />
+              <div className="mt-4">
+                <CostReportPanel report={costReport} />
+              </div>
+            </section>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '120ms' }}>
+            <SectionHeader
+              icon={<IconBarChart className="h-3.5 w-3.5 text-[var(--accent)]" />}
+              eyebrow="Sources"
+              title="Performance by Source"
+              badge={topSource ? (
+                <span className="shell-chip px-3 py-1 text-[10px] font-mono">
+                  Best {topSource.source}
+                </span>
+              ) : null}
+            />
+            <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
             {sourcePerformance.map((item) => (
-              <div key={item.source} className="rounded-2xl border border-[var(--border)] bg-white p-4">
-                <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)]">{item.source}</div>
-                <div className="mt-2 text-xl font-semibold text-[var(--text-primary)]">{fmtUsd(item.realized_pnl)}</div>
-                <div className="mt-1 text-sm text-[var(--text-secondary)]">
-                  {item.trades_count} trades - {item.hit_rate != null ? `${(item.hit_rate * 100).toFixed(1)}% hit rate` : 'No closed P&L yet'}
+              <div key={item.source} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] p-4">
+                <div className="shell-kicker">{item.source}</div>
+                <div className="mt-3 text-2xl font-semibold text-[var(--text-primary)]">
+                  {fmtUsd(item.realized_pnl + item.unrealized_pnl)}
                 </div>
-                <div className="mt-2 text-xs text-[var(--text-muted)]">
-                  Cost {fmtUsd(item.total_cost)} - ROI {item.roi != null ? item.roi.toFixed(2) : '--'}
+                <div className="mt-1 text-sm text-[var(--text-secondary)]">
+                  {item.trades_count} trades • {item.hit_rate != null ? `${(item.hit_rate * 100).toFixed(1)}% hit rate` : 'No closed P&L yet'}
+                </div>
+                <div className="mt-2 text-[11px] font-mono text-[var(--text-muted)]">
+                  Cost {fmtUsd(item.total_cost)} • ROI {item.roi != null ? item.roi.toFixed(2) : '--'}
                 </div>
               </div>
             ))}
-          </div>
+            </div>
+          </section>
 
-          <div className="grid grid-cols-1 xl:grid-cols-[1.15fr,0.85fr] gap-5">
-            <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-              <div className="flex items-center justify-between gap-2 mb-4">
-                <div>
-                  <h2 className="text-sm font-semibold text-[var(--text-primary)]">Rule Contribution</h2>
-                  <p className="text-xs text-[var(--text-muted)]">
-                    Separate contribution tracking for rule-driven and direct AI trading.
-                  </p>
-                </div>
-              </div>
-
+          <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '160ms' }}>
+            <SectionHeader
+              icon={<IconGrid className="h-3.5 w-3.5 text-slate-500" />}
+              eyebrow="Contribution"
+              title="Rule Contribution"
+              badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{rulePerformance.length} rows</span>}
+            />
+            <div className="mt-4">
               {rulePerformance.length ? (
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[640px]">
@@ -418,88 +654,106 @@ export default function AutopilotPage() {
                   </table>
                 </div>
               ) : (
-                <div className="text-sm text-[var(--text-muted)]">No rule-level performance history yet.</div>
+                <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">
+                  No rule-level performance history yet.
+                </div>
               )}
             </div>
-
-            <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-              <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-4">AI Cost Report</h2>
-              <CostReportPanel report={costReport} />
-            </div>
-          </div>
+          </section>
         </div>
       )}
 
       {activeTab === 'rule-lab' && (
         rulesLoading && !rules.length ? (
-          <div className="rounded-2xl border border-[var(--border)] bg-white px-5 py-8 text-sm text-[var(--text-muted)]">
+          <div className="shell-panel rounded-[28px] px-5 py-8 text-sm text-[var(--text-muted)]">
             Loading AI rule inventory...
           </div>
         ) : (
-          <AutopilotRuleLab rules={rules} onRefresh={loadRules} />
+          <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
+            <SectionHeader
+              icon={<IconArrows className="h-3.5 w-3.5 text-indigo-500" />}
+              eyebrow="Rule Lab"
+              title="Autopilot Rule Inventory"
+              badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{rules.length} rules</span>}
+            />
+            <div className="mt-4">
+              <AutopilotRuleLab rules={rules} onRefresh={loadRules} />
+            </div>
+          </section>
         )
       )}
 
       {activeTab === 'evaluation' && (
-        <div className="space-y-5">
-          {/* Decision Runs */}
-          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Decision Runs</h2>
+        <div className="space-y-6">
+          <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
+            <SectionHeader
+              icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />}
+              eyebrow="Decision Ledger"
+              title="Decision Runs"
+              badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{decisionRuns.length} runs</span>}
+            />
+            <div className="mt-4 flex justify-end">
               <button
                 type="button"
-                onClick={() => { void fetchDecisionRuns(20).then(setDecisionRuns) }}
-                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs hover:bg-slate-50"
+                onClick={() => void loadDecisionRuns()}
+                className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
               >
                 Refresh
               </button>
             </div>
+            <div className="mt-4">
             {decisionRuns.length ? (
               <div className="space-y-2">
                 {decisionRuns.map(run => (
-                  <div key={run.id} className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm">
+                  <div key={run.id} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${
-                        run.status === 'completed' ? 'border-emerald-200 text-emerald-700' : 'border-amber-200 text-amber-700'
-                      }`}>{run.status}</span>
+                      <span className="shell-chip px-3 py-1 text-[10px] font-mono">{run.status}</span>
                       <span className="text-[var(--text-primary)]">{run.source}</span>
                       <span className="text-[var(--text-muted)]">{run.mode}</span>
                     </div>
                     <div className="flex items-center gap-3 text-xs text-[var(--text-muted)]">
                       {run.model && <span>{run.model}</span>}
-                      {run.aggregate_confidence != null && <span>conf: {(run.aggregate_confidence * 100).toFixed(0)}%</span>}
+                      {run.aggregate_confidence != null && <span>conf {(run.aggregate_confidence * 100).toFixed(0)}%</span>}
                       <span>{Object.values(run.item_counts).reduce((a, b) => a + b, 0)} items</span>
-                      <span>{new Date(run.created_at).toLocaleString()}</span>
+                      <span>{formatTimestamp(run.created_at)}</span>
+                    </div>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="text-sm text-[var(--text-muted)]">No decision runs yet. Click Refresh to load.</div>
+              <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">
+                No decision runs yet.
+              </div>
             )}
-          </div>
+            </div>
+          </section>
 
-          {/* Evaluation Runs */}
-          <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">Evaluation Runs</h2>
+          <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '90ms' }}>
+            <SectionHeader
+              icon={<IconGrid className="h-3.5 w-3.5 text-slate-500" />}
+              eyebrow="Evaluation"
+              title="Evaluation Runs"
+              badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{evaluationRuns.length} runs</span>}
+            />
+            <div className="mt-4 flex justify-end">
               <button
                 type="button"
-                onClick={() => { void fetchEvaluationRuns(20).then(setEvaluationRuns) }}
-                className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs hover:bg-slate-50"
+                onClick={() => void loadEvaluationRuns()}
+                className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
               >
                 Refresh
               </button>
             </div>
+            <div className="mt-4">
             {evaluationRuns.length ? (
               <div className="space-y-2">
                 {evaluationRuns.map(evalRun => (
-                  <div key={evalRun.id} className="rounded-lg border border-[var(--border)] px-3 py-2">
+                  <div key={evalRun.id} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
                     <div className="flex items-center justify-between gap-2 text-sm">
                       <div className="flex items-center gap-2">
-                        <span className={`inline-flex rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${
-                          evalRun.status === 'completed' ? 'border-emerald-200 text-emerald-700' : 'border-amber-200 text-amber-700'
-                        }`}>{evalRun.status}</span>
+                        <span className="shell-chip px-3 py-1 text-[10px] font-mono">{evalRun.status}</span>
                         <span className="text-[var(--text-primary)]">{evalRun.evaluation_mode}</span>
                         <span className="text-[var(--text-muted)]">{evalRun.candidate_key}</span>
                       </div>
@@ -509,26 +763,33 @@ export default function AutopilotPage() {
                           onClick={() => {
                             void fetchEvaluationSlices(evalRun.id).then(setSelectedEvalSlices)
                           }}
-                          className="rounded border border-[var(--border)] px-2 py-1 text-xs hover:bg-slate-50"
+                          className="rounded-2xl border border-[var(--border)] px-4 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
                         >
-                          Slices
+                          View slices
                         </button>
-                        <span className="text-xs text-[var(--text-muted)]">{new Date(evalRun.created_at).toLocaleString()}</span>
+                        <span className="text-xs text-[var(--text-muted)]">{formatTimestamp(evalRun.created_at)}</span>
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="text-sm text-[var(--text-muted)]">No evaluation runs yet. Click Refresh to load.</div>
+              <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">
+                No evaluation runs yet.
+              </div>
             )}
-          </div>
+            </div>
+          </section>
 
-          {/* Evaluation Slices Detail */}
           {selectedEvalSlices.length > 0 && (
-            <div className="rounded-2xl border border-[var(--border)] bg-white p-5">
-              <h2 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Evaluation Slices</h2>
-              <div className="overflow-x-auto">
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '120ms' }}>
+              <SectionHeader
+                icon={<IconBarChart className="h-3.5 w-3.5 text-[var(--accent)]" />}
+                eyebrow="Slices"
+                title="Evaluation Slice Detail"
+                badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{selectedEvalSlices.length} slices</span>}
+              />
+              <div className="mt-4 overflow-x-auto">
                 <table className="min-w-full text-sm">
                   <thead>
                     <tr className="border-b border-[var(--border)] text-left text-[10px] uppercase tracking-[0.12em] text-[var(--text-muted)]">
@@ -544,7 +805,7 @@ export default function AutopilotPage() {
                   </thead>
                   <tbody>
                     {selectedEvalSlices.map((slice, idx) => (
-                      <tr key={idx} className="border-b border-[var(--border)]">
+                      <tr key={`${slice.slice_type}:${slice.slice_key}:${idx}`} className="border-b border-[var(--border)]/60 last:border-b-0">
                         <td className="py-2 pr-3 font-medium text-[var(--text-primary)]">{slice.slice_type}</td>
                         <td className="py-2 pr-3 text-[var(--text-secondary)]">{slice.slice_key}</td>
                         <td className="py-2 pr-3">{slice.count}</td>
@@ -558,7 +819,7 @@ export default function AutopilotPage() {
                   </tbody>
                 </table>
               </div>
-            </div>
+            </section>
           )}
         </div>
       )}

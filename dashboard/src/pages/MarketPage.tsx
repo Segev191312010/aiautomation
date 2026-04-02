@@ -11,6 +11,7 @@ import TickerCard from '@/components/ticker/TickerCard'
 import Skeleton from '@/components/ui/Skeleton'
 import AlertForm from '@/components/alerts/AlertForm'
 import { useToast } from '@/components/ui/ToastProvider'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import { useMarketStore, useDrawingStore, useUIStore, useBotStore } from '@/store'
 import { fetchYahooBars, fetchIBKRBars, fetchSettings } from '@/services/api'
 import { calcRSI, calcMACD } from '@/utils/indicators'
@@ -371,6 +372,7 @@ export default function MarketPage() {
 
   return (
     <div className="flex min-h-0 flex-col gap-6 pb-4">
+      <ErrorBoundary>
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
         <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
@@ -434,7 +436,9 @@ export default function MarketPage() {
           />
         </div>
       </section>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <section className="shell-panel p-5 sm:p-6">
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -521,8 +525,10 @@ export default function MarketPage() {
           />
         </div>
       </section>
+      </ErrorBoundary>
 
       <section className="grid min-h-0 flex-1 gap-6 xl:grid-cols-[minmax(0,1fr)_280px]">
+        <ErrorBoundary>
         <div className="flex min-h-0 min-w-0 flex-col gap-2" ref={chartContainerRef}>
           <div className="shell-panel shell-grid relative flex-1 overflow-hidden">
             {loading && (
@@ -588,7 +594,9 @@ export default function MarketPage() {
             />
           </div>
         </div>
+        </ErrorBoundary>
 
+        <ErrorBoundary>
         <aside className="space-y-4">
           <div className="shell-panel p-4">
             <div className="mb-3">
@@ -664,14 +672,17 @@ export default function MarketPage() {
             </div>
           )}
         </aside>
+        </ErrorBoundary>
       </section>
 
+      <ErrorBoundary>
       {showAlertForm && (
         <AlertForm
           initialSymbol={selectedSymbol}
           onClose={() => setShowAlertForm(false)}
         />
       )}
+      </ErrorBoundary>
     </div>
   )
 }

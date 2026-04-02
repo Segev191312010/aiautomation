@@ -1,4 +1,5 @@
 ﻿import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { ConditionBuilder } from '@/components/rules/ConditionBuilder'
 import {
@@ -290,6 +291,7 @@ export default function RulesPage() {
       </div>
 
       <section className="grid gap-6 xl:grid-cols-[minmax(360px,420px),1fr]">
+        <ErrorBoundary>
         <div className="rounded-2xl border border-[var(--border)] bg-white p-5 shadow-sm space-y-4">
           <div>
             <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
@@ -509,7 +511,9 @@ export default function RulesPage() {
             </div>
           </form>
         </div>
+        </ErrorBoundary>
 
+        <ErrorBoundary>
         <div className="rounded-2xl border border-[var(--border)] bg-white p-5 shadow-sm space-y-4">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
@@ -619,8 +623,10 @@ export default function RulesPage() {
             </div>
           )}
         </div>
+        </ErrorBoundary>
       </section>
 
+      <ErrorBoundary>
       <section className="space-y-4">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
@@ -652,6 +658,7 @@ export default function RulesPage() {
           <AutopilotRuleLab rules={aiRules} onRefresh={loadAiRules} />
         )}
       </section>
+      </ErrorBoundary>
     </div>
   )
 }
