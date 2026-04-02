@@ -1,43 +1,65 @@
 # =============================================================================
-# Trading Platform — docker-compose
+# Trading Platform — docker-compose.yml
+#
+# Two-service architecture:
+#   - backend: FastAPI on port 8000 (internal only, exposed via dashboard/nginx)
+#   - dashboard: nginx serving React SPA + reverse proxy (port 80 to 3000)
 #
 # Usage:
 #   docker compose up --build          # first run / after code changes
 #   docker compose up -d               # background
-#   docker compose logs -f trading-app # tail logs
-#   docker compose down                # stop
+#   docker compose logs -f             # tail all logs
+#   docker compose logs backend        # tail backend only
+#   docker compose down                # stop all services
+#
+# Access:
+#   http://localhost:3000              # React dashboard
+#   (Backend API and WebSocket routed through nginx)
 # =============================================================================
 
+version: '3.8'
+
 services:
-  trading-app:
+  # ==========================================================================
+  # Backend: FastAPI + SQLite + IBKR integration
+  # ==========================================================================
+  backend:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: trading-app
+      dockerfile: backend/Dockerfile
+    container_name: trading-backend
     restart: unless-stopped
 
-    ports:
-      - "${PORT:-8000}:8000"
+    # Port exposed only to the docker network (not localhost)
+    # Dashboard (nginx) talks to backend:8000
+    expose:
+      - "8000"
 
-    # All secrets and config come from .env (never baked into the image)
+    # All secrets and environment config from .env file (never in image)
     env_file:
       - .env
+
     environment:
-      # Production safety defaults — override in .env if you need live trading
+      # Production safety defaults — override in .env for live trading
       IS_PAPER: "${IS_PAPER:-true}"
       SIM_MODE: "${SIM_MODE:-true}"
-      # Point database at the persistent volume path
+      MOCK_MODE: "${MOCK_MODE:-false}"
+
+      # Database path inside container (persisted via volume)
       DB_PATH: "/data/trading_bot.db"
-      # Dashboard dist is embedded in the image at /app/dashboard/dist
+
+      # Dashboard static files embedded in container
       DASHBOARD_BUILD_DIR: "./dashboard/dist"
-      # Uvicorn tuning
+
+      # Uvicorn tuning (workers, log level)
       WORKERS: "${WORKERS:-2}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
 
+    # Persistent SQLite database volume
     volumes:
-      # Persist SQLite database across container restarts / rebuilds
       - trading-data:/data
 
+    # Container health check
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -45,13 +67,61 @@ services:
       start_period: 20s
       retries: 3
 
-    # Structured JSON logs to stdout — use `docker compose logs` to tail
+    # Structured JSON logging (captured by docker logs)
     logging:
       driver: json-file
       options:
         max-size: "50m"
         max-file: "5"
 
+  # ==========================================================================
+  # Dashboard: nginx serving React SPA + reverse proxy to backend
+  # ==========================================================================
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: trading-dashboard
+    restart: unless-stopped
+
+    # Expose port 80 to localhost:3000
+    # (Can adjust via PORT env var if needed)
+    ports:
+      - "${DASHBOARD_PORT:-3000}:80"
+
+    # Wait for backend to be healthy before starting dashboard
+    depends_on:
+      backend:
+        condition: service_healthy
+
+    # Container health check (nginx /health endpoint)
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 2
+
+    # Structured logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+# =============================================================================
+# Shared network (already created automatically)
+# =============================================================================
+networks:
+  default:
+    name: trading-network
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
 volumes:
   trading-data:
     driver: local
+    driver_opts:
+      type: local
