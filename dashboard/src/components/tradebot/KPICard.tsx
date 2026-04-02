@@ -2,58 +2,73 @@ import React from 'react'
 import clsx from 'clsx'
 
 interface Props {
-  label:     string
-  value:     string | number
+  label: string
+  value: string | number
   subLabel?: string
   positive?: boolean
-  prefix?:   string
-  suffix?:   string
+  prefix?: string
+  suffix?: string
   highlight?: boolean
 }
 
 export default function KPICard({
-  label, value, subLabel, positive, prefix = '', suffix = '', highlight,
+  label,
+  value,
+  subLabel,
+  positive,
+  prefix = '',
+  suffix = '',
+  highlight,
 }: Props) {
-  const valueColor =
-    highlight          ? 'text-blue-400'      :
-    positive === true  ? 'text-emerald-400'   :
-    positive === false ? 'text-red-400'       :
-                         'text-zinc-100'
-
   const displayValue =
     typeof value === 'number'
       ? value.toLocaleString('en-US', { maximumFractionDigits: 2 })
       : value
 
+  const toneClass = highlight
+    ? 'text-[var(--accent)]'
+    : positive === true
+      ? 'text-[var(--success)]'
+      : positive === false
+        ? 'text-[var(--danger)]'
+        : 'text-[var(--text-primary)]'
+
   return (
     <div
       className={clsx(
-        'bg-zinc-900/80 border border-zinc-800 rounded-2xl p-4',
-        'flex flex-col gap-1.5 relative overflow-hidden',
-        highlight && 'border-l-2 border-l-blue-500/60',
-        'transition-colors hover:bg-zinc-800/60 cursor-default',
+        'relative overflow-hidden rounded-[24px] border px-4 py-4 transition-all',
+        highlight
+          ? 'border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.08)]'
+          : 'border-[var(--border)] bg-[var(--bg-hover)] hover:bg-[var(--bg-card)]',
       )}
     >
-      <span className="text-[10px] font-sans uppercase tracking-wider text-zinc-500">
-        {label}
-      </span>
-      <div className="flex items-baseline gap-1">
+      <div
+        className="pointer-events-none absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent to-transparent"
+        style={{ backgroundImage: 'linear-gradient(90deg, transparent, var(--accent), transparent)' }}
+      />
+
+      <span className="shell-kicker">{label}</span>
+
+      <div className="mt-3 flex items-end gap-1.5">
         {prefix && (
-          <span className={clsx('text-sm font-mono font-semibold tabular-nums', valueColor)}>
+          <span className={clsx('text-sm font-semibold', toneClass)}>
             {prefix}
           </span>
         )}
-        <span className={clsx('text-xl font-mono font-bold tabular-nums leading-none', valueColor)}>
+
+        <span className={clsx('text-[1.55rem] font-semibold leading-none', toneClass)}>
           {displayValue}
         </span>
+
         {suffix && (
-          <span className={clsx('text-sm font-mono font-medium tabular-nums opacity-70', valueColor)}>
+          <span className={clsx('pb-0.5 text-sm font-semibold opacity-80', toneClass)}>
             {suffix}
           </span>
         )}
       </div>
+
       {subLabel && (
-        <span className="text-[11px] font-mono text-zinc-500 leading-none">
+        <span className="mt-2 block text-xs leading-5 text-[var(--text-secondary)]">
           {subLabel}
         </span>
       )}

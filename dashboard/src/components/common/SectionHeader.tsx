@@ -10,18 +10,30 @@ interface SectionHeaderProps {
 
 export function SectionHeader({ icon, eyebrow, title, badge, action }: SectionHeaderProps) {
   return (
-    <div className="flex items-center gap-2.5 mb-4">
-      {icon && (
-        <div className="w-7 h-7 rounded-lg bg-zinc-800/60 flex items-center justify-center flex-shrink-0">
-          {icon}
+    <div className="mb-5 flex flex-wrap items-start gap-3">
+      <div className="flex min-w-0 items-start gap-3">
+        {icon && (
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-primary)] shadow-[0_18px_36px_-24px_var(--shadow-color)]">
+            {icon}
+          </div>
+        )}
+        <div className="min-w-0">
+          {eyebrow ? (
+            <div className="shell-kicker">{eyebrow}</div>
+          ) : (
+            <div className="h-[0.65rem]" aria-hidden="true" />
+          )}
+          <h2 className="display-font mt-2 text-[1.45rem] leading-none text-[var(--text-primary)] sm:text-[1.6rem]">
+            {title}
+          </h2>
+        </div>
+      </div>
+      {(badge || action) && (
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {badge && <div>{badge}</div>}
+          {action && <div>{action}</div>}
         </div>
       )}
-      <div className="min-w-0">
-        <div className="text-[10px] font-sans uppercase tracking-[0.2em] text-zinc-500">{eyebrow}</div>
-        <h2 className="text-sm font-sans font-semibold text-zinc-100 tracking-wide">{title}</h2>
-      </div>
-      {badge && <div className="ml-1">{badge}</div>}
-      {action && <div className="ml-auto">{action}</div>}
     </div>
   )
 }

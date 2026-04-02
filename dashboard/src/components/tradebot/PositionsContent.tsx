@@ -6,13 +6,13 @@ import type { Position, SimPosition } from '@/types'
 
 function PositionsEmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center py-14 gap-3">
-      <div className="w-14 h-14 rounded-2xl bg-zinc-800/30 flex items-center justify-center">
-        <IconBriefcase className="w-7 h-7 text-zinc-500/50" />
+    <div className="flex flex-col items-center justify-center gap-3 py-14">
+      <div className="flex h-14 w-14 items-center justify-center rounded-3xl border border-[var(--border)] bg-[var(--bg-hover)]">
+        <IconBriefcase className="h-7 w-7 text-[var(--text-muted)]" />
       </div>
-      <p className="text-sm font-sans text-zinc-500">No open positions</p>
-      <p className="text-[11px] font-sans text-zinc-500/60">
-        Use the Quick Order form to enter a trade
+      <p className="text-sm font-sans text-[var(--text-secondary)]">No open positions</p>
+      <p className="text-[11px] font-sans text-[var(--text-muted)]">
+        Use the quick order rail to enter a trade.
       </p>
     </div>
   )
@@ -26,34 +26,28 @@ interface PositionsContentProps {
 export function PositionsContent({ positions, initialLoad }: PositionsContentProps) {
   return (
     <div className="flex flex-col gap-5">
-      {/* Quick order */}
-      <section className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 animate-fade-in-up">
+      <section className="shell-panel gradient-surface animate-fade-in-up p-5 sm:p-6">
         <SectionHeader
-          eyebrow=""
-          icon={<IconLightning className="w-3.5 h-3.5 text-amber-600" />}
+          eyebrow="Execution"
+          icon={<IconLightning className="h-3.5 w-3.5 text-amber-600" />}
           title="Quick Order"
         />
         <QuickOrderForm />
       </section>
 
-      {/* Positions table */}
-      <section className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 animate-fade-in-up">
+      <section className="shell-panel animate-fade-in-up p-5 sm:p-6">
         <SectionHeader
-          eyebrow=""
-          icon={<IconBriefcase className="w-3.5 h-3.5 text-zinc-400" />}
+          eyebrow="Book"
+          icon={<IconBriefcase className="h-3.5 w-3.5 text-[var(--text-secondary)]" />}
           title="Open Positions"
           badge={
             positions.length > 0 ? (
-              <span className="ml-auto text-[11px] font-mono text-zinc-500 bg-zinc-800/50 px-2 py-0.5 rounded-lg">
-                {positions.length}
-              </span>
+              <span className="shell-chip px-3 py-1 text-[11px] font-mono">{positions.length}</span>
             ) : undefined
           }
         />
-        {positions.length === 0 && !initialLoad
-          ? <PositionsEmptyState />
-          : <PositionsTable />
-        }
+
+        {positions.length === 0 && !initialLoad ? <PositionsEmptyState /> : <PositionsTable />}
       </section>
     </div>
   )

@@ -19,12 +19,12 @@ import { useDiagnostics } from '@/hooks/useDiagnostics'
 import { useMarketStore, useAccountStore, useBotStore, useDiagnosticsStore, useUIStore } from '@/store'
 import type { AccountSummary, SimAccountState } from '@/types'
 
-function isSimAccount(a: AccountSummary | SimAccountState): a is SimAccountState {
-  return 'is_sim' in a && a.is_sim === true
+function isSimAccount(account: AccountSummary | SimAccountState): account is SimAccountState {
+  return 'is_sim' in account && account.is_sim === true
 }
 
-function fmtUSD(v: number): string {
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+function fmtUSD(value: number): string {
+  return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatCompact(value?: number): string {
@@ -35,20 +35,91 @@ function formatCompact(value?: number): string {
   return `$${value.toLocaleString('en-US')}`
 }
 
-function formatPrice(value?: number): string {
+function formatNumber(value?: number): string {
   if (value == null) return '--'
-  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return value.toLocaleString('en-US', { maximumFractionDigits: 2 })
 }
 
-function SectionHeader({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) {
+function formatPrice(value?: number): string {
+  if (value == null) return '--'
+  return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function formatChange(value?: number): string {
+  if (value == null) return '--'
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function SectionHeading({
+  eyebrow,
+  title,
+  description,
+  action,
+}: {
+  eyebrow: string
+  title: string
+  description?: string
+  action?: React.ReactNode
+}) {
   return (
-    <div className="flex items-end justify-between gap-4">
-      <div>
-        <div className="text-[10px] font-sans uppercase tracking-[0.22em] text-zinc-500">{eyebrow}</div>
-        <h2 className="mt-1 text-lg font-sans font-semibold text-zinc-50">{title}</h2>
+    <div className="flex flex-wrap items-end justify-between gap-4">
+      <div className="max-w-2xl">
+        <div className="shell-kicker">{eyebrow}</div>
+        <h2 className="display-font mt-2 text-[1.75rem] leading-none text-[var(--text-primary)]">
+          {title}
+        </h2>
+        {description && (
+          <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+            {description}
+          </p>
+        )}
       </div>
       {action}
     </div>
+  )
+}
+
+function ActionCard({
+  eyebrow,
+  title,
+  description,
+  onClick,
+  active,
+}: {
+  eyebrow: string
+  title: string
+  description: string
+  onClick: () => void
+  active?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        'group rounded-[24px] border p-4 text-left transition-all',
+        active
+          ? 'border-[rgba(245,158,11,0.3)] bg-[rgba(245,158,11,0.12)]'
+          : 'border-[var(--border)] bg-[var(--bg-hover)] hover:border-[rgba(245,158,11,0.28)] hover:bg-[rgba(245,158,11,0.08)]',
+      )}
+    >
+      <div className="shell-kicker">{eyebrow}</div>
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <div className="text-base font-semibold text-[var(--text-primary)]">{title}</div>
+        <svg
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          className="h-4 w-4 text-[var(--text-muted)] transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+        >
+          <path d="M6 14 14 6M7 6h7v7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+        {description}
+      </p>
+    </button>
   )
 }
 
@@ -98,184 +169,144 @@ export default function Dashboard() {
   const cash = account?.cash ?? null
   const unrealPnl = account?.unrealized_pnl ?? null
   const realPnl = account ? account.realized_pnl : null
+  const feedLabel = selectedQuote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback'
 
   return (
-    <div className="flex flex-col gap-5 h-full">
-      <section className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(320px,0.9fr)]">
-        <div className="card rounded-lg p-5 ">
-          <div className="flex flex-col gap-5">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="text-[10px] font-sans uppercase tracking-[0.24em] text-zinc-500">
-                  Market Snapshot
-                </div>
-                <div className="mt-2 flex flex-wrap items-end gap-x-4 gap-y-2">
-                  <div className="text-4xl font-mono font-bold tracking-tight text-zinc-50">
-                    {selectedSymbol}
-                  </div>
-                  <div className="text-2xl font-mono font-semibold text-zinc-100">
-                    {formatPrice(selectedQuote?.price)}
-                  </div>
-                  {selectedQuote && (
-                    <div
-                      className={clsx(
-                        'text-sm font-mono font-semibold tabular-nums',
-                        selectedQuote.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400',
-                      )}
-                    >
-                      {selectedQuote.change_pct >= 0 ? '+' : ''}
-                      {selectedQuote.change?.toFixed(2) ?? '--'} / {selectedQuote.change_pct >= 0 ? '+' : ''}
-                      {selectedQuote.change_pct.toFixed(2)}%
-                    </div>
-                  )}
-                </div>
-                <p className="mt-3 max-w-2xl text-sm font-sans text-zinc-400">
-                  Start with the active name, then drill into the live market workspace, full stock analysis, or run a broader screen.
-                </p>
+    <div className="flex flex-col gap-6 pb-4">
+      <section className="grid gap-6 2xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.85fr)]">
+        <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
+          <div className="relative">
+            <div className="shell-kicker">Live command deck</div>
+            <div className="mt-3 flex flex-wrap items-end gap-x-5 gap-y-3">
+              <div className="display-font text-[3rem] leading-none text-[var(--text-primary)] sm:text-[3.6rem]">
+                {selectedSymbol}
               </div>
-
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => setRoute('market')}
-                  className="rounded-lg border border-zinc-800 bg-zinc-950 px-3.5 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-zinc-900"
-                >
-                  Open market workspace
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRoute('stock')}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-3.5 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
-                >
-                  Open stock analysis
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRoute('screener')}
-                  className="rounded-lg border border-zinc-800 bg-[#FAF8F5] px-3.5 py-2 text-[11px] font-sans font-medium text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
-                >
-                  Run screener
-                </button>
+              <div className="text-2xl font-semibold text-[var(--text-primary)] sm:text-3xl">
+                {formatPrice(selectedQuote?.price)}
+              </div>
+              <div className={clsx(
+                'rounded-full border px-3 py-1 text-sm font-semibold',
+                (selectedQuote?.change_pct ?? 0) >= 0
+                  ? 'border-[rgba(31,157,104,0.2)] bg-[rgba(31,157,104,0.1)] text-[var(--success)]'
+                  : 'border-[rgba(217,76,61,0.2)] bg-[rgba(217,76,61,0.1)] text-[var(--danger)]',
+              )}>
+                {selectedQuote?.change != null ? `${selectedQuote.change >= 0 ? '+' : ''}${selectedQuote.change.toFixed(2)}` : '--'} / {formatChange(selectedQuote?.change_pct)}
               </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Market Cap</div>
-                <div className="mt-1 text-base font-mono font-semibold text-zinc-50">
-                  {formatCompact(selectedQuote?.market_cap)}
-                </div>
-              </div>
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Volume</div>
-                <div className="mt-1 text-base font-mono font-semibold text-zinc-50">
-                  {selectedQuote?.volume?.toLocaleString('en-US') ?? '--'}
-                </div>
-              </div>
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-3">
-                <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-400">Feed</div>
-                <div className="mt-1 text-base font-mono font-semibold text-zinc-50">
-                  {selectedQuote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback'}
-                </div>
-              </div>
+            <p className="mt-4 max-w-3xl text-sm leading-7 text-[var(--text-secondary)]">
+              The desk opens on the active symbol. Use this surface to push into market, research, screening,
+              or automation without hunting through dense navigation first.
+            </p>
+
+            <div className="mt-5 grid gap-3 sm:grid-cols-3">
+              <MetricTile label="Market cap" value={formatCompact(selectedQuote?.market_cap)} />
+              <MetricTile label="Volume" value={formatNumber(selectedQuote?.volume)} />
+              <MetricTile label="Data feed" value={feedLabel} />
             </div>
-          </div>
-        </div>
 
-        <div className="card rounded-lg p-5 ">
-          <SectionHeader eyebrow="Capital" title="Account Snapshot" />
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-            {!account ? (
-              <>
-                <SkeletonCard />
-                <SkeletonCard />
-                <SkeletonCard />
-                <SkeletonCard />
-              </>
-            ) : (
-              <>
-                <KPICard
-                  label={simMode ? 'Net Liq (SIM)' : 'Net Liquidation'}
-                  value={netLiq != null ? fmtUSD(netLiq) : '--'}
-                  highlight
-                />
-                <KPICard label="Cash" value={cash != null ? fmtUSD(cash) : '--'} />
-                <KPICard
-                  label="Unrealized P&L"
-                  value={unrealPnl != null ? fmtUSD(unrealPnl) : '--'}
-                  positive={unrealPnl != null ? unrealPnl >= 0 : undefined}
-                />
-                <KPICard
-                  label="Realized P&L"
-                  value={realPnl != null ? fmtUSD(realPnl) : '--'}
-                  positive={realPnl != null ? realPnl >= 0 : undefined}
-                />
-                {isSimAccount(account) && (
-                  <KPICard
-                    label="Total Return"
-                    value={account.total_return_pct.toFixed(2)}
-                    suffix="%"
-                    positive={account.total_return_pct >= 0}
-                  />
-                )}
-              </>
-            )}
-          </div>
-        </div>
-      </section>
-
-      <section className="animate-fade-in-up">
-        <SectionHeader eyebrow="Watchlist" title="Market Entry Points" />
-        <div className="mt-3">
-          <WatchlistGrid />
-        </div>
-      </section>
-
-      <section className="animate-fade-in-up" style={{ animationDelay: '40ms' }}>
-        <SectionHeader eyebrow="Ideas" title="Opportunity Board" />
-        <div className="mt-3">
-          <OpportunityBoard />
-        </div>
-      </section>
-
-      <section className="flex-1 min-h-0 animate-fade-in-up" style={{ animationDelay: '80ms' }}>
-        <div className="card rounded-lg overflow-hidden  min-h-[28rem] flex flex-col">
-          <div className="flex items-center gap-3 px-4 py-3 border-b border-[#E8E4DF]">
-            <div>
-              <div className="text-[10px] font-sans uppercase tracking-[0.18em] text-zinc-500">Chart</div>
-              <div className="text-base font-mono font-bold text-zinc-50">{selectedSymbol}</div>
-            </div>
-            <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-zinc-400">
-              {chartType}
-            </span>
-            {selectedQuote && (
-              <span
-                className={clsx(
-                  'text-[11px] font-mono tabular-nums',
-                  selectedQuote.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400',
-                )}
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => setRoute('market')}
+                className="rounded-2xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
               >
-                {selectedQuote.change_pct >= 0 ? '+' : ''}{selectedQuote.change_pct.toFixed(2)}%
-              </span>
-            )}
+                Open market workspace
+              </button>
+              <button
+                type="button"
+                onClick={() => setRoute('stock')}
+                className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              >
+                Open stock analysis
+              </button>
+              <button
+                type="button"
+                onClick={() => setRoute('screener')}
+                className="rounded-2xl border border-[var(--border)] bg-transparent px-4 py-3 text-sm font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
+              >
+                Run screener
+              </button>
+            </div>
+          </div>
+        </div>
 
-            <div className="ml-auto flex items-center gap-2">
+        <div className="flex flex-col gap-6">
+          <div className="shell-panel p-5">
+            <SectionHeading
+              eyebrow="Capital"
+              title="Account Snapshot"
+              description="Current desk posture across live or simulation mode."
+            />
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {!account ? (
+                <>
+                  <SkeletonCard />
+                  <SkeletonCard />
+                  <SkeletonCard />
+                  <SkeletonCard />
+                </>
+              ) : (
+                <>
+                  <KPICard label={simMode ? 'Net Liq (SIM)' : 'Net Liquidation'} value={netLiq != null ? fmtUSD(netLiq) : '--'} highlight />
+                  <KPICard label="Cash" value={cash != null ? fmtUSD(cash) : '--'} />
+                  <KPICard label="Unrealized P&L" value={unrealPnl != null ? fmtUSD(unrealPnl) : '--'} positive={unrealPnl != null ? unrealPnl >= 0 : undefined} />
+                  <KPICard label="Realized P&L" value={realPnl != null ? fmtUSD(realPnl) : '--'} positive={realPnl != null ? realPnl >= 0 : undefined} />
+                  {isSimAccount(account) && (
+                    <KPICard label="Total Return" value={account.total_return_pct.toFixed(2)} suffix="%" positive={account.total_return_pct >= 0} />
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="shell-panel p-5">
+            <SectionHeading
+              eyebrow="Launchpad"
+              title="Move Fast"
+              description="Shortest path into the next tool, depending on whether you are trading, researching, or validating."
+            />
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <ActionCard eyebrow="Execution" title="TradeBot" description="Review positions, recent trades, and automation state." onClick={() => setRoute('tradebot')} />
+              <ActionCard eyebrow="Research" title="Stock Profile" description="Jump from the active ticker into company detail and context." onClick={() => setRoute('stock')} />
+              <ActionCard eyebrow="Discovery" title="Screener" description="Scan broad universes and route winners straight into charts." onClick={() => setRoute('screener')} />
+              <ActionCard eyebrow="Autonomy" title="Autopilot" description="Inspect AI decisions, guardrails, and intervention queues." onClick={() => setRoute('advisor')} active />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+        <div className="shell-panel overflow-hidden">
+          <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] px-5 py-4">
+            <div>
+              <div className="shell-kicker">Live chart</div>
+              <div className="mt-1 flex items-center gap-2">
+                <span className="display-font text-[1.5rem] leading-none text-[var(--text-primary)]">{selectedSymbol}</span>
+                <span className="rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--text-secondary)]">
+                  {chartType}
+                </span>
+              </div>
+            </div>
+
+            <div className="ml-auto flex flex-wrap items-center gap-2">
               {compMode && (
                 <input
                   value={compSymbol}
-                  onChange={(e) => setCompSymbol(e.target.value.toUpperCase())}
-                  placeholder="vs. MSFT"
-                  className="w-24 rounded-lg border border-zinc-800 bg-[#FAF8F5] px-2.5 py-1.5 text-xs font-mono text-zinc-100 focus:border-zinc-700 focus:outline-none"
+                  onChange={(event) => setCompSymbol(event.target.value.toUpperCase())}
+                  placeholder="Compare vs MSFT"
+                  className="rounded-2xl border border-[var(--border)] bg-[var(--bg-input)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none transition-colors placeholder:text-[var(--text-muted)] focus:border-[var(--accent)]"
                 />
               )}
               <button
                 type="button"
                 onClick={toggleCompMode}
                 className={clsx(
-                  'rounded-lg border px-2.5 py-1.5 text-[11px] font-sans transition-colors',
+                  'rounded-2xl border px-3 py-2 text-sm font-semibold transition-colors',
                   compMode
-                    ? 'border-zinc-800 bg-zinc-800 text-zinc-50'
-                    : 'border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-100',
+                    ? 'border-[rgba(245,158,11,0.3)] bg-[rgba(245,158,11,0.12)] text-[var(--accent)]'
+                    : 'border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]',
                 )}
               >
                 Compare
@@ -283,59 +314,85 @@ export default function Dashboard() {
               <button
                 type="button"
                 onClick={() => setRoute('market')}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-sans text-zinc-200 transition-colors hover:border-zinc-700 hover:text-zinc-50"
+                className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
               >
-                Open workspace
+                Full workspace
               </button>
             </div>
           </div>
 
-          <div className="flex-1 min-h-0">
+          <div className="h-[34rem] min-h-[28rem]">
             <TradingChart symbol={selectedSymbol} className="h-full" />
           </div>
         </div>
 
-        {/* Quick Brief removed — info available in sidebar focus widget */}
+        <div className="grid gap-6">
+          <div>
+            <SectionHeading
+              eyebrow="Watchlist"
+              title="Radar Grid"
+              description="Sort, prune, and switch into symbols without leaving the overview."
+            />
+            <div className="mt-3">
+              <WatchlistGrid />
+            </div>
+          </div>
+
+          <div>
+            <SectionHeading
+              eyebrow="Signals"
+              title="Opportunity Board"
+              description="Quick ranking of buy and sell pressure across the active watchlist."
+            />
+            <div className="mt-3">
+              <OpportunityBoard />
+            </div>
+          </div>
+        </div>
       </section>
 
       {diagnosticsEnabled && (
-        <section className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '120ms' }}>
-          <SectionHeader
+        <section className="animate-fade-in-up" style={{ animationDelay: '100ms' }}>
+          <SectionHeading
             eyebrow="Diagnostics"
             title="Market Diagnostics"
+            description="Deep macro and breadth context stays out of the way until you want the fuller read."
             action={(
               <button
                 type="button"
-                onClick={() => setDiagnosticsExpanded((v) => !v)}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] font-sans text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-50"
+                onClick={() => setDiagnosticsExpanded((value) => !value)}
+                className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
               >
-                {diagnosticsExpanded ? 'Hide' : 'Show'}
+                {diagnosticsExpanded ? 'Collapse diagnostics' : 'Expand diagnostics'}
               </button>
             )}
           />
 
           {!diagnosticsExpanded ? (
-            <div className="card rounded-lg p-4 flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm font-sans text-zinc-200">
-                  Diagnostics stay collapsed by default so the dashboard remains focused on scanning and drilldowns.
-                </p>
-                {overview?.last_run_ts && (
-                  <p className="text-[11px] font-mono text-zinc-400 mt-1">
-                    Last run: {new Date(overview.last_run_ts).toLocaleString()}
+            <div className="shell-panel gradient-surface mt-4 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm leading-7 text-[var(--text-secondary)]">
+                    Keep the command deck lean by default, then expand into breadth, Dow confirmation,
+                    allocation signals, and news flow when you need context around a move.
                   </p>
-                )}
+                  {overview?.last_run_ts && (
+                    <p className="mt-2 text-xs font-medium uppercase tracking-[0.16em] text-[var(--text-muted)]">
+                      Last diagnostic run {new Date(overview.last_run_ts).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDiagnosticsExpanded(true)}
+                  className="rounded-2xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
+                >
+                  Open full diagnostics
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setDiagnosticsExpanded(true)}
-                className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px] font-sans font-medium text-white transition-colors hover:bg-zinc-900"
-              >
-                Expand diagnostics
-              </button>
             </div>
           ) : (
-            <>
+            <div className="mt-4 flex flex-col gap-4">
               <DiagnosticHeaderRow
                 lookbackDays={lookbackDays}
                 onSetLookback={onSetLookback}
@@ -346,34 +403,19 @@ export default function Dashboard() {
               />
 
               {diagnosticsError && (
-                <div className="rounded-lg border border-red-300 bg-red-500/10 p-5 flex items-start gap-3">
-                  <svg
-                    className="w-4 h-4 text-red-400 shrink-0 mt-0.5"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="8" x2="12" y2="12" />
-                    <line x1="12" y1="16" x2="12.01" y2="16" />
-                  </svg>
-                  <span className="text-xs font-sans font-medium text-red-400">
-                    Diagnostics error: {diagnosticsError}
-                  </span>
+                <div className="shell-panel border-[rgba(217,76,61,0.22)] bg-[rgba(217,76,61,0.08)] p-5 text-sm font-medium text-[var(--danger)]">
+                  Diagnostics error: {diagnosticsError}
                 </div>
               )}
 
               {diagnosticsLoading && !overview && indicators.length === 0 ? (
-                <div className="card rounded-lg p-5 text-xs font-sans font-medium text-zinc-500">
+                <div className="shell-panel p-5 text-sm text-[var(--text-secondary)]">
                   Loading diagnostics...
                 </div>
               ) : (
                 <>
                   <OverallSummaryCard overview={overview} />
-                  <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+                  <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                     <SystemOverviewWidget overview={overview} />
                     <DowTheoryWidget overview={overview} />
                     <SectorDivergenceWidget overview={overview} />
@@ -385,10 +427,19 @@ export default function Dashboard() {
                   <NewsStrip articles={news} />
                 </>
               )}
-            </>
+            </div>
           )}
         </section>
       )}
+    </div>
+  )
+}
+
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[22px] border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3">
+      <div className="shell-kicker">{label}</div>
+      <div className="mt-2 text-lg font-semibold text-[var(--text-primary)]">{value}</div>
     </div>
   )
 }

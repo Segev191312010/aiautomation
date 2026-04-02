@@ -27,7 +27,7 @@ export interface UseNotificationsResult {
 // ── VAPID public key ──────────────────────────────────────────────────────────
 // Set VITE_VAPID_PUBLIC_KEY in your .env file if you have a push server.
 // If absent we fall back to basic (non-persistent) browser notifications only.
-const VAPID_PUBLIC_KEY = (import.meta as any).env?.['VITE_VAPID_PUBLIC_KEY'] as string | undefined
+const VAPID_PUBLIC_KEY = import.meta.env.VITE_VAPID_PUBLIC_KEY as string | undefined
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ async function subscribeToPush(): Promise<void> {
 
     const subscription = existing ?? await registration.pushManager.subscribe({
       userVisibleOnly:      true,
-      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) as any,
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) as BufferSource,
     })
 
     await subscribePush(subscription.toJSON())

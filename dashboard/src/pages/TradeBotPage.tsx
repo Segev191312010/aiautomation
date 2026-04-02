@@ -1,244 +1,238 @@
-/**
- * TradeBotPage — Command Center for automated trading.
- *
- * Tabs:
- *  1. Positions (default) — KPI cards, quick order, positions table
- *  2. Rules               — inline RulesPage (lazy)
- *  3. Autopilot           — inline AutopilotPage (lazy)
- *  4. Activity            — LiveActivityFeed + recent trades log
- *
- * KPI cards and BotToggle are always visible above the tab bar.
- */
-import React, { Suspense, useEffect, useState, lazy } from 'react'
-import clsx from 'clsx'
-import { fmtUSD } from '@/utils/formatters'
-import { IconDollar, IconWallet, IconTrendUp, IconTrendDown } from '@/components/icons'
-import { KPISkeletonCard } from '@/components/tradebot/KPISkeletonCard'
+import React, { Suspense, lazy, useEffect, useState } from 'react'
+import KPICard from '@/components/tradebot/KPICard'
 import { PositionsContent } from '@/components/tradebot/PositionsContent'
 import { ActivityContent } from '@/components/tradebot/ActivityContent'
 import BotToggle from '@/components/tradebot/BotToggle'
 import TradeBotTabs from '@/components/tradebot/TradeBotTabs'
+import { fmtUSD } from '@/utils/formatters'
 import { useAccountStore, useBotStore, useSimStore, useUIStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, fetchAccountSummary, fetchPositions } from '@/services/api'
 import type { AccountSummary } from '@/types'
 
-const RulesPage     = lazy(() => import('@/pages/RulesPage'))
+const RulesPage = lazy(() => import('@/pages/RulesPage'))
 const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
 
 function TabFallback() {
   return (
     <div className="flex items-center justify-center py-20">
       <div className="flex flex-col items-center gap-3">
-        <div className="w-8 h-8 rounded-full border-2 border-indigo-500/30 border-t-indigo-500 animate-spin" />
-        <span className="text-xs font-sans text-zinc-500">Loading…</span>
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" />
+        <span className="text-xs font-sans text-[var(--text-muted)]">Loading...</span>
       </div>
+    </div>
+  )
+}
+
+function HeroSignal({
+  label,
+  value,
+  accent,
+}: {
+  label: string
+  value: string
+  accent?: 'default' | 'success' | 'warning'
+}) {
+  const toneClass =
+    accent === 'success'
+      ? 'border-[rgba(31,157,104,0.18)] bg-[rgba(31,157,104,0.1)] text-[var(--success)]'
+      : accent === 'warning'
+        ? 'border-[rgba(245,158,11,0.2)] bg-[rgba(245,158,11,0.1)] text-[var(--accent)]'
+        : 'border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-primary)]'
+
+  return (
+    <div className={`rounded-[24px] border p-4 ${toneClass}`}>
+      <div className="shell-kicker">{label}</div>
+      <div className="mt-3 text-2xl font-semibold leading-none">{value}</div>
     </div>
   )
 }
 
 export default function TradeBotPage() {
   const { account, positions, setTrades, trades } = useAccountStore()
-  const { simMode } = useBotStore()
+  const { simMode, botRunning, ibkrConnected } = useBotStore()
   const { simAccount, setSimAccount, setSimPositions } = useSimStore()
   const [initialLoad, setInitialLoad] = useState(true)
 
-  const tradebotTab    = useUIStore((s) => s.tradebotTab)
+  const tradebotTab = useUIStore((s) => s.tradebotTab)
   const setTradebotTab = useUIStore((s) => s.setTradebotTab)
 
   const displayAccount = simMode ? simAccount : account
-
-  const netLiq    = displayAccount ? ('net_liquidation' in displayAccount ? displayAccount.net_liquidation : (displayAccount as AccountSummary).balance) : null
-  const cash      = displayAccount?.cash ?? null
+  const netLiq = displayAccount
+    ? 'net_liquidation' in displayAccount
+      ? displayAccount.net_liquidation
+      : (displayAccount as AccountSummary).balance
+    : null
+  const cash = displayAccount?.cash ?? null
   const unrealPnl = displayAccount?.unrealized_pnl ?? null
-  const realPnl   = displayAccount?.realized_pnl ?? null
+  const realPnl = displayAccount?.realized_pnl ?? null
 
   useEffect(() => {
     const load = async () => {
       try {
-        const t = await fetchTrades(50)
-        setTrades(t)
-      } catch { /* ignore */ }
+        const recentTrades = await fetchTrades(50)
+        setTrades(recentTrades)
+      } catch {
+        // Ignore feed failures and keep the desk interactive.
+      }
 
       if (simMode) {
         try {
           const [acc, pos] = await Promise.all([fetchSimAccount(), fetchSimPositions()])
           setSimAccount(acc)
           setSimPositions(pos)
-        } catch { /* ignore */ }
+        } catch {
+          // Ignore simulation refresh failure.
+        }
       } else {
         try {
           const [acc, pos] = await Promise.all([fetchAccountSummary(), fetchPositions()])
           useAccountStore.getState().setAccount(acc)
           useAccountStore.getState().setPositions(pos)
-        } catch { /* ignore */ }
+        } catch {
+          // Ignore live refresh failure.
+        }
       }
+
       setInitialLoad(false)
     }
-    load()
-    const t = setInterval(load, 10_000)
-    return () => clearInterval(t)
+
+    void load()
+    const timer = setInterval(load, 10_000)
+    return () => clearInterval(timer)
   }, [simMode, setTrades, setSimAccount, setSimPositions])
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6 pb-4">
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+        <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
+          <div className="relative">
+            <div className="shell-kicker">Automation desk</div>
+            <div className="mt-3 flex flex-wrap items-center gap-2.5">
+              <h2 className="display-font text-[2.7rem] leading-none text-[var(--text-primary)] sm:text-[3.2rem]">
+                TradeBot
+              </h2>
+              <span className="shell-chip text-[11px] font-semibold">
+                {simMode ? 'Simulation' : 'Live account'}
+              </span>
+              <span className="shell-chip text-[11px] font-semibold">
+                {botRunning ? 'Bot active' : 'Bot idle'}
+              </span>
+              <span className="shell-chip text-[11px] font-semibold">
+                {ibkrConnected ? 'IBKR connected' : 'IBKR offline'}
+              </span>
+            </div>
 
-      {/* ── KPI header — always visible ───────────────────────────────────── */}
-      <section className="animate-fade-in-up">
-        <div className="flex items-center gap-2 mb-3">
-          <h2 className="text-xs font-sans font-medium text-zinc-400 tracking-widest uppercase">
-            Account Overview
-          </h2>
+            <p className="mt-4 max-w-3xl text-sm leading-7 text-[var(--text-secondary)]">
+              Keep execution, automation controls, live activity, and rule management in one command surface.
+              The data feed stays live while the page stays thin.
+            </p>
+
+            <div className="mt-5 flex flex-wrap gap-2">
+              <span className="shell-chip text-[11px] font-medium">
+                {positions.length} open position{positions.length === 1 ? '' : 's'}
+              </span>
+              <span className="shell-chip text-[11px] font-medium">
+                {trades.length} recent trade{trades.length === 1 ? '' : 's'}
+              </span>
+              <span className="shell-chip text-[11px] font-medium">
+                Refreshes every 10s
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-3 xl:grid-cols-1">
+          <HeroSignal
+            label="Mode"
+            value={simMode ? 'Simulation' : 'Live'}
+            accent={simMode ? 'warning' : 'default'}
+          />
+          <HeroSignal
+            label="Execution"
+            value={botRunning ? 'Autonomous' : 'Manual'}
+            accent={botRunning ? 'success' : 'default'}
+          />
+          <HeroSignal
+            label="Connectivity"
+            value={ibkrConnected ? 'Streaming' : 'Disconnected'}
+            accent={ibkrConnected ? 'success' : 'warning'}
+          />
+        </div>
+      </section>
+
+      <section className="shell-panel p-5 sm:p-6">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div className="max-w-2xl">
+            <div className="shell-kicker">Capital posture</div>
+            <h2 className="display-font mt-2 text-[1.75rem] leading-none text-[var(--text-primary)]">
+              Account overview
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
+              Live or simulated balances, capital available, and current P&amp;L on the desk.
+            </p>
+          </div>
+
           {simMode && (
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-lg bg-amber-600/15 text-amber-600 border border-amber-300/20">
-              SIMULATION
+            <span className="shell-chip border-[rgba(245,158,11,0.28)] bg-[rgba(245,158,11,0.12)] text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--accent)]">
+              Simulation mode
             </span>
           )}
         </div>
 
         {initialLoad && !displayAccount ? (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <KPISkeletonCard />
-            <KPISkeletonCard />
-            <KPISkeletonCard />
-            <KPISkeletonCard />
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] p-4 animate-pulse">
+                <div className="h-2.5 w-24 rounded bg-[var(--bg-card)]" />
+                <div className="mt-4 h-7 w-28 rounded bg-[var(--bg-card)]" />
+              </div>
+            ))}
           </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {/* Net Liquidation */}
-            <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2 border-l-indigo-600/60">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-lg bg-indigo-50 flex items-center justify-center flex-shrink-0">
-                  <IconDollar className="w-3.5 h-3.5 text-indigo-600" />
-                </div>
-                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
-                  Net Liquidation
-                </span>
-              </div>
-              <span className="text-2xl font-mono font-bold tabular-nums text-zinc-100">
-                {netLiq != null ? fmtUSD(netLiq) : '—'}
-              </span>
-            </div>
-
-            {/* Cash */}
-            <div className="bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2 border-l-blue-500/50">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-lg bg-blue-500/15 flex items-center justify-center flex-shrink-0">
-                  <IconWallet className="w-3.5 h-3.5 text-blue-400" />
-                </div>
-                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
-                  Cash
-                </span>
-              </div>
-              <span className="text-2xl font-mono font-bold tabular-nums text-zinc-100">
-                {cash != null ? fmtUSD(cash) : '—'}
-              </span>
-            </div>
-
-            {/* Unrealized P&L */}
-            <div className={clsx(
-              'bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2',
-              unrealPnl == null
-                ? 'border-l-white/[0.08]'
-                : unrealPnl >= 0
-                ? 'border-l-emerald-500/60'
-                : 'border-l-red-500/60',
-            )}>
-              <div className="flex items-center gap-2">
-                <div className={clsx(
-                  'w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0',
-                  unrealPnl == null
-                    ? 'bg-zinc-800/50'
-                    : unrealPnl >= 0
-                    ? 'bg-emerald-500/15'
-                    : 'bg-red-500/15',
-                )}>
-                  {unrealPnl == null || unrealPnl >= 0
-                    ? <IconTrendUp className={clsx('w-3.5 h-3.5', unrealPnl == null ? 'text-zinc-500' : 'text-emerald-400')} />
-                    : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />
-                  }
-                </div>
-                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
-                  Unrealized P&L
-                </span>
-              </div>
-              <span className={clsx(
-                'text-2xl font-mono font-bold tabular-nums',
-                unrealPnl == null
-                  ? 'text-zinc-100'
-                  : unrealPnl >= 0
-                  ? 'text-emerald-400'
-                  : 'text-red-400',
-              )}>
-                {unrealPnl != null
-                  ? (unrealPnl >= 0 ? '+' : '') + fmtUSD(unrealPnl)
-                  : '—'}
-              </span>
-            </div>
-
-            {/* Realized P&L */}
-            <div className={clsx(
-              'bg-zinc-900/80 border border-zinc-800 rounded-2xl p-5 flex flex-col gap-2 border-l-2',
-              realPnl == null
-                ? 'border-l-white/[0.08]'
-                : realPnl >= 0
-                ? 'border-l-emerald-500/60'
-                : 'border-l-red-500/60',
-            )}>
-              <div className="flex items-center gap-2">
-                <div className={clsx(
-                  'w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0',
-                  realPnl == null
-                    ? 'bg-zinc-800/50'
-                    : realPnl >= 0
-                    ? 'bg-emerald-500/15'
-                    : 'bg-red-500/15',
-                )}>
-                  {realPnl == null || realPnl >= 0
-                    ? <IconTrendUp className={clsx('w-3.5 h-3.5', realPnl == null ? 'text-zinc-500' : 'text-emerald-400')} />
-                    : <IconTrendDown className="w-3.5 h-3.5 text-red-400" />
-                  }
-                </div>
-                <span className="text-[10px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
-                  Realized P&L
-                </span>
-              </div>
-              <span className={clsx(
-                'text-2xl font-mono font-bold tabular-nums',
-                realPnl == null
-                  ? 'text-zinc-100'
-                  : realPnl >= 0
-                  ? 'text-emerald-400'
-                  : 'text-red-400',
-              )}>
-                {realPnl != null
-                  ? (realPnl >= 0 ? '+' : '') + fmtUSD(realPnl)
-                  : '—'}
-              </span>
-            </div>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <KPICard label="Net Liquidation" value={netLiq != null ? fmtUSD(netLiq) : '--'} highlight />
+            <KPICard label="Cash" value={cash != null ? fmtUSD(cash) : '--'} />
+            <KPICard
+              label="Unrealized P&L"
+              value={unrealPnl != null ? `${unrealPnl >= 0 ? '+' : ''}${fmtUSD(unrealPnl)}` : '--'}
+              positive={unrealPnl != null ? unrealPnl >= 0 : undefined}
+            />
+            <KPICard
+              label="Realized P&L"
+              value={realPnl != null ? `${realPnl >= 0 ? '+' : ''}${fmtUSD(realPnl)}` : '--'}
+              positive={realPnl != null ? realPnl >= 0 : undefined}
+            />
           </div>
         )}
       </section>
 
-      {/* ── Master toggle — always visible ────────────────────────────────── */}
       <section className="animate-fade-in-up" style={{ animationDelay: '40ms' }}>
         <BotToggle />
       </section>
 
-      {/* ── Tab bar ───────────────────────────────────────────────────────── */}
-      <div className="animate-fade-in-up" style={{ animationDelay: '60ms' }}>
-        <TradeBotTabs
-          activeTab={tradebotTab}
-          onTabChange={(tab) => setTradebotTab(tab as 'positions' | 'rules' | 'insights' | 'activity')}
-          tabs={[
-            { id: 'positions', label: 'Positions' },
-            { id: 'rules',     label: 'Rules' },
-            { id: 'insights',  label: 'Autopilot' },
-            { id: 'activity',  label: 'Activity' },
-          ]}
-        />
-      </div>
+      <section className="animate-fade-in-up" style={{ animationDelay: '60ms' }}>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <div className="shell-kicker">Workspace</div>
+            <p className="mt-2 max-w-xl text-sm leading-6 text-[var(--text-secondary)]">
+              Switch between position management, rules, autopilot, and live activity without leaving the execution desk.
+            </p>
+          </div>
 
-      {/* ── Tab content ───────────────────────────────────────────────────── */}
+          <TradeBotTabs
+            activeTab={tradebotTab}
+            onTabChange={(tab) => setTradebotTab(tab as 'positions' | 'rules' | 'insights' | 'activity')}
+            tabs={[
+              { id: 'positions', label: 'Positions' },
+              { id: 'rules', label: 'Rules' },
+              { id: 'insights', label: 'Autopilot' },
+              { id: 'activity', label: 'Activity' },
+            ]}
+          />
+        </div>
+      </section>
+
       <div className="animate-fade-in-up" style={{ animationDelay: '80ms' }}>
         {tradebotTab === 'positions' && (
           <PositionsContent positions={positions} initialLoad={initialLoad} />
@@ -260,7 +254,6 @@ export default function TradeBotPage() {
           <ActivityContent trades={trades} initialLoad={initialLoad} />
         )}
       </div>
-
     </div>
   )
 }
