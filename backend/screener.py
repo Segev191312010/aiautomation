@@ -580,6 +580,8 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
       if symbols is also provided, the result is the *intersection*
       (only universe members that also appear in the symbols list).
     """
+    t0 = time.time()
+
     # Resolve symbols
     if request.universe == "custom":
         symbols = [s.upper() for s in (request.symbols or [])]
@@ -590,7 +592,7 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
             symbols = [s for s in symbols if s in custom]
 
     if not symbols:
-        return ScanResponse(results=[], skipped_symbols=[])
+        return ScanResponse(results=[], skipped_symbols=[], elapsed_ms=0, total_symbols=0)
 
     # Fetch bar data
     skipped = await refresh_cache(symbols, request.interval, request.period)
@@ -637,7 +639,13 @@ async def run_scan(request: ScanRequest) -> ScanResponse:
             notes=snapshot["notes"],
         ))
     ranked_results = sorted(results, key=_result_sort_key, reverse=True)[:request.limit]
-    return ScanResponse(results=ranked_results, skipped_symbols=sorted(skipped_set))
+    elapsed_ms = int((time.time() - t0) * 1000)
+    return ScanResponse(
+        results=ranked_results,
+        skipped_symbols=sorted(skipped_set),
+        elapsed_ms=elapsed_ms,
+        total_symbols=len(symbols),
+    )
 
 
 async def build_market_opportunity_snapshot(

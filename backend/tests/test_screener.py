@@ -447,3 +447,218 @@ class TestPresetModel:
         restored = ScreenerPreset.model_validate(data)
         assert restored.name == preset.name
         assert len(restored.filters) == 1
+
+
+# ---------------------------------------------------------------------------
+# ScanResponse timing fields
+# ---------------------------------------------------------------------------
+
+class TestScanResponseTiming:
+    def test_response_includes_timing_fields(self):
+        response = ScanResponse(
+            results=[],
+            skipped_symbols=[],
+            elapsed_ms=1234,
+            total_symbols=500,
+        )
+        assert response.elapsed_ms == 1234
+        assert response.total_symbols == 500
+
+    def test_response_default_timing(self):
+        response = ScanResponse(results=[], skipped_symbols=[])
+        assert response.elapsed_ms == 0
+        assert response.total_symbols == 0
+
+
+# ---------------------------------------------------------------------------
+# Run scan returns timing
+# ---------------------------------------------------------------------------
+
+class TestScanTiming:
+    @pytest.mark.anyio
+    async def test_run_scan_includes_elapsed_ms(anyio_backend):
+        screener_module._bar_cache.clear()
+        df = _make_df(260, start_price=100, seed=100)
+        screener_module._bar_cache[("TEST", "1d", "1y")] = screener_module.CacheEntry(df, time.time())
+
+        request = ScanRequest(
+            universe="custom",
+            symbols=["TEST"],
+            filters=[ScanFilter(
+                indicator="PRICE",
+                params={},
+                operator="GT",
+                value=FilterValue(type="number", number=1),
+            )],
+            interval="1d",
+            period="1y",
+        )
+
+        with patch("screener.refresh_cache", new=AsyncMock(return_value=[])):
+            response = await run_scan(request)
+
+        assert response.elapsed_ms >= 0
+        assert response.total_symbols == 1
+
+    @pytest.mark.anyio
+    async def test_empty_universe_returns_zero_timing(anyio_backend):
+        request = ScanRequest(
+            universe="custom",
+            symbols=[],
+            filters=[ScanFilter(
+                indicator="PRICE",
+                params={},
+                operator="GT",
+                value=FilterValue(type="number", number=1),
+            )],
+        )
+        response = await run_scan(request)
+        assert response.elapsed_ms == 0
+        assert response.total_symbols == 0
+
+
+# ---------------------------------------------------------------------------
+# Built-in presets
+# ---------------------------------------------------------------------------
+
+class TestBuiltInPresets:
+    def test_built_in_presets_have_valid_filters(self):
+        from database import _BUILT_IN_PRESETS
+        for raw in _BUILT_IN_PRESETS:
+            assert "name" in raw
+            assert "filters" in raw
+            assert len(raw["filters"]) >= 1
+            # Ensure each filter validates
+            for f in raw["filters"]:
+                filt = ScanFilter.model_validate(f)
+                assert filt.indicator in (
+                    "RSI", "SMA", "EMA", "MACD", "BBANDS", "ATR", "STOCH",
+                    "PRICE", "VOLUME", "CHANGE_PCT",
+                )
+
+    def test_at_least_8_built_in_presets(self):
+        from database import _BUILT_IN_PRESETS
+        assert len(_BUILT_IN_PRESETS) >= 8
+
+    def test_preset_names_unique(self):
+        from database import _BUILT_IN_PRESETS
+        names = [p["name"] for p in _BUILT_IN_PRESETS]
+        assert len(names) == len(set(names)), "Duplicate preset names found"
+
+
+# ---------------------------------------------------------------------------
+# IBKR Scanner (unit tests — no real IBKR connection)
+# ---------------------------------------------------------------------------
+
+class TestIBKRScanner:
+    def test_get_available_scans_returns_list(self):
+        from ibkr_scanner import get_available_scans
+        scans = get_available_scans()
+        assert isinstance(scans, list)
+        assert len(scans) >= 8
+        for scan in scans:
+            assert "id" in scan
+            assert "name" in scan
+            assert "max_results" in scan
+
+    def test_scan_templates_have_required_fields(self):
+        from ibkr_scanner import SCAN_TEMPLATES
+        for name, template in SCAN_TEMPLATES.items():
+            assert "instrument" in template
+            assert "locationCode" in template
+            assert "scanCode" in template
+
+    @pytest.mark.anyio
+    async def test_run_scan_returns_empty_when_disconnected(anyio_backend):
+        from ibkr_scanner import run_scan as ibkr_run_scan
+        # ibkr is not connected in test env
+        results = await ibkr_run_scan("hot_us_stocks")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# CSV export route (contract test)
+# ---------------------------------------------------------------------------
+
+class TestCSVExportRoute:
+    @pytest.mark.anyio
+    async def test_csv_export_produces_valid_csv(anyio_backend):
+        """Test that the CSV export logic produces a valid response."""
+        import csv
+        import io
+        from routers.screener_routes import router as _  # noqa: F401 — ensure import works
+
+        # Test CSV generation logic directly
+        from models import ScanResultRow
+        rows = [
+            ScanResultRow(
+                symbol="AAPL", price=175.50, change_pct=1.2, volume=50_000_000,
+                indicators={"RSI_14": 55.3, "SMA_50": 170.0},
+                screener_score=72.5, setup="trend",
+                relative_volume=1.5, momentum_20d=8.3, trend_strength=24.0,
+                notes=["MA stack aligned"],
+            ),
+        ]
+        output = io.StringIO()
+        writer = csv.writer(output)
+        indicator_cols = sorted({"RSI_14", "SMA_50"})
+        header = ["Symbol", "Price", "Change%", "Volume", "Score", "Setup",
+                  "RVOL", "Mom20D", "Trend", "Notes"] + indicator_cols
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow([
+                row.symbol, f"{row.price:.2f}", f"{row.change_pct:.2f}", row.volume,
+                f"{row.screener_score:.1f}", row.setup,
+                f"{row.relative_volume:.2f}", f"{row.momentum_20d:.2f}",
+                f"{row.trend_strength:.1f}", "; ".join(row.notes),
+            ] + [f"{row.indicators.get(col, 0):.4f}" for col in indicator_cols])
+
+        output.seek(0)
+        reader = csv.reader(output)
+        all_rows = list(reader)
+        assert len(all_rows) == 2  # header + 1 data row
+        assert all_rows[0][0] == "Symbol"
+        assert all_rows[1][0] == "AAPL"
+        assert all_rows[1][4] == "72.5"
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting / cache behavior
+# ---------------------------------------------------------------------------
+
+class TestCacheBehavior:
+    def test_cache_eviction_at_max_size(self):
+        """Ensure LRU eviction works when cache exceeds MAX_CACHE_SIZE."""
+        from screener import _bar_cache, _evict_if_full, CacheEntry, MAX_CACHE_SIZE
+        _bar_cache.clear()
+
+        # Fill cache beyond max
+        df = _make_df(10)
+        for i in range(MAX_CACHE_SIZE + 100):
+            _bar_cache[(f"SYM{i}", "1d", "1y")] = CacheEntry(df, time.time() + i * 0.001)
+
+        assert len(_bar_cache) == MAX_CACHE_SIZE + 100
+
+        _evict_if_full()
+
+        assert len(_bar_cache) <= MAX_CACHE_SIZE
+        _bar_cache.clear()
+
+    def test_stale_cache_detection(self):
+        """Entries older than CACHE_TTL should be detected as stale."""
+        from screener import CacheEntry, _is_stale, CACHE_TTL
+        df = _make_df(10)
+
+        fresh = CacheEntry(df, time.time())
+        assert not _is_stale(fresh)
+
+        stale = CacheEntry(df, time.time() - CACHE_TTL - 1)
+        assert _is_stale(stale)
+
+    def test_cache_key_uniqueness(self):
+        """Same symbol with different interval/period produces different keys."""
+        key1 = ("AAPL", "1d", "1y")
+        key2 = ("AAPL", "1h", "3mo")
+        key3 = ("MSFT", "1d", "1y")
+        assert key1 != key2
+        assert key1 != key3

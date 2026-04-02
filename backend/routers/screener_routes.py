@@ -2,11 +2,17 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from database import get_screener_presets, save_screener_preset, delete_screener_preset
 from models import ScanRequest, ScanFilter, ScreenerPreset, EnrichRequest
 from screener import run_scan, list_universes, validate_timeframe, enrich_symbols
+
+try:
+    from ibkr_scanner import get_available_scans, run_scan as ibkr_run_scan, run_multi_scan, SCAN_TEMPLATES
+    _IBKR_AVAILABLE = True
+except ImportError:
+    _IBKR_AVAILABLE = False
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
 
@@ -14,6 +20,10 @@ router = APIRouter(prefix="/api/screener", tags=["screener"])
 class SavePresetRequest(BaseModel):
     name: str
     filters: list[ScanFilter]
+
+
+class MultiScanRequest(BaseModel):
+    scans: list[str] | None = Field(default=None, max_length=10)
 
 
 @router.post("/scan")
@@ -60,3 +70,36 @@ async def screener_delete_preset(preset_id: str):
 async def screener_enrich(body: EnrichRequest):
     results = await enrich_symbols(body.symbols)
     return [r.model_dump() for r in results]
+
+
+# ── IBKR Scanner integration ─────────────────────────────────────────────────
+
+@router.get("/ibkr-scans")
+async def screener_ibkr_available_scans():
+    """List available IBKR scanner templates."""
+    if not _IBKR_AVAILABLE:
+        raise HTTPException(503, "IBKR scanner module not available")
+    return get_available_scans()
+
+
+@router.get("/ibkr-scan/{scan_name}")
+async def screener_ibkr_run_scan(scan_name: str, max_results: int = 50):
+    """Run an IBKR server-side scanner and return results."""
+    if not _IBKR_AVAILABLE:
+        raise HTTPException(503, "IBKR scanner module not available")
+    if scan_name not in SCAN_TEMPLATES:
+        raise HTTPException(404, f"Unknown scan template: {scan_name}")
+    results = await ibkr_run_scan(scan_name, min(max_results, 100))
+    return {"scan": scan_name, "results": results, "count": len(results)}
+
+
+@router.post("/ibkr-multi-scan")
+async def screener_ibkr_multi_scan(body: MultiScanRequest):
+    """Run multiple IBKR scans concurrently."""
+    if not _IBKR_AVAILABLE:
+        raise HTTPException(503, "IBKR scanner module not available")
+    results = await run_multi_scan(body.scans)
+    return {
+        name: {"results": items, "count": len(items)}
+        for name, items in results.items()
+    }
