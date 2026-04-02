@@ -5,14 +5,18 @@
  * Height: ~60-80px. Color-coded bars (green = up, red = down).
  */
 import { useEffect, useRef } from 'react'
-import type { IChartApi, ISeriesApi } from 'lightweight-charts'
+import type {
+  HistogramData,
+  HistogramSeriesOptions,
+  IChartApi,
+  ISeriesApi,
+  LogicalRange,
+  Time,
+} from 'lightweight-charts'
 import clsx from 'clsx'
 import { useChart, PANEL_THEME } from '@/hooks/useChart'
 import { useMarketStore } from '@/store'
 import type { OHLCVBar } from '@/types'
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyData = any
 
 interface Props {
   symbol:       string
@@ -45,7 +49,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
     const vol = chart.addHistogramSeries({
       color:       '#CBD5E1',
       priceFormat: { type: 'volume' },
-    } as AnyData)
+    } as Partial<HistogramSeriesOptions>)
     volumeRef.current = vol
     onChartReadyRef.current?.(chart, vol)
 
@@ -61,13 +65,13 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
   // Set data when bars change
   useEffect(() => {
     if (!volumeRef.current || !bars.length) return
-    const data = bars.slice(-5000).map((b: OHLCVBar) => ({
-      time:  b.time as unknown,
+    const data: HistogramData<Time>[] = bars.slice(-5000).map((b: OHLCVBar) => ({
+      time:  b.time as Time,
       value: b.volume,
       color: b.close >= b.open ? 'rgba(22, 163, 74, 0.28)' : 'rgba(220, 38, 38, 0.28)',
     }))
     try {
-      volumeRef.current.setData(data as AnyData)
+      volumeRef.current.setData(data)
       if (!fittedRef.current) {
         chartRef.current?.timeScale().fitContent()
         fittedRef.current = true
@@ -81,7 +85,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
     const volChart = chartRef.current
     const syncingRef = { current: false }
 
-    const onMainRangeChange = (range: AnyData) => {
+    const onMainRangeChange = (range: LogicalRange | null) => {
       if (syncingRef.current || !range) return
       syncingRef.current = true
       setTimeout(() => {
@@ -90,7 +94,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
       }, 0)
     }
 
-    const onVolRangeChange = (range: AnyData) => {
+    const onVolRangeChange = (range: LogicalRange | null) => {
       if (syncingRef.current || !range) return
       syncingRef.current = true
       setTimeout(() => {

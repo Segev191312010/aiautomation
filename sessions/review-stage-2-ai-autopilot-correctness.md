@@ -1,7 +1,21 @@
 ﻿AI AUTOPILOT — STAGE 2 AI / AUTOPILOT CORRECTNESS
 ==================================================
-DATE: 2026-03-27
+DATE: 2026-03-27 (updated 2026-03-31 with audit findings)
 STATUS: READY AFTER STAGE 1 BOUNDARIES START TO EXIST
+
+AUDIT UPDATE (2026-03-31)
+-------------------------
+Full codebase audit found 8 issues in this stage. 3 were FIXED same-day, 5 remain OPEN.
+See: `sessions/audit-findings-2026-03-31.md` (section: STAGE 2)
+
+FIXED: asyncio.Queue for candidates, per-rule oscillation prevention, backtest gate default
+
+OPEN (do in Phase 2.1-2.3):
+  - F2-04: Auto-tune sizing_changes/new_min_score never applied (ai_advisor.py:360)
+  - F2-05: Replay context not fully persisted (ai_optimizer.py:689)
+  - F2-06: AI input validation — stop_price direction, scope defaults (ai_rule_lab.py:75)
+  - F2-07: Direct AI candidates volatile on restart (execution_brain.py)
+  - F2-08: Bull/Bear debate fails silently to NEUTRAL (ai_advisor.py:543)
 OWNER: AUTOPILOT / AI TEAM
 GOAL: Make AI decision generation, replay, evaluation, scoring, and learning modular, explainable, and safe to trust.
 

@@ -6,21 +6,22 @@
  */
 import { useEffect, useRef } from 'react'
 import {
+  type HistogramData,
   type IChartApi,
   type ISeriesApi,
+  type LineData,
   type LineSeriesOptions,
   type HistogramSeriesOptions,
+  type LogicalRange,
+  type Time,
 } from 'lightweight-charts'
 import clsx from 'clsx'
 import { useChart, PANEL_THEME } from '@/hooks/useChart'
 import { useMarketStore } from '@/store'
 import { calcRSI, calcMACD, type LinePoint } from '@/utils/indicators'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyData = any
-
-function toTV(pts: LinePoint[]): AnyData {
-  return pts.map((p) => ({ time: p.time, value: p.value }))
+function toTV(pts: LinePoint[]): LineData<Time>[] {
+  return pts.map((p) => ({ time: p.time as Time, value: p.value }))
 }
 
 // ── RSI Sub-chart ─────────────────────────────────────────────────────────────
@@ -98,7 +99,7 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
     const panelChart = chartRef.current
     const syncingRef = { current: false }
 
-    const onMainRangeChange = (range: AnyData) => {
+    const onMainRangeChange = (range: LogicalRange | null) => {
       if (syncingRef.current || !range) return
       syncingRef.current = true
       setTimeout(() => {
@@ -107,7 +108,7 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
       }, 0)
     }
 
-    const onPanelRangeChange = (range: AnyData) => {
+    const onPanelRangeChange = (range: LogicalRange | null) => {
       if (syncingRef.current || !range) return
       syncingRef.current = true
       setTimeout(() => {
@@ -218,7 +219,7 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
     const panelChart = chartRef.current
     const syncingRef = { current: false }
 
-    const onMainRangeChange = (range: AnyData) => {
+    const onMainRangeChange = (range: LogicalRange | null) => {
       if (syncingRef.current || !range) return
       syncingRef.current = true
       setTimeout(() => {
@@ -227,7 +228,7 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
       }, 0)
     }
 
-    const onPanelRangeChange = (range: AnyData) => {
+    const onPanelRangeChange = (range: LogicalRange | null) => {
       if (syncingRef.current || !range) return
       syncingRef.current = true
       setTimeout(() => {

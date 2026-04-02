@@ -1,7 +1,23 @@
 ﻿AI AUTOPILOT — STAGE 3 TRADING RUNTIME HARDENING
 ================================================
-DATE: 2026-03-27
+DATE: 2026-03-27 (updated 2026-03-31 with audit findings)
 STATUS: READY AFTER STAGE 1 AND STAGE 2 FOUNDATIONS
+
+AUDIT UPDATE (2026-03-31)
+-------------------------
+Full codebase audit found 18 issues in this stage. 14 were FIXED same-day, 4 remain OPEN.
+See: `sessions/audit-findings-2026-03-31.md` (section: STAGE 3)
+
+FIXED: skip_safety bypass, MKT→LMT race, fire-and-forget tasks, partial fills,
+       fill watcher timeout, dedup window, stale event callbacks, fail-open risk checks,
+       unrealized P&L in circuit breaker, price fallback, emergency position close,
+       reconnect reconciliation, same-cycle churn, DB synchronous=FULL
+
+OPEN (do in Phase 3.1):
+  - F3-15: Stale position re-read before exit (bot_runner.py:1224)
+  - F3-16: Database transaction isolation (database.py:24)
+  - F3-17: Exit retry force-close when cap reached (bot_runner.py:1356)
+  - F3-18: Batch pre-load sectors on startup (risk_manager.py)
 OWNER: TRADING RUNTIME TEAM
 GOAL: Make live trade lifecycle behavior explicit, centralized, safe, and recoverable.
 

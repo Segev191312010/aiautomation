@@ -8,14 +8,27 @@ import { useAccountStore, useBotStore } from '@/store'
 import { useToast } from '@/components/ui/ToastProvider'
 import type { Position, SimPosition } from '@/types'
 
+interface SparklineBar {
+  close: number
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function isSparklineBar(value: unknown): value is SparklineBar {
+  return isRecord(value) && typeof value.close === 'number'
+}
+
 function PositionSparkline({ symbol, avgCost }: { symbol: string; avgCost: number }) {
   const [prices, setPrices] = useState<number[]>([])
   useEffect(() => {
     fetch(`/api/yahoo/${symbol}/bars?timeframe=1d&limit=20`)
       .then(r => r.json())
-      .then((bars: any[]) => {
-        if (Array.isArray(bars) && bars.length > 0) {
-          setPrices(bars.map(b => b.close))
+      .then((bars: unknown) => {
+        if (Array.isArray(bars)) {
+          const closePrices = bars.filter(isSparklineBar).map((bar) => bar.close)
+          if (closePrices.length > 0) setPrices(closePrices)
         }
       })
       .catch(() => {})
@@ -42,7 +55,7 @@ function fmtUSD(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
-function isSimPos(p: any): p is SimPosition {
+function isSimPos(p: Position | SimPosition): p is SimPosition {
   return 'pnl_pct' in p && 'current_price' in p
 }
 
@@ -54,6 +67,39 @@ interface BracketInfo {
 }
 
 type EnrichedPosition = (Position | SimPosition) & BracketInfo
+
+function isBracketOrder(value: unknown): value is NonNullable<BracketInfo['sl_order']> {
+  return (
+    isRecord(value)
+    && typeof value.order_id === 'number'
+    && typeof value.price === 'number'
+    && typeof value.status === 'string'
+  )
+}
+
+function isEnrichedPosition(value: unknown): value is EnrichedPosition {
+  if (!isRecord(value)) return false
+
+  const basePosition =
+    typeof value.symbol === 'string'
+    && typeof value.qty === 'number'
+    && typeof value.avg_cost === 'number'
+    && typeof value.market_value === 'number'
+    && typeof value.unrealized_pnl === 'number'
+    && (
+      ('market_price' in value && typeof value.market_price === 'number' && typeof value.realized_pnl === 'number')
+      || ('current_price' in value && typeof value.current_price === 'number' && typeof value.pnl_pct === 'number')
+    )
+
+  if (!basePosition) return false
+
+  return (
+    (value.sl_order === undefined || value.sl_order === null || isBracketOrder(value.sl_order))
+    && (value.tp_order === undefined || value.tp_order === null || isBracketOrder(value.tp_order))
+    && (value.pnl_pct === undefined || typeof value.pnl_pct === 'number')
+    && (value.pct_of_account === undefined || typeof value.pct_of_account === 'number')
+  )
+}
 
 function EditablePrice({ value, onSave, color }: {
   value: number | null | undefined; onSave: (v: number) => void; color: string
@@ -98,11 +144,9 @@ function PositionRow({ pos, onModifyOrder }: {
 }) {
   const price = isSimPos(pos) ? pos.current_price : pos.market_price
   const pnl = pos.unrealized_pnl
-  const pnlPct = (pos as any).pnl_pct ?? (price && pos.avg_cost ? ((price / pos.avg_cost - 1) * 100) : 0)
+  const pnlPct = pos.pnl_pct ?? (price && pos.avg_cost ? ((price / pos.avg_cost - 1) * 100) : 0)
   const up = pnl >= 0
-  const slOrder = (pos as any).sl_order
-  const tpOrder = (pos as any).tp_order
-  const pctAcct = (pos as any).pct_of_account
+  const { sl_order: slOrder, tp_order: tpOrder, pct_of_account: pctAcct } = pos
 
   return (
     <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/20 transition-colors">
@@ -145,7 +189,7 @@ function PositionRow({ pos, onModifyOrder }: {
 }
 
 export default function PositionsTable() {
-  const { positions, account } = useAccountStore()
+  const { positions } = useAccountStore()
   const simMode = useBotStore((s) => s.simMode)
   const [enriched, setEnriched] = useState<EnrichedPosition[]>([])
   const toast = useToast()
@@ -159,8 +203,12 @@ export default function PositionsTable() {
     try {
       const res = await fetch('/api/positions/brackets')
       if (res.ok) {
-        const data = await res.json()
-        setEnriched(data)
+        const data: unknown = await res.json()
+        if (Array.isArray(data)) {
+          setEnriched(data.filter(isEnrichedPosition))
+        } else {
+          setEnriched(positions as EnrichedPosition[])
+        }
       } else {
         setEnriched(positions as EnrichedPosition[])
       }
@@ -194,7 +242,7 @@ export default function PositionsTable() {
     )
   }
 
-  const totalValue = enriched.reduce((s, p) => s + (isSimPos(p) ? p.market_value : p.market_value), 0)
+  const totalValue = enriched.reduce((sum, position) => sum + position.market_value, 0)
   const totalPnl = enriched.reduce((s, p) => s + p.unrealized_pnl, 0)
 
   const cols = ['Symbol', 'Chart', 'Qty', 'Avg Cost', 'Price', 'P&L', 'SL', 'TP', '% Acct']

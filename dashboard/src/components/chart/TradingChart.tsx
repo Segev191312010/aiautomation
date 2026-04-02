@@ -188,7 +188,7 @@ interface Props {
   symbol:       string
   className?:   string
   timeframe?:   string
-  onChartReady?: (chart: IChartApi, series: ISeriesApi<AnyData>) => void
+  onChartReady?: (chart: IChartApi, series: Parameters<IChartApi['setCrosshairPosition']>[2]) => void
   onStale?:      () => void
 }
 

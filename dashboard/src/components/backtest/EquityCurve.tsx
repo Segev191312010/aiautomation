@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { createChart, type IChartApi, type ISeriesApi, type LineData } from 'lightweight-charts'
+import { createChart, type IChartApi, type ISeriesApi, type LineData, type Time } from 'lightweight-charts'
 import type { BacktestResult } from '@/types'
 
 interface Props {
@@ -43,10 +43,10 @@ export function EquityCurve({ result }: Props) {
       title: 'Strategy',
     })
 
-    const strategyData: LineData[] = result.equity_curve.map((e) => ({
-      time: e.time as number,
+    const strategyData: LineData<Time>[] = result.equity_curve.map((e) => ({
+      time: e.time as Time,
       value: e.equity,
-    }) as LineData)
+    }))
     strategySeries.setData(strategyData)
 
     // Buy-and-hold line — muted gray
@@ -57,38 +57,38 @@ export function EquityCurve({ result }: Props) {
       title: 'Buy & Hold',
     })
 
-    const bhData: LineData[] = result.buy_hold_curve.map((e) => ({
-      time: e.time as number,
+    const bhData: LineData<Time>[] = result.buy_hold_curve.map((e) => ({
+      time: e.time as Time,
       value: e.equity,
-    }) as LineData)
+    }))
     bhSeries.setData(bhData)
 
     // Trade markers on strategy line
     if (result.trades.length > 0) {
-      const markers = result.trades.flatMap((t) => {
-        const entries: any[] = []
+      const markers = result.trades.flatMap<Parameters<typeof strategySeries.setMarkers>[0][number]>((t) => {
         const entryTime = Math.floor(new Date(t.entry_date).getTime() / 1000)
         const exitTime = Math.floor(new Date(t.exit_date).getTime() / 1000)
 
-        entries.push({
-          time: entryTime,
-          position: 'belowBar',
-          color: '#16A34A',
-          shape: 'arrowUp',
-          text: 'BUY',
-        })
-        entries.push({
-          time: exitTime,
-          position: 'aboveBar',
-          color: '#DC2626',
-          shape: 'arrowDown',
-          text: t.exit_reason === 'stop_loss' ? 'SL' : t.exit_reason === 'take_profit' ? 'TP' : 'SELL',
-        })
-        return entries
+        return [
+          {
+            time: entryTime as Time,
+            position: 'belowBar',
+            color: '#16A34A',
+            shape: 'arrowUp',
+            text: 'BUY',
+          },
+          {
+            time: exitTime as Time,
+            position: 'aboveBar',
+            color: '#DC2626',
+            shape: 'arrowDown',
+            text: t.exit_reason === 'stop_loss' ? 'SL' : t.exit_reason === 'take_profit' ? 'TP' : 'SELL',
+          },
+        ]
       })
 
       // Sort markers by time (required by lightweight-charts)
-      markers.sort((a: any, b: any) => a.time - b.time)
+      markers.sort((a, b) => Number(a.time) - Number(b.time))
       strategySeries.setMarkers(markers)
     }
 

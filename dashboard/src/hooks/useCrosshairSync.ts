@@ -9,14 +9,13 @@
  * Horizontal crosshair lines should be hidden on sub-panes via chart options.
  */
 import { useEffect, useRef } from 'react'
-import type { IChartApi, ISeriesApi, MouseEventParams } from 'lightweight-charts'
+import type { IChartApi, MouseEventParams } from 'lightweight-charts'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnySeries = ISeriesApi<any>
+type CrosshairSeries = Parameters<IChartApi['setCrosshairPosition']>[2]
 
 export interface ChartPane {
   chart:  IChartApi
-  series: AnySeries
+  series: CrosshairSeries
   data:   Map<number, number>  // time (unix seconds) → price value
 }
 

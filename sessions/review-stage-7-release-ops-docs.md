@@ -1,7 +1,21 @@
 ﻿AI AUTOPILOT — STAGE 7 RELEASE, OPS, AND DOCUMENTATION DISCIPLINE
 ==================================================================
-DATE: 2026-03-27
+DATE: 2026-03-27 (updated 2026-03-31 with audit findings)
 STATUS: TREAT AS RELEASE GATE, NOT OPTIONAL CLEANUP
+
+AUDIT UPDATE (2026-03-31)
+-------------------------
+Full codebase audit found 4 issues in this stage. 0 fixed, all OPEN.
+See: `sessions/audit-findings-2026-03-31.md` (section: STAGE 7)
+
+OPEN (CRITICAL for LIVE deployment):
+  - F7-01: Auth effectively unauthenticated — demo user fallback, no auth on mutating routes
+           (auth.py:111, routers/auth.py:16, autopilot_api.py:126, routers/orders.py:37)
+           Mitigated: running on localhost only. MUST fix before remote access.
+  - F7-02: Hardening middleware (rate limit, security headers) exists but never mounted
+           (middleware.py:25, main.py:296)
+  - F7-03: No API rate limiting on any endpoint
+  - F7-04: Bootstrap/placeholder files in shipping tree (_write_files.py, _bootstrap.py)
 OWNER: CORE TEAM + OPS OWNERS
 GOAL: Make the platform operable, releasable, and handoff-safe for a team instead of depending on tribal knowledge.
 

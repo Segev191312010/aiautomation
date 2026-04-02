@@ -4,6 +4,7 @@
  */
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import clsx from 'clsx'
+import type { AreaData, IChartApi, ISeriesApi, LineData, Time } from 'lightweight-charts'
 import type { DailyPnL, PortfolioAnalytics } from '@/types'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -74,9 +75,9 @@ interface Props {
 
 export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
-  const chartRef     = useRef<unknown>(null)
-  const seriesRef    = useRef<unknown>(null)
-  const benchRef     = useRef<unknown>(null)
+  const chartRef     = useRef<IChartApi | null>(null)
+  const seriesRef    = useRef<ISeriesApi<'Area'> | null>(null)
+  const benchRef     = useRef<ISeriesApi<'Line'> | null>(null)
   const [bucket, setBucket] = useState<Bucket>('daily')
   const [showBench, setShowBench] = useState(true)
 
@@ -126,7 +127,11 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
       lineWidth:   2,
       priceLineVisible: false,
     })
-    series.setData(aggData.map((d) => ({ time: d.time, value: d.cumPnL })) as any)
+    const areaData: AreaData<Time>[] = aggData.map((point) => ({
+      time: point.time,
+      value: point.cumPnL,
+    }))
+    series.setData(areaData)
 
     // Benchmark overlay (SPY, re-scaled to same starting point as portfolio)
     if (showBench && analytics?.benchmark_curve?.length) {
@@ -141,11 +146,11 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
         priceLineVisible:  false,
         lastValueVisible:  false,
       })
-      const rescaled = bench.map((p) => ({
-        time:  p.time as unknown as number,
+      const rescaled: LineData<Time>[] = bench.map((p) => ({
+        time:  p.time as Time,
         value: ((p.value / benchStart) - 1) * Math.abs(pnlStart || 1),
       }))
-      benchSeries.setData(rescaled as any)
+      benchSeries.setData(rescaled)
       benchRef.current = benchSeries
     }
 
@@ -156,7 +161,7 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
     // Resize observer
     const ro = new ResizeObserver(() => {
       if (containerRef.current && chartRef.current) {
-        (chartRef.current as { applyOptions(o: unknown): void }).applyOptions({
+        chartRef.current.applyOptions({
           width: containerRef.current.clientWidth,
         })
       }
@@ -165,7 +170,7 @@ export default function PnLChart({ dailyPnL, analytics, loading }: Props) {
 
     return () => {
       ro.disconnect()
-      if (chartRef.current) (chartRef.current as { remove(): void }).remove()
+      chartRef.current?.remove()
     }
   }, [dailyPnL, bucket, showBench, analytics])
 

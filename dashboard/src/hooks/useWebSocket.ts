@@ -6,8 +6,70 @@ import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
 import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore } from '@/store'
 import { fetchTrades, fetchPositions, fetchAccountSummary } from '@/services/api'
-import type { ActivityEvent, AlertFiredEvent, WsEvent } from '@/types'
+import type { AlertFiredEvent, AnyAccount, Position, SimPosition, WsEvent } from '@/types'
 import { useToast } from '@/components/ui/ToastProvider'
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isPositionLike(value: unknown): value is Position | SimPosition {
+  if (!isRecord(value)) return false
+  if (
+    typeof value.symbol !== 'string'
+    || !isFiniteNumber(value.qty)
+    || !isFiniteNumber(value.avg_cost)
+    || !isFiniteNumber(value.market_value)
+    || !isFiniteNumber(value.unrealized_pnl)
+  ) {
+    return false
+  }
+
+  return (
+    ('market_price' in value && isFiniteNumber(value.market_price) && isFiniteNumber(value.realized_pnl))
+    || ('current_price' in value && isFiniteNumber(value.current_price) && isFiniteNumber(value.pnl_pct))
+  )
+}
+
+function isAccountLike(value: unknown): value is AnyAccount {
+  if (
+    !isRecord(value)
+    || !isFiniteNumber(value.cash)
+    || !isFiniteNumber(value.unrealized_pnl)
+    || !isFiniteNumber(value.realized_pnl)
+  ) {
+    return false
+  }
+
+  if ('net_liquidation' in value) {
+    return (
+      isFiniteNumber(value.net_liquidation)
+      && isFiniteNumber(value.initial_cash)
+      && isFiniteNumber(value.positions_value)
+      && isFiniteNumber(value.total_return_pct)
+      && value.is_sim === true
+    )
+  }
+
+  return (
+    isFiniteNumber(value.balance)
+    && isFiniteNumber(value.margin_used)
+    && typeof value.currency === 'string'
+  )
+}
+
+function parsePositionsUpdate(ev: WsEvent) {
+  const positions = Array.isArray(ev['positions'])
+    ? ev['positions'].filter(isPositionLike)
+    : null
+  const account = isAccountLike(ev['account']) ? ev['account'] : null
+
+  return { positions, account }
+}
 
 export function useWebSocket(): void {
   const mountedRef = useRef(false)
@@ -159,8 +221,7 @@ export function useWebSocket(): void {
     // Live position + account updates from backend heartbeat
     const unPositions = wsService.subscribe('positions_update', (ev: WsEvent) => {
       const { setPositions, setAccount } = useAccountStore.getState()
-      const positions = ev['positions'] as any[]
-      const account = ev['account'] as any
+      const { positions, account } = parsePositionsUpdate(ev)
       if (positions) setPositions(positions)
       if (account) setAccount(account)
     })

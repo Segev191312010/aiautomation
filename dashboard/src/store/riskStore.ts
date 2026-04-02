@@ -21,6 +21,7 @@ interface RiskState {
   riskLimits:    RiskLimits | null
   riskChecks:    RiskCheckResult[]
   riskEvents:    RiskEvent[]
+  riskEventsStatus: 'idle' | 'loading' | 'success' | 'error' | 'degraded'
   portfolioRisk: PortfolioRisk | null
   riskSettings:  RiskSettings
   loading:       boolean
@@ -36,6 +37,7 @@ export const useRiskStore = create<RiskState>((set, get) => ({
   riskLimits:    null,
   riskChecks:    [],
   riskEvents:    [],
+  riskEventsStatus: 'idle',
   portfolioRisk: null,
   riskSettings:  DEFAULT_RISK_SETTINGS,
   loading:       false,
@@ -56,7 +58,7 @@ export const useRiskStore = create<RiskState>((set, get) => ({
 
   fetchRiskEvents: async () => {
     // Backend endpoint not yet implemented — stub returns empty array
-    set({ riskEvents: [] })
+    set({ riskEvents: [], riskEventsStatus: 'degraded' })
   },
 
   updateRiskSettings: (partial) =>

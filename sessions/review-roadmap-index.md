@@ -10,6 +10,10 @@ Current baseline at review time:
 
 This means the system is stable enough to refactor deliberately. The work below is about making the platform safer, clearer, and easier to evolve.
 
+## Audit Trail
+
+- `audit-findings-2026-03-31.md` — Full codebase audit (Claude + Codex). 38 findings, 19 fixed same-day. Each finding mapped to its stage.
+
 ## The 9 Files
 
 1. `review-roadmap-index.md`

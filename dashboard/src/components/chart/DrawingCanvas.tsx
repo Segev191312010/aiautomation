@@ -10,7 +10,7 @@
  *   - Selection + context menu via chart subscriptions when pointer-events off
  */
 import { useEffect, useRef, useCallback, useState } from 'react'
-import type { IChartApi, ISeriesApi, MouseEventParams } from 'lightweight-charts'
+import type { IChartApi, MouseEventParams } from 'lightweight-charts'
 import { useDrawingStore } from '@/store'
 import { useMarketStore } from '@/store'
 import {
@@ -28,8 +28,7 @@ import type { OHLCVBar } from '@/types'
 
 interface Props {
   chart: IChartApi
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  series: ISeriesApi<any>
+  series: Parameters<IChartApi['setCrosshairPosition']>[2]
   symbol: string
   timeframe: string
 }
@@ -104,7 +103,7 @@ export default function DrawingCanvas({ chart, series, symbol, timeframe }: Prop
   // ── Coordinate converters ──────────────────────────────────────────────
 
   const priceToY = useCallback((price: number): number | null => {
-    try { return (series as ISeriesApi<'Candlestick'>).priceToCoordinate(price) as number | null } catch { return null }
+    try { return series.priceToCoordinate(price) as number | null } catch { return null }
   }, [series])
 
   const timeToX = useCallback((time: number): number | null => {
@@ -112,7 +111,7 @@ export default function DrawingCanvas({ chart, series, symbol, timeframe }: Prop
   }, [chart])
 
   const yToPrice = useCallback((y: number): number | null => {
-    try { return (series as ISeriesApi<'Candlestick'>).coordinateToPrice(y) as number | null } catch { return null }
+    try { return series.coordinateToPrice(y) as number | null } catch { return null }
   }, [series])
 
   const xToTime = useCallback((x: number): number | null => {

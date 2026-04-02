@@ -1,7 +1,20 @@
 ﻿AI AUTOPILOT — STAGE 5 FRONTEND ARCHITECTURE
 ============================================
-DATE: 2026-03-27
+DATE: 2026-03-27 (updated 2026-03-31 with audit findings)
 STATUS: READY AFTER STAGE 0 AND PARALLEL WITH STAGE 4 WHERE OWNERSHIP ALLOWS
+
+AUDIT UPDATE (2026-03-31)
+-------------------------
+Full codebase audit found 6 issues in this stage. 0 fixed (frontend not modified), all OPEN.
+See: `sessions/audit-findings-2026-03-31.md` (section: STAGE 5)
+
+OPEN (do in Stage 5/6):
+  - F5-01: 43 uses of `any` type across 22 files (PositionsTable, crosshairSync, etc.)
+  - F5-02: No per-page error boundaries — one crash blanks the whole app
+  - F5-03: Standard rules still use raw condition JSON (RulesPage.tsx:507)
+  - F5-04: Risk events store slice is hardcoded empty stub (store/index.ts:1618)
+  - F5-05: Autopilot page missing decision drilldown/replay flows
+  - F5-06: Canvas charts lack accessibility fallbacks
 OWNER: FRONTEND CORE TEAM
 GOAL: Shrink page monoliths, split the API layer by domain, standardize async state handling, and make the dashboard easier to extend safely.
 
