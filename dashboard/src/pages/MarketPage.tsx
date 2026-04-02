@@ -90,19 +90,19 @@ export default function MarketPage() {
   const currentTF = TOOLBAR_TIMEFRAMES[tfIdx]
   const bars = useMarketStore((s) => s.bars[selectedSymbol] ?? [])
 
-  const isStockLike = (symbol: string) => {
+  const isStockLike = useCallback((symbol: string) => {
     const normalized = symbol.trim().toUpperCase()
     return !!normalized && !normalized.endsWith('-USD')
-  }
+  }, [])
 
-  const staleAgeS = (() => {
+  const staleAgeS = useMemo(() => {
     if (quote?.stale_s != null) return quote.stale_s
     if (!quote?.last_update) return Number.POSITIVE_INFINITY
     const age = (Date.now() - new Date(quote.last_update).getTime()) / 1000
     return Number.isFinite(age) ? Math.max(0, age) : Number.POSITIVE_INFINITY
-  })()
+  }, [quote?.stale_s, quote?.last_update])
 
-  const badge = (() => {
+  const badge = useMemo(() => {
     const marketState = quote?.market_state ?? 'unknown'
     if (marketState === 'open' && staleAgeS <= 10) {
       return {
@@ -126,11 +126,16 @@ export default function MarketPage() {
       dotClass: staleAgeS > 30 ? 'bg-red-600' : 'bg-amber-600',
       textClass: staleAgeS > 30 ? 'text-red-400' : 'text-amber-600',
     }
-  })()
+  }, [quote?.market_state, staleAgeS])
 
-  const feedLabel = quote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback'
-  const historyFeedLabel =
-    ibkrConnected && isStockLike(selectedSymbol) ? 'IBKR history + Yahoo fallback' : 'Yahoo history'
+  const feedLabel = useMemo(
+    () => quote?.live_source === 'ibkr' ? 'IBKR stream' : 'Yahoo fallback',
+    [quote?.live_source],
+  )
+  const historyFeedLabel = useMemo(
+    () => ibkrConnected && isStockLike(selectedSymbol) ? 'IBKR history + Yahoo fallback' : 'Yahoo history',
+    [ibkrConnected, isStockLike, selectedSymbol],
+  )
 
   const mainDataMap = useMemo(() => {
     const map = new Map<number, number>()
@@ -158,18 +163,22 @@ export default function MarketPage() {
     return map
   }, [bars])
 
-  const mainPane: ChartPane | null = mainChartApi && mainSeries
-    ? { chart: mainChartApi, series: mainSeries, data: mainDataMap }
-    : null
-  const volPane: ChartPane | null = volChart && volSeries
-    ? { chart: volChart, series: volSeries, data: volDataMap }
-    : null
-  const rsiPane: ChartPane | null = rsiChart && rsiSeries
-    ? { chart: rsiChart, series: rsiSeries, data: rsiDataMap }
-    : null
-  const macdPane: ChartPane | null = macdChart && macdSeries
-    ? { chart: macdChart, series: macdSeries, data: macdDataMap }
-    : null
+  const mainPane = useMemo<ChartPane | null>(
+    () => mainChartApi && mainSeries ? { chart: mainChartApi, series: mainSeries, data: mainDataMap } : null,
+    [mainChartApi, mainSeries, mainDataMap],
+  )
+  const volPane = useMemo<ChartPane | null>(
+    () => volChart && volSeries ? { chart: volChart, series: volSeries, data: volDataMap } : null,
+    [volChart, volSeries, volDataMap],
+  )
+  const rsiPane = useMemo<ChartPane | null>(
+    () => rsiChart && rsiSeries ? { chart: rsiChart, series: rsiSeries, data: rsiDataMap } : null,
+    [rsiChart, rsiSeries, rsiDataMap],
+  )
+  const macdPane = useMemo<ChartPane | null>(
+    () => macdChart && macdSeries ? { chart: macdChart, series: macdSeries, data: macdDataMap } : null,
+    [macdChart, macdSeries, macdDataMap],
+  )
 
   const selectedIndicators = useMarketStore((s) => s.selectedIndicators)
   useEffect(() => {
