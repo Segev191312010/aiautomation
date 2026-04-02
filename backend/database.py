@@ -26,8 +26,9 @@ async def get_db():
     """Open a DB connection with WAL mode and busy_timeout configured."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=NORMAL")
-        await db.execute("PRAGMA busy_timeout=5000")
+        # FULL sync: trades involve real money — never lose a write on crash
+        await db.execute("PRAGMA synchronous=FULL")
+        await db.execute("PRAGMA busy_timeout=10000")
         await db.execute("PRAGMA foreign_keys=ON")
         yield db
 
@@ -1153,6 +1154,166 @@ _BUILT_IN_PRESETS = [
             }
         ],
     },
+    {
+        "name": "Momentum Surge",
+        "filters": [
+            {
+                "indicator": "RSI",
+                "params": {"length": 14},
+                "operator": "GT",
+                "value": {"type": "number", "number": 60},
+            },
+            {
+                "indicator": "EMA",
+                "params": {"length": 20},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "EMA", "params": {"length": 50}},
+            },
+            {
+                "indicator": "VOLUME",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "VOLUME", "params": {"length": 20}, "multiplier": 1.5},
+            },
+        ],
+    },
+    {
+        "name": "Bollinger Squeeze",
+        "filters": [
+            {
+                "indicator": "ATR",
+                "params": {"length": 14},
+                "operator": "LT",
+                "value": {"type": "number", "number": 2.0},
+            },
+            {
+                "indicator": "RSI",
+                "params": {"length": 14},
+                "operator": "GTE",
+                "value": {"type": "number", "number": 45},
+            },
+            {
+                "indicator": "RSI",
+                "params": {"length": 14},
+                "operator": "LTE",
+                "value": {"type": "number", "number": 60},
+            },
+        ],
+    },
+    {
+        "name": "Trend Pullback",
+        "filters": [
+            {
+                "indicator": "SMA",
+                "params": {"length": 50},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "SMA", "params": {"length": 200}},
+            },
+            {
+                "indicator": "RSI",
+                "params": {"length": 14},
+                "operator": "LT",
+                "value": {"type": "number", "number": 45},
+            },
+            {
+                "indicator": "PRICE",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "SMA", "params": {"length": 200}},
+            },
+        ],
+    },
+    {
+        "name": "Death Cross",
+        "filters": [
+            {
+                "indicator": "SMA",
+                "params": {"length": 50},
+                "operator": "CROSSES_BELOW",
+                "value": {"type": "indicator", "indicator": "SMA", "params": {"length": 200}},
+            }
+        ],
+    },
+    {
+        "name": "High Relative Volume",
+        "filters": [
+            {
+                "indicator": "VOLUME",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "VOLUME", "params": {"length": 20}, "multiplier": 3.0},
+            },
+            {
+                "indicator": "CHANGE_PCT",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "number", "number": 2.0},
+            },
+        ],
+    },
+    {
+        "name": "MACD Bullish Cross",
+        "filters": [
+            {
+                "indicator": "MACD",
+                "params": {"fast": 12, "slow": 26, "signal": 9},
+                "operator": "CROSSES_ABOVE",
+                "value": {"type": "number", "number": 0},
+            },
+            {
+                "indicator": "PRICE",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "SMA", "params": {"length": 200}},
+            },
+        ],
+    },
+    {
+        "name": "Oversold Bounce",
+        "filters": [
+            {
+                "indicator": "RSI",
+                "params": {"length": 14},
+                "operator": "GT",
+                "value": {"type": "number", "number": 30},
+            },
+            {
+                "indicator": "RSI",
+                "params": {"length": 14},
+                "operator": "LT",
+                "value": {"type": "number", "number": 45},
+            },
+            {
+                "indicator": "CHANGE_PCT",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "number", "number": 0},
+            },
+        ],
+    },
+    {
+        "name": "52W High Breakout",
+        "filters": [
+            {
+                "indicator": "PRICE",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "SMA", "params": {"length": 50}},
+            },
+            {
+                "indicator": "SMA",
+                "params": {"length": 20},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "SMA", "params": {"length": 50}},
+            },
+            {
+                "indicator": "VOLUME",
+                "params": {},
+                "operator": "GT",
+                "value": {"type": "indicator", "indicator": "VOLUME", "params": {"length": 20}, "multiplier": 1.5},
+            },
+        ],
+    },
 ]
 
 
@@ -1236,11 +1397,23 @@ async def delete_backtest(backtest_id: str, user_id: str = "demo") -> bool:
 
 
 async def _seed_screener_presets(db: aiosqlite.Connection) -> None:
-    async with db.execute("SELECT COUNT(*) FROM screener_presets WHERE built_in=1") as cur:
-        (count,) = await cur.fetchone()  # type: ignore[misc]
-    if count > 0:
-        return
+    # Get existing built-in names to upsert only what changed
+    async with db.execute("SELECT name FROM screener_presets WHERE built_in=1") as cur:
+        existing_names = {row[0] for row in await cur.fetchall()}
+
+    target_names = {raw["name"] for raw in _BUILT_IN_PRESETS}
+
+    # Remove built-ins no longer in the list
+    for stale_name in existing_names - target_names:
+        await db.execute(
+            "DELETE FROM screener_presets WHERE name=? AND built_in=1",
+            (stale_name,),
+        )
+
+    # Upsert each current built-in by name
     for raw in _BUILT_IN_PRESETS:
+        if raw["name"] in existing_names:
+            continue  # already seeded
         preset = ScreenerPreset(
             name=raw["name"],
             filters=[ScanFilter.model_validate(f) for f in raw["filters"]],

@@ -1,12 +1,14 @@
 """Execution brain for ranking rule and direct-AI candidates together."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from config import cfg
 from portfolio_allocator import allocate_candidates
 
-_pending_direct_candidates: list[dict] = []
+# Thread-safe queue for direct AI candidates (replaces plain list)
+_pending_direct_queue: asyncio.Queue[dict] = asyncio.Queue()
 
 
 def _priority(candidate: dict) -> tuple[int, float]:
@@ -40,7 +42,7 @@ def queue_direct_candidates(decisions: list[dict]) -> int:
         symbol = str(decision.get("symbol", "")).upper()
         if not symbol:
             continue
-        _pending_direct_candidates.append({
+        _pending_direct_queue.put_nowait({
             "symbol": symbol,
             "source": "ai_direct",
             "score": float(decision.get("confidence", 0.5)) * 100.0,
@@ -60,7 +62,16 @@ def drain_direct_candidates(max_age_seconds: int = 900) -> list[dict]:
     """
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
     merged: dict[str, dict] = {}
-    for candidate in list(_pending_direct_candidates):
+
+    # Drain the queue (non-blocking)
+    drained: list[dict] = []
+    while not _pending_direct_queue.empty():
+        try:
+            drained.append(_pending_direct_queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+
+    for candidate in drained:
         queued_at_raw = candidate.get("queued_at")
         try:
             queued_at = datetime.fromisoformat(str(queued_at_raw).replace("Z", "+00:00"))
@@ -74,5 +85,4 @@ def drain_direct_candidates(max_age_seconds: int = 900) -> list[dict]:
         current = merged.get(symbol)
         if current is None or _priority(candidate) > _priority(current):
             merged[symbol] = dict(candidate)
-    _pending_direct_candidates.clear()
     return list(merged.values())

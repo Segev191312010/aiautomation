@@ -32,18 +32,39 @@ _SECTOR_MAP: dict[str, str] = {
 }
 
 
+_dynamic_sector_cache: dict[str, str | None] = {}
+
+
 def get_sector(symbol: str) -> str | None:
-    """Get sector for symbol. Uses static map first; returns None if unknown."""
-    return _SECTOR_MAP.get(symbol.upper())
+    """Get sector for symbol. Uses static map first, then yfinance cache, then 'Unknown'."""
+    sym = symbol.upper()
+    if sym in _SECTOR_MAP:
+        return _SECTOR_MAP[sym]
+    if sym in _dynamic_sector_cache:
+        return _dynamic_sector_cache[sym]
+    # Try yfinance lookup (cached after first call)
+    try:
+        import yfinance as yf
+        info = yf.Ticker(sym).info
+        sector = info.get("sector")
+        if sector:
+            _dynamic_sector_cache[sym] = sector
+            return sector
+    except Exception:
+        pass
+    # Unknown sector — still track for concentration limits
+    _dynamic_sector_cache[sym] = "Unknown"
+    return "Unknown"
 
 
 # ── Account state (fetched once per cycle) ───────────────────────────────────
 
 def get_account_state(ib) -> dict:
-    """Pull equity, cash, daily P&L, positions from IBKR in one call."""
+    """Pull equity, cash, daily P&L (realized + unrealized), positions from IBKR."""
     equity = 0.0
     cash = 0.0
-    daily_pnl = 0.0
+    realized_pnl = 0.0
+    unrealized_pnl = 0.0
     try:
         for av in ib.accountValues():
             if av.currency != "USD":
@@ -53,9 +74,12 @@ def get_account_state(ib) -> dict:
             elif av.tag == "AvailableFunds":
                 cash = float(av.value)
             elif av.tag == "RealizedPnL":
-                daily_pnl = float(av.value)
+                realized_pnl = float(av.value)
+            elif av.tag == "UnrealizedPnL":
+                unrealized_pnl = float(av.value)
     except Exception as e:
         log.warning("Failed to read account values: %s", e)
+    daily_pnl = realized_pnl + unrealized_pnl
 
     positions = []
     try:
@@ -133,10 +157,13 @@ def check_trade_risk(
     if account_value <= 0:
         return RiskCheckResult("BLOCK", ["Account value is zero or negative."])
 
-    # Price: use provided, or fallback to position/default
+    # Price: use provided, or fallback to position data — never guess
     if est_price <= 0:
         existing = next((p for p in positions if p.get("symbol") == symbol), None)
-        est_price = (existing.get("market_price") or existing.get("avg_cost") or 100) if existing else 100
+        if existing:
+            est_price = existing.get("market_price") or existing.get("avg_cost") or 0
+        if est_price <= 0:
+            return RiskCheckResult("BLOCK", [f"Cannot estimate price for {symbol} — blocking for safety."])
     order_pct = (qty * est_price / account_value) * 100
 
     # Cash-only: reject SELL if no long position
@@ -381,10 +408,10 @@ def check_portfolio_impact(
         )
 
     except Exception as exc:
-        log.error("Portfolio impact check FAILED (error_skip) for %s: %s", symbol, exc)
+        log.error("Portfolio impact check FAILED (error_blocked) for %s: %s", symbol, exc)
         return PortfolioImpactResult(
-            allowed=True, reason="error_skip", symbol=sym, side=side,
-            details=f"Internal error: {exc}",
+            allowed=False, reason="error_blocked", symbol=sym, side=side,
+            details=f"Internal error — blocking for safety: {exc}",
         )
 
 

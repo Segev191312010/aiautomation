@@ -16,7 +16,8 @@ async def _load_current_regime() -> str | None:
             row = await cur.fetchone()
             if row:
                 return row[0]
-    except Exception:
+    except Exception as exc:
+        log.warning("Failed to load last report: %s", exc)
         return None
     return None
 

@@ -17,6 +17,25 @@ from services import order_lifecycle, order_recovery, safety_gate
 
 log = logging.getLogger(__name__)
 
+# Track active fill watcher tasks for monitoring
+_active_watch_tasks: dict[str, asyncio.Task] = {}
+
+
+def _safe_create_task(coro, *, name: str = "") -> asyncio.Task:
+    """Create an asyncio task with error logging callback. Never silently lose exceptions."""
+    task = asyncio.create_task(coro)
+    def _on_done(t: asyncio.Task) -> None:
+        _active_watch_tasks.pop(name, None)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc:
+            log.critical("Background task '%s' CRASHED: %s", name, exc, exc_info=exc)
+    task.add_done_callback(_on_done)
+    if name:
+        _active_watch_tasks[name] = task
+    return task
+
 
 class OrderError(Exception):
     """Raised when an order cannot be placed."""
@@ -63,7 +82,7 @@ MAX_ORDER_QTY = 10_000
 MIN_PRICE = 0.01
 MAX_PRICE = 1_000_000
 MIN_ORDER_VALUE = 100  # minimum notional value
-DEDUP_WINDOW = 5  # seconds
+DEDUP_WINDOW = max(10, cfg.BOT_INTERVAL_SECONDS * 2)  # at least 2x bot interval
 _recent_orders: dict[str, float] = {}  # "symbol:action" -> timestamp
 
 
@@ -233,8 +252,11 @@ async def place_order(
         log.info("Order placed: %s %d %s — order_id=%s",
                  action_str, qty, rule.symbol, trade_rec.order_id)
 
-        # Watch for fill asynchronously
-        asyncio.create_task(_watch_fill(ib_trade, trade_rec, contract, rule))
+        # Watch for fill asynchronously (with error tracking)
+        _safe_create_task(
+            _watch_fill(ib_trade, trade_rec, contract, rule),
+            name=f"fill_watch:{trade_rec.symbol}:{trade_rec.order_id}",
+        )
 
         return trade_rec
 
@@ -245,13 +267,23 @@ async def place_order(
         return trade_rec
 
 
-async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule | None = None, timeout: int = 60) -> None:
+async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule | None = None, timeout: int = 120) -> None:
     """Poll the IBKR trade object until it fills or times out."""
     elapsed = 0
     while elapsed < timeout:
         await asyncio.sleep(2)
         elapsed += 2
         status = ib_trade.orderStatus.status
+
+        # Detect partial fills
+        filled_qty = getattr(ib_trade.orderStatus, 'filled', 0) or 0
+        total_qty = getattr(ib_trade.order, 'totalQuantity', 0) or trade_rec.quantity
+        if 0 < filled_qty < total_qty and status not in ("Filled",):
+            log.warning(
+                "Partial fill detected: %d/%d for %s (order %s) — waiting for completion",
+                filled_qty, total_qty, trade_rec.symbol, trade_rec.order_id,
+            )
+
         resolved = await order_recovery.reconcile_trade_status_update(
             trade_rec,
             status,
@@ -259,20 +291,30 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
             fill_callbacks=_fill_callbacks,
         )
         if resolved == "FILLED":
+            # Verify actual filled quantity matches expected
+            actual_filled = int(getattr(ib_trade.orderStatus, 'filled', 0) or trade_rec.quantity)
+            if actual_filled != trade_rec.quantity and actual_filled > 0:
+                log.warning(
+                    "Partial fill finalized: %d/%d shares for %s — updating trade quantity",
+                    actual_filled, trade_rec.quantity, trade_rec.symbol,
+                )
+                trade_rec.quantity = actual_filled
+                await save_trade(trade_rec)
+
             fill_price = float(trade_rec.fill_price or ib_trade.orderStatus.avgFillPrice or 0.0)
             log.info("Order FILLED: %s %d %s @ %.4f",
                      trade_rec.action, trade_rec.quantity, trade_rec.symbol, fill_price)
 
             try:
                 from notification_service import notification_service
-                asyncio.create_task(notification_service.notify_order_filled({
+                _safe_create_task(notification_service.notify_order_filled({
                     "symbol": trade_rec.symbol,
                     "action": trade_rec.action,
                     "qty": trade_rec.quantity,
                     "fill_price": fill_price,
                     "rule_name": trade_rec.rule_name,
                     "trade_id": trade_rec.id,
-                }))
+                }), name=f"notify_fill:{trade_rec.symbol}")
             except Exception:
                 pass
 
@@ -280,10 +322,36 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
                      trade_rec.action, trade_rec.symbol, fill_price)
             return
         if resolved in {"CANCELLED", "ERROR"}:
+            # Check if there was a partial fill before cancellation
+            partial = int(getattr(ib_trade.orderStatus, 'filled', 0) or 0)
+            if partial > 0:
+                log.warning(
+                    "Order %s cancelled with partial fill: %d/%d shares — recording partial",
+                    trade_rec.order_id, partial, trade_rec.quantity,
+                )
+                trade_rec.quantity = partial
+                trade_rec.status = "FILLED"  # type: ignore[assignment]
+                trade_rec.fill_price = float(ib_trade.orderStatus.avgFillPrice or 0.0)
+                await save_trade(trade_rec)
+                for cb in _fill_callbacks:
+                    cb(trade_rec)
+                return
             log.warning("Order resolved without fill: order_id=%s status=%s", trade_rec.order_id, resolved)
             return
 
-    log.warning("Order %s did not fill within %ds", trade_rec.order_id, timeout)
+    # Timeout — query broker directly to check actual state
+    log.warning("Order %s did not fill within %ds — checking broker state", trade_rec.order_id, timeout)
+    try:
+        for open_trade in ibkr.ib.openTrades():
+            if open_trade.order.orderId == trade_rec.order_id:
+                final_status = open_trade.orderStatus.status
+                if order_recovery.normalize_trade_status(final_status) == "FILLED":
+                    log.critical("Order %s actually FILLED at broker — syncing now", trade_rec.order_id)
+                    await _handle_fill(trade_rec, float(open_trade.orderStatus.avgFillPrice or 0.0))
+                    return
+                break
+    except Exception as exc:
+        log.error("Failed to query broker for order %s state: %s", trade_rec.order_id, exc)
 
 
 async def cancel_order(order_id: int) -> bool:
@@ -343,9 +411,22 @@ async def reconcile_pending_orders() -> None:
         normalized = order_recovery.normalize_trade_status(status)
         if normalized == "FILLED":
             fill_price = ib_trade.orderStatus.avgFillPrice
-            asyncio.create_task(_handle_fill(rec, fill_price))
+            async def _safe_handle_fill_event():
+                from database import get_trade
+                fresh = await get_trade(rec.id)
+                if not fresh:
+                    log.warning("Trade %s deleted before fill event — ignoring", rec.id)
+                    return
+                if fresh.status == "FILLED":
+                    log.debug("Trade %s already FILLED — skipping duplicate event", rec.id)
+                    return
+                await _handle_fill(fresh, fill_price)
+            _safe_create_task(_safe_handle_fill_event(), name=f"event_fill:{rec.symbol}:{oid}")
         elif normalized in {"CANCELLED", "ERROR"}:
-            asyncio.create_task(order_recovery.reconcile_trade_status_update(rec, status))
+            _safe_create_task(
+                order_recovery.reconcile_trade_status_update(rec, status),
+                name=f"event_resolve:{rec.symbol}:{oid}",
+            )
             log.info("Order resolved via event: %s %s -> %s", rec.action, rec.symbol, normalized)
 
     ibkr.ib.orderStatusEvent += _on_order_status
@@ -382,9 +463,31 @@ async def _convert_mkt_orders_to_limit() -> None:
             log.warning("Cannot resubmit %s %s as LIMIT — no price available", action, symbol)
             continue
 
-        # Cancel the existing MKT order
+        # Cancel the existing MKT order and wait for confirmation
         ibkr.ib.cancelOrder(order)
-        await asyncio.sleep(0.5)
+        # Wait for cancellation to be confirmed (up to 5s)
+        for _wait in range(10):
+            await asyncio.sleep(0.5)
+            cancel_status = ib_trade.orderStatus.status
+            if cancel_status in ("Cancelled", "ApiCancelled", "Inactive"):
+                break
+            if cancel_status == "Filled":
+                log.info("MKT order %d filled during cancel wait — skipping resubmit", order.orderId)
+                break
+        else:
+            log.warning("MKT order %d cancel not confirmed after 5s — skipping resubmit", order.orderId)
+            continue
+
+        # If the original order was filled during cancellation, skip resubmit
+        if ib_trade.orderStatus.status == "Filled":
+            if order.orderId in pending_db:
+                rec = pending_db[order.orderId]
+                await order_recovery.reconcile_trade_status_update(
+                    rec, "Filled",
+                    fill_price=ib_trade.orderStatus.avgFillPrice,
+                    fill_callbacks=_fill_callbacks,
+                )
+            continue
 
         # Place fresh LIMIT order
         from ib_insync import LimitOrder as _LimitOrder
@@ -404,7 +507,10 @@ async def _convert_mkt_orders_to_limit() -> None:
             old_rec.order_type = "LMT"
             old_rec.limit_price = limit_px
             await save_trade(old_rec)
-            asyncio.create_task(_watch_fill(new_ib_trade, old_rec, ib_trade.contract, None))
+            _safe_create_task(
+                _watch_fill(new_ib_trade, old_rec, ib_trade.contract, None),
+                name=f"fill_watch_resubmit:{symbol}:{new_ib_trade.order.orderId}",
+            )
 
         resubmitted += 1
 

@@ -106,8 +106,15 @@ class Config:
     ENABLE_MARKET_DIAGNOSTICS: bool = os.getenv("ENABLE_MARKET_DIAGNOSTICS", "false").lower() == "true"
 
     # ── Phase 2 hardening feature flags ─────────────────────────────────────
-    ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT: bool = os.getenv("ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT", "false").lower() == "true"
-    ENABLE_RULE_BACKTEST_GATE: bool = os.getenv("ENABLE_RULE_BACKTEST_GATE", "false").lower() == "true"
+    # Default to true when AUTOPILOT_MODE=LIVE for safety
+    ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT: bool = os.getenv(
+        "ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT",
+        "true" if os.getenv("AUTOPILOT_MODE", "OFF").upper() == "LIVE" else "false",
+    ).lower() == "true"
+    ENABLE_RULE_BACKTEST_GATE: bool = os.getenv(
+        "ENABLE_RULE_BACKTEST_GATE",
+        "true" if os.getenv("AUTOPILOT_MODE", "OFF").upper() == "LIVE" else "false",
+    ).lower() == "true"
     ENABLE_BOT_HEALTH_MONITORING: bool = os.getenv("ENABLE_BOT_HEALTH_MONITORING", "false").lower() == "true"
     ENABLE_ENHANCED_REGIME: bool = os.getenv("ENABLE_ENHANCED_REGIME", "false").lower() == "true"
     DIAG_INTRADAY_INTERVAL_SECONDS: int = int(os.getenv("DIAG_INTRADAY_INTERVAL_SECONDS", "300"))

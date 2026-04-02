@@ -282,7 +282,12 @@ class IBKRClient:
                 try:
                     ok = await self.connect()
                     if ok:
-                        log.info("Auto-reconnect: success")
+                        log.info("Auto-reconnect: success — reconciling pending orders")
+                        try:
+                            from order_executor import reconcile_pending_orders
+                            await reconcile_pending_orders()
+                        except Exception as recon_exc:
+                            log.error("Post-reconnect order reconciliation failed: %s", recon_exc)
                     else:
                         log.warning("Auto-reconnect: failed — will retry in %ds", cfg.RECONNECT_INTERVAL)
                 except Exception as exc:

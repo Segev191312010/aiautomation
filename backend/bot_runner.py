@@ -186,7 +186,8 @@ def get_bot_health() -> dict:
             ibkr_connected = bool(_ibkr_health.is_connected())
             if ibkr_connected:
                 _record_ibkr_heartbeat()
-        except Exception:
+        except Exception as exc:
+            log.debug("Health probe: ibkr_connected check failed: %s", exc)
             ibkr_connected = bool(_last_successful_ibkr_heartbeat_at)
 
     return {
@@ -291,8 +292,8 @@ async def _legacy_prescreen_universe_unused(candidates: list[str]) -> list[str]:
                             avg_volume  = float(sym_df["Volume"].mean())
                             if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                                 liquid.append(sym.upper())
-                        except Exception:
-                            log.debug("Pre-screen: malformed bars for %s", sym)
+                        except Exception as exc:
+                            log.debug("Pre-screen: malformed bars for %s: %s", sym, exc)
                             _record_degraded_event()
                 else:
                     # Single symbol returned as flat df
@@ -381,8 +382,8 @@ async def _prescreen_universe(candidates: list[str]) -> list[str]:
                             avg_volume = float(sym_df["Volume"].mean())
                             if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
                                 liquid.append(sym.upper())
-                        except Exception:
-                            log.debug("Pre-screen: malformed bars for %s", sym)
+                        except Exception as exc:
+                            log.debug("Pre-screen: malformed bars for %s: %s", sym, exc)
                             _record_degraded_event()
                 else:
                     sym = batch[0]

@@ -70,8 +70,11 @@ def record_ai_failure(source: str) -> bool:
     return False
 
 
-async def trip_circuit_breaker(source: str) -> None:
-    """Activate emergency stop due to consecutive AI failures."""
+async def trip_circuit_breaker(source: str, *, close_positions: bool = False) -> None:
+    """Activate emergency stop due to consecutive AI failures.
+
+    If close_positions=True, attempts to close all open positions via market orders.
+    """
     try:
         from ai_guardrails import _load_guardrails_from_db, save_guardrails_to_db, log_ai_action
 
@@ -93,8 +96,46 @@ async def trip_circuit_breaker(source: str) -> None:
                 status="applied",
             )
             log.critical("Emergency stop ACTIVATED by circuit breaker (source=%s)", source)
+
+        # Optionally close all positions to limit further damage
+        if close_positions:
+            await _emergency_close_all_positions(source)
     except Exception as exc:
         log.error("Failed to activate emergency stop via circuit breaker: %s", exc)
+
+
+async def _emergency_close_all_positions(source: str) -> None:
+    """Best-effort emergency close of all open positions."""
+    try:
+        from database import get_open_positions
+        from ibkr_client import ibkr
+        from config import cfg
+
+        if cfg.SIM_MODE or not ibkr.is_connected():
+            log.warning("Cannot emergency-close: SIM_MODE=%s connected=%s",
+                        cfg.SIM_MODE, ibkr.is_connected() if not cfg.SIM_MODE else "N/A")
+            return
+
+        positions = await get_open_positions()
+        if not positions:
+            return
+
+        log.critical("EMERGENCY CLOSE: attempting to close %d positions (source=%s)", len(positions), source)
+        from ib_insync import MarketOrder as _MktOrder
+        for pos in positions:
+            try:
+                contract = ibkr.make_stock_contract(pos.symbol)
+                await ibkr.ib.qualifyContractsAsync(contract)
+                close_action = "SELL" if pos.side == "BUY" else "BUY"
+                order = _MktOrder(close_action, int(pos.quantity))
+                order.tif = "GTC"
+                order.outsideRth = True
+                ibkr.ib.placeOrder(contract, order)
+                log.critical("Emergency MKT %s %d %s placed", close_action, int(pos.quantity), pos.symbol)
+            except Exception as exc:
+                log.error("Failed to emergency-close %s: %s", pos.symbol, exc)
+    except Exception as exc:
+        log.error("Emergency close failed: %s", exc)
 
 
 def reset_circuit_breaker() -> None:

@@ -998,6 +998,8 @@ def _env_int(name: str, fallback: int) -> int:
         return fallback
 
 _MARKET_HEARTBEAT_INTERVAL_SECONDS = max(5, _env_int("MARKET_HEARTBEAT_INTERVAL_SECONDS", 30))
+_MARKET_HEARTBEAT_ENABLED = os.getenv("MARKET_HEARTBEAT_ENABLED", "true").lower() not in ("false", "0", "no")
+_DEFAULT_WATCHLIST = "SPY,QQQ,IWM,DIA,XLF,XLE,XLK,XLV,XLU,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
 
 
 def _split_symbols(raw: str) -> list[str]:
@@ -1048,6 +1050,7 @@ def _cache_prices_from_quotes(quotes: list[dict]) -> None:
 
 
 _position_push_counter = 0
+_market_heartbeat_task: asyncio.Task | None = None
 
 async def _market_heartbeat_loop() -> None:
     global _position_push_counter
