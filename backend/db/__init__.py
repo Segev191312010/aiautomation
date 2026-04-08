@@ -1,5 +1,5 @@
 """Database package — re-exports all functions for backward compatibility."""
-from db.core import DB_PATH, get_db, init_db  # noqa: F401
+from db.core import DB_PATH, get_db, init_db, transaction  # noqa: F401
 from db.rules import (  # noqa: F401
     get_rules, get_rule, save_rule, delete_rule,
     save_rule_version, get_rule_versions, persist_rule_revision,

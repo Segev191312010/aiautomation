@@ -25,10 +25,9 @@ python -m pytest tests/ -v
 ```
 
 ## Development Roadmap
-- Stages 1–2c: **COMPLETE** (Foundation, Auth, Charting, Drawing Tools, Multi-Pane Sync)
-- Stage 3 (Screener): **NEXT**
-- Stage 4 (Backtesting): **CRITICAL** — event-driven, bar-by-bar, no look-ahead bias
-- Stages 5–8: Future (Alerts, Rule Builder, Analytics, Production)
+- Stages 1–8: **COMPLETE** (Foundation, Auth, Charting, Screener, Backtesting, Alerts, Rules, Analytics, Production)
+- v1 Beta: **COMPLETE** (AI Advisor, Regime Detection, Evaluation, Decision Ledger, Autopilot)
+- Active: Safety hardening, auto-tune, P1 correctness fixes before live trading resumes
 
 ## Self-Correction Loop
 1. Before editing, check LEARNED.md for relevant rules

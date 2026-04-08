@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from context_utils import compute_context_hash
-from database import get_db
+from database import get_db, transaction
 
 log = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ async def record_decision_items(
     now = _now_iso()
     item_ids: list[str] = []
 
-    async with get_db() as db:
+    async with transaction() as db:
         for idx, item in enumerate(items):
             item_id = _make_id()
             item_ids.append(item_id)
@@ -115,7 +115,6 @@ async def record_decision_items(
                     now, now, user_id,
                 ),
             )
-        await db.commit()
 
     return item_ids
 

@@ -1,7 +1,7 @@
 """Direct AI trade execution regressions."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, call
 
 import pytest
 
@@ -261,3 +261,64 @@ async def test_execute_direct_trade_blocks_when_shared_gate_rejects(anyio_backen
     ):
         with pytest.raises(SafetyViolation, match="blocked for testing"):
             await execute_direct_trade(decision)
+
+
+@pytest.mark.anyio
+async def test_live_sell_pending_marks_position_for_reconciliation(anyio_backend):
+    """A live SELL that returns PENDING must mark position for reconciliation."""
+    cfg.AUTOPILOT_MODE = "LIVE"
+    decision = AIDirectTrade(
+        symbol="AAPL",
+        action="SELL",
+        order_type="MKT",
+        stop_price=180.0,
+        invalidation="Close broken",
+        reason="Protect gains",
+        confidence=0.61,
+    )
+    existing = OpenPosition(
+        id="entry-001",
+        symbol="AAPL",
+        side="BUY",
+        quantity=4.0,
+        entry_price=100.0,
+        entry_time="2026-03-20T10:00:00+00:00",
+        atr_at_entry=3.0,
+        hard_stop_price=91.0,
+        atr_stop_mult=3.0,
+        atr_trail_mult=2.0,
+        high_watermark=110.0,
+        rule_id="rule-001",
+        rule_name="Test Rule",
+    )
+    pending_trade = Trade(
+        rule_id="ai-direct:AAPL",
+        rule_name="AI Direct SELL AAPL",
+        symbol="AAPL",
+        action="SELL",
+        asset_type="STK",
+        quantity=4,
+        order_type="MKT",
+        limit_price=None,
+        fill_price=None,
+        status="PENDING",
+        order_id=99,
+        timestamp="2026-03-21T12:00:00Z",
+    )
+
+    with patch("direct_ai_trader.get_open_positions", new=AsyncMock(return_value=[existing])), \
+         patch("direct_ai_trader.get_latest_price", new=AsyncMock(return_value=105.0)), \
+         patch("direct_ai_trader.safety_gate.evaluate_runtime_safety", new=AsyncMock(return_value=(True, None))), \
+         patch("direct_ai_trader.place_order", new=AsyncMock(return_value=pending_trade)), \
+         patch("direct_ai_trader.order_lifecycle.stamp_exit_trade_context", new=AsyncMock()) as mock_stamp, \
+         patch("direct_ai_trader.order_lifecycle.finalize_filled_exit_trade", new=AsyncMock()) as mock_finalize, \
+         patch("database.save_open_position", new=AsyncMock()) as mock_save_pos, \
+         patch("services.order_recovery.mark_exit_pending_submitted") as mock_mark_pending, \
+         patch("direct_ai_trader.log_ai_action", new=AsyncMock()):
+        result = await execute_direct_trade(decision)
+
+    assert result["mode"] == "LIVE"
+    mock_stamp.assert_awaited_once()
+    mock_finalize.assert_not_called()  # NOT filled, so no finalize
+    mock_mark_pending.assert_called_once()
+    mock_save_pos.assert_awaited_once_with(existing)

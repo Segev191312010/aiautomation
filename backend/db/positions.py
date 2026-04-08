@@ -2,15 +2,18 @@
 from __future__ import annotations
 import json
 import logging
+import aiosqlite
 from models import OpenPosition
 from db.core import get_db
 
 log = logging.getLogger(__name__)
 
-async def save_open_position(pos: OpenPosition, user_id: str = "demo") -> None:
-    """Upsert an open position (insert on entry, replace on watermark update)."""
-    async with get_db() as db:
-        await db.execute(
+async def save_open_position(
+    pos: OpenPosition, user_id: str = "demo", *, db: aiosqlite.Connection | None = None,
+) -> None:
+    """Upsert an open position. When *db* is provided, caller manages the transaction."""
+    async def _execute(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
             "INSERT OR REPLACE INTO open_positions "
             "(id, symbol, side, quantity, entry_price, entry_time, atr_at_entry, "
             " hard_stop_price, atr_stop_mult, atr_trail_mult, high_watermark, "
@@ -21,7 +24,12 @@ async def save_open_position(pos: OpenPosition, user_id: str = "demo") -> None:
              pos.atr_stop_mult, pos.atr_trail_mult, pos.high_watermark,
              pos.rule_id, pos.rule_name, user_id, pos.model_dump_json()),
         )
-        await db.commit()
+    if db is not None:
+        await _execute(db)
+    else:
+        async with get_db() as conn:
+            await _execute(conn)
+            await conn.commit()
 
 
 async def get_open_positions(user_id: str = "demo") -> list[OpenPosition]:
@@ -45,12 +53,20 @@ async def get_open_position(trade_id: str, user_id: str = "demo") -> OpenPositio
     return OpenPosition.model_validate(json.loads(row[0])) if row else None
 
 
-async def delete_open_position(trade_id: str, user_id: str = "demo") -> bool:
+async def delete_open_position(
+    trade_id: str, user_id: str = "demo", *, db: aiosqlite.Connection | None = None,
+) -> bool:
     """Remove a tracked position on exit. Returns True if a row was deleted."""
-    async with get_db() as db:
-        cur = await db.execute(
+    async def _execute(conn: aiosqlite.Connection) -> bool:
+        cur = await conn.execute(
             "DELETE FROM open_positions WHERE id=? AND user_id=?",
             (trade_id, user_id),
         )
-        await db.commit()
         return cur.rowcount > 0
+    if db is not None:
+        return await _execute(db)
+    else:
+        async with get_db() as conn:
+            result = await _execute(conn)
+            await conn.commit()
+            return result

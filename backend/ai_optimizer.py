@@ -463,6 +463,13 @@ async def run_full_optimization() -> dict:
                 "trade_count": context.get("trade_count", 0),
                 "current_regime": context.get("current_regime"),
                 "lookback_days": context.get("lookback_days"),
+                "rule_performance": context.get("rule_performance", []),
+                "score_analysis": context.get("score_analysis", {}),
+                "sector_performance": context.get("sector_performance", []),
+                "time_patterns": context.get("time_patterns", []),
+                "bracket_analysis": context.get("bracket_analysis", {}),
+                "current_params": context.get("current_params", {}),
+                "market_snapshot": context.get("market_snapshot", {}),
             }, default=str)
 
             run_id = await start_decision_run(

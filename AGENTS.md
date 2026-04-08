@@ -30,19 +30,17 @@ Example: `feat(chart): add Fibonacci retracement drawing tool`
 - Backend: one module per concern (auth.py, settings.py, screener.py, backtest.py)
 - Dashboard components: dashboard/src/components/{feature}/*.tsx
 - Shared types: dashboard/src/types/index.ts (extend, don't create new files unless >200 lines)
-- API service: dashboard/src/services/api.ts (single file, grouped by feature)
-- Store: dashboard/src/store/index.ts (Zustand, sliced by feature)
+- API service: dashboard/src/services/api/ (16 domain modules, barrel re-export in api.ts)
+- Store: dashboard/src/store/ (15 domain stores, barrel re-export in index.ts)
 - Tests: colocate with source (backend/tests/, dashboard/src/**/__tests__/)
 - Session prompts: sessions/stage-N-*-prompt.md
 - Handoffs: handoffs/YYYY-MM-DD-stage-N-*.md
 
-## Testing Requirements Per Stage
-- Stage 3 (Screener): pytest for scan logic + rate limiting, vitest for filter UI
-- Stage 4 (Backtest): pytest for engine core (bar-by-bar, no look-ahead bias), vitest for results display
-- Stage 5 (Alerts): pytest for alert evaluation loop, WebSocket integration test
-- Stage 6 (Rules): pytest for condition serialization, vitest for rule builder UI
-- Stage 7 (Analytics): pytest for risk calculations, vitest for chart components
-- Stage 8 (Production): full regression suite, auth flow e2e
+## Testing Requirements
+- Backend: 490+ tests across 41 files (pytest) — covers order lifecycle, exits, safety kernel, AI optimizer, decision ledger, replay, rules, alerts, screener, bot health, WS auth
+- Frontend: 259+ tests across 17 files (vitest) — covers pages, hooks, components
+- Run all: `cd backend && python -m pytest tests/ -v` and `cd dashboard && npx vitest run`
+- Quality gates (run before every commit): typecheck, build, pytest, vitest
 
 ## Agent Definitions (future .claude/agents/)
 

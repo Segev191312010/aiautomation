@@ -4,7 +4,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from models import Rule
-from db.core import get_db
+from db.core import get_db, transaction
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ async def persist_rule_revision(
     rule.version = max(1, rule.version) + 1
     rule.updated_at = datetime.now(timezone.utc).isoformat()
     created_at = rule.updated_at
-    async with get_db() as db:
+    async with transaction() as db:
         await db.execute(
             "INSERT OR REPLACE INTO rules (id, data, user_id) VALUES (?, ?, ?)",
             (rule.id, rule.model_dump_json(), user_id),
@@ -114,7 +114,6 @@ async def persist_rule_revision(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (rule.id, rule.version, rule.model_dump_json(), diff_summary, created_at, author, user_id),
         )
-        await db.commit()
 
 
 async def delete_rule(rule_id: str, user_id: str = "demo") -> bool:

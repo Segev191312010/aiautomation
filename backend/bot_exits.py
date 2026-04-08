@@ -56,10 +56,14 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
         return
 
     from database import save_open_position
+    from db.core import transaction
     from position_tracker import update_watermarks
 
-    for pos in update_watermarks(open_positions, bars_by_symbol):
-        await save_open_position(pos)
+    updated = list(update_watermarks(open_positions, bars_by_symbol))
+    if updated:
+        async with transaction() as tx:
+            for pos in updated:
+                await save_open_position(pos, db=tx)
 
     for pos in open_positions:
         sym = pos.symbol.upper()

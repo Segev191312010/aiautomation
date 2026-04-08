@@ -4,20 +4,28 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Literal
+import aiosqlite
 from models import Trade
 from db.core import get_db
 
 log = logging.getLogger(__name__)
 
-async def save_trade(trade: Trade, user_id: str = "demo") -> None:
-    async with get_db() as db:
-        await db.execute(
+async def save_trade(
+    trade: Trade, user_id: str = "demo", *, db: aiosqlite.Connection | None = None,
+) -> None:
+    async def _execute(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
             "INSERT OR REPLACE INTO trades (id, rule_id, symbol, action, timestamp, data, user_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (trade.id, trade.rule_id, trade.symbol, trade.action,
              trade.timestamp, trade.model_dump_json(), user_id),
         )
-        await db.commit()
+    if db is not None:
+        await _execute(db)
+    else:
+        async with get_db() as conn:
+            await _execute(conn)
+            await conn.commit()
 
 
 async def get_trades(limit: int = 200, user_id: str = "demo") -> list[Trade]:
@@ -64,22 +72,27 @@ async def get_trade_by_order_id(order_id: int, symbol: str | None = None, user_i
 
 
 async def update_trade_status(
-    trade_id: str, status: str, fill_price: float | None = None, user_id: str = "demo"
+    trade_id: str, status: str, fill_price: float | None = None, user_id: str = "demo",
+    *, db: aiosqlite.Connection | None = None,
 ) -> None:
-    trade = None
-    async with get_db() as db:
-        async with db.execute("SELECT data FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)) as cur:
+    async def _execute(conn: aiosqlite.Connection) -> None:
+        async with conn.execute("SELECT data FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)) as cur:
             row = await cur.fetchone()
         if row:
             trade = Trade.model_validate(json.loads(row[0]))
             trade.status = status  # type: ignore[assignment]
             if fill_price is not None:
                 trade.fill_price = fill_price
-            await db.execute(
+            await conn.execute(
                 "UPDATE trades SET data=? WHERE id=? AND user_id=?",
                 (trade.model_dump_json(), trade_id, user_id),
             )
-            await db.commit()
+    if db is not None:
+        await _execute(db)
+    else:
+        async with get_db() as conn:
+            await _execute(conn)
+            await conn.commit()
 
 
 async def finalize_trade_outcome(
@@ -92,12 +105,19 @@ async def finalize_trade_outcome(
     close_reason: str,
     position_id: str | None = None,
     user_id: str = "demo",
+    db: aiosqlite.Connection | None = None,
 ) -> Trade | None:
-    """Finalize a trade's canonical outcome fields. Single source of truth for P&L."""
+    """Finalize a trade's canonical outcome fields. Single source of truth for P&L.
+
+    When *db* is provided, the caller manages the transaction and S10 side
+    effects. When *db* is ``None``, this function auto-commits and fires
+    S10 linkage as before.
+    """
     if position_side not in ("BUY", "SELL"):
         raise ValueError(f"position_side must be 'BUY' or 'SELL', got '{position_side}'")
-    async with get_db() as db:
-        async with db.execute("SELECT data FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)) as cur:
+
+    async def _execute(conn: aiosqlite.Connection) -> Trade | None:
+        async with conn.execute("SELECT data FROM trades WHERE id=? AND user_id=?", (trade_id, user_id)) as cur:
             row = await cur.fetchone()
         if not row:
             log.warning("finalize_trade_outcome: trade %s not found", trade_id)
@@ -127,18 +147,26 @@ async def finalize_trade_outcome(
         # Backward compat: metadata["pnl"] for unmigrated readers
         trade.metadata["pnl"] = realized_pnl
 
-        await db.execute(
+        await conn.execute(
             "UPDATE trades SET data=? WHERE id=? AND user_id=?",
             (trade.model_dump_json(), trade_id, user_id),
         )
-        await db.commit()
+        return trade
+
+    if db is not None:
+        return await _execute(db)
+
+    # Standalone mode: own connection, own commit, own S10 side effects
+    async with get_db() as conn:
+        trade = await _execute(conn)
+        await conn.commit()
 
     # S10: link realized outcome back to originating decision item
-    if trade.decision_id:
+    if trade and trade.decision_id:
         try:
             from ai_decision_ledger import attach_realized_trade
             await attach_realized_trade(
-                trade.decision_id, trade.id, realized_pnl, trade.closed_at,
+                trade.decision_id, trade.id, trade.realized_pnl, trade.closed_at,
             )
         except Exception as exc:
             log.warning("Failed to attach realized trade to decision item: %s", exc)

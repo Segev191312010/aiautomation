@@ -21,6 +21,28 @@ async def get_db():
         await db.execute("PRAGMA foreign_keys=ON")
         yield db
 
+
+@asynccontextmanager
+async def transaction():
+    """Atomic multi-step operation — BEGIN IMMEDIATE, auto-COMMIT or ROLLBACK.
+
+    Use for operations that touch multiple tables (e.g. finalize trade + delete
+    position). Pass the yielded ``db`` connection to CRUD helpers via their
+    optional ``db`` keyword argument so they share the same transaction.
+    """
+    async with aiosqlite.connect(cfg.DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=FULL")
+        await db.execute("PRAGMA busy_timeout=10000")
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            yield db
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 ﻿"""Tests for shared order lifecycle helpers."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
@@ -59,8 +59,8 @@ async def test_persist_filled_trade_record_updates_status_and_entry_price(anyio_
     ) as mock_save:
         updated = await order_lifecycle.persist_filled_trade_record(trade, 151.25)
 
-    mock_update.assert_awaited_once_with("trade-001", "FILLED", 151.25)
-    mock_save.assert_awaited_once()
+    mock_update.assert_awaited_once_with("trade-001", "FILLED", 151.25, db=ANY)
+    mock_save.assert_awaited_once_with(trade, db=ANY)
     assert updated.status == "FILLED"
     assert updated.fill_price == 151.25
     assert updated.entry_price == 151.25
@@ -141,5 +141,6 @@ async def test_finalize_filled_exit_trade_finalizes_and_deletes_position(anyio_b
         fees=0.0,
         close_reason="trail_stop",
         position_id="entry-001",
+        db=ANY,
     )
-    mock_delete.assert_awaited_once_with("entry-001")
+    mock_delete.assert_awaited_once_with("entry-001", db=ANY)

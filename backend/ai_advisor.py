@@ -358,7 +358,9 @@ def compute_auto_tune(rule_perf: list[dict], score_analysis: dict, rules: list[R
 
 
 async def apply_auto_tune(tune_result: dict) -> dict:
-    """Apply auto-tune changes to DB."""
+    """Apply auto-tune changes to DB and AI parameter store."""
+    from ai_params import ai_params
+
     rules = await get_rules()
     rule_map = {r.id: r for r in rules}
 
@@ -368,6 +370,16 @@ async def apply_auto_tune(tune_result: dict) -> dict:
             rule.enabled = False
             await save_rule(rule)
             log.info("Auto-tune DISABLED rule: %s", rule.name)
+
+    for rule_id, multiplier in tune_result.get("sizing_changes", {}).items():
+        ai_params.set_rule_sizing_multiplier(rule_id, multiplier)
+        log.info("Auto-tune sizing: rule %s x%.2f", rule_id, multiplier)
+
+    new_min_score = tune_result.get("new_min_score")
+    if new_min_score is not None:
+        old_score = ai_params.get_min_score()
+        ai_params.set_min_score(new_min_score)
+        log.info("Auto-tune min_score: %.1f -> %.1f", old_score, new_min_score)
 
     tune_result["applied"] = True
     return tune_result

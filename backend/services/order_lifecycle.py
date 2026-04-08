@@ -19,13 +19,16 @@ log = logging.getLogger(__name__)
 
 
 async def persist_filled_trade_record(trade_rec: Trade, fill_price: float) -> Trade:
-    """Persist a fill consistently for any trade record."""
-    await update_trade_status(trade_rec.id, "FILLED", fill_price)
-    trade_rec.status = "FILLED"  # type: ignore[assignment]
-    trade_rec.fill_price = fill_price
-    # Preserve current behavior: filled trades mirror fill into entry_price.
-    trade_rec.entry_price = fill_price
-    await save_trade(trade_rec)
+    """Persist a fill consistently — single transaction for status + trade update."""
+    from db.core import transaction
+
+    async with transaction() as db:
+        await update_trade_status(trade_rec.id, "FILLED", fill_price, db=db)
+        trade_rec.status = "FILLED"  # type: ignore[assignment]
+        trade_rec.fill_price = fill_price
+        # Preserve current behavior: filled trades mirror fill into entry_price.
+        trade_rec.entry_price = fill_price
+        await save_trade(trade_rec, db=db)
     return trade_rec
 
 
@@ -84,19 +87,35 @@ async def finalize_filled_exit_trade(
     close_reason: str,
     fallback_exit_price: float | None = None,
 ) -> Trade | None:
-    """Finalize a filled exit and remove the tracked open position."""
+    """Finalize a filled exit and remove the tracked open position — atomically."""
+    from db.core import transaction
+
     fill_price = float(exit_trade.fill_price or fallback_exit_price or 0.0)
     if fill_price <= 0:
         raise ValueError(f"Filled exit trade {exit_trade.id} is missing a usable exit price")
 
-    finalized = await finalize_trade_outcome(
-        exit_trade.id,
-        position_side=position.side,
-        entry_price=position.entry_price,
-        exit_price=fill_price,
-        fees=0.0,
-        close_reason=close_reason,
-        position_id=position.id,
-    )
-    await delete_open_position(position.id)
+    async with transaction() as db:
+        finalized = await finalize_trade_outcome(
+            exit_trade.id,
+            position_side=position.side,
+            entry_price=position.entry_price,
+            exit_price=fill_price,
+            fees=0.0,
+            close_reason=close_reason,
+            position_id=position.id,
+            db=db,
+        )
+        await delete_open_position(position.id, db=db)
+
+    # S10 side effect: link to decision ledger (non-critical, after commit)
+    if finalized and finalized.decision_id:
+        try:
+            from ai_decision_ledger import attach_realized_trade
+            await attach_realized_trade(
+                finalized.decision_id, finalized.id,
+                finalized.realized_pnl, finalized.closed_at,
+            )
+        except Exception as exc:
+            log.warning("Failed to attach realized trade to decision item: %s", exc)
+
     return finalized
