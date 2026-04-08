@@ -278,4 +278,4 @@ async def _check_retry_cap(pos) -> None:
         if qty >= 1:
             sym = pos.symbol.upper()
             log.critical("FORCE-CLOSING %s via MKT order after %d failed exits", sym, pos.exit_attempts)
-            await _place_exit_order(pos, sym, qty, 0.0, "force_close_retry_cap", force_close=True)
+            await _place_exit_order(pos, sym, qty, pos.entry_price, "force_close_retry_cap", force_close=True)

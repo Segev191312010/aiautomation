@@ -62,6 +62,12 @@ class WebSocketService {
 
   private _connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return
+    // Refresh token on reconnect to avoid stale JWT after expiry
+    const token = getAuthToken()
+    if (token) {
+      const base = this.url.split('?')[0]
+      this.url = `${base}?token=${encodeURIComponent(token)}`
+    }
     try {
       this.ws = new WebSocket(this.url)
     } catch {
@@ -230,6 +236,12 @@ class MarketDataWsService {
   }
 
   private _connect(): void {
+    // Refresh token on reconnect to avoid stale JWT after expiry
+    const token = getAuthToken()
+    if (token) {
+      const base = this.url.split('?')[0]
+      this.url = `${base}?token=${encodeURIComponent(token)}`
+    }
     try {
       this.ws = new WebSocket(this.url)
     } catch {
