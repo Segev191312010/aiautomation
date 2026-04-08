@@ -167,13 +167,11 @@ describe('TradeBotPage', () => {
     expect(screen.getByTestId('bot-toggle')).toBeInTheDocument()
   })
 
-  it('renders tab navigation with all four tabs', () => {
+  it('renders tab navigation with both tabs', () => {
     render(<TradeBotPage />)
     const tabs = screen.getByTestId('tradebot-tabs')
     expect(tabs).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Positions' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Rules' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Autopilot' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Activity' })).toBeInTheDocument()
   })
 

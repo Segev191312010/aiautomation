@@ -3,10 +3,11 @@ import csv
 import io
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from auth import get_current_user
 from database import get_screener_presets, save_screener_preset, delete_screener_preset
 from models import ScanRequest, ScanFilter, ScreenerPreset, EnrichRequest
 from screener import run_scan, list_universes, validate_timeframe, enrich_symbols
@@ -17,7 +18,7 @@ try:
 except ImportError:
     _IBKR_AVAILABLE = False
 
-router = APIRouter(prefix="/api/screener", tags=["screener"])
+router = APIRouter(prefix="/api/screener", tags=["screener"], dependencies=[Depends(get_current_user)])
 
 
 class SavePresetRequest(BaseModel):

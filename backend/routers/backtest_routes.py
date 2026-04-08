@@ -4,14 +4,15 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import get_current_user
 from database import save_backtest, get_backtests, get_backtest, delete_backtest
 from models import BacktestRequest, BacktestSaveRequest
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+router = APIRouter(prefix="/api/backtest", tags=["backtest"], dependencies=[Depends(get_current_user)])
 
 
 @router.post("/run")

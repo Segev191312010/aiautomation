@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from db.positions import get_open_position
 from models import Rule, TradeAction
 
 log = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
             continue
 
         if pos.exit_attempts >= MAX_EXIT_ATTEMPTS:
+            await _check_retry_cap(pos)
             continue
 
         from position_tracker import check_exits
@@ -156,11 +158,25 @@ async def _reconcile_pending_exit(pos) -> None:
     log.debug("Exit pending for %s (waiting)", pos.symbol)
 
 
-async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reason: str) -> None:
+async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reason: str, *, force_close: bool = False) -> None:
     """Place a fresh exit order and track it on the position."""
     from database import save_open_position
     from order_executor import OrderError, place_order
     from services import order_lifecycle, order_recovery
+
+    # Re-fetch position from DB to avoid stale reads (BUG-7)
+    fresh_pos = await get_open_position(pos.id)
+    if fresh_pos is None:
+        log.warning("Position %s no longer exists at exit time — skipping", sym)
+        return
+    fresh_qty = int(fresh_pos.quantity)
+    if fresh_qty != qty:
+        log.info("Position %s qty changed %d -> %d — using fresh value", sym, qty, fresh_qty)
+        qty = fresh_qty
+    if qty < 1:
+        log.warning("Position %s qty=%d after refresh — skipping exit", sym, qty)
+        return
+    pos = fresh_pos
 
     exit_action = "SELL" if pos.side == "BUY" else "BUY"
     exit_rule = Rule(
@@ -213,13 +229,19 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
         else:
             order_recovery.mark_exit_retry_state(pos, f"Exit order {normalized}", now=now)
             await save_open_position(pos)
-            await _check_retry_cap(pos)
+            if not force_close:
+                await _check_retry_cap(pos)
+            else:
+                log.critical("Force-close order status %s for %s", normalized, sym)
 
     except (OrderError, RuntimeError) as exc:
         order_recovery.mark_exit_retry_state(pos, str(exc), now=now)
         await save_open_position(pos)
         log.error("Exit order FAILED for %s (attempt %d): %s", sym, pos.exit_attempts, exc)
-        await _check_retry_cap(pos)
+        if not force_close:
+            await _check_retry_cap(pos)
+        else:
+            log.critical("Force-close order ALSO FAILED for %s: %s", sym, exc)
 
 
 async def _check_retry_cap(pos) -> None:
@@ -250,3 +272,10 @@ async def _check_retry_cap(pos) -> None:
             )
         except Exception as exc:
             log.warning("Failed to open intervention for %s retry cap: %s", pos.symbol, exc)
+
+        # Force-close via MKT order as last resort (BUG-5)
+        qty = int(pos.quantity)
+        if qty >= 1:
+            sym = pos.symbol.upper()
+            log.critical("FORCE-CLOSING %s via MKT order after %d failed exits", sym, pos.exit_attempts)
+            await _place_exit_order(pos, sym, qty, 0.0, "force_close_retry_cap", force_close=True)

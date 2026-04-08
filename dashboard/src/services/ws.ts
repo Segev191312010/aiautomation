@@ -8,6 +8,7 @@
  *   wsService.disconnect()
  */
 import type { WsEvent, WsEventType } from '@/types'
+import { getAuthToken } from '@/services/api/client'
 
 type Handler = (event: WsEvent) => void
 
@@ -22,7 +23,9 @@ class WebSocketService {
   connect(path = '/ws'): void {
     this.stopped = false
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    this.url = `${proto}://${window.location.host}${path}`
+    const token = getAuthToken()
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+    this.url = `${proto}://${window.location.host}${path}${tokenParam}`
     this._connect()
   }
 
@@ -181,7 +184,9 @@ class MarketDataWsService {
     ) return
     this.stopped = false
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    this.url = `${proto}://${window.location.host}/ws/market-data`
+    const token = getAuthToken()
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
+    this.url = `${proto}://${window.location.host}/ws/market-data${tokenParam}`
     this._connect()
   }
 

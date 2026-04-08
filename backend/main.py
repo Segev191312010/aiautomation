@@ -392,7 +392,16 @@ _ALLOWED_WS_ORIGINS = {
 
 def _check_ws_origin(ws: WebSocket) -> bool:
     origin = ws.headers.get("origin", "")
-    return origin in _ALLOWED_WS_ORIGINS or not origin  # allow non-browser
+    return origin in _ALLOWED_WS_ORIGINS
+
+
+def _validate_ws_token(ws: WebSocket) -> str | None:
+    """Extract and validate JWT from query param ?token=..."""
+    token = ws.query_params.get("token")
+    if not token:
+        return None
+    from auth import verify_token
+    return verify_token(token)
 
 
 # ---------------------------------------------------------------------------
@@ -401,9 +410,14 @@ def _check_ws_origin(ws: WebSocket) -> bool:
 
 @app.websocket("/ws")
 async def ws_general(ws: WebSocket):
+    user_id = _validate_ws_token(ws)
+    if not user_id:
+        await ws.accept()
+        await ws.close(code=4001, reason="Authentication required")
+        return
     if not _check_ws_origin(ws):
         await ws.accept()
-        await ws.close(code=4003)
+        await ws.close(code=4003, reason="Origin not allowed")
         return
     await manager.connect(ws)
     try:
@@ -766,9 +780,14 @@ async def _ws_collect_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
 
 @app.websocket("/ws/market-data")
 async def ws_market_data(ws: WebSocket):
+    user_id = _validate_ws_token(ws)
+    if not user_id:
+        await ws.accept()
+        await ws.close(code=4001, reason="Authentication required")
+        return
     if not _check_ws_origin(ws):
         await ws.accept()
-        await ws.close(code=4003)
+        await ws.close(code=4003, reason="Origin not allowed")
         return
     await ws.accept()
     subscribed: set[str] = set()

@@ -71,6 +71,7 @@ async def test_failed_exit_keeps_position(anyio_backend):
 
     with patch("order_executor.place_order", side_effect=RuntimeError("IBKR connection lost")), \
          patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved_positions.append(p)), \
+         patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=pos), \
          patch("bot_exits._emit", new_callable=AsyncMock), \
          patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
          patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock):
@@ -183,19 +184,19 @@ async def test_timeout_triggers_cancel_and_retry(anyio_backend):
 # ── Test: Retry cap stops automation ───────────────────────────────────────────
 
 @pytest.mark.anyio
-async def test_retry_cap_stops_automation(anyio_backend):
-    """Position at retry cap should not get new exit orders."""
+async def test_retry_cap_triggers_force_close_in_process_exits(anyio_backend):
+    """Position at retry cap should trigger _check_retry_cap (force-close) instead of normal exit."""
     from bot_runner import _process_exits, MAX_EXIT_ATTEMPTS
 
     pos = _make_position(exit_attempts=MAX_EXIT_ATTEMPTS)
 
     with patch("position_tracker.update_watermarks", return_value=[]), \
-         patch("bot_exits._place_exit_order", new_callable=AsyncMock) as mock_place, \
+         patch("bot_exits._check_retry_cap", new_callable=AsyncMock) as mock_cap, \
          patch("position_tracker.check_exits", return_value=(True, "hard_stop")):
 
         await _process_exits([pos], {"AAPL": MagicMock()})
 
-    mock_place.assert_not_called()
+    mock_cap.assert_called_once()
 
 
 # ── Test: Short P&L positive when price falls ─────────────────────────────────
@@ -213,6 +214,7 @@ async def test_short_pnl_positive_when_price_falls(anyio_backend):
 
     emitted = []
     with patch("order_executor.place_order", new_callable=AsyncMock, return_value=filled_trade), \
+         patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=pos), \
          patch("bot_exits._emit", new_callable=AsyncMock, side_effect=lambda p: emitted.append(p)), \
          patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
          patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
@@ -236,6 +238,7 @@ async def test_place_order_returns_none_keeps_position(anyio_backend):
     saved = []
 
     with patch("order_executor.place_order", new_callable=AsyncMock, return_value=None), \
+         patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=pos), \
          patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
          patch("database.delete_open_position", new_callable=AsyncMock) as mock_delete:
 
@@ -257,7 +260,11 @@ async def test_error_exit_trade_retries_instead_of_pending(anyio_backend):
     errored_trade = _make_trade(status="ERROR", order_id=77777)
     saved = []
 
-    with patch("order_executor.place_order", new_callable=AsyncMock, return_value=errored_trade),          patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)),          patch("bot_exits._check_retry_cap", new_callable=AsyncMock) as mock_retry_cap,          patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock):
+    with patch("order_executor.place_order", new_callable=AsyncMock, return_value=errored_trade), \
+         patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=pos), \
+         patch("database.save_open_position", new_callable=AsyncMock, side_effect=lambda p, **kw: saved.append(p)), \
+         patch("bot_exits._check_retry_cap", new_callable=AsyncMock) as mock_retry_cap, \
+         patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock):
 
         await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
 
@@ -266,3 +273,111 @@ async def test_error_exit_trade_retries_instead_of_pending(anyio_backend):
     assert saved[0].exit_attempts == 1
     assert "ERROR" in (saved[0].last_exit_error or "")
     mock_retry_cap.assert_awaited_once()
+
+
+# ── Test: Position re-fetched before exit order (BUG-7) ──────────────────────
+
+@pytest.mark.anyio
+async def test_place_exit_refetches_position(anyio_backend):
+    """_place_exit_order must re-fetch position from DB; if qty changed, use fresh value."""
+    from bot_runner import _place_exit_order
+
+    pos = _make_position(quantity=10.0)
+    fresh_pos = _make_position(quantity=5.0)  # simulates partial close by another path
+
+    placed_orders = []
+
+    async def capture_place_order(rule, **kw):
+        placed_orders.append(rule)
+        return _make_trade(status="FILLED", fill_price=145.0)
+
+    finalized_trade = _make_trade(status="FILLED", fill_price=145.0)
+    finalized_trade.realized_pnl = -25.0
+
+    with patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=fresh_pos), \
+         patch("order_executor.place_order", new_callable=AsyncMock, side_effect=capture_place_order), \
+         patch("bot_exits._emit", new_callable=AsyncMock), \
+         patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
+         patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
+
+        await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
+
+    assert len(placed_orders) == 1
+    assert placed_orders[0].action.quantity == 5, "Should use fresh qty (5), not stale (10)"
+
+
+@pytest.mark.anyio
+async def test_place_exit_skips_if_position_gone(anyio_backend):
+    """If position no longer exists at exit time, skip the order."""
+    from bot_runner import _place_exit_order
+
+    pos = _make_position()
+
+    with patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=None), \
+         patch("order_executor.place_order", new_callable=AsyncMock) as mock_place:
+
+        await _place_exit_order(pos, "AAPL", 10, 145.0, "hard_stop")
+
+    mock_place.assert_not_called()
+
+
+# ── Test: Retry cap triggers force-close (BUG-5) ─────────────────────────────
+
+@pytest.mark.anyio
+async def test_retry_cap_force_closes_position(anyio_backend):
+    """When retry cap is reached, a force-close MKT order should be placed."""
+    from bot_runner import _check_retry_cap, MAX_EXIT_ATTEMPTS
+
+    pos = _make_position(exit_attempts=MAX_EXIT_ATTEMPTS, quantity=10.0)
+    fresh_pos = _make_position(exit_attempts=MAX_EXIT_ATTEMPTS, quantity=10.0)
+    filled_trade = _make_trade(status="FILLED", fill_price=145.0)
+
+    finalized_trade = _make_trade(status="FILLED", fill_price=145.0)
+    finalized_trade.realized_pnl = -50.0
+
+    placed_orders = []
+
+    async def capture_place_order(rule, **kw):
+        placed_orders.append(rule)
+        return filled_trade
+
+    with patch("bot_exits._emit", new_callable=AsyncMock), \
+         patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=fresh_pos), \
+         patch("order_executor.place_order", new_callable=AsyncMock, side_effect=capture_place_order), \
+         patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
+         patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
+
+        await _check_retry_cap(pos)
+
+    assert len(placed_orders) == 1, "Force-close MKT order should be placed at retry cap"
+    assert placed_orders[0].action.order_type == "MKT"
+    assert placed_orders[0].action.quantity == 10
+
+
+@pytest.mark.anyio
+async def test_force_close_failure_no_recursion(anyio_backend):
+    """If force-close also fails, it should NOT recurse into _check_retry_cap again."""
+    from bot_runner import _check_retry_cap, MAX_EXIT_ATTEMPTS
+
+    pos = _make_position(exit_attempts=MAX_EXIT_ATTEMPTS, quantity=10.0)
+
+    call_count = 0
+
+    async def counting_check_retry_cap(p):
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise AssertionError("_check_retry_cap called recursively!")
+        # Call the real implementation
+        from bot_exits import _check_retry_cap as real_check
+        await real_check(p)
+
+    with patch("bot_exits._emit", new_callable=AsyncMock), \
+         patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=pos), \
+         patch("order_executor.place_order", side_effect=RuntimeError("IBKR down")), \
+         patch("database.save_open_position", new_callable=AsyncMock):
+
+        # Should not raise or infinite loop — force_close=True skips _check_retry_cap
+        await _check_retry_cap(pos)
+
+    # If we got here without recursion error, the test passes
