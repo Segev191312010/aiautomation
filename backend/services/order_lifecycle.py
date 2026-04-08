@@ -60,6 +60,7 @@ async def stamp_exit_trade_context(
     fallback_mode: str | None = None,
     fallback_source: str | None = None,
     fallback_decision_id: str | None = None,
+    db=None,
 ) -> Trade:
     """Link an exit trade to its originating position and inherit entry context."""
     entry_trade = await get_trade(position.id)
@@ -76,7 +77,7 @@ async def stamp_exit_trade_context(
     )
     exit_trade.source = exit_trade.source or entry_source or fallback_source or "rule"
     exit_trade.decision_id = exit_trade.decision_id or entry_decision_id or fallback_decision_id
-    await save_trade(exit_trade)
+    await save_trade(exit_trade, db=db)
     return exit_trade
 
 

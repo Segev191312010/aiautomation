@@ -358,8 +358,9 @@ def compute_auto_tune(rule_perf: list[dict], score_analysis: dict, rules: list[R
 
 
 async def apply_auto_tune(tune_result: dict) -> dict:
-    """Apply auto-tune changes to DB and AI parameter store."""
+    """Apply auto-tune changes to DB and AI parameter store with audit trail."""
     from ai_params import ai_params
+    from ai_guardrails import save_param_snapshot
 
     rules = await get_rules()
     rule_map = {r.id: r for r in rules}
@@ -372,13 +373,16 @@ async def apply_auto_tune(tune_result: dict) -> dict:
             log.info("Auto-tune DISABLED rule: %s", rule.name)
 
     for rule_id, multiplier in tune_result.get("sizing_changes", {}).items():
+        old = ai_params.get_rule_sizing_multiplier(rule_id)
         ai_params.set_rule_sizing_multiplier(rule_id, multiplier)
+        await save_param_snapshot("auto_tune_sizing", rule_id, {"old": old, "new": multiplier})
         log.info("Auto-tune sizing: rule %s x%.2f", rule_id, multiplier)
 
     new_min_score = tune_result.get("new_min_score")
     if new_min_score is not None:
         old_score = ai_params.get_min_score()
         ai_params.set_min_score(new_min_score)
+        await save_param_snapshot("auto_tune_min_score", None, {"old": old_score, "new": new_min_score})
         log.info("Auto-tune min_score: %.1f -> %.1f", old_score, new_min_score)
 
     tune_result["applied"] = True
@@ -553,16 +557,26 @@ async def run_bull_bear_debate(
                     "key_factors": parsed.get("key_factors", []),
                 }
             except (_json.JSONDecodeError, ValueError):
+                log.warning(
+                    "Bull/Bear %s debate for %s: JSON parse failed, using degraded fallback. Raw text: %.120s",
+                    role, symbol, text,
+                )
                 results[role.lower()] = {
                     "conviction": 0.5,
                     "thesis": text[:200],
                     "key_factors": [],
+                    "degraded": True,
                 }
         else:
+            log.warning(
+                "Bull/Bear %s debate for %s: AI call failed: %s",
+                role, symbol, result.error,
+            )
             results[role.lower()] = {
                 "conviction": 0.5,
                 "thesis": f"Analysis unavailable: {result.error}",
                 "key_factors": [],
+                "degraded": True,
             }
 
     bull_conv = results["bull"]["conviction"]
@@ -577,11 +591,14 @@ async def run_bull_bear_debate(
         winner = "NEUTRAL"
 
     # Only recommend trading when one side has clear conviction advantage
-    should_trade = abs(net) >= 0.2 and max(bull_conv, bear_conv) >= 0.6
+    # and neither side returned a degraded (fallback) result
+    any_degraded = results["bull"].get("degraded", False) or results["bear"].get("degraded", False)
+    should_trade = abs(net) >= 0.2 and max(bull_conv, bear_conv) >= 0.6 and not any_degraded
 
     results["winner"] = winner
     results["net_conviction"] = round(net, 3)
     results["should_trade"] = should_trade
+    results["degraded"] = any_degraded
 
     log.info(
         "Bull/Bear debate for %s: winner=%s net=%.3f bull=%.2f bear=%.2f trade=%s",

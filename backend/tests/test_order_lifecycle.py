@@ -107,7 +107,7 @@ async def test_stamp_exit_trade_context_inherits_entry_trade_fields(anyio_backen
     ) as mock_save:
         stamped = await order_lifecycle.stamp_exit_trade_context(exit_trade, pos)
 
-    mock_save.assert_awaited_once_with(exit_trade)
+    mock_save.assert_awaited_once_with(exit_trade, db=None)
     assert stamped.position_id == "entry-001"
     assert stamped.mode == "LIVE"
     assert stamped.source == "rule"

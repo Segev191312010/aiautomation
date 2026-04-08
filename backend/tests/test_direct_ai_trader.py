@@ -319,6 +319,11 @@ async def test_live_sell_pending_marks_position_for_reconciliation(anyio_backend
 
     assert result["mode"] == "LIVE"
     mock_stamp.assert_awaited_once()
+    # Verify stamp was called with db= (transaction connection)
+    _, stamp_kwargs = mock_stamp.await_args
+    assert "db" in stamp_kwargs, "stamp_exit_trade_context must receive db= for atomicity"
     mock_finalize.assert_not_called()  # NOT filled, so no finalize
     mock_mark_pending.assert_called_once()
-    mock_save_pos.assert_awaited_once_with(existing)
+    # Verify save_open_position was called with db= (same transaction)
+    _, save_kwargs = mock_save_pos.await_args
+    assert "db" in save_kwargs, "save_open_position must receive db= for atomicity"

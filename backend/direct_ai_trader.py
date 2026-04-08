@@ -219,23 +219,27 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
             )
         else:
             # Exit not immediately filled — stamp context and mark pending
-            # so bot_exits._reconcile_pending_exit can finalize later
-            await order_lifecycle.stamp_exit_trade_context(
-                trade,
-                existing,
-                fallback_mode="LIVE",
-                fallback_source="ai_direct",
-                fallback_decision_id=trade.decision_id,
-            )
-            if trade.order_id and existing:
-                from database import save_open_position
-                from services.order_recovery import mark_exit_pending_submitted
+            # atomically so bot_exits._reconcile_pending_exit can finalize later
+            from db.core import transaction as db_transaction
 
-                now = datetime.now(timezone.utc)
-                mark_exit_pending_submitted(existing, trade.order_id, now=now)
-                await save_open_position(existing)
-                log.info("AI direct exit PENDING for %s (order_id=%s) — marked for reconciliation",
-                         symbol, trade.order_id)
+            async with db_transaction() as tx:
+                await order_lifecycle.stamp_exit_trade_context(
+                    trade,
+                    existing,
+                    fallback_mode="LIVE",
+                    fallback_source="ai_direct",
+                    fallback_decision_id=trade.decision_id,
+                    db=tx,
+                )
+                if trade.order_id and existing:
+                    from database import save_open_position
+                    from services.order_recovery import mark_exit_pending_submitted
+
+                    now = datetime.now(timezone.utc)
+                    mark_exit_pending_submitted(existing, trade.order_id, now=now)
+                    await save_open_position(existing, db=tx)
+                    log.info("AI direct exit PENDING for %s (order_id=%s) — marked for reconciliation",
+                             symbol, trade.order_id)
     else:
         trade.opened_at = trade.timestamp
         trade.position_id = trade.id

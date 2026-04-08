@@ -100,10 +100,17 @@ async def persist_rule_revision(
     user_id: str = "demo",
 ) -> None:
     """Atomic: bump version, save rule + version snapshot in a single transaction."""
-    rule.version = max(1, rule.version) + 1
-    rule.updated_at = datetime.now(timezone.utc).isoformat()
-    created_at = rule.updated_at
     async with transaction() as db:
+        # Compute version atomically inside BEGIN IMMEDIATE to prevent race
+        async with db.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM ai_rule_versions WHERE rule_id = ?",
+            (rule.id,),
+        ) as cur:
+            row = await cur.fetchone()
+        rule.version = (row[0] if row else 0) + 1
+        rule.updated_at = datetime.now(timezone.utc).isoformat()
+        created_at = rule.updated_at
+
         await db.execute(
             "INSERT OR REPLACE INTO rules (id, data, user_id) VALUES (?, ?, ?)",
             (rule.id, rule.model_dump_json(), user_id),
