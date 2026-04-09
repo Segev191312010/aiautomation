@@ -378,7 +378,7 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
                     if isinstance(dt, dict):
                         dt["decision_id"] = dt_item_ids[i]
 
-            queued = queue_direct_candidates(direct_trades)
+            queued = await queue_direct_candidates(direct_trades)
             for i, dt in enumerate(direct_trades):
                 iid = dt_item_ids[i] if i < len(dt_item_ids) else None
                 if i < queued:

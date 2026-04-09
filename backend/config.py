@@ -67,6 +67,15 @@ class Config:
     AI_CONSECUTIVE_FAILURE_THRESHOLD: int = int(os.getenv("AI_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
     AI_FALLBACK_ENABLED: bool = os.getenv("AI_FALLBACK_ENABLED", "true").lower() == "true"
 
+    # ── Direct AI candidate queue ───────────────────────────────────────────
+    # TTL for persisted AI direct candidates before they are treated as stale.
+    AI_DIRECT_CANDIDATE_TTL_SECONDS: int = int(os.getenv("AI_DIRECT_CANDIDATE_TTL_SECONDS", "900"))
+
+    # ── Bull/Bear debate telemetry ──────────────────────────────────────────
+    # Number of JSON parse failures within a 24h window before emitting a
+    # MetricEvent so the operator can notice silent degradation.
+    AI_DEBATE_FAILURE_THRESHOLD: int = int(os.getenv("AI_DEBATE_FAILURE_THRESHOLD", "5"))
+
     # ── Shadow → Live gating ────────────────────────────────────────────────
     SHADOW_TO_LIVE_MIN_DECISIONS: int = int(os.getenv("SHADOW_TO_LIVE_MIN_DECISIONS", "100"))
     SHADOW_TO_LIVE_MIN_DAYS: int = int(os.getenv("SHADOW_TO_LIVE_MIN_DAYS", "15"))

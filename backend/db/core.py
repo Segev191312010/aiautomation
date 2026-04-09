@@ -362,6 +362,20 @@ CREATE TABLE IF NOT EXISTS regime_snapshots (
 );
 """
 
+# ── Direct AI Candidate Queue (persisted across restarts) ──────────────────
+
+_CREATE_DIRECT_CANDIDATES = """
+CREATE TABLE IF NOT EXISTS direct_candidates (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'demo',
+    symbol        TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    queued_at     TEXT NOT NULL,
+    ttl_seconds   INTEGER NOT NULL DEFAULT 900,
+    status        TEXT NOT NULL DEFAULT 'queued'
+);
+"""
+
 # ── S10: Decision Ledger Tables ──────────────────────────────────────────────
 
 _CREATE_AI_DECISION_RUNS = """
@@ -530,6 +544,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_AI_RULE_VALIDATION_RUNS)
         await db.execute(_CREATE_MANUAL_INTERVENTIONS)
         await db.execute(_CREATE_REGIME_SNAPSHOTS)
+        await db.execute(_CREATE_DIRECT_CANDIDATES)
         # S10: decision ledger tables
         await db.execute(_CREATE_AI_DECISION_RUNS)
         await db.execute(_CREATE_AI_DECISION_ITEMS)
@@ -584,6 +599,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_opened ON manual_interventions(opened_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_resolved ON manual_interventions(resolved_at, opened_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(timestamp DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_direct_candidates_status_queued ON direct_candidates(user_id, status, queued_at)")
         # S10: decision ledger indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_runs_created ON ai_decision_runs(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_run ON ai_decision_items(run_id)")

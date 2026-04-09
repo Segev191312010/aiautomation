@@ -6,7 +6,6 @@ are drained on the next bot cycle; stale rows are marked ``expired``.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -56,9 +55,16 @@ def _build_candidate_row(decision: dict) -> dict | None:
     }
 
 
-async def _async_queue_direct_candidates(decisions: list[dict]) -> int:
+async def queue_direct_candidates(decisions: list[dict]) -> int:
+    """Persist direct AI trade opportunities for execution in the next bot cycle.
+
+    Writes each candidate to the ``direct_candidates`` table with a TTL so it
+    survives a backend restart. Returns the number of candidates successfully
+    persisted.
+    """
     from db.direct_candidates import queue_candidate
 
+    ttl = int(getattr(cfg, "AI_DIRECT_CANDIDATE_TTL_SECONDS", 900))
     queued = 0
     for decision in decisions:
         row = _build_candidate_row(decision)
@@ -66,45 +72,13 @@ async def _async_queue_direct_candidates(decisions: list[dict]) -> int:
             continue
         cand_id = str(decision.get("decision_id") or uuid.uuid4())
         try:
-            await queue_candidate(
-                cand_id,
-                row["symbol"],
-                row,
-                ttl_seconds=int(getattr(cfg, "AI_DIRECT_CANDIDATE_TTL_SECONDS", 900)),
-            )
+            await queue_candidate(cand_id, row["symbol"], row, ttl_seconds=ttl)
             queued += 1
         except Exception as exc:
             log.error("queue_direct_candidates: persist failed for %s: %s", row["symbol"], exc)
     if queued:
         log.info("Queued %d direct AI candidate(s) to DB", queued)
     return queued
-
-
-def queue_direct_candidates(decisions: list[dict]) -> int:
-    """Queue direct AI trade opportunities for execution in the next bot cycle.
-
-    Persists each candidate to the ``direct_candidates`` table. If called from
-    a sync context, schedules the coroutine on the running event loop; if
-    there is no running loop, runs it synchronously.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(_async_queue_direct_candidates(decisions))
-
-    # Running loop (e.g. ai_optimizer under FastAPI) — run and wait inline by
-    # scheduling a task. Callers expect the count, so await via run_coroutine
-    # when possible, otherwise schedule fire-and-forget. ai_optimizer is async
-    # already and should call the _async_ helper directly; this sync wrapper
-    # exists only for legacy/test callers.
-    future = asyncio.ensure_future(_async_queue_direct_candidates(decisions))
-    if loop.is_running():
-        # Fallback: cannot block the loop. Caller gets an optimistic count
-        # equal to the number of well-formed decisions; exceptions will be
-        # logged by the task itself.
-        queued_optimistic = sum(1 for d in decisions if _build_candidate_row(d) is not None)
-        return queued_optimistic
-    return loop.run_until_complete(future)
 
 
 async def drain_direct_candidates(max_age_seconds: int = 900) -> list[dict]:

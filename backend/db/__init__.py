@@ -28,3 +28,7 @@ from db.alerts import (  # noqa: F401
 from db.positions import (  # noqa: F401
     save_open_position, get_open_positions, get_open_position, delete_open_position,
 )
+from db.direct_candidates import (  # noqa: F401
+    queue_candidate, drain_candidates, mark_candidate_status,
+    purge_expired_candidates, get_candidate_status,
+)

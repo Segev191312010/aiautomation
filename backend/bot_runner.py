@@ -319,7 +319,7 @@ async def _run_cycle() -> None:
     try:
         from execution_brain import drain_direct_candidates
 
-        direct_candidates = drain_direct_candidates()
+        direct_candidates = await drain_direct_candidates()
     except Exception as exc:
         log.debug("Direct candidate queue unavailable: %s", exc)
         direct_candidates = []
