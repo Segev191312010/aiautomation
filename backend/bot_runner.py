@@ -13,8 +13,6 @@ Every BOT_INTERVAL_SECONDS:
 from __future__ import annotations
 import asyncio
 import logging
-import hashlib
-import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 from config import cfg
@@ -33,15 +31,27 @@ from market_data import get_historical_bars, clear_bar_cache, get_latest_price
 from rule_engine import evaluate_all
 from order_executor import OrderError, place_order
 from models import Rule, Trade, TradeAction
-from position_tracker import check_exits, update_watermarks
 from services import order_lifecycle, order_recovery, safety_gate
-from screener import load_universe
 from events import (
     EventBus, EventType, EventQueue,
     MarketEvent, SignalEvent, OrderEvent, FillEvent, RegimeEvent, MetricEvent,
     ibkr_bar_to_market_event,
 )
 from event_logger import EventLogger, MetricsCollector
+from bot_health import (
+    get_bot_health as _get_bot_health_raw,
+    emit_bot_health as _emit_bot_health_raw,
+    set_health_broadcast,
+    record_cycle_start,
+    record_cycle_complete,
+    record_bot_error,
+    record_degraded_event,
+    record_signal_symbol,
+    record_order_submit,
+    record_fill_event,
+    record_ibkr_heartbeat as _record_ibkr_heartbeat,
+)
+from universe_prescreen import expand_universe, prescreen_universe
 
 log = logging.getLogger(__name__)
 
@@ -58,35 +68,23 @@ _task: Optional[asyncio.Task] = None
 _last_run: Optional[str] = None
 _next_run: Optional[str] = None
 
-# ── Bot health state ────────────────────────────────────────────────────────
-_cycle_day: Optional[str] = None
-_cycle_count_today: int = 0
-_error_timestamps: list[float] = []
-_degraded_timestamps: list[float] = []
-_last_error_message: Optional[str] = None
-_last_signal_symbol: Optional[str] = None
-_last_cycle_started_at: Optional[str] = None
-_last_cycle_completed_at: Optional[str] = None
-_last_successful_ibkr_heartbeat_at: Optional[str] = None
-_last_order_submit_at: Optional[str] = None
-_last_fill_event_at: Optional[str] = None
-_last_bot_health_emit_at: float = 0.0
+# ── Correlation matrix cache (avoid recomputing when symbol set is unchanged) ─
+_corr_matrix_cache: dict | None = None
+_corr_matrix_cache_key: tuple | None = None
 
-# ── Liquidity pre-screen cache ─────────────────────────────────────────────
-# Rebuilt once per day from the full us_all universe.
-# Filters: last close > $5, average 5-day volume > 500k shares.
-_PRESCREEN_MIN_PRICE  = 5.0
-_PRESCREEN_MIN_VOLUME = 500_000
-_PRESCREEN_TTL        = 86_400          # refresh every 24 h
-_prescreen_cache: dict[str, tuple[list[str], float]] = {}
-_screened_symbols: list[str] = []  # legacy shim for the renamed helper
-_screened_at: float = 0.0
+
+def _update_corr_cache(key: tuple, matrix: dict) -> None:
+    global _corr_matrix_cache, _corr_matrix_cache_key
+    _corr_matrix_cache_key = key
+    _corr_matrix_cache = matrix
+
 
 
 def set_broadcast(cb: Callable) -> None:
     global _broadcast
     _broadcast = cb
     _set_exit_broadcast(cb)
+    set_health_broadcast(cb)
 
 
 def is_running() -> bool:
@@ -101,322 +99,14 @@ def get_next_run() -> Optional[str]:
     return _next_run
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _prune_timestamps(bucket: list[float], *, window_seconds: int = 86_400) -> None:
-    cutoff = time.time() - window_seconds
-    while bucket and bucket[0] < cutoff:
-        bucket.pop(0)
-
-
-def _record_cycle_start() -> None:
-    global _cycle_day, _cycle_count_today, _last_cycle_started_at
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if _cycle_day != today:
-        _cycle_day = today
-        _cycle_count_today = 0
-    _cycle_count_today += 1
-    _last_cycle_started_at = _now_iso()
-
-
-def _record_cycle_complete() -> None:
-    global _last_cycle_completed_at
-    _last_cycle_completed_at = _now_iso()
-
-
-def _record_bot_error(message: str) -> None:
-    global _last_error_message
-    _error_timestamps.append(time.time())
-    _prune_timestamps(_error_timestamps)
-    _last_error_message = message
-
-
-def _record_degraded_event() -> None:
-    _degraded_timestamps.append(time.time())
-    _prune_timestamps(_degraded_timestamps)
-
-
-def _record_signal_symbol(symbol: str | None) -> None:
-    global _last_signal_symbol
-    if symbol:
-        _last_signal_symbol = symbol.upper()
-
-
-def _record_ibkr_heartbeat() -> None:
-    global _last_successful_ibkr_heartbeat_at
-    _last_successful_ibkr_heartbeat_at = _now_iso()
-
-
-def _record_order_submit() -> None:
-    global _last_order_submit_at
-    _last_order_submit_at = _now_iso()
-
-
-def _record_fill_event() -> None:
-    global _last_fill_event_at
-    _last_fill_event_at = _now_iso()
-
-
 def get_bot_health() -> dict:
-    _prune_timestamps(_error_timestamps)
-    _prune_timestamps(_degraded_timestamps)
-
-    now = datetime.now(timezone.utc)
-    minutes_since_last_cycle: float | None = None
-    stale_warning = False
-    ibkr_connected = False
-
-    if _last_cycle_completed_at:
-        try:
-            last_cycle = datetime.fromisoformat(_last_cycle_completed_at.replace("Z", "+00:00"))
-            minutes_since_last_cycle = round((now - last_cycle).total_seconds() / 60.0, 2)
-            # Use bot interval (not WS threshold) — bot cycles every BOT_INTERVAL_SECONDS
-            stale_threshold = max(cfg.BOT_INTERVAL_SECONDS * 2, 60)
-            stale_warning = (now - last_cycle).total_seconds() > stale_threshold
-        except (TypeError, ValueError):
-            minutes_since_last_cycle = None
-
-    if cfg.SIM_MODE:
-        ibkr_connected = False
-    else:
-        try:
-            from ibkr_client import ibkr as _ibkr_health
-
-            ibkr_connected = bool(_ibkr_health.is_connected())
-            if ibkr_connected:
-                _record_ibkr_heartbeat()
-        except Exception as exc:
-            log.debug("Health probe: ibkr_connected check failed: %s", exc)
-            ibkr_connected = bool(_last_successful_ibkr_heartbeat_at)
-
-    return {
-        "is_running": _running,
-        "minutes_since_last_cycle": minutes_since_last_cycle,
-        "total_cycles_today": _cycle_count_today,
-        "error_count_24h": len(_error_timestamps),
-        "ibkr_connected": ibkr_connected,
-        "stale_warning": stale_warning,
-        "last_error_message": _last_error_message,
-        "last_signal_symbol": _last_signal_symbol,
-        "last_successful_ibkr_heartbeat_at": _last_successful_ibkr_heartbeat_at,
-        "last_order_submit_at": _last_order_submit_at,
-        "last_fill_event_at": _last_fill_event_at,
-        "degraded_mode_count_24h": len(_degraded_timestamps),
-    }
+    return _get_bot_health_raw(is_running=_running)
 
 
-async def _emit_bot_health(force: bool = False) -> None:
-    global _last_bot_health_emit_at
-    if not cfg.ENABLE_BOT_HEALTH_MONITORING:
-        return
-    now = time.time()
-    if not force and (now - _last_bot_health_emit_at) < 60:
-        return
-    _last_bot_health_emit_at = now
-    await _emit({
-        "type": "bot_health",
-        **get_bot_health(),
-    })
+async def emit_bot_health(*, force: bool = False, **kw) -> None:
+    await _emit_bot_health_raw(is_running=_running, force=force)
 
 
-def _prescreen_cache_key(candidates: list[str]) -> str:
-    normalized = ",".join(sorted(sym.upper() for sym in candidates))
-    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
-
-
-def _expand_universe(universe_id: str) -> list[str]:
-    """Expand a universe identifier to a list of symbols."""
-    if universe_id == "all":
-        symbols: set[str] = set()
-        for uid in ("sp500", "nasdaq100", "etfs"):
-            symbols.update(load_universe(uid))
-        return sorted(symbols)
-    # us_all and any other named universe load directly from their JSON file
-    return load_universe(universe_id)
-
-
-async def _legacy_prescreen_universe_unused(candidates: list[str]) -> list[str]:
-    """
-    Rapidly filter a large symbol list down to liquid, in-range stocks.
-
-    Downloads 5 days of daily bars for all candidates in one batch call,
-    then keeps only symbols where:
-      - last close  > _PRESCREEN_MIN_PRICE  (default $5  — filters penny stocks)
-      - avg volume  > _PRESCREEN_MIN_VOLUME (default 500k — filters illiquid names)
-
-    Results are cached for _PRESCREEN_TTL seconds (24 h by default).
-    """
-    global _screened_symbols, _screened_at
-    import time as _time_mod
-    import asyncio as _asyncio
-
-    now = _time_mod.time()
-    if _screened_symbols and (now - _screened_at) < _PRESCREEN_TTL:
-        log.info("Pre-screen cache hit — %d liquid symbols", len(_screened_symbols))
-        return _screened_symbols
-
-    log.info("Pre-screening %d symbols (price>$%.0f, vol>%s) …",
-             len(candidates), _PRESCREEN_MIN_PRICE,
-             f"{_PRESCREEN_MIN_VOLUME:,}")
-
-    try:
-        import yfinance as yf
-        import pandas as pd
-
-        liquid: list[str] = []
-        BATCH = 1000
-
-        loop = _asyncio.get_running_loop()
-        for i in range(0, len(candidates), BATCH):
-            batch = candidates[i:i + BATCH]
-            try:
-                raw = await loop.run_in_executor(
-                    None,
-                    lambda b=batch: yf.download(
-                        b, period="5d", interval="1d",
-                        auto_adjust=True, progress=False,
-                        group_by="ticker", threads=True,
-                    )
-                )
-                if raw.empty:
-                    continue
-
-                if isinstance(raw.columns, pd.MultiIndex):
-                    for sym in batch:
-                        try:
-                            sym_df = raw[sym].dropna(how="all")
-                            if sym_df.empty:
-                                continue
-                            last_close  = float(sym_df["Close"].iloc[-1])
-                            avg_volume  = float(sym_df["Volume"].mean())
-                            if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
-                                liquid.append(sym.upper())
-                        except Exception as exc:
-                            log.debug("Pre-screen: malformed bars for %s: %s", sym, exc)
-                            _record_degraded_event()
-                else:
-                    # Single symbol returned as flat df
-                    sym = batch[0]
-                    try:
-                        last_close = float(raw["Close"].iloc[-1])
-                        avg_volume = float(raw["Volume"].mean())
-                        if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
-                            liquid.append(sym.upper())
-                    except Exception as exc:
-                        log.debug("Pre-screen %s skipped (malformed bars): %s", sym, exc)
-
-                log.info("Pre-screen batch %d/%d done — %d liquid so far",
-                         i // BATCH + 1, -(-len(candidates) // BATCH), len(liquid))
-            except Exception as exc:
-                log.warning("Pre-screen batch %d failed: %s", i // BATCH, exc)
-
-        _screened_symbols = sorted(liquid)
-        _screened_at = now
-        log.info("Pre-screen complete: %d / %d symbols pass liquidity filter",
-                 len(_screened_symbols), len(candidates))
-        return _screened_symbols
-
-    except Exception as exc:
-        log.error("Pre-screen failed, falling back to full list: %s", exc)
-        return candidates
-
-
-async def _prescreen_universe(candidates: list[str]) -> list[str]:
-    """
-    Override the legacy pre-screen helper with a cache keyed by candidate set.
-
-    This avoids cross-contaminating large universes while keeping the call site
-    unchanged.
-    """
-    import asyncio as _asyncio
-    import time as _time_mod
-
-    now = _time_mod.time()
-    cache_key = _prescreen_cache_key(candidates)
-    cached = _prescreen_cache.get(cache_key)
-    if cached and (now - cached[1]) < _PRESCREEN_TTL:
-        log.info("Pre-screen cache hit for %d candidates -> %d liquid symbols", len(candidates), len(cached[0]))
-        return cached[0]
-
-    log.info(
-        "Pre-screening %d symbols (price>$%.0f, vol>%s) ...",
-        len(candidates),
-        _PRESCREEN_MIN_PRICE,
-        f"{_PRESCREEN_MIN_VOLUME:,}",
-    )
-
-    try:
-        import pandas as pd
-        import yfinance as yf
-
-        liquid: list[str] = []
-        batch_size = 1000
-        loop = _asyncio.get_running_loop()
-
-        for i in range(0, len(candidates), batch_size):
-            batch = candidates[i:i + batch_size]
-            try:
-                raw = await loop.run_in_executor(
-                    None,
-                    lambda b=batch: yf.download(
-                        b,
-                        period="5d",
-                        interval="1d",
-                        auto_adjust=True,
-                        progress=False,
-                        group_by="ticker",
-                        threads=True,
-                    ),
-                )
-                if raw.empty:
-                    continue
-
-                if isinstance(raw.columns, pd.MultiIndex):
-                    for sym in batch:
-                        try:
-                            sym_df = raw[sym].dropna(how="all")
-                            if sym_df.empty:
-                                continue
-                            last_close = float(sym_df["Close"].iloc[-1])
-                            avg_volume = float(sym_df["Volume"].mean())
-                            if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
-                                liquid.append(sym.upper())
-                        except Exception as exc:
-                            log.debug("Pre-screen: malformed bars for %s: %s", sym, exc)
-                            _record_degraded_event()
-                else:
-                    sym = batch[0]
-                    try:
-                        last_close = float(raw["Close"].iloc[-1])
-                        avg_volume = float(raw["Volume"].mean())
-                        if last_close >= _PRESCREEN_MIN_PRICE and avg_volume >= _PRESCREEN_MIN_VOLUME:
-                            liquid.append(sym.upper())
-                    except Exception as exc:
-                        log.debug("Pre-screen %s skipped (malformed bars): %s", sym, exc)
-
-                log.info(
-                    "Pre-screen batch %d/%d done -> %d liquid so far",
-                    i // batch_size + 1,
-                    -(-len(candidates) // batch_size),
-                    len(liquid),
-                )
-            except Exception as exc:
-                log.warning("Pre-screen batch %d failed: %s", i // batch_size, exc)
-
-        screened_symbols = sorted(set(liquid))
-        _prescreen_cache[cache_key] = (screened_symbols, now)
-        log.info(
-            "Pre-screen complete: %d / %d symbols pass liquidity filter",
-            len(screened_symbols),
-            len(candidates),
-        )
-        return screened_symbols
-    except Exception as exc:
-        log.error("Pre-screen failed, falling back to full list: %s", exc)
-        _record_degraded_event()
-        return candidates
 
 
 async def start() -> None:
@@ -446,7 +136,7 @@ async def _loop() -> None:
     while _running:
         import time as _time
         cycle_start = _time.monotonic()
-        _record_cycle_start()
+        record_cycle_start()
         _last_run = datetime.now(timezone.utc).isoformat()
 
         # Schedule next_run BEFORE the cycle so status event has correct value
@@ -464,13 +154,13 @@ async def _loop() -> None:
 
         try:
             await _run_cycle()
-            _record_cycle_complete()
+            record_cycle_complete()
         except Exception as exc:
             log.exception("Error in bot cycle: %s", exc)
-            _record_bot_error(str(exc))
+            record_bot_error(str(exc))
             await _emit({"type": "error", "message": str(exc)})
         finally:
-            await _emit_bot_health(force=True)
+            await emit_bot_health(force=True)
 
         # Sleep only the remaining interval (cycle_duration + sleep = BOT_INTERVAL)
         elapsed = _time.monotonic() - cycle_start
@@ -478,7 +168,7 @@ async def _loop() -> None:
         if remaining > 0:
             await asyncio.sleep(remaining)
         else:
-            _record_degraded_event()
+            record_degraded_event()
             log.warning(
                 "Bot cycle exceeded configured interval: elapsed=%.2fs interval=%ss",
                 elapsed,
@@ -503,10 +193,10 @@ async def _run_cycle() -> None:
     for r in enabled:
         if r.universe:
             if r.universe not in universe_cache:
-                raw_list = _expand_universe(r.universe)
+                raw_list = expand_universe(r.universe)
                 # For large universes (us_all), pre-screen to liquid names only
                 if len(raw_list) > 500:
-                    raw_list = await _prescreen_universe(raw_list)
+                    raw_list = await prescreen_universe(raw_list)
                 universe_cache[r.universe] = raw_list
             all_symbols.update(s.upper() for s in universe_cache[r.universe])
         elif r.symbol:
@@ -718,6 +408,18 @@ async def _run_cycle() -> None:
 
     # ── Execute triggered rules ───────────────────────────────────────────────
     total_signals = len(rule_candidates) + len(direct_candidates)
+
+    # Pre-fetch sector data for all candidate symbols to avoid serial yfinance calls
+    all_candidate_symbols = list({str(c.get("symbol", "")).upper() for c in rule_candidates + direct_candidates if c.get("symbol")})
+    if all_candidate_symbols:
+        try:
+            from risk_manager import prefetch_sectors
+            # Run in a worker thread — prefetch_sectors uses a blocking ThreadPoolExecutor
+            # whose .map() would stall the event loop if called directly.
+            await asyncio.to_thread(prefetch_sectors, all_candidate_symbols)
+        except Exception as exc:
+            log.debug("Sector prefetch skipped: %s", exc)
+
     selected_candidates: list[dict] = []
     if cfg.AUTOPILOT_MODE != "OFF":
         try:
@@ -782,11 +484,17 @@ async def _run_cycle() -> None:
             for c in selected_candidates:
                 if c.get("symbol"):
                     corr_syms.add(str(c["symbol"]).upper())
-            corr_syms_list = [s for s in corr_syms if s]
+            corr_syms_list = sorted(s for s in corr_syms if s)
             if len(corr_syms_list) >= 2:
-                from portfolio_analytics import compute_correlation_matrix
-                cycle_corr_matrix = compute_correlation_matrix(corr_syms_list)
-                log.info("Correlation matrix built for %d symbols", len(corr_syms_list))
+                cache_key = tuple(corr_syms_list)
+                if cache_key == _corr_matrix_cache_key and _corr_matrix_cache is not None:
+                    cycle_corr_matrix = _corr_matrix_cache
+                    log.debug("Correlation matrix cache hit for %d symbols", len(corr_syms_list))
+                else:
+                    from portfolio_analytics import compute_correlation_matrix
+                    cycle_corr_matrix = compute_correlation_matrix(corr_syms_list)
+                    _update_corr_cache(cache_key, cycle_corr_matrix)
+                    log.info("Correlation matrix built for %d symbols", len(corr_syms_list))
         except Exception as corr_exc:
             log.debug("Correlation matrix unavailable this cycle: %s", corr_exc)
     for candidate in selected_candidates:
@@ -841,7 +549,7 @@ async def _run_cycle() -> None:
                 from direct_ai_trader import execute_direct_trade
 
                 decision = AIDirectTrade(**dict(candidate.get("decision", {})))
-                _record_signal_symbol(decision.symbol)
+                record_signal_symbol(decision.symbol)
                 outcome = await execute_direct_trade(decision)
                 trade_payload = outcome.get("trade", {})
                 # Only count if execution actually succeeded (not error/rejected)
@@ -863,7 +571,7 @@ async def _run_cycle() -> None:
                 event_bus.publish(order_event)
                 event_logger.log_event(order_event)
                 orders_placed += 1
-                _record_order_submit()
+                record_order_submit()
                 if decision.action == "BUY":
                     approved_this_cycle.append({
                         "symbol": decision.symbol.upper(),
@@ -890,7 +598,7 @@ async def _run_cycle() -> None:
                     )
                     event_bus.publish(fill_event)
                     event_logger.log_event(fill_event)
-                    _record_fill_event()
+                    record_fill_event()
                 metrics.record("orders_placed", orders_placed)
                 await _emit({
                     "type": "signal",
@@ -910,7 +618,7 @@ async def _run_cycle() -> None:
         if not isinstance(rule, Rule):
             log.warning("Skipping malformed rule candidate for %s", symbol)
             continue
-        _record_signal_symbol(trigger_symbol)
+        record_signal_symbol(trigger_symbol)
 
         # For universe rules, set the symbol on the rule copy for order placement
         order_rule = rule.model_copy()
@@ -1075,7 +783,7 @@ async def _run_cycle() -> None:
                             order_rule.symbol, "None" if trade is None else "ERROR")
                 continue
             orders_placed += 1
-            _record_order_submit()
+            record_order_submit()
             # Track approved candidate for same-cycle concentration checks
             if order_rule.action.type == "BUY":
                 approved_this_cycle.append({
@@ -1095,7 +803,7 @@ async def _run_cycle() -> None:
                 event_bus.publish(fill_event)
                 event_logger.log_event(fill_event)
                 metrics.record("fill_price", trade.fill_price)
-                _record_fill_event()
+                record_fill_event()
             metrics.record("orders_placed", orders_placed)
         except (OrderError, RuntimeError) as exc:
             log.error("Order failed for rule '%s' on %s: %s", rule.name, trigger_symbol, exc)
