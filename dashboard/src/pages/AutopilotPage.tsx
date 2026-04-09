@@ -7,6 +7,7 @@ import CostReportPanel from '@/components/autopilot/CostReportPanel'
 import CircuitBreakerPanel from '@/components/autopilot/CircuitBreakerPanel'
 import { SectionHeader } from '@/components/common/SectionHeader'
 import PageErrorBanner from '@/components/common/PageErrorBanner'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import { IconArrows, IconBarChart, IconDollar, IconGrid, IconHistory, IconLightning, IconShield, IconTrendUp } from '@/components/icons'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { DecisionDrilldown } from '@/components/autopilot/DecisionDrilldown'
@@ -199,6 +200,7 @@ export default function AutopilotPage() {
 
   return (
     <div className="flex flex-col gap-6 pb-4">
+      <ErrorBoundary>
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
         <div className="shell-panel relative overflow-hidden p-6 sm:p-7">
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(245,158,11,0.16),transparent_34%)]" />
@@ -234,8 +236,11 @@ export default function AutopilotPage() {
         </div>
       </section>
 
+      </ErrorBoundary>
+
       <PageErrorBanner show={Boolean(pageError || error)} message={pageError || error || undefined} />
 
+      <ErrorBoundary>
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
         <div className="space-y-6">
           <div className="shell-panel p-5 sm:p-6">
@@ -260,6 +265,8 @@ export default function AutopilotPage() {
         </div>
       </section>
 
+      </ErrorBoundary>
+
       <section className="animate-fade-in-up" style={{ animationDelay: '40ms' }}>
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -270,7 +277,7 @@ export default function AutopilotPage() {
         </div>
       </section>
 
-      {activeTab === 'feed' && (
+      {activeTab === 'feed' && (<ErrorBoundary>
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
           <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
             <SectionHeader icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Audit" title="Live Activity Feed" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">Realtime operator trail</span>} />
@@ -293,9 +300,9 @@ export default function AutopilotPage() {
             </div>
           </section>
         </div>
-      )}
+      </ErrorBoundary>)}
 
-      {activeTab === 'performance' && (
+      {activeTab === 'performance' && (<ErrorBoundary>
         <div className="space-y-6">
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
             <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
@@ -316,11 +323,11 @@ export default function AutopilotPage() {
             <div className="mt-4">{rulePerformance.length ? <div className="overflow-x-auto"><table className="w-full min-w-[640px]"><thead><tr className="border-b border-[var(--border)] text-left text-[11px] uppercase tracking-[0.12em] text-[var(--text-muted)]"><th className="py-3 pr-3 font-medium">Rule</th><th className="py-3 px-3 font-medium">Source</th><th className="py-3 px-3 font-medium">Trades</th><th className="py-3 px-3 font-medium">Hit Rate</th><th className="py-3 pl-3 text-right font-medium">Net P&L</th></tr></thead><tbody>{rulePerformance.map((row) => <tr key={`${row.rule_id}:${row.source}`} className="border-b border-[var(--border)]/60 last:border-b-0"><td className="py-3 pr-3"><div className="font-medium text-[var(--text-primary)]">{row.rule_name}</div><div className="text-xs text-[var(--text-muted)]">{row.rule_id}</div></td><td className="py-3 px-3 text-sm text-[var(--text-secondary)]">{row.source}</td><td className="py-3 px-3 text-sm text-[var(--text-secondary)]">{row.trades_count}</td><td className="py-3 px-3 text-sm text-[var(--text-secondary)]">{row.hit_rate != null ? `${(row.hit_rate * 100).toFixed(1)}%` : '--'}</td><td className="py-3 pl-3 text-right text-sm font-medium text-[var(--text-primary)]">{fmtUsd(row.net_pnl)}</td></tr>)}</tbody></table></div> : <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">No rule-level performance history yet.</div>}</div>
           </section>
         </div>
-      )}
+      </ErrorBoundary>)}
 
-      {activeTab === 'rule-lab' && (rulesLoading && !rules.length ? <div className="shell-panel rounded-[28px] px-5 py-8 text-sm text-[var(--text-muted)]">Loading AI rule inventory...</div> : <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}><SectionHeader icon={<IconArrows className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Rule Lab" title="Autopilot Rule Inventory" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{rules.length} rules</span>} /><div className="mt-4"><AutopilotRuleLab rules={rules} onRefresh={loadRules} /></div></section>)}
+      {activeTab === 'rule-lab' && (<ErrorBoundary>{rulesLoading && !rules.length ? <div className="shell-panel rounded-[28px] px-5 py-8 text-sm text-[var(--text-muted)]">Loading AI rule inventory...</div> : <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}><SectionHeader icon={<IconArrows className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Rule Lab" title="Autopilot Rule Inventory" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">{rules.length} rules</span>} /><div className="mt-4"><AutopilotRuleLab rules={rules} onRefresh={loadRules} /></div></section>}</ErrorBoundary>)}
 
-      {activeTab === 'evaluation' && (
+      {activeTab === 'evaluation' && (<ErrorBoundary>
         <div className="space-y-6">
           <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
             <SectionHeader icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Decision Ledger" title="Decision Runs" />
@@ -335,7 +342,7 @@ export default function AutopilotPage() {
             </div>
           </section>
         </div>
-      )}
+      </ErrorBoundary>)}
     </div>
   )
 }

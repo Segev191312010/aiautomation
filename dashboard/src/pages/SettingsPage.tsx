@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useToast } from '@/components/ui/ToastProvider'
 import { useSettingsStore, useBotStore } from '@/store'
 import { fetchSettings, updateSettings } from '@/services/api'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 
 // ── Inline SVG icons (no extra dependency) ───────────────────────────────────
 
@@ -202,6 +203,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      <ErrorBoundary>
       {/* ── General ──────────────────────────────────────────────────────── */}
       <SectionCard icon={<IconGlobe className="w-3.5 h-3.5" />} title="General" delay={60}>
         <div className="flex flex-col gap-5">
@@ -294,6 +296,8 @@ export default function SettingsPage() {
           </div>
         </div>
       </SectionCard>
+
+      </ErrorBoundary>
 
       {/* ── About ────────────────────────────────────────────────────────── */}
       <SectionCard icon={<IconInfo className="w-3.5 h-3.5" />} title="About" delay={240}>

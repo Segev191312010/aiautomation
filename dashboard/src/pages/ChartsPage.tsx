@@ -6,6 +6,7 @@
  */
 import { useState, useMemo } from 'react'
 import { useMarketStore } from '@/store'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 
 const IB_CHART_BASE = 'http://127.0.0.1:5001'
 
@@ -106,15 +107,17 @@ export default function ChartsPage() {
       </div>
 
       {/* Chart iframe */}
-      <div className="flex-1 rounded-xl border border-[var(--border)] overflow-hidden bg-white min-h-0">
-        <iframe
-          key={chartUrl}
-          src={chartUrl}
-          className="w-full h-full border-0"
-          title="ib_chart"
-          allow="fullscreen"
-        />
-      </div>
+      <ErrorBoundary>
+        <div className="flex-1 rounded-xl border border-[var(--border)] overflow-hidden bg-white min-h-0">
+          <iframe
+            key={chartUrl}
+            src={chartUrl}
+            className="w-full h-full border-0"
+            title="ib_chart"
+            allow="fullscreen"
+          />
+        </div>
+      </ErrorBoundary>
     </div>
   )
 }

@@ -8,6 +8,7 @@ import type { Alert } from '@/types'
 import AlertList from '@/components/alerts/AlertList'
 import AlertHistoryTable from '@/components/alerts/AlertHistoryTable'
 import AlertForm from '@/components/alerts/AlertForm'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 
@@ -151,22 +152,26 @@ export default function AlertsPage() {
       </div>
 
       {/* ── Tab content ─────────────────────────────────────────────────── */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {loading ? (
-          <AlertsPageSkeleton />
-        ) : activeTab === 'active' ? (
-          <AlertList onEdit={handleEdit} />
-        ) : (
-          <AlertHistoryTable />
-        )}
-      </div>
+      <ErrorBoundary>
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {loading ? (
+            <AlertsPageSkeleton />
+          ) : activeTab === 'active' ? (
+            <AlertList onEdit={handleEdit} />
+          ) : (
+            <AlertHistoryTable />
+          )}
+        </div>
+      </ErrorBoundary>
 
       {/* ── Create / Edit modal ─────────────────────────────────────────── */}
       {showForm && (
-        <AlertForm
-          onClose={handleCloseForm}
-          editAlert={editAlert ?? undefined}
-        />
+        <ErrorBoundary>
+          <AlertForm
+            onClose={handleCloseForm}
+            editAlert={editAlert ?? undefined}
+          />
+        </ErrorBoundary>
       )}
     </div>
   )

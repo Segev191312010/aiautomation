@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import PageErrorBanner from '@/components/common/PageErrorBanner'
+import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import { SectionHeader } from '@/components/common/SectionHeader'
 import { IconArrows, IconBarChart, IconGrid, IconTrendUp } from '@/components/icons'
 import { LiveSectorStrip } from '@/components/rotation/LiveSectorStrip'
@@ -120,6 +121,7 @@ export default function MarketRotationPage() {
 
       <PageErrorBanner show={Boolean(error)} message={error || undefined} />
 
+      <ErrorBoundary>
       <section className="shell-panel p-5 sm:p-6">
         <SectionHeader icon={<IconTrendUp className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Sector strip" title="Live Sector ETF Tape" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">11 ETFs</span>} />
         <div className="mt-4">
@@ -128,7 +130,9 @@ export default function MarketRotationPage() {
             : <LiveSectorStrip rotation={rotation} livePrices={livePrices} selectedSector={selectedSector} onSelectSector={setSelectedSector} />}
         </div>
       </section>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <section className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="shell-panel p-5 sm:p-6">
           <SectionHeader
@@ -176,7 +180,9 @@ export default function MarketRotationPage() {
           </div>
         </aside>
       </section>
+      </ErrorBoundary>
 
+      <ErrorBoundary>
       <section className="shell-panel p-5 sm:p-6">
         <SectionHeader icon={<IconGrid className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Leaders" title="Sector Leaders" badge={selectedRotation ? <span className="shell-chip px-3 py-1 text-[10px] font-mono">{selectedRotation.name}</span> : null} />
         <div className="mt-4">
@@ -193,6 +199,7 @@ export default function MarketRotationPage() {
           )}
         </div>
       </section>
+      </ErrorBoundary>
     </div>
   )
 }
