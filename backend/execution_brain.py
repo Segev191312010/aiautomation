@@ -1,14 +1,20 @@
-"""Execution brain for ranking rule and direct-AI candidates together."""
+"""Execution brain for ranking rule and direct-AI candidates together.
+
+Direct AI candidates are persisted to SQLite (``direct_candidates`` table) so
+they survive a backend restart. Candidates carry a TTL (default 15 min) and
+are drained on the next bot cycle; stale rows are marked ``expired``.
+"""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+import logging
+import uuid
+from datetime import datetime, timezone
 
 from config import cfg
 from portfolio_allocator import allocate_candidates
 
-# Thread-safe queue for direct AI candidates (replaces plain list)
-_pending_direct_queue: asyncio.Queue[dict] = asyncio.Queue()
+log = logging.getLogger(__name__)
 
 
 def _priority(candidate: dict) -> tuple[int, float]:
@@ -34,55 +40,91 @@ def choose_candidates(rule_candidates: list[dict], direct_candidates: list[dict]
     return allocate_candidates(list(merged.values()))
 
 
-def queue_direct_candidates(decisions: list[dict]) -> int:
-    """Queue direct AI trade opportunities for execution in the next bot cycle."""
+def _build_candidate_row(decision: dict) -> dict | None:
+    symbol = str(decision.get("symbol", "")).upper()
+    if not symbol:
+        return None
     now = datetime.now(timezone.utc).isoformat()
+    return {
+        "symbol": symbol,
+        "source": "ai_direct",
+        "score": float(decision.get("confidence", 0.5)) * 100.0,
+        "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
+        "is_exit": str(decision.get("action", "BUY")).upper() == "SELL",
+        "decision": dict(decision),
+        "queued_at": now,
+    }
+
+
+async def _async_queue_direct_candidates(decisions: list[dict]) -> int:
+    from db.direct_candidates import queue_candidate
+
     queued = 0
     for decision in decisions:
-        symbol = str(decision.get("symbol", "")).upper()
-        if not symbol:
+        row = _build_candidate_row(decision)
+        if row is None:
             continue
-        _pending_direct_queue.put_nowait({
-            "symbol": symbol,
-            "source": "ai_direct",
-            "score": float(decision.get("confidence", 0.5)) * 100.0,
-            "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
-            "is_exit": str(decision.get("action", "BUY")).upper() == "SELL",
-            "decision": dict(decision),
-            "queued_at": now,
-        })
-        queued += 1
+        cand_id = str(decision.get("decision_id") or uuid.uuid4())
+        try:
+            await queue_candidate(
+                cand_id,
+                row["symbol"],
+                row,
+                ttl_seconds=int(getattr(cfg, "AI_DIRECT_CANDIDATE_TTL_SECONDS", 900)),
+            )
+            queued += 1
+        except Exception as exc:
+            log.error("queue_direct_candidates: persist failed for %s: %s", row["symbol"], exc)
+    if queued:
+        log.info("Queued %d direct AI candidate(s) to DB", queued)
     return queued
 
 
-def drain_direct_candidates(max_age_seconds: int = 900) -> list[dict]:
+def queue_direct_candidates(decisions: list[dict]) -> int:
+    """Queue direct AI trade opportunities for execution in the next bot cycle.
+
+    Persists each candidate to the ``direct_candidates`` table. If called from
+    a sync context, schedules the coroutine on the running event loop; if
+    there is no running loop, runs it synchronously.
     """
-    Drain queued direct AI opportunities, dropping stale entries and keeping the
-    highest-priority candidate per symbol.
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_async_queue_direct_candidates(decisions))
+
+    # Running loop (e.g. ai_optimizer under FastAPI) — run and wait inline by
+    # scheduling a task. Callers expect the count, so await via run_coroutine
+    # when possible, otherwise schedule fire-and-forget. ai_optimizer is async
+    # already and should call the _async_ helper directly; this sync wrapper
+    # exists only for legacy/test callers.
+    future = asyncio.ensure_future(_async_queue_direct_candidates(decisions))
+    if loop.is_running():
+        # Fallback: cannot block the loop. Caller gets an optimistic count
+        # equal to the number of well-formed decisions; exceptions will be
+        # logged by the task itself.
+        queued_optimistic = sum(1 for d in decisions if _build_candidate_row(d) is not None)
+        return queued_optimistic
+    return loop.run_until_complete(future)
+
+
+async def drain_direct_candidates(max_age_seconds: int = 900) -> list[dict]:
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    Drain queued direct AI opportunities from the DB, dropping stale entries
+    and keeping the highest-priority candidate per symbol.
+    """
+    from db.direct_candidates import drain_candidates
+
+    rows = await drain_candidates(max_age_seconds=max_age_seconds)
+
     merged: dict[str, dict] = {}
-
-    # Drain the queue (non-blocking)
-    drained: list[dict] = []
-    while not _pending_direct_queue.empty():
-        try:
-            drained.append(_pending_direct_queue.get_nowait())
-        except asyncio.QueueEmpty:
-            break
-
-    for candidate in drained:
-        queued_at_raw = candidate.get("queued_at")
-        try:
-            queued_at = datetime.fromisoformat(str(queued_at_raw).replace("Z", "+00:00"))
-        except Exception:
-            queued_at = datetime.min.replace(tzinfo=timezone.utc)  # malformed = treat as expired
-        if queued_at < cutoff:
-            continue
+    for candidate in rows:
         symbol = str(candidate.get("symbol", "")).upper()
         if not symbol:
             continue
         current = merged.get(symbol)
         if current is None or _priority(candidate) > _priority(current):
             merged[symbol] = dict(candidate)
+
+    if merged:
+        log.info("Drained %d direct candidate(s) for execution: %s", len(merged), list(merged.keys()))
     return list(merged.values())

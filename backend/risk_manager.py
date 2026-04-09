@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import math
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -32,29 +34,62 @@ _SECTOR_MAP: dict[str, str] = {
 }
 
 
-_dynamic_sector_cache: dict[str, str | None] = {}
+# Dynamic cache with TTL (24h) for yfinance lookups
+_SECTOR_CACHE_TTL = 86_400  # 24 hours
+_dynamic_sector_cache: dict[str, tuple[str, float]] = {}  # symbol -> (sector, timestamp)
 
 
 def get_sector(symbol: str) -> str | None:
-    """Get sector for symbol. Uses static map first, then yfinance cache, then 'Unknown'."""
+    """Get sector for symbol. Uses static map first, then TTL-cached yfinance, then 'Unknown'."""
     sym = symbol.upper()
     if sym in _SECTOR_MAP:
         return _SECTOR_MAP[sym]
-    if sym in _dynamic_sector_cache:
-        return _dynamic_sector_cache[sym]
+    cached = _dynamic_sector_cache.get(sym)
+    if cached and (time.monotonic() - cached[1]) < _SECTOR_CACHE_TTL:
+        return cached[0]
     # Try yfinance lookup (cached after first call)
     try:
         import yfinance as yf
         info = yf.Ticker(sym).info
         sector = info.get("sector")
         if sector:
-            _dynamic_sector_cache[sym] = sector
+            _dynamic_sector_cache[sym] = (sector, time.monotonic())
             return sector
     except Exception:
         pass
     # Unknown sector — still track for concentration limits
-    _dynamic_sector_cache[sym] = "Unknown"
+    _dynamic_sector_cache[sym] = ("Unknown", time.monotonic())
     return "Unknown"
+
+
+def prefetch_sectors(symbols: list[str]) -> None:
+    """Batch pre-fetch sector data for symbols not in static map or cache.
+
+    Runs yfinance lookups in parallel to warm the cache before trade evaluation.
+    """
+    now = time.monotonic()
+    unknown = [
+        s.upper() for s in symbols
+        if s.upper() not in _SECTOR_MAP
+        and (s.upper() not in _dynamic_sector_cache
+             or (now - _dynamic_sector_cache[s.upper()][1]) >= _SECTOR_CACHE_TTL)
+    ]
+    if not unknown:
+        return
+    log.info("Pre-fetching sector data for %d symbol(s): %s", len(unknown), unknown[:10])
+
+    def _lookup(sym: str) -> tuple[str, str]:
+        try:
+            import yfinance as yf
+            info = yf.Ticker(sym).info
+            return (sym, info.get("sector", "Unknown"))
+        except Exception:
+            return (sym, "Unknown")
+
+    with ThreadPoolExecutor(max_workers=min(len(unknown), 6)) as pool:
+        for sym, sector in pool.map(_lookup, unknown):
+            _dynamic_sector_cache[sym] = (sector, time.monotonic())
+    log.info("Sector pre-fetch complete for %d symbol(s)", len(unknown))
 
 
 # ── Account state (fetched once per cycle) ───────────────────────────────────

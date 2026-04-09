@@ -27,17 +27,12 @@ def test_is_crypto_usd_symbol():
 
 
 def test_fetch_coinbase_spot_success(monkeypatch: pytest.MonkeyPatch):
-    class _Resp:
-        def __enter__(self):
-            return self
+    class _FakeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"data": {"amount": "68300.12"}}
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return b'{"data":{"amount":"68300.12"}}'
-
-    monkeypatch.setattr(main.urllib.request, "urlopen", lambda *_args, **_kwargs: _Resp())
+    monkeypatch.setattr(main.httpx, "get", lambda *_a, **_kw: _FakeResp())
     resolved = main._fetch_coinbase_spot("BTC-USD")
     assert resolved is not None
     price, quote_ts, market_state = resolved
@@ -47,26 +42,22 @@ def test_fetch_coinbase_spot_success(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_fetch_coinbase_spot_prefers_exchange_ticker(monkeypatch: pytest.MonkeyPatch):
-    class _Resp:
-        def __init__(self, payload: bytes):
-            self._payload = payload
+    class _ExchangeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"price": "70123.45", "time": "2026-03-04T08:41:30.240155965Z"}
 
-        def __enter__(self):
-            return self
+    class _SpotResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"data": {"amount": "68300.12"}}
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return self._payload
-
-    def _urlopen(req, **_kwargs):
-        url = getattr(req, "full_url", str(req))
+    def _fake_get(url, **_kw):
         if "api.exchange.coinbase.com" in url:
-            return _Resp(b'{"price":"70123.45","time":"2026-03-04T08:41:30.240155965Z"}')
-        return _Resp(b'{"data":{"amount":"68300.12"}}')
+            return _ExchangeResp()
+        return _SpotResp()
 
-    monkeypatch.setattr(main.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(main.httpx, "get", _fake_get)
     resolved = main._fetch_coinbase_spot("BTC-USD")
     assert resolved is not None
     price, quote_ts, market_state = resolved
@@ -79,7 +70,7 @@ def test_fetch_coinbase_spot_failure(monkeypatch: pytest.MonkeyPatch):
     def _boom(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(main.urllib.request, "urlopen", _boom)
+    monkeypatch.setattr(main.httpx, "get", _boom)
     assert main._fetch_coinbase_spot("BTC-USD") is None
 
 

@@ -53,7 +53,7 @@ import json
 import logging
 import os
 import threading
-import urllib.request
+import httpx
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -536,17 +536,19 @@ def _fetch_coinbase_spot(symbol: str) -> tuple[float, int, str] | None:
     Fetch spot price from Coinbase for crypto USD pairs.
 
     Returns (price, unix_ts, market_state) or None on any failure.
+    Uses httpx (sync) since this runs inside asyncio.to_thread.
     """
     sym = _normalize_symbol(symbol)
     if not _is_crypto_usd_symbol(sym):
         return None
+    headers = {"User-Agent": "trading-dashboard/1.0"}
     try:
-        exchange_req = urllib.request.Request(
+        resp = httpx.get(
             f"https://api.exchange.coinbase.com/products/{sym}/ticker",
-            headers={"User-Agent": "trading-dashboard/1.0"},
+            headers=headers, timeout=2.5,
         )
-        with urllib.request.urlopen(exchange_req, timeout=2.5) as resp:  # nosec B310
-            payload = json.loads(resp.read().decode("utf-8"))
+        resp.raise_for_status()
+        payload = resp.json()
         exchange_price = payload.get("price")
         if exchange_price is not None:
             price = float(exchange_price)
@@ -563,12 +565,12 @@ def _fetch_coinbase_spot(symbol: str) -> tuple[float, int, str] | None:
         log.debug("Coinbase exchange API failed for %s: %s", sym, exc)
 
     try:
-        spot_req = urllib.request.Request(
+        resp = httpx.get(
             f"https://api.coinbase.com/v2/prices/{sym}/spot",
-            headers={"User-Agent": "trading-dashboard/1.0"},
+            headers=headers, timeout=2.5,
         )
-        with urllib.request.urlopen(spot_req, timeout=2.5) as resp:  # nosec B310
-            payload = json.loads(resp.read().decode("utf-8"))
+        resp.raise_for_status()
+        payload = resp.json()
         amount = payload.get("data", {}).get("amount")
         price = float(amount)
         if price <= 0:
