@@ -29,3 +29,6 @@ backend/.env
 *.db-shm
 .tmp/
 
+# IB Chart sidecar (runs on port 5001, not part of main app)
+/ib_chart/
+
