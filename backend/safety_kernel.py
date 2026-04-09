@@ -11,10 +11,14 @@ when AI fails N times in a row, auto-activates emergency stop to protect positio
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import defaultdict
 
 from config import cfg
+
+# Symbol format validation (shared with api_contracts)
+_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 
 log = logging.getLogger(__name__)
 
@@ -178,6 +182,11 @@ async def check_all(
     require_autopilot_authority: bool = True,
 ) -> None:
     """Run the shared runtime safety checks for an order."""
+    # Validate and normalize symbol before any action
+    symbol = symbol.strip().upper()
+    if not _SYMBOL_RE.match(symbol):
+        raise SafetyViolation(f"Invalid symbol format: {symbol!r}")
+
     if require_autopilot_authority and not is_exit:
         await assert_not_killed()
         await assert_daily_loss_not_locked(is_exit=False)

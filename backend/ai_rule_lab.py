@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterable
 
 from api_contracts import AIRuleAction
@@ -10,6 +11,12 @@ from database import delete_rule, get_rule, get_rules, save_rule, save_rule_vers
 from models import Rule, RuleCreate
 
 log = logging.getLogger(__name__)
+
+# Allowed symbol pattern: 1-10 uppercase alphanumeric + dots/hyphens
+_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
+# Max length for free-text fields coming from AI
+_MAX_NAME_LEN = 120
+_MAX_DESCRIPTION_LEN = 2000
 
 
 def _as_action(value: AIRuleAction | dict) -> AIRuleAction:
@@ -55,6 +62,33 @@ async def _apply_rule_action(
             raise ValueError("create requires rule_payload")
         # Normalize Claude's format to match RuleCreate model
         payload = dict(action.rule_payload)
+
+        # ── Input sanitization ─────────────────────────────────────────
+        # Truncate free-text fields to prevent oversized payloads
+        if "name" in payload:
+            payload["name"] = str(payload["name"])[:_MAX_NAME_LEN]
+        if "description" in payload:
+            payload["description"] = str(payload["description"])[:_MAX_DESCRIPTION_LEN]
+
+        # Validate symbol format
+        sym = str(payload.get("symbol", "")).strip().upper()
+        if sym and not _SYMBOL_RE.match(sym):
+            raise ValueError(f"Invalid symbol format from AI: {sym!r}")
+        if sym:
+            payload["symbol"] = sym
+
+        # Validate universe symbols
+        universe = payload.get("universe")
+        if isinstance(universe, list):
+            cleaned = []
+            for s in universe:
+                s = str(s).strip().upper()
+                if _SYMBOL_RE.match(s):
+                    cleaned.append(s)
+                else:
+                    log.warning("Dropping invalid universe symbol from AI: %r", s)
+            payload["universe"] = cleaned
+
         # Fix: Claude sends action_type instead of action dict
         if "action_type" in payload and "action" not in payload:
             payload["action"] = {
@@ -121,6 +155,21 @@ async def _apply_rule_action(
         if not action.rule_payload:
             raise ValueError("update requires rule_payload")
         patch = action.rule_payload.copy()
+        # ── Sanitize update payload (same rules as create) ─────────────
+        if "name" in patch:
+            patch["name"] = str(patch["name"])[:_MAX_NAME_LEN]
+        if "description" in patch:
+            patch["description"] = str(patch["description"])[:_MAX_DESCRIPTION_LEN]
+        if "symbol" in patch:
+            sym = str(patch["symbol"]).strip().upper()
+            if not _SYMBOL_RE.match(sym):
+                raise ValueError(f"Invalid symbol format from AI: {sym!r}")
+            patch["symbol"] = sym
+        if isinstance(patch.get("universe"), list):
+            patch["universe"] = [
+                s for s in (str(u).strip().upper() for u in patch["universe"])
+                if _SYMBOL_RE.match(s)
+            ]
         if not allow_active and patch.get("status") == "active":
             patch["status"] = "paper"
         updated = updated.model_copy(update=patch)

@@ -6,8 +6,9 @@ enforcing consistency between backend, frontend, and the AI optimizer.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Score bucket (used in score analysis) ────────────────────────────────────
@@ -299,24 +300,43 @@ class AIRiskAdjustments(BaseModel):
     risk_per_trade_pct: Optional[UncertainValue] = None
 
 
+# Symbol format: 1-10 uppercase alphanumeric, dots, hyphens (e.g. BRK.B, BTC-USD)
+_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
+
+
 class AIRuleAction(BaseModel):
     action: Literal["create", "update", "enable", "disable", "pause", "retire", "delete"]
     rule_id: Optional[str] = None
     rule_payload: Optional[dict[str, Any]] = None
-    reason: str
-    confidence: float = 0.5
+    reason: str = Field(..., max_length=2000)
+    confidence: float = Field(0.5, ge=0.0, le=1.0)
+
+    @field_validator("rule_id")
+    @classmethod
+    def _clean_rule_id(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 64:
+            raise ValueError("rule_id exceeds 64 characters")
+        return v
 
 
 class AIDirectTrade(BaseModel):
-    symbol: str
+    symbol: str = Field(..., max_length=10)
     action: Literal["BUY", "SELL"]
     order_type: Literal["MKT", "LMT"] = "MKT"
-    limit_price: Optional[float] = None
-    stop_price: float
-    invalidation: str
-    reason: str
-    confidence: float = 0.5
+    limit_price: Optional[float] = Field(None, gt=0)
+    stop_price: float = Field(..., gt=0)
+    invalidation: str = Field(..., max_length=500)
+    reason: str = Field(..., max_length=2000)
+    confidence: float = Field(0.5, ge=0.0, le=1.0)
     decision_id: Optional[str] = None  # S9: originating decision; None until wired to audit log
+
+    @field_validator("symbol")
+    @classmethod
+    def _clean_symbol(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not _SYMBOL_RE.match(v):
+            raise ValueError(f"Invalid symbol format: {v!r}")
+        return v
 
 
 class AIDecisionPayload(BaseModel):
