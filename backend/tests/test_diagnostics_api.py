@@ -23,12 +23,18 @@ async def client(tmp_path):
 
     database.DB_PATH = db_path
     from main import app, _diag_service
+    from auth import create_token
 
     await database.init_db()
     await _diag_service.ensure_catalog_seeded()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    # Create auth headers for tests
+    token = create_token("demo")
+    auth_headers = {"Authorization": f"Bearer {token}"}
+    async with AsyncClient(
+        transport=transport, base_url="http://test", headers=auth_headers
+    ) as c:
         yield c
 
 

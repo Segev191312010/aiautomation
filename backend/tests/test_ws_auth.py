@@ -89,7 +89,12 @@ async def test_screener_requires_auth(client):
 @pytest.mark.asyncio
 async def test_backtest_with_auth(client):
     """GET /api/backtest/history with valid token should succeed."""
-    token_resp = await client.post("/api/auth/token")
+    from config import cfg
+    headers = {}
+    bootstrap_secret = getattr(cfg, "JWT_BOOTSTRAP_SECRET", None)
+    if bootstrap_secret:
+        headers["X-Bootstrap-Secret"] = bootstrap_secret
+    token_resp = await client.post("/api/auth/token", headers=headers)
     token = token_resp.json()["access_token"]
     resp = await client.get(
         "/api/backtest/history",
@@ -101,7 +106,12 @@ async def test_backtest_with_auth(client):
 @pytest.mark.asyncio
 async def test_screener_presets_with_auth(client):
     """GET /api/screener/presets with valid token should succeed."""
-    token_resp = await client.post("/api/auth/token")
+    from config import cfg
+    headers = {}
+    bootstrap_secret = getattr(cfg, "JWT_BOOTSTRAP_SECRET", None)
+    if bootstrap_secret:
+        headers["X-Bootstrap-Secret"] = bootstrap_secret
+    token_resp = await client.post("/api/auth/token", headers=headers)
     token = token_resp.json()["access_token"]
     resp = await client.get(
         "/api/screener/presets",

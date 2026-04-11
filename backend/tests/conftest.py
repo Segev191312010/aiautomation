@@ -29,6 +29,14 @@ if os.path.exists(_TEST_DB):
 os.environ["DB_PATH"] = _TEST_DB
 os.environ["SIM_MODE"] = "true"
 
+# Relaxed rate limits for tests — avoid 429s when multiple test files
+# hit /api/auth/token in the same test session.
+os.environ.setdefault("TEST_RATE_LIMIT_GENERAL", "10000")
+os.environ.setdefault("TEST_RATE_LIMIT_AUTH", "10000")
+
+# Set JWT_BOOTSTRAP_SECRET for tests so /api/auth/token works
+os.environ.setdefault("JWT_BOOTSTRAP_SECRET", "test-bootstrap-secret")
+
 
 @pytest.fixture
 def anyio_backend():

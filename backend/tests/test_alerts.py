@@ -23,7 +23,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 async def issue_auth_headers(client: AsyncClient) -> dict[str, str]:
-    resp = await client.post("/api/auth/token")
+    from config import cfg
+    headers = {}
+    bootstrap_secret = getattr(cfg, "JWT_BOOTSTRAP_SECRET", None)
+    if bootstrap_secret:
+        headers["X-Bootstrap-Secret"] = bootstrap_secret
+    resp = await client.post("/api/auth/token", headers=headers)
     assert resp.status_code == 200
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 

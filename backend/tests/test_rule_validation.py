@@ -139,8 +139,13 @@ async def test_promotion_readiness_endpoint_exposes_latest_validation(tmp_path, 
     )
 
     transport = ASGITransport(app=app)
+    from config import cfg
+    auth_headers = {}
+    bootstrap_secret = getattr(cfg, "JWT_BOOTSTRAP_SECRET", None)
+    if bootstrap_secret:
+        auth_headers["X-Bootstrap-Secret"] = bootstrap_secret
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        token_resp = await client.post("/api/auth/token")
+        token_resp = await client.post("/api/auth/token", headers=auth_headers)
         assert token_resp.status_code == 200
         resp = await client.get(
             f"/api/autopilot/rules/{rule.id}/promotion-readiness",
