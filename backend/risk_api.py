@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from typing import Optional
 
+from auth import get_current_user
 from risk_config import DEFAULT_LIMITS, RiskLimits
 from risk_manager import check_trade_risk, calculate_position_size, check_drawdown
 from portfolio_analytics import (
@@ -14,7 +15,7 @@ from portfolio_analytics import (
 )
 
 log = logging.getLogger(__name__)
-router = APIRouter(tags=["risk"])
+router = APIRouter(tags=["risk"], dependencies=[Depends(get_current_user)])
 
 _user_limits: dict[int, RiskLimits] = {}
 

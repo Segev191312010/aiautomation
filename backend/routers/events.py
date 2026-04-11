@@ -1,5 +1,7 @@
 """Event system routes — /api/events/*"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from auth import get_current_user
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -15,7 +17,7 @@ async def get_event_metrics():
     }
 
 
-@router.get("/log")
+@router.get("/log", dependencies=[Depends(get_current_user)])
 async def get_event_log(last_n: int = 50):
     """Recent events from the JSONL log."""
     from bot_runner import event_logger

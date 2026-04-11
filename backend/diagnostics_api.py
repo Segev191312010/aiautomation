@@ -3,14 +3,15 @@ Diagnostics API routes.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from auth import get_current_user
 from diagnostics_service import DiagnosticsService
 
 
 def create_diagnostics_router(service: DiagnosticsService) -> APIRouter:
-    router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
+    router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"], dependencies=[Depends(get_current_user)])
 
     def _require_enabled() -> None:
         if not service.enabled:

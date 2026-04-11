@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 import time
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
 
+from auth import get_current_user
 from ai_advisor import build_full_report
 from api_contracts import (
     AdvisorReportResponse,
@@ -19,7 +20,7 @@ from api_contracts import (
 )
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/advisor", tags=["advisor"])
+router = APIRouter(prefix="/api/advisor", tags=["advisor"], dependencies=[Depends(get_current_user)])
 
 # Simple in-memory cache (1 hour TTL)
 _cache: dict[str, dict] = {}

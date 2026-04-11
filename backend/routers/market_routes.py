@@ -2,8 +2,9 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from auth import get_current_user
 from config import cfg
 from ibkr_client import ibkr
 from market_data import get_historical_bars, get_latest_price, subscribe_realtime_bars, unsubscribe_realtime_bars
@@ -70,7 +71,7 @@ async def get_price(symbol: str):
 
 
 @router.post("/api/market/{symbol}/subscribe")
-async def subscribe_market_bars(symbol: str):
+async def subscribe_market_bars(symbol: str, _user=Depends(get_current_user)):
     sym = symbol.upper()
     if sym in _active_rt_subs:
         return {"subscribed": True, "symbol": sym}
@@ -91,7 +92,7 @@ async def subscribe_market_bars(symbol: str):
 
 
 @router.post("/api/market/{symbol}/unsubscribe")
-async def unsubscribe_market_bars(symbol: str):
+async def unsubscribe_market_bars(symbol: str, _user=Depends(get_current_user)):
     sym = symbol.upper()
     unsubscribe_realtime_bars(sym)
     _active_rt_subs.discard(sym)

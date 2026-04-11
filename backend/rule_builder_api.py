@@ -5,16 +5,17 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from auth import get_current_user
 from database import get_rules, save_rule, get_rule, delete_rule
 from models import Rule, RuleCreate, Condition, TradeAction
 from rule_templates import get_templates, get_template, get_categories
 from rule_validator import validate_conditions, ValidationResult
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/rules", tags=["rule-builder"])
+router = APIRouter(prefix="/api/rules", tags=["rule-builder"], dependencies=[Depends(get_current_user)])
 
 
 # ---------------------------------------------------------------------------
