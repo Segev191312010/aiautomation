@@ -141,6 +141,8 @@ class Config:
     JWT_SECRET: str = os.getenv("JWT_SECRET", "trading-dev-secret-MUST-SET-IN-ENV")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "1440"))
+    # Bootstrap secret for /api/auth/token — must be set before any remote exposure
+    JWT_BOOTSTRAP_SECRET: str = os.getenv("JWT_BOOTSTRAP_SECRET", "")
 
     # ── Strict config validation ──────────────────────────────────────────────
     STRICT_CONFIG: bool = os.getenv("STRICT_CONFIG", "true").lower() == "true"
