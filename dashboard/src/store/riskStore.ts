@@ -2,7 +2,6 @@ import { create } from 'zustand'
 import type {
   PortfolioRisk,
   RiskCheckResult,
-  RiskEvent,
   RiskLimits,
   RiskSettings,
 } from '@/types'
@@ -20,15 +19,12 @@ const DEFAULT_RISK_SETTINGS: RiskSettings = {
 interface RiskState {
   riskLimits:    RiskLimits | null
   riskChecks:    RiskCheckResult[]
-  riskEvents:    RiskEvent[]
-  riskEventsStatus: 'idle' | 'loading' | 'success' | 'error' | 'degraded'
   portfolioRisk: PortfolioRisk | null
   riskSettings:  RiskSettings
   loading:       boolean
   error:         string | null
 
   fetchRiskLimits:    () => Promise<void>
-  fetchRiskEvents:    () => Promise<void>
   updateRiskSettings: (partial: Partial<RiskSettings>) => void
   computeRiskChecks:  (limits: RiskLimits) => void
 }
@@ -36,8 +32,6 @@ interface RiskState {
 export const useRiskStore = create<RiskState>((set, get) => ({
   riskLimits:    null,
   riskChecks:    [],
-  riskEvents:    [],
-  riskEventsStatus: 'idle',
   portfolioRisk: null,
   riskSettings:  DEFAULT_RISK_SETTINGS,
   loading:       false,
@@ -54,11 +48,6 @@ export const useRiskStore = create<RiskState>((set, get) => ({
     } finally {
       set({ loading: false })
     }
-  },
-
-  fetchRiskEvents: async () => {
-    // Backend endpoint not yet implemented — stub returns empty array
-    set({ riskEvents: [], riskEventsStatus: 'degraded' })
   },
 
   updateRiskSettings: (partial) =>
