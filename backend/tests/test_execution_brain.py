@@ -196,6 +196,51 @@ async def test_purge_expired_candidates_on_startup(_isolated_db, anyio_backend):
     assert await get_candidate_status("cand-purge-1") == "expired"
 
 
+# ── HB1-02 regression: risk check must run AFTER dynamic sizing ────────────
+# The bot cycle first computes `computed_qty` from account value * sizing pct
+# and writes it onto order_rule.action.quantity, THEN invokes check_trade_risk
+# using that updated quantity. If the order ever flips, risk guards would see
+# the stale original rule quantity instead of the final size.
+
+
+# TODO(BLOCK-6, Phase B): replace this inspect.getsource hack with a runtime
+# patch-and-run test. Skeleton: mock check_trade_risk, drive _run_cycle with
+# a rule whose original qty differs from computed_qty (via POSITION_SIZE_PCT
+# + account_val), and assert the captured qty arg equals computed_qty (not
+# rule.action.quantity). The source-level check below silently passes on any
+# refactor that preserves the marker string and breaks on whitespace.
+def test_hb1_02_risk_check_runs_after_dynamic_sizing():
+    """Source-level guard: inside bot_runner._run_cycle, the check_trade_risk
+    call must come AFTER the block that assigns computed_qty to
+    order_rule.action.quantity. Any reordering would revert HB1-02."""
+    import inspect
+    import bot_runner
+
+    src = inspect.getsource(bot_runner._run_cycle)
+
+    sizing_marker = 'update={"quantity": computed_qty}'
+    risk_marker = "check_trade_risk("
+
+    sizing_idx = src.find(sizing_marker)
+    risk_idx = src.find(risk_marker)
+
+    assert sizing_idx != -1, "dynamic sizing block missing from _run_cycle"
+    assert risk_idx != -1, "check_trade_risk call missing from _run_cycle"
+    assert sizing_idx < risk_idx, (
+        "HB1-02 regression: check_trade_risk must be invoked AFTER the "
+        "dynamic-sizing block that updates order_rule.action.quantity"
+    )
+
+    # Also confirm the check_trade_risk call passes `order_rule.action.quantity`
+    # (the updated field) as its quantity argument, not `rule.action.quantity`
+    # or an original-source copy.
+    risk_call_snippet = src[risk_idx : risk_idx + 300]
+    assert "order_rule.action.quantity" in risk_call_snippet, (
+        "check_trade_risk must be called with order_rule.action.quantity "
+        "(the post-sizing value)"
+    )
+
+
 @pytest.mark.anyio
 async def test_ai_optimizer_queues_direct_trades(_isolated_db, anyio_backend):
     from ai_optimizer import _apply_decisions

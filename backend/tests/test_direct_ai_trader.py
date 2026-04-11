@@ -242,6 +242,102 @@ async def test_execute_direct_trade_live_buy_rejects_error_trade(anyio_backend):
 
 
 @pytest.mark.anyio
+async def test_hb1_06_failed_live_trade_does_not_mark_decision_item_applied(anyio_backend):
+    """HB1-06 regression: a live direct trade that fails to place must NOT
+    mark its decision_item as applied. The item must remain 'pending' so the
+    ledger accurately reflects that nothing was executed."""
+    cfg.AUTOPILOT_MODE = "LIVE"
+    decision = AIDirectTrade(
+        symbol="NVDA",
+        action="BUY",
+        order_type="MKT",
+        stop_price=95.0,
+        invalidation="Break below trend support",
+        reason="AI momentum continuation",
+        confidence=0.74,
+    )
+    # Attach a decision_id so the mark-applied path would fire if the code
+    # was reverted to the pre-HB1-06 "mark applied before execution" order.
+    decision.decision_id = "item-hb106-001"
+
+    errored_trade = Trade(
+        rule_id="ai-direct:NVDA",
+        rule_name="AI Direct BUY NVDA",
+        symbol="NVDA",
+        action="BUY",
+        asset_type="STK",
+        quantity=4,
+        order_type="MKT",
+        limit_price=None,
+        fill_price=None,
+        status="ERROR",
+        order_id=None,
+        timestamp="2026-03-21T12:00:00Z",
+    )
+
+    mark_applied = AsyncMock()
+
+    with patch("direct_ai_trader.get_open_positions", new=AsyncMock(return_value=[])), \
+         patch("direct_ai_trader.get_latest_price", new=AsyncMock(return_value=100.0)), \
+         patch("direct_ai_trader._get_account_equity", new=AsyncMock(return_value=10_000.0)), \
+         patch("direct_ai_trader.calculate_position_size", return_value={"shares": 4}), \
+         patch("direct_ai_trader.safety_gate.evaluate_runtime_safety",
+               new=AsyncMock(return_value=(True, None))), \
+         patch("direct_ai_trader.place_order", new=AsyncMock(return_value=errored_trade)), \
+         patch("direct_ai_trader.save_trade", new=AsyncMock()) as mock_save, \
+         patch("ai_decision_ledger.mark_decision_item_applied", new=mark_applied):
+        with pytest.raises(SafetyViolation, match="Failed to place direct AI trade"):
+            await execute_direct_trade(decision)
+
+    mock_save.assert_not_called()
+    assert not mark_applied.called, "HB1-06: item must NOT be marked applied on ERROR"
+
+
+@pytest.mark.anyio
+async def test_hb1_06_successful_live_trade_marks_decision_item_applied(anyio_backend):
+    """Positive companion to HB1-06: a successful live trade DOES mark the
+    decision item as applied. Confirms the happy-path still wires the ledger."""
+    cfg.AUTOPILOT_MODE = "LIVE"
+    decision = _buy_decision()
+    decision.decision_id = "item-hb106-ok"
+
+    live_trade = Trade(
+        rule_id="ai-direct:NVDA",
+        rule_name="AI Direct BUY NVDA",
+        symbol="NVDA",
+        action="BUY",
+        asset_type="STK",
+        quantity=4,
+        order_type="MKT",
+        limit_price=None,
+        fill_price=100.0,
+        status="FILLED",
+        order_id=42,
+        timestamp="2026-03-21T12:00:00Z",
+    )
+
+    mark_applied = AsyncMock()
+
+    with patch("direct_ai_trader.get_open_positions", new=AsyncMock(return_value=[])), \
+         patch("direct_ai_trader.get_latest_price", new=AsyncMock(return_value=100.0)), \
+         patch("direct_ai_trader._get_account_equity", new=AsyncMock(return_value=10_000.0)), \
+         patch("direct_ai_trader.calculate_position_size", return_value={"shares": 4}), \
+         patch("direct_ai_trader.safety_gate.evaluate_runtime_safety",
+               new=AsyncMock(return_value=(True, None))), \
+         patch("direct_ai_trader.place_order", new=AsyncMock(return_value=live_trade)), \
+         patch("direct_ai_trader.save_trade", new=AsyncMock()), \
+         patch("direct_ai_trader.order_lifecycle.register_entry_position_from_fill",
+               new=AsyncMock(return_value=True)), \
+         patch("direct_ai_trader.log_ai_action", new=AsyncMock()), \
+         patch("ai_decision_ledger.mark_decision_item_applied", new=mark_applied):
+        await execute_direct_trade(decision)
+
+    mark_applied.assert_awaited_once()
+    _, kwargs = mark_applied.await_args
+    assert kwargs.get("created_trade_id") == live_trade.id
+
+
+@pytest.mark.anyio
 async def test_execute_direct_trade_blocks_when_shared_gate_rejects(anyio_backend):
     cfg.AUTOPILOT_MODE = "PAPER"
     decision = _buy_decision()

@@ -230,3 +230,40 @@ async def test_abstained_run(_isolated_db, anyio_backend):
 
     items = await get_decision_items(run_id)
     assert items[0]["item_type"] == "abstain"
+
+
+# ── HB1-05 regression: SQLite FK cascade enforcement ───────────────────────
+# Verifies PRAGMA foreign_keys=ON is honored by db/core connection factory:
+# deleting a parent ai_decision_runs row must cascade-delete child items
+# from ai_decision_items (declared with ON DELETE CASCADE).
+
+
+@pytest.mark.anyio
+async def test_hb1_05_decision_run_delete_cascades_to_items(_isolated_db, anyio_backend):
+    await init_db()
+
+    run_id = await start_decision_run(
+        source="optimizer", mode="PAPER",
+        context_json=json.dumps({"test": "cascade"}),
+    )
+    await record_decision_items(run_id, [
+        {"item_type": "score_threshold", "target_key": "min_score",
+         "proposed": {"value": 55}, "confidence": 0.8},
+        {"item_type": "direct_trade", "action_name": "BUY", "symbol": "AAPL",
+         "proposed": {"qty": 10}, "confidence": 0.7},
+    ])
+    items_before = await get_decision_items(run_id)
+    assert len(items_before) == 2
+
+    from db.core import get_db
+    async with get_db() as db:
+        # Confirm pragma is actually ON in this connection
+        async with db.execute("PRAGMA foreign_keys") as cur:
+            row = await cur.fetchone()
+        assert row[0] == 1, "foreign_keys pragma must be ON for cascade to fire"
+
+        await db.execute("DELETE FROM ai_decision_runs WHERE id=?", (run_id,))
+        await db.commit()
+
+    items_after = await get_decision_items(run_id)
+    assert items_after == [], "child decision_items should be cascade-deleted"
