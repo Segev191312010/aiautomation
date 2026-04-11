@@ -274,7 +274,11 @@ register_routers(app)
 
 # â"€â"€ CORS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-app.add_middleware(RateLimitMiddleware, general_limit=1000, auth_limit=200)
+app.add_middleware(
+    RateLimitMiddleware,
+    general_limit=int(os.getenv("TEST_RATE_LIMIT_GENERAL", "300")),
+    auth_limit=int(os.getenv("TEST_RATE_LIMIT_AUTH", "10")),
+)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,

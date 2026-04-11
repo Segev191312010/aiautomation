@@ -54,10 +54,10 @@ async def screener_list_presets():
 
 
 @router.post("/presets", status_code=201)
-async def screener_save_preset(body: SavePresetRequest):
+async def screener_save_preset(body: SavePresetRequest, user=Depends(get_current_user)):
     preset = ScreenerPreset(
         name=body.name, filters=body.filters, built_in=False,
-        user_id="demo", created_at=datetime.now(timezone.utc).isoformat(),
+        user_id=user.id, created_at=datetime.now(timezone.utc).isoformat(),
     )
     await save_screener_preset(preset)
     return preset.model_dump()

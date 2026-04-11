@@ -46,7 +46,7 @@ async def api_backtest_run(req: BacktestRequest):
 
 
 @router.post("/save")
-async def api_backtest_save(req: BacktestSaveRequest):
+async def api_backtest_save(req: BacktestSaveRequest, user=Depends(get_current_user)):
     """Save a backtest result for later retrieval."""
     created_at = datetime.now(timezone.utc).isoformat()
     strategy_data = json.dumps({
@@ -61,7 +61,7 @@ async def api_backtest_save(req: BacktestSaveRequest):
     backtest_id = str(uuid.uuid4())
     await save_backtest(
         backtest_id=backtest_id,
-        user_id="demo",
+        user_id=user.id,
         name=req.name,
         strategy_data=strategy_data,
         result_data=result_data,
@@ -71,9 +71,9 @@ async def api_backtest_save(req: BacktestSaveRequest):
 
 
 @router.get("/history")
-async def api_backtest_history():
+async def api_backtest_history(user=Depends(get_current_user)):
     """List saved backtests."""
-    return await get_backtests(user_id="demo")
+    return await get_backtests(user_id=user.id)
 
 
 @router.get("/{backtest_id}")
