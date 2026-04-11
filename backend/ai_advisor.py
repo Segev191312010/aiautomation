@@ -463,6 +463,58 @@ def _template_report(data: dict, recommendations: list[dict]) -> str:
 # Before committing to a trade or recommendation, generate adversarial
 # perspectives and let them argue. Only proceed when one side has clear conviction.
 
+# Telemetry: track JSON parse failures so silent degradation to NEUTRAL is
+# observable. Counter auto-resets at UTC midnight and emits a MetricEvent
+# once it crosses cfg.AI_DEBATE_FAILURE_THRESHOLD in the current window.
+_debate_failure_count: int = 0
+_debate_failure_day: str | None = None
+_debate_threshold_emitted: bool = False
+
+
+def _reset_debate_counter_if_new_day() -> None:
+    global _debate_failure_count, _debate_failure_day, _debate_threshold_emitted
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _debate_failure_day != today:
+        _debate_failure_day = today
+        _debate_failure_count = 0
+        _debate_threshold_emitted = False
+
+
+def get_debate_failure_count() -> int:
+    """Return current 24h debate parse-failure count (auto-resets at UTC midnight)."""
+    _reset_debate_counter_if_new_day()
+    return _debate_failure_count
+
+
+def _record_debate_parse_failure(symbol: str) -> None:
+    """Increment the counter and emit a MetricEvent once the threshold is crossed."""
+    global _debate_failure_count, _debate_threshold_emitted
+    _reset_debate_counter_if_new_day()
+    _debate_failure_count += 1
+
+    threshold = int(getattr(cfg, "AI_DEBATE_FAILURE_THRESHOLD", 5))
+    if _debate_failure_count >= threshold and not _debate_threshold_emitted:
+        _debate_threshold_emitted = True
+        try:
+            # Lazy imports to avoid circular deps at module load time.
+            from events import MetricEvent, EventType
+            from bot_runner import event_bus
+
+            event_bus.publish(MetricEvent(
+                timestamp=datetime.now(timezone.utc),
+                type=EventType.METRIC,
+                metric_type="ai_debate_parse_failures",
+                value=float(_debate_failure_count),
+                symbol=symbol or "",
+            ))
+            log.warning(
+                "Bull/Bear debate parse failures crossed threshold (%d/24h) — emitted metric event",
+                _debate_failure_count,
+            )
+        except Exception as exc:
+            log.debug("debate parse-failure metric emit failed: %s", exc)
+
+
 DEBATE_SYSTEM_PROMPT = (
     "You are a {role} analyst on a trading desk. Your job is to argue "
     "the {role} case for {symbol} as convincingly as possible using the data provided. "
@@ -556,11 +608,12 @@ async def run_bull_bear_debate(
                     "thesis": parsed.get("thesis", ""),
                     "key_factors": parsed.get("key_factors", []),
                 }
-            except (_json.JSONDecodeError, ValueError):
+            except (_json.JSONDecodeError, ValueError) as exc:
                 log.warning(
-                    "Bull/Bear %s debate for %s: JSON parse failed, using degraded fallback. Raw text: %.120s",
-                    role, symbol, text,
+                    "bull_bear_parse_failed: %s role=%s symbol=%s raw=%.120s",
+                    exc, role, symbol, text,
                 )
+                _record_debate_parse_failure(symbol)
                 results[role.lower()] = {
                     "conviction": 0.5,
                     "thesis": text[:200],

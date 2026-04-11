@@ -77,3 +77,85 @@ async def test_get_ai_decisions_builds_prompt_without_crash(_isolated_db, anyio_
     assert result is not None
     assert "prompt" in captured
     assert "?" in captured["prompt"]  # partial row formatted with fallback
+
+
+# ── P2-3 / F2-08: Bull/Bear debate JSON-parse telemetry ─────────────────────
+
+
+@pytest.mark.anyio
+async def test_bull_bear_parse_failure_increments_counter_and_logs(
+    anyio_backend, monkeypatch, caplog
+):
+    """Degraded debate must log a warning AND bump the failure counter."""
+    import ai_advisor
+
+    # Force a clean counter window
+    monkeypatch.setattr(ai_advisor, "_debate_failure_count", 0, raising=False)
+    monkeypatch.setattr(ai_advisor, "_debate_failure_day", None, raising=False)
+    monkeypatch.setattr(ai_advisor, "_debate_threshold_emitted", False, raising=False)
+    monkeypatch.setattr(config.cfg, "AI_DEBATE_FAILURE_THRESHOLD", 5, raising=False)
+
+    class GarbageResult:
+        ok = True
+        text = "not-json-at-all"  # guaranteed parse failure
+        error = None
+
+    async def mock_ai_call(*args, **kwargs):
+        return GarbageResult()
+
+    import ai_model_router
+    monkeypatch.setattr(ai_model_router, "ai_call", mock_ai_call)
+
+    import logging
+    caplog.set_level(logging.WARNING, logger="ai_advisor")
+
+    result = await ai_advisor.run_bull_bear_debate("NVDA")
+
+    # Both bull and bear runs failed to parse → 2 increments
+    assert ai_advisor.get_debate_failure_count() == 2
+    # Result is a degraded NEUTRAL
+    assert result["degraded"] is True
+    assert result["should_trade"] is False
+    assert result["winner"] == "NEUTRAL"
+    # Warning was logged with the identifiable prefix
+    assert any("bull_bear_parse_failed" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_bull_bear_parse_failure_emits_metric_at_threshold(
+    anyio_backend, monkeypatch
+):
+    """Once the counter crosses the threshold, a MetricEvent must be published."""
+    import ai_advisor
+    from events import MetricEvent
+
+    monkeypatch.setattr(ai_advisor, "_debate_failure_count", 0, raising=False)
+    monkeypatch.setattr(ai_advisor, "_debate_failure_day", None, raising=False)
+    monkeypatch.setattr(ai_advisor, "_debate_threshold_emitted", False, raising=False)
+    monkeypatch.setattr(config.cfg, "AI_DEBATE_FAILURE_THRESHOLD", 1, raising=False)
+
+    published: list = []
+    from bot_runner import event_bus
+    monkeypatch.setattr(event_bus, "publish", lambda ev: published.append(ev))
+
+    ai_advisor._record_debate_parse_failure("AAPL")
+
+    assert ai_advisor.get_debate_failure_count() == 1
+    assert any(isinstance(ev, MetricEvent) and ev.metric_type == "ai_debate_parse_failures" for ev in published)
+
+
+def test_bot_health_surfaces_debate_failure_count(monkeypatch):
+    """get_bot_health() must include ai_debate_parse_failures_24h."""
+    import ai_advisor
+    import bot_health
+
+    monkeypatch.setattr(ai_advisor, "_debate_failure_count", 3, raising=False)
+    monkeypatch.setattr(
+        ai_advisor, "_debate_failure_day",
+        __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d"),
+        raising=False,
+    )
+
+    health = bot_health.get_bot_health(is_running=False)
+    assert "ai_debate_parse_failures_24h" in health
+    assert health["ai_debate_parse_failures_24h"] == 3

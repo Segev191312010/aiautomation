@@ -172,12 +172,13 @@ async def lifespan(app: FastAPI):
     from startup import validate_startup
     await validate_startup()
     await init_db()
-    # Purge stale direct AI candidates left over from a previous process
+    # Purge stale direct AI candidates left over from a previous process.
+    # Always log the count (even when zero) so the paper-soak runbook can use
+    # this log line as proof the hook ran on startup.
     try:
         from db.direct_candidates import purge_expired_candidates
         expired = await purge_expired_candidates()
-        if expired:
-            log.info("Startup: purged %d stale direct AI candidate(s)", expired)
+        log.info("Startup: purged %d stale direct AI candidate(s)", expired)
     except Exception as exc:
         log.warning("Startup purge of direct candidates failed: %s", exc)
     await sim_engine.initialize()

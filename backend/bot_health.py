@@ -127,6 +127,14 @@ def get_bot_health(*, is_running: bool = False) -> dict:
             log.debug("Health probe: ibkr_connected check failed: %s", exc)
             ibkr_connected = bool(_last_successful_ibkr_heartbeat_at)
 
+    # Surface bull/bear debate parse-failure count so silent degradation to
+    # NEUTRAL is visible in health telemetry (P2-3 / F2-08).
+    try:
+        from ai_advisor import get_debate_failure_count
+        ai_debate_parse_failures_24h = int(get_debate_failure_count())
+    except Exception:
+        ai_debate_parse_failures_24h = 0
+
     return {
         "is_running": is_running,
         "minutes_since_last_cycle": minutes_since_last_cycle,
@@ -140,6 +148,7 @@ def get_bot_health(*, is_running: bool = False) -> dict:
         "last_order_submit_at": _last_order_submit_at,
         "last_fill_event_at": _last_fill_event_at,
         "degraded_mode_count_24h": len(_degraded_timestamps),
+        "ai_debate_parse_failures_24h": ai_debate_parse_failures_24h,
     }
 
 
