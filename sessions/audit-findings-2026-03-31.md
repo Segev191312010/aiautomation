@@ -164,16 +164,16 @@ Each finding is tagged with:
 - When to fix: Phase 2.2 — add Pydantic validators for stop direction, reject malformed payloads.
 - Source: Codex audit
 
-#### F2-07: Direct AI candidates don't survive process restart [MEDIUM] (Codex finding)
-- Found in: `execution_brain.py` (now asyncio.Queue, still in-memory)
-- Issue: Queued candidates are volatile. Process restart loses them.
-- When to fix: Phase 2.3 — persist queued candidates with TTL/status in DB.
-- Source: Codex audit
+#### F2-07: Direct AI candidates don't survive process restart [MEDIUM] (Codex finding) — **FIXED 2026-04-09**
+- Found in: `execution_brain.py` (was asyncio.Queue, in-memory)
+- Issue: Queued candidates were volatile. Process restart lost them.
+- **Resolution:** New `backend/db/direct_candidates.py` CRUD module + `direct_candidates` table with TTL + queued/draining/applied/failed/expired status. `execution_brain.queue_direct_candidates` and `drain_direct_candidates` are now async DB calls. Startup purge in `main.py` lifespan. Restart-survival regression test in `tests/test_execution_brain.py`.
+- Commits: `5866800` + `8ebab67` (companion module).
 
-#### F2-08: Bull/Bear debate fails silently to NEUTRAL [MEDIUM]
+#### F2-08: Bull/Bear debate fails silently to NEUTRAL [MEDIUM] — **FIXED 2026-04-09 (Phase 1)**
 - Found in: `ai_advisor.py:543-548`
-- Issue: If LLM JSON parsing fails, conviction defaults to 0.5 for both sides, netting NEUTRAL. API failures silently prevent all AI trades without any alert.
-- When to fix: Phase 2.2 — log warnings, track failure rate, alert on consistent failures.
+- Issue: If LLM JSON parsing failed, conviction defaulted to 0.5 for both sides, netting NEUTRAL. API failures silently prevented all AI trades without any alert.
+- **Resolution:** Parse failure path now emits `log.warning("bull_bear_parse_failed: %s", exc)`. Module counter `_debate_failure_count` resets at UTC midnight. When count crosses `cfg.AI_DEBATE_FAILURE_THRESHOLD` (default 5), publishes `MetricEvent(metric_type="ai_debate_parse_failures")` via the bot event bus. Surfaced as `ai_debate_parse_failures_24h` in `bot_health.get_bot_health()`. New env knob in `backend/config.py`. 3 regression tests in `tests/test_ai_optimizer.py`.
 
 ---
 
@@ -198,11 +198,10 @@ Each finding is tagged with:
 - When to fix: Stage 6 (Page Rebuild) — the Rule Builder UI is Stage 6 work.
 - Source: Codex audit
 
-#### F5-04: Risk events are hardcoded empty stub [MEDIUM] (Codex finding)
-- Found in: `store/index.ts:1618`
-- Issue: Risk events store slice returns empty array. Never populated.
-- When to fix: Stage 6 — either implement or remove.
-- Source: Codex audit
+#### F5-04: Risk events are hardcoded empty stub [MEDIUM] (Codex finding) — **FIXED 2026-04-09 (Phase 1, removed)**
+- Found in: `store/index.ts:1618` → migrated to `dashboard/src/store/riskStore.ts:59-61` after store split
+- Issue: Risk events store slice returned empty array. Never populated.
+- **Resolution:** Stub REMOVED. `grep -rn "riskEvents"` found zero consumers in any page or component (only the store and the unused `useAnalyticsData` hook). `riskEvents`, `riskEventsStatus`, `fetchRiskEvents`, and the `RiskEvent` type import deleted from `riskStore.ts`. `useAnalyticsData.ts` cleaned up. Per feedback_planning_safety, removal was correct call (faster, safer). `RiskEvent`/`RiskEventType` types in `types/index.ts` left in place (ambient type surface, out of scope).
 
 #### F5-05: Autopilot page missing decision drilldown and replay flows [MEDIUM] (Codex finding)
 - Found in: `AutopilotPage.tsx:451,488`

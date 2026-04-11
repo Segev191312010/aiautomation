@@ -22,6 +22,8 @@ backend/_rm_append.py
 # Secrets & local config
 .env
 backend/.env
+.claude/settings.local.json
+.claude/worktrees/
 
 # Database files
 *.db

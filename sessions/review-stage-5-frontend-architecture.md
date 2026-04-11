@@ -8,13 +8,13 @@ AUDIT UPDATE (2026-03-31)
 Full codebase audit found 6 issues in this stage. 0 fixed (frontend not modified), all OPEN.
 See: `sessions/audit-findings-2026-03-31.md` (section: STAGE 5)
 
-OPEN (do in Stage 5/6):
-  - F5-01: 43 uses of `any` type across 22 files (PositionsTable, crosshairSync, etc.)
-  - F5-02: No per-page error boundaries — one crash blanks the whole app
-  - F5-03: Standard rules still use raw condition JSON (RulesPage.tsx:507)
-  - F5-04: Risk events store slice is hardcoded empty stub (store/index.ts:1618)
-  - F5-05: Autopilot page missing decision drilldown/replay flows
-  - F5-06: Canvas charts lack accessibility fallbacks
+OPEN / CLOSED status (updated 2026-04-09):
+  - F5-01: 43 uses of `any` type across 22 files — MOSTLY FIXED (43→1 production use)
+  - F5-02: No per-page error boundaries — FIXED (commit a549705, all 9 pages have ErrorBoundary)
+  - F5-03: Standard rules still use raw condition JSON (RulesPage.tsx:507) — OPEN (P3-6)
+  - F5-04: Risk events store slice — FIXED 2026-04-09 (Phase 1, stub removed — zero consumers)
+  - F5-05: Autopilot page missing decision drilldown/replay flows — OPEN (P3-5)
+  - F5-06: Canvas charts lack accessibility fallbacks — OPEN (P3-8)
 OWNER: FRONTEND CORE TEAM
 GOAL: Shrink page monoliths, split the API layer by domain, standardize async state handling, and make the dashboard easier to extend safely.
 
