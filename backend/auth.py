@@ -7,6 +7,7 @@ flow, but protected routes now require a bearer token on every request.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone, timedelta
 
 import bcrypt
@@ -27,7 +28,11 @@ def _verify_password(password: str, hashed: str) -> bool:
 
 DEMO_USER_ID = "demo"
 DEMO_EMAIL = "demo@local"
-DEMO_PASSWORD = "demo"
+# C4 safety fix: generate a random password at startup so the demo account
+# isn't a fixed credential visible in source control. Operator must read the
+# startup log or use JWT_BOOTSTRAP_SECRET to get a token.
+import secrets as _secrets
+DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", _secrets.token_urlsafe(24))
 
 
 # ---------------------------------------------------------------------------

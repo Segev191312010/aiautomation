@@ -78,10 +78,16 @@ def test_risk_budget_rejects_with_wide_stop():
             assert_risk_budget(quantity=10, price_estimate=100.0, account_equity=10000.0, stop_price=50.0)
 
 
-def test_risk_budget_skips_when_no_data():
-    with patch("safety_kernel.cfg") as mock_cfg:
-        mock_cfg.RISK_PER_TRADE_PCT = 1.0
+def test_risk_budget_blocks_on_zero_equity():
+    """C1 safety fix: zero equity must RAISE, not silently pass."""
+    with pytest.raises(SafetyViolation, match="account_equity"):
         assert_risk_budget(quantity=100, price_estimate=100.0, account_equity=0)
+
+
+def test_risk_budget_blocks_on_zero_quantity():
+    """C1 safety fix: zero quantity must RAISE, not silently pass."""
+    with pytest.raises(SafetyViolation, match="quantity"):
+        assert_risk_budget(quantity=0, price_estimate=100.0, account_equity=10000)
 
 
 def test_no_shorts_allows_buy():
@@ -101,23 +107,26 @@ def test_no_shorts_blocks_sell_open():
         assert_no_shorts("SELL", is_exit=False, has_existing_position=False)
 
 
-def test_dedup_blocks_rapid_fire():
+@pytest.mark.anyio
+async def test_dedup_blocks_rapid_fire(anyio_backend):
     _recent_checks.clear()
-    assert_not_duplicate("AAPL", "BUY", "rule")
+    await assert_not_duplicate("AAPL", "BUY", "rule")
     with pytest.raises(SafetyViolation, match="Duplicate"):
-        assert_not_duplicate("AAPL", "BUY", "rule")
+        await assert_not_duplicate("AAPL", "BUY", "rule")
 
 
-def test_dedup_allows_different_symbols():
+@pytest.mark.anyio
+async def test_dedup_allows_different_symbols(anyio_backend):
     _recent_checks.clear()
-    assert_not_duplicate("AAPL", "BUY", "rule")
-    assert_not_duplicate("TSLA", "BUY", "rule")
+    await assert_not_duplicate("AAPL", "BUY", "rule")
+    await assert_not_duplicate("TSLA", "BUY", "rule")
 
 
-def test_dedup_allows_after_window():
+@pytest.mark.anyio
+async def test_dedup_allows_after_window(anyio_backend):
     _recent_checks.clear()
     _recent_checks["AAPL:BUY:RULE"] = time.time() - 20
-    assert_not_duplicate("AAPL", "BUY", "rule")
+    await assert_not_duplicate("AAPL", "BUY", "rule")
 
 
 @pytest.mark.anyio
@@ -149,7 +158,7 @@ async def test_check_all_exit_skips_authority_risk_and_dedup(anyio_backend):
     with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
         "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
     ) as mock_daily, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
-        "safety_kernel.assert_not_duplicate", new=Mock()
+        "safety_kernel.assert_not_duplicate", new_callable=AsyncMock
     ) as mock_dup:
         await check_all(
             "AAPL",
@@ -173,7 +182,7 @@ async def test_check_all_manual_bypasses_authority_but_keeps_common_entry_guards
     with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
         "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
     ) as mock_daily, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
-        "safety_kernel.assert_not_duplicate", new=Mock()
+        "safety_kernel.assert_not_duplicate", new_callable=AsyncMock
     ) as mock_dup:
         await check_all(
             "AAPL",

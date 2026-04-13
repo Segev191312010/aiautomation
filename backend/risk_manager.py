@@ -388,17 +388,23 @@ def check_portfolio_impact(
         # ── Correlation check ─────────────────────────────────────────────
         if corr_matrix is None:
             if sector_degraded:
+                # C2 safety fix: fail CLOSED when both sector and correlation
+                # data are unavailable. Conservative 5% position / 20% sector
+                # defaults would still be speculative — better to block.
                 return PortfolioImpactResult(
-                    allowed=True, reason="degraded_data_skip", symbol=sym, side=side,
+                    allowed=False, reason="degraded_data_block", symbol=sym, side=side,
                     sector=candidate_sector,
-                    details="Sector unknown and correlation matrix unavailable",
+                    details="Sector unknown AND correlation matrix unavailable — blocking for safety",
                 )
+            # Sector data available but no correlation matrix — allow with
+            # a warning (sector check already ran above and would have blocked
+            # if the sector was over-concentrated).
             return PortfolioImpactResult(
-                allowed=True, reason="degraded_data_skip", symbol=sym, side=side,
+                allowed=True, reason="degraded_corr_skip", symbol=sym, side=side,
                 sector=candidate_sector,
                 sector_weight_before=round(sector_before, 2) if sector_before is not None else None,
                 sector_weight_after=round(sector_after, 2) if sector_after is not None else None,
-                details="Correlation matrix unavailable — sector check passed",
+                details="Correlation matrix unavailable — sector check passed, correlation skipped",
             )
 
         # Build list of all relevant symbols for correlation counting

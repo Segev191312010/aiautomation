@@ -46,13 +46,21 @@ async def validate_startup() -> StartupResult:
     warnings: list[str] = []
 
     # ------------------------------------------------------------------
-    # 1. JWT secret strength
+    # 1. JWT secret strength (C6 safety fix: ERROR in non-OFF mode)
     # ------------------------------------------------------------------
     if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET:
-        warnings.append(
-            "JWT_SECRET is the default development value. "
-            "Set a strong random secret before going to production."
-        )
+        if cfg.AUTOPILOT_MODE == "OFF":
+            warnings.append(
+                "JWT_SECRET is the default development value. "
+                "Set a strong random secret before going to production."
+            )
+        else:
+            errors.append(
+                f"JWT_SECRET is the default development value but "
+                f"AUTOPILOT_MODE={cfg.AUTOPILOT_MODE}. Refusing to start "
+                f"with AI authority enabled on a default secret. "
+                f"Set JWT_SECRET in .env to a strong random string."
+            )
 
     # ------------------------------------------------------------------
     # 2. Database accessibility

@@ -10,6 +10,7 @@ when AI fails N times in a row, auto-activates emergency stop to protect positio
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -23,6 +24,7 @@ _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
 log = logging.getLogger(__name__)
 
 _recent_checks: dict[str, float] = {}
+_dedup_lock = asyncio.Lock()
 DEDUP_WINDOW = 5  # seconds
 
 # ── Consecutive Failure Circuit Breaker ─────────────────────────────────────
@@ -193,7 +195,7 @@ async def check_all(
     assert_no_shorts(side, is_exit=is_exit, has_existing_position=has_existing_position)
     if not is_exit:
         assert_risk_budget(quantity, price_estimate, account_equity, stop_price=stop_price)
-        assert_not_duplicate(symbol, side, source)
+        await assert_not_duplicate(symbol, side, source)
     log.debug(
         "Safety kernel PASS: side=%s symbol=%s qty=%s source=%s exit=%s authority=%s",
         side,
@@ -259,8 +261,10 @@ def assert_risk_budget(
     For rule-driven entries without a concrete stop, we conservatively fall back
     to order notional.
     """
-    if quantity <= 0 or account_equity <= 0:
-        return
+    if quantity <= 0:
+        raise SafetyViolation(f"quantity is {quantity} — cannot verify risk budget")
+    if account_equity <= 0:
+        raise SafetyViolation(f"account_equity is ${account_equity:.2f} — cannot verify risk budget")
     if price_estimate <= 0:
         raise SafetyViolation("price_estimate is zero - cannot verify risk budget")
 
@@ -277,19 +281,24 @@ def assert_risk_budget(
         )
 
 
-def assert_not_duplicate(symbol: str, side: str, source: str) -> None:
-    """Reject duplicate orders within a small rolling window."""
+async def assert_not_duplicate(symbol: str, side: str, source: str) -> None:
+    """Reject duplicate orders within a small rolling window.
+
+    Uses an asyncio.Lock to prevent two concurrent coroutines from
+    both passing the dedup check for the same symbol (C3 safety fix).
+    """
     key = f"{symbol.upper()}:{side.upper()}:{source}"
     now = time.time()
 
-    stale = [k for k, ts in _recent_checks.items() if (now - ts) > DEDUP_WINDOW * 2]
-    for key_to_remove in stale:
-        del _recent_checks[key_to_remove]
+    async with _dedup_lock:
+        stale = [k for k, ts in _recent_checks.items() if (now - ts) > DEDUP_WINDOW * 2]
+        for key_to_remove in stale:
+            del _recent_checks[key_to_remove]
 
-    last = _recent_checks.get(key)
-    if last and (now - last) < DEDUP_WINDOW:
-        raise SafetyViolation(f"Duplicate {side} {symbol} from {source} within {DEDUP_WINDOW}s")
-    _recent_checks[key] = now
+        last = _recent_checks.get(key)
+        if last and (now - last) < DEDUP_WINDOW:
+            raise SafetyViolation(f"Duplicate {side} {symbol} from {source} within {DEDUP_WINDOW}s")
+        _recent_checks[key] = now
 
 
 def is_autopilot_live() -> bool:

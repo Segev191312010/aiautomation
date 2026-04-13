@@ -33,7 +33,25 @@ def test_validate_config_rejects_unknown_autopilot_mode(restore_cfg):
 
 
 @pytest.mark.anyio
-async def test_validate_startup_warns_on_default_jwt_secret(restore_cfg, anyio_backend):
+async def test_validate_startup_warns_on_default_jwt_secret_off_mode(restore_cfg, anyio_backend):
+    """With AUTOPILOT_MODE=OFF, default JWT_SECRET is a warning (not error)."""
+    cfg.DB_PATH = ":memory:"
+    cfg.JWT_SECRET = DEFAULT_DEV_JWT_SECRET
+    cfg.STRICT_CONFIG = False
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.IS_PAPER = True
+    cfg.IBKR_PORT = 7497
+    cfg.SIM_MODE = False
+
+    result = await validate_startup()
+
+    assert any("JWT_SECRET is the default development value" in w for w in result["warnings"])
+    assert not result["errors"]
+
+
+@pytest.mark.anyio
+async def test_validate_startup_errors_on_default_jwt_secret_paper_mode(restore_cfg, anyio_backend):
+    """C6 safety fix: PAPER or LIVE mode with default JWT_SECRET is an error."""
     cfg.DB_PATH = ":memory:"
     cfg.JWT_SECRET = DEFAULT_DEV_JWT_SECRET
     cfg.STRICT_CONFIG = False
@@ -44,4 +62,4 @@ async def test_validate_startup_warns_on_default_jwt_secret(restore_cfg, anyio_b
 
     result = await validate_startup()
 
-    assert any("JWT_SECRET is the default development value" in warning for warning in result["warnings"])
+    assert any("Refusing to start" in e for e in result["errors"])

@@ -139,10 +139,12 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
         return macd_line
 
     if ind == "BBANDS":
+        bb_length = max(2, int(params.get("length", 20)))
+        bb_std = max(0.1, min(10.0, float(params.get("std", 2.0))))
         upper, mid, lower = _bbands(
             df["close"],
-            length=int(params.get("length", 20)),
-            std=float(params.get("std", 2.0)),
+            length=bb_length,
+            std=bb_std,
         )
         band = str(params.get("band", "mid")).lower()
         return upper if band == "upper" else (lower if band == "lower" else mid)
