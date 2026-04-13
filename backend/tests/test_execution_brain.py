@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import config
@@ -429,3 +430,132 @@ async def test_ai_optimizer_queues_direct_trades(_isolated_db, anyio_backend):
 
     mock_queue.assert_awaited_once_with([decision])
     assert any("direct_trade_queued: MSFT BUY" in item for item in results["applied"])
+
+
+# ── AI-7: Regime detection unit tests ──────────────────────────────────────
+
+
+def test_regime_detector_bull_classification():
+    """RegimeDetector classifies price > SMA200*1.02 + SMA50 > SMA200 as BULL."""
+    import pandas as pd
+    import numpy as np
+    from regime_detector import RegimeDetector
+    from events import MarketEvent, EventType
+
+    # Build 250 daily bars with a clear uptrend (price consistently above SMAs)
+    np.random.seed(42)
+    prices = np.linspace(100, 200, 250)  # straight up
+    df = pd.DataFrame({
+        "open": prices * 0.99,
+        "high": prices * 1.01,
+        "low": prices * 0.98,
+        "close": prices,
+        "volume": np.full(250, 1_000_000),
+    })
+
+    detector = RegimeDetector()
+    spy_event = MarketEvent(
+        timestamp=datetime(2026, 4, 13, tzinfo=timezone.utc),
+        type=EventType.MARKET, symbol="SPY",
+        open=float(df["open"].iloc[-1]), high=float(df["high"].iloc[-1]),
+        low=float(df["low"].iloc[-1]), close=float(df["close"].iloc[-1]),
+        volume=float(df["volume"].iloc[-1]),
+    )
+    regime_event = detector.on_market_event(spy_event, df)
+
+    assert detector.regime == "BULL"
+    assert detector.get_risk_multiplier() == 1.0
+    assert regime_event.regime == "BULL"
+    assert regime_event.market_score == 0.8
+
+
+def test_regime_detector_bear_classification():
+    """RegimeDetector classifies price < SMA200*0.98 + SMA50 < SMA200 as BEAR."""
+    import pandas as pd
+    import numpy as np
+    from regime_detector import RegimeDetector
+    from events import MarketEvent, EventType
+
+    # Clear downtrend
+    np.random.seed(42)
+    prices = np.linspace(200, 100, 250)  # straight down
+    df = pd.DataFrame({
+        "open": prices * 1.01,
+        "high": prices * 1.02,
+        "low": prices * 0.99,
+        "close": prices,
+        "volume": np.full(250, 1_000_000),
+    })
+
+    detector = RegimeDetector()
+    spy_event = MarketEvent(
+        timestamp=datetime(2026, 4, 13, tzinfo=timezone.utc),
+        type=EventType.MARKET, symbol="SPY",
+        open=float(df["open"].iloc[-1]), high=float(df["high"].iloc[-1]),
+        low=float(df["low"].iloc[-1]), close=float(df["close"].iloc[-1]),
+        volume=float(df["volume"].iloc[-1]),
+    )
+    regime_event = detector.on_market_event(spy_event, df)
+
+    assert detector.regime == "BEAR"
+    assert detector.get_risk_multiplier() == 0.5
+    assert regime_event.regime == "BEAR"
+    assert regime_event.market_score == 0.2
+
+
+def test_regime_risk_multiplier_reduces_position_size():
+    """AI-7 regression: in BEAR regime, position size should be halved."""
+    from models import Rule, TradeAction, Condition
+
+    rule = Rule(
+        name="AI-7 regime test",
+        symbol="AAPL",
+        enabled=True,
+        conditions=[Condition(indicator="PRICE", operator=">", value=0.0)],
+        logic="AND",
+        action=TradeAction(type="BUY", quantity=1, order_type="MKT"),
+    )
+
+    account_val = 10_000.0
+    price = 100.0
+    position_size_pct = 0.10
+    ai_sizing = 1.0
+
+    # Normal sizing (BULL, mult=1.0)
+    base_qty = max(1, int(account_val * position_size_pct / price))
+    assert base_qty == 10
+
+    # BEAR regime mult = 0.5
+    bear_mult = 0.5
+    bear_qty = max(1, int(base_qty * ai_sizing * bear_mult))
+    assert bear_qty == 5, f"BEAR should halve size: expected 5, got {bear_qty}"
+
+    # HIGH_VOL regime mult = 0.7
+    hvol_mult = 0.7
+    hvol_qty = max(1, int(base_qty * ai_sizing * hvol_mult))
+    assert hvol_qty == 7, f"HIGH_VOL should reduce size by 30%: expected 7, got {hvol_qty}"
+
+    # BULL regime mult = 1.0 (no change)
+    bull_mult = 1.0
+    bull_qty = max(1, int(base_qty * ai_sizing * bull_mult))
+    assert bull_qty == 10
+
+
+def test_regime_weight_adjustments():
+    """RegimeDetector returns different signal weight multipliers per regime."""
+    from regime_detector import RegimeDetector
+
+    detector = RegimeDetector()
+
+    # Default is BULL
+    bull_weights = detector.get_weight_adjustments()
+    assert bull_weights["trend"] == 1.3
+    assert bull_weights["momentum"] == 1.2
+    assert bull_weights["mean_reversion"] == 0.7
+
+    # Force BEAR
+    detector._current_regime = "BEAR"
+    bear_weights = detector.get_weight_adjustments()
+    assert bear_weights["trend"] == 0.6
+    assert bear_weights["momentum"] == 0.5
+    assert bear_weights["mean_reversion"] == 1.3

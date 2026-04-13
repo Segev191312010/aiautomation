@@ -339,6 +339,64 @@ async def _run_cycle() -> None:
             event_logger.log_event(me)
     metrics.record("bars_fetched", len(bars_by_symbol))
 
+    # ── Regime detection (AI-7) ──────────────────────────────────────────────
+    # Feed SPY bars to the RegimeDetector to classify the current market
+    # environment. The regime flows into position sizing (risk multiplier),
+    # the event bus (dashboard display), and the DB (context_builder reads it).
+    cycle_regime: str = "BULL"
+    cycle_regime_risk_mult: float = 1.0
+    try:
+        from regime_detector import RegimeDetector
+        _regime_detector = RegimeDetector()
+        spy_bars = bars_by_symbol.get("SPY")
+        if spy_bars is not None and len(spy_bars) >= 200:
+            spy_event = MarketEvent(
+                timestamp=now, type=EventType.MARKET, symbol="SPY",
+                open=float(spy_bars["open"].iloc[-1]),
+                high=float(spy_bars["high"].iloc[-1]),
+                low=float(spy_bars["low"].iloc[-1]),
+                close=float(spy_bars["close"].iloc[-1]),
+                volume=float(spy_bars.get("volume", spy_bars.get("Volume", [0])).iloc[-1]) if "volume" in spy_bars.columns or "Volume" in spy_bars.columns else 0,
+            )
+            regime_event = _regime_detector.on_market_event(spy_event, spy_bars)
+            cycle_regime = _regime_detector.regime
+            cycle_regime_risk_mult = _regime_detector.get_risk_multiplier()
+            event_bus.publish(regime_event)
+            event_logger.log_event(regime_event)
+            log.info(
+                "Regime: %s (vol=%.2f%%, score=%.2f, risk_mult=%.2f)",
+                cycle_regime, _regime_detector.volatility,
+                regime_event.market_score, cycle_regime_risk_mult,
+            )
+            # Persist to regime_snapshots so context_builder can read it
+            try:
+                from db.core import get_db
+                import json as _json
+                async with get_db() as _rdb:
+                    await _rdb.execute(
+                        "INSERT INTO regime_snapshots (timestamp, regime, regime_features, confidence, user_id) "
+                        "VALUES (?, ?, ?, ?, 'demo')",
+                        (
+                            now.isoformat(),
+                            cycle_regime,
+                            _json.dumps({
+                                "volatility": _regime_detector.volatility,
+                                "market_score": regime_event.market_score,
+                                "spy_vs_sma200": regime_event.spy_vs_sma200,
+                                "risk_multiplier": cycle_regime_risk_mult,
+                            }),
+                            regime_event.market_score,
+                        ),
+                    )
+                    await _rdb.commit()
+            except Exception as snap_exc:
+                log.debug("Regime snapshot write failed (non-critical): %s", snap_exc)
+        else:
+            log.debug("Regime detection skipped — SPY bars unavailable or < 200 days")
+    except Exception as exc:
+        log.debug("Regime detection failed (non-critical, using defaults): %s", exc)
+    metrics.record("regime", {"label": cycle_regime, "risk_mult": cycle_regime_risk_mult})
+
     # ── Phase 2: Evaluate entry rules ─────────────────────────────────────────
     if cfg.AUTOPILOT_MODE == "OFF":
         log.info("Autopilot OFF — skipping new entries")
@@ -666,13 +724,17 @@ async def _run_cycle() -> None:
                 ai_sizing = ai_params.get_rule_sizing_multiplier(order_rule.id)
                 if ai_sizing != 1.0:
                     computed_qty = max(1, int(computed_qty * ai_sizing))
+                # AI-7: Scale position size by regime risk multiplier
+                # (BEAR=0.5x, HIGH_VOL=0.7x, BULL/LOW_VOL=1.0x)
+                if cycle_regime_risk_mult != 1.0:
+                    computed_qty = max(1, int(computed_qty * cycle_regime_risk_mult))
                 order_rule = order_rule.model_copy()
                 order_rule.action = order_rule.action.model_copy(
                     update={"quantity": computed_qty}
                 )
                 log.info(
-                    "Sizing %s: $%.0f × %.1f%% / $%.4f = %d shares (ai_mult=%.2f)",
-                    sym_upper, account_val, cfg.POSITION_SIZE_PCT * 100, price, computed_qty, ai_sizing,
+                    "Sizing %s: $%.0f × %.1f%% / $%.4f = %d shares (ai_mult=%.2f, regime_mult=%.2f)",
+                    sym_upper, account_val, cfg.POSITION_SIZE_PCT * 100, price, computed_qty, ai_sizing, cycle_regime_risk_mult,
                 )
         except Exception as exc:
             log.warning("Position sizing failed, using rule quantity: %s", exc)
