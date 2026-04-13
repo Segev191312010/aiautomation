@@ -159,3 +159,105 @@ def test_bot_health_surfaces_debate_failure_count(monkeypatch):
     health = bot_health.get_bot_health(is_running=False)
     assert "ai_debate_parse_failures_24h" in health
     assert health["ai_debate_parse_failures_24h"] == 3
+
+
+# ── AI-5: Parameter persistence across restarts ────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_ai_params_save_and_restore_round_trip(_isolated_db, anyio_backend):
+    """AI-5 regression: parameters saved to DB must be restored on startup."""
+    await init_db()
+    from ai_params import AIParameterStore
+
+    store = AIParameterStore()
+    store.shadow_mode = False  # getters return stored values, not shadow defaults
+    store.set_min_score(67.5)
+    store.set_risk_multiplier(1.3)
+    store.set_exit_params("AAPL", {"atr_stop_mult": 2.5, "atr_trail_mult": 1.8})
+    store.set_signal_weights("BULL", {"rsi": 1.2, "sma": 0.8})
+    store.set_rule_sizing_multiplier("rule-abc", 1.5)
+
+    saved = await store.save_to_db()
+    assert saved == 5  # min_score, risk_mult, signal_weights:BULL, exit_params:AAPL, rule_sizing:rule-abc
+
+    # Simulate restart: create a fresh store and load from DB
+    fresh = AIParameterStore()
+    fresh.shadow_mode = False
+    assert fresh._min_score is None  # defaults
+    assert fresh._risk_multipliers == {}
+
+    restored = await fresh.load_from_db()
+    assert restored is True
+    assert fresh.get_min_score() == 67.5
+    assert fresh.get_risk_multiplier() == 1.3
+    assert fresh.get_exit_params("AAPL") == {"atr_stop_mult": 2.5, "atr_trail_mult": 1.8}
+    assert fresh.get_signal_weights("BULL") == {"rsi": 1.2, "sma": 0.8}
+    assert fresh.get_rule_sizing_multiplier("rule-abc") == 1.5
+
+
+@pytest.mark.anyio
+async def test_ai_params_load_empty_db_returns_false(_isolated_db, anyio_backend):
+    """load_from_db on a fresh DB must return False, not crash."""
+    await init_db()
+    from ai_params import AIParameterStore
+
+    store = AIParameterStore()
+    assert await store.load_from_db() is False
+    # All defaults
+    assert store.get_min_score() == 50.0
+    assert store.get_risk_multiplier() == 1.0
+
+
+@pytest.mark.anyio
+async def test_ai_params_save_overwrites_latest(_isolated_db, anyio_backend):
+    """Multiple save calls should result in the LATEST values being loaded."""
+    await init_db()
+    from ai_params import AIParameterStore
+
+    # First save
+    store = AIParameterStore()
+    store.shadow_mode = False
+    store.set_min_score(55.0)
+    await store.save_to_db()
+
+    # Second save with different value
+    store.set_min_score(72.0)
+    await store.save_to_db()
+
+    # Load should get 72.0 (the latest)
+    fresh = AIParameterStore()
+    fresh.shadow_mode = False
+    await fresh.load_from_db()
+    assert fresh.get_min_score() == 72.0
+
+
+@pytest.mark.anyio
+async def test_ai_params_clamp_on_load(_isolated_db, anyio_backend):
+    """Loaded values must be clamped to their valid ranges."""
+    await init_db()
+    from ai_params import AIParameterStore
+    from db.core import get_db
+    from datetime import datetime, timezone
+    import json
+
+    now = datetime.now(timezone.utc).isoformat()
+    async with get_db() as db:
+        # Write out-of-range values directly
+        await db.execute(
+            "INSERT INTO ai_parameter_snapshots (timestamp, param_type, symbol, data, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (now, "min_score", None, json.dumps({"value": 999.0}), "ai"),
+        )
+        await db.execute(
+            "INSERT INTO ai_parameter_snapshots (timestamp, param_type, symbol, data, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (now, "risk_multiplier", None, json.dumps({"global": 50.0}), "ai"),
+        )
+        await db.commit()
+
+    store = AIParameterStore()
+    store.shadow_mode = False
+    await store.load_from_db()
+    assert store.get_min_score() == 90.0  # clamped to max
+    assert store.get_risk_multiplier() == 2.0  # clamped to max

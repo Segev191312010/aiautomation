@@ -181,6 +181,14 @@ async def lifespan(app: FastAPI):
         log.info("Startup: purged %d stale direct AI candidate(s)", expired)
     except Exception as exc:
         log.warning("Startup purge of direct candidates failed: %s", exc)
+    # Restore AI-optimized parameters from last snapshot (AI-5 fix)
+    try:
+        from ai_params import ai_params
+        restored = await ai_params.load_from_db()
+        if restored:
+            log.info("Startup: restored AI parameters from snapshot")
+    except Exception as exc:
+        log.warning("Startup: AI params restore failed (using defaults): %s", exc)
     await sim_engine.initialize()
     await _diag_service.ensure_catalog_seeded()
 

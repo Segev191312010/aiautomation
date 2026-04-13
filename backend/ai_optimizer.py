@@ -520,6 +520,12 @@ async def run_full_optimization() -> dict:
         _last_optimization = time.time()
         ai_params.last_recompute = _last_optimization
 
+        # AI-5: persist optimized params so they survive restart
+        try:
+            await ai_params.save_to_db()
+        except Exception as exc:
+            log.warning("Failed to persist AI params snapshot: %s", exc)
+
         elapsed = time.time() - start
         log.info(
             "AI optimization complete in %.1fs: %d applied, %d blocked, %d shadow",
