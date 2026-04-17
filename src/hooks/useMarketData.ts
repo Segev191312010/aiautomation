@@ -17,7 +17,8 @@ import { getMockQuotes, getMockBars, getMockAccount } from '@/services/mockServi
 import { useMarketStore, useAccountStore, useBotStore } from '@/store'
 import { wsMdService } from '@/services/ws'
 
-const QUOTE_INTERVAL   = 5_000   // full quote refresh (change_pct, vol, etc.)
+const QUOTE_INTERVAL_FAST = 5_000    // when WS is disconnected
+const QUOTE_INTERVAL_SLOW = 30_000   // when WS is delivering live ticks
 const ACCOUNT_INTERVAL = 10_000
 
 export function useMarketData(): void {
@@ -118,8 +119,15 @@ export function useMarketData(): void {
 
   useEffect(() => {
     refreshQuotes() // immediate on watchlist change
-    if (quoteTimer.current) clearInterval(quoteTimer.current)
-    quoteTimer.current = setInterval(refreshQuotes, QUOTE_INTERVAL)
+    const scheduleNext = () => {
+      if (quoteTimer.current) clearInterval(quoteTimer.current)
+      const interval = wsMdService.connected ? QUOTE_INTERVAL_SLOW : QUOTE_INTERVAL_FAST
+      quoteTimer.current = setInterval(() => {
+        refreshQuotes()
+        scheduleNext()
+      }, interval)
+    }
+    scheduleNext()
     return () => { if (quoteTimer.current) clearInterval(quoteTimer.current) }
   }, [refreshQuotes])
 

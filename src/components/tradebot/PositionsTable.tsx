@@ -5,11 +5,8 @@
 import React from 'react'
 import clsx from 'clsx'
 import { useAccountStore, useBotStore } from '@/store'
+import { fmtUSD } from '@/utils/formatters'
 import type { Position, SimPosition } from '@/types'
-
-function fmtUSD(n: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
-}
 
 function isSimPos(p: Position | SimPosition): p is SimPosition {
   return 'pnl_pct' in p

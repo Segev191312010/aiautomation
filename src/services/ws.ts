@@ -153,6 +153,10 @@ class MarketDataWsService {
   private reconnTimer: ReturnType<typeof setTimeout> | null = null
   private pingTimer:   ReturnType<typeof setInterval> | null = null
 
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
   connect(): void {
     if (
       this.ws?.readyState === WebSocket.OPEN ||

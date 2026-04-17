@@ -8,10 +8,7 @@ import TradingChart from '@/components/chart/TradingChart'
 import KPICard from '@/components/tradebot/KPICard'
 import { useSimStore, useMarketStore } from '@/store'
 import { fetchSimAccount, fetchSimPositions, fetchSimOrders, resetSimAccount } from '@/services/api'
-
-function fmtUSD(v: number) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v)
-}
+import { fmtUSD } from '@/utils/formatters'
 
 export default function SimulationPage() {
   const { simAccount, simPositions, simOrders, playback, setSimAccount, setSimPositions, setSimOrders } = useSimStore()

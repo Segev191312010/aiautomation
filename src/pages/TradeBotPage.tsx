@@ -14,11 +14,8 @@ import BotToggle from '@/components/tradebot/BotToggle'
 import PositionsTable from '@/components/tradebot/PositionsTable'
 import { useAccountStore, useBotStore, useSimStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, placeManualOrder } from '@/services/api'
+import { fmtUSD } from '@/utils/formatters'
 import type { Trade, SimAccountState, AccountSummary } from '@/types'
-
-function fmtUSD(v: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v)
-}
 
 function isSimAccount(a: AccountSummary | SimAccountState): a is SimAccountState {
   return 'is_sim' in a && a.is_sim === true

@@ -83,16 +83,16 @@ export const fetchWatchlist = (symbols?: string) =>
   get<MarketQuote[]>(`/api/watchlist${symbols ? `?symbols=${symbols}` : ''}`)
 
 export const fetchYahooBars = (symbol: string, period = '5d', interval = '5m') =>
-  get<OHLCVBar[]>(`/api/yahoo/${symbol}/bars?period=${period}&interval=${interval}`)
+  get<OHLCVBar[]>(`/api/yahoo/${encodeURIComponent(symbol)}/bars?period=${period}&interval=${interval}`)
 
 export const fetchIBKRBars = (symbol: string, barSize = '1D', duration = '60 D') =>
-  get<OHLCVBar[]>(`/api/market/${symbol}/bars?bar_size=${barSize}&duration=${encodeURIComponent(duration)}`)
+  get<OHLCVBar[]>(`/api/market/${encodeURIComponent(symbol)}/bars?bar_size=${barSize}&duration=${encodeURIComponent(duration)}`)
 
 export const fetchPrice = (symbol: string) =>
-  get<{ symbol: string; price: number; is_mock?: boolean }>(`/api/market/${symbol}/price`)
+  get<{ symbol: string; price: number; is_mock?: boolean }>(`/api/market/${encodeURIComponent(symbol)}/price`)
 
-export const subscribeRtBars   = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${symbol}/subscribe`)
-export const unsubscribeRtBars = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${symbol}/unsubscribe`)
+export const subscribeRtBars   = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${encodeURIComponent(symbol)}/subscribe`)
+export const unsubscribeRtBars = (symbol: string) => post<{ subscribed: boolean }>(`/api/market/${encodeURIComponent(symbol)}/unsubscribe`)
 
 // ── Simulation ────────────────────────────────────────────────────────────────
 

@@ -7,7 +7,7 @@
  *  • Remove symbols by hovering a card and clicking ✕
  *  • Live prices via WS (handled in useMarketData hook)
  */
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useMemo } from 'react'
 import clsx from 'clsx'
 import TickerCard from './TickerCard'
 import { useMarketStore } from '@/store'
@@ -82,7 +82,7 @@ export default function WatchlistGrid() {
 
   // ── Sort ──────────────────────────────────────────────────────────────────
 
-  const sorted = [...symbols]
+  const sorted = useMemo(() => [...symbols]
     .map((sym) => quotes[sym])
     .filter(Boolean)
     .sort((a, b) => {
@@ -95,7 +95,7 @@ export default function WatchlistGrid() {
         case 'market_cap': return mul * ((a.market_cap ?? 0) - (b.market_cap ?? 0))
         default:           return 0
       }
-    })
+    }), [symbols, quotes, sortField, sortDir])
 
   const handleSort = (field: SortField) => {
     setSort(field, field === sortField && sortDir === 'desc' ? 'asc' : 'desc')

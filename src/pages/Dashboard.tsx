@@ -7,14 +7,11 @@ import WatchlistGrid from '@/components/ticker/WatchlistGrid'
 import TradingChart from '@/components/chart/TradingChart'
 import KPICard from '@/components/tradebot/KPICard'
 import { useMarketStore, useAccountStore, useBotStore } from '@/store'
+import { fmtUSD } from '@/utils/formatters'
 import type { AccountSummary, SimAccountState } from '@/types'
 
 function isSimAccount(a: AccountSummary | SimAccountState): a is SimAccountState {
   return 'is_sim' in a && a.is_sim === true
-}
-
-function fmtUSD(v: number): string {
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 export default function Dashboard() {
