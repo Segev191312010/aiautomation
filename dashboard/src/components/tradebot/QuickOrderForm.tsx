@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { useToast } from '@/components/ui/ToastProvider'
 import { placeManualOrder } from '@/services/api'
 import { IconLightning } from '@/components/icons'
+import { validateSymbol } from '@/utils/validateSymbol'
 
 export function QuickOrderForm() {
   const toast = useToast()
@@ -12,13 +13,17 @@ export function QuickOrderForm() {
   const [status, setStatus] = useState('')
   const [busy,   setBusy]   = useState(false)
 
+  const normalizedSym = sym.trim().toUpperCase()
+  const symValidation = validateSymbol(normalizedSym)
+  const symTouched = sym.length > 0
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!sym || qty <= 0) return
+    if (!symValidation.ok || qty <= 0) return
     setBusy(true)
     setStatus('')
     try {
-      const r = await placeManualOrder({ symbol: sym.toUpperCase(), action, quantity: qty })
+      const r = await placeManualOrder({ symbol: normalizedSym, action, quantity: qty })
       const msg = r.message ?? 'Order placed'
       setStatus(msg)
       toast.success(msg)
@@ -32,7 +37,7 @@ export function QuickOrderForm() {
   }
 
   const isBuy = action === 'BUY'
-  const canSubmit = sym.length > 0 && qty > 0
+  const canSubmit = symValidation.ok && qty > 0
 
   return (
     <div className="flex flex-col gap-5">
@@ -40,15 +45,28 @@ export function QuickOrderForm() {
       <div className="flex flex-wrap items-end gap-4">
         {/* Symbol */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
+          <label htmlFor="quick-order-symbol" className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
             Symbol
           </label>
           <input
+            id="quick-order-symbol"
             value={sym}
             onChange={(e) => setSym(e.target.value)}
             placeholder="AAPL"
-            className="w-28 text-sm font-mono bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-zinc-100 focus:border-indigo-600/50 focus:outline-none uppercase tracking-wider placeholder:text-zinc-500/50"
+            aria-invalid={symTouched && !symValidation.ok}
+            aria-describedby={symTouched && !symValidation.ok ? 'quick-order-symbol-error' : undefined}
+            className={clsx(
+              'w-28 text-sm font-mono bg-zinc-900 border rounded-xl px-3 py-2 text-zinc-100 focus:outline-none uppercase tracking-wider placeholder:text-zinc-500/50',
+              symTouched && !symValidation.ok
+                ? 'border-red-500/60 focus:border-red-500'
+                : 'border-zinc-800 focus:border-indigo-600/50',
+            )}
           />
+          {symTouched && !symValidation.ok && symValidation.reason && (
+            <span id="quick-order-symbol-error" role="alert" className="text-[10px] font-sans text-red-400">
+              {symValidation.reason}
+            </span>
+          )}
         </div>
 
         {/* Quantity */}
@@ -95,7 +113,7 @@ export function QuickOrderForm() {
       </div>
 
       {/* Order preview */}
-      {sym && qty > 0 && (
+      {symValidation.ok && qty > 0 && (
         <div className={clsx(
           'flex items-center gap-2 px-4 py-2.5 rounded-xl border text-xs font-mono',
           isBuy
@@ -105,7 +123,7 @@ export function QuickOrderForm() {
           <span className="opacity-60">Preview:</span>
           <span className="font-semibold">{isBuy ? 'BUY' : 'SELL'}</span>
           <span className="text-zinc-400">{qty} share{qty !== 1 ? 's' : ''} of</span>
-          <span className="font-semibold text-zinc-100">{sym.toUpperCase()}</span>
+          <span className="font-semibold text-zinc-100">{normalizedSym}</span>
           <span className="text-zinc-500 ml-1">— Market Order</span>
         </div>
       )}
