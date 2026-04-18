@@ -34,13 +34,17 @@ export interface LinePoint   { time: number; value: number }
 export interface BandsResult { upper: LinePoint[]; middle: LinePoint[]; lower: LinePoint[] }
 export interface MACDResult  { macd: LinePoint[]; signal: LinePoint[]; histogram: LinePoint[] }
 
-// ── SMA ───────────────────────────────────────────────────────────────────────
+// ── SMA (rolling sum, O(n)) ───────────────────────────────────────────────────
 
 export function calcSMA(bars: OHLCVBar[], period: number): LinePoint[] {
+  const n = bars.length
+  if (n < period || period <= 0) return []
   const result: LinePoint[] = []
-  for (let i = period - 1; i < bars.length; i++) {
-    let sum = 0
-    for (let j = i - period + 1; j <= i; j++) sum += bars[j].close
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += bars[i].close
+  result.push({ time: bars[period - 1].time, value: +(sum / period).toFixed(4) })
+  for (let i = period; i < n; i++) {
+    sum += bars[i].close - bars[i - period].close
     result.push({ time: bars[i].time, value: +(sum / period).toFixed(4) })
   }
   return result
@@ -60,17 +64,39 @@ export function calcEMA(bars: OHLCVBar[], period: number): LinePoint[] {
   return result
 }
 
-// ── Bollinger Bands ───────────────────────────────────────────────────────────
+// ── Bollinger Bands (rolling sums, O(n)) ──────────────────────────────────────
+//
+// variance = E[X²] − E[X]² using rolling sum and rolling sum-of-squares.
+// Stable for typical stock-price ranges ($1–$10,000); not used near-cancel.
 
 export function calcBB(bars: OHLCVBar[], period = 20, mult = 2): BandsResult {
   const upper: LinePoint[] = [], middle: LinePoint[] = [], lower: LinePoint[] = []
-  for (let i = period - 1; i < bars.length; i++) {
-    const slice = bars.slice(i - period + 1, i + 1).map((b) => b.close)
-    const avg = slice.reduce((s, v) => s + v, 0) / period
-    const std = Math.sqrt(slice.reduce((s, v) => s + (v - avg) ** 2, 0) / period)
+  const n = bars.length
+  if (n < period || period <= 0) return { upper, middle, lower }
+
+  let sum = 0, sumSq = 0
+  for (let i = 0; i < period; i++) {
+    const c = bars[i].close
+    sum += c
+    sumSq += c * c
+  }
+
+  const push = (i: number) => {
+    const avg = sum / period
+    const variance = Math.max(0, sumSq / period - avg * avg) // clamp float-cancellation
+    const std = Math.sqrt(variance)
     middle.push({ time: bars[i].time, value: +avg.toFixed(4) })
     upper.push({  time: bars[i].time, value: +(avg + mult * std).toFixed(4) })
     lower.push({  time: bars[i].time, value: +(avg - mult * std).toFixed(4) })
+  }
+
+  push(period - 1)
+  for (let i = period; i < n; i++) {
+    const enter = bars[i].close
+    const leave = bars[i - period].close
+    sum   += enter - leave
+    sumSq += enter * enter - leave * leave
+    push(i)
   }
   return { upper, middle, lower }
 }
