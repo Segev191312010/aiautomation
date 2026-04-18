@@ -79,19 +79,43 @@ describe('ConfirmModal', () => {
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
 
-  it('Enter key does nothing while phrase does not match', () => {
+  it('Enter key on input does nothing while phrase does not match', () => {
     const onConfirm = vi.fn()
     render(<ConfirmModal {...baseProps} onConfirm={onConfirm} />)
-    fireEvent.keyDown(window, { key: 'Enter' })
+    fireEvent.keyDown(screen.getByLabelText(/type confirm to confirm/i), { key: 'Enter' })
     expect(onConfirm).not.toHaveBeenCalled()
   })
 
-  it('Enter key submits when phrase matches', () => {
+  it('Enter key on input submits when phrase matches', () => {
+    const onConfirm = vi.fn()
+    render(<ConfirmModal {...baseProps} onConfirm={onConfirm} />)
+    const input = screen.getByLabelText(/type confirm to confirm/i)
+    fireEvent.change(input, { target: { value: 'CONFIRM' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+  })
+
+  it('Enter key on window does NOT submit (only input-scoped)', () => {
     const onConfirm = vi.fn()
     render(<ConfirmModal {...baseProps} onConfirm={onConfirm} />)
     fireEvent.change(screen.getByLabelText(/type confirm to confirm/i), { target: { value: 'CONFIRM' } })
     fireEvent.keyDown(window, { key: 'Enter' })
-    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(onConfirm).not.toHaveBeenCalled()
+  })
+
+  it('restores focus to opener on close', () => {
+    const opener = document.createElement('button')
+    opener.textContent = 'Open'
+    document.body.appendChild(opener)
+    opener.focus()
+    expect(document.activeElement).toBe(opener)
+
+    const { rerender } = render(<ConfirmModal {...baseProps} />)
+    // Close the modal
+    rerender(<ConfirmModal {...baseProps} open={false} />)
+    expect(document.activeElement).toBe(opener)
+
+    document.body.removeChild(opener)
   })
 
   it('backdrop click fires onCancel; inner card click does not', () => {

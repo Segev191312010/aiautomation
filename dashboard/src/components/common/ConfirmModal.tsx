@@ -18,6 +18,9 @@ export interface ConfirmModalProps {
   onCancel: () => void
 }
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
 export default function ConfirmModal({
   open,
   title,
@@ -29,35 +32,59 @@ export default function ConfirmModal({
   onCancel,
 }: ConfirmModalProps) {
   const [typed, setTyped] = useState('')
+  const dialogRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const openerRef = useRef<Element | null>(null)
   const titleId = useId()
   const descId = useId()
+  const instructionsId = useId()
 
   const phraseMatches = typed === requirePhrase
 
+  // Focus management: remember opener, focus input, restore focus on close
   useEffect(() => {
     if (!open) {
       setTyped('')
+      if (openerRef.current && openerRef.current instanceof HTMLElement) {
+        openerRef.current.focus()
+        openerRef.current = null
+      }
       return
     }
+    openerRef.current = document.activeElement
     const id = requestAnimationFrame(() => inputRef.current?.focus())
     return () => cancelAnimationFrame(id)
   }, [open])
 
+  // Escape + focus trap (Enter is handled on the input only, not globally)
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault()
         onCancel()
-      } else if (e.key === 'Enter' && phraseMatches) {
+        return
+      }
+      if (e.key !== 'Tab') return
+      const root = dialogRef.current
+      if (!root) return
+      const focusables = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+        .filter((el) => !el.hasAttribute('disabled') && el.offsetParent !== null)
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last  = focusables[focusables.length - 1]
+      const active = document.activeElement as HTMLElement | null
+      if (e.shiftKey && active === first) {
         e.preventDefault()
-        onConfirm()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [open, phraseMatches, onConfirm, onCancel])
+  }, [open, onCancel])
 
   if (!open) return null
 
@@ -66,11 +93,12 @@ export default function ConfirmModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
-      aria-describedby={descId}
+      aria-describedby={`${descId} ${instructionsId}`}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onCancel}
     >
       <div
+        ref={dialogRef}
         className="w-full max-w-md mx-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-5 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -96,13 +124,19 @@ export default function ConfirmModal({
           ))}
         </dl>
 
-        <label className="mt-4 block text-[11px] font-sans text-zinc-400">
+        <label id={instructionsId} className="mt-4 block text-[11px] font-sans text-zinc-400">
           Type <span className="font-mono font-semibold text-zinc-200">{requirePhrase}</span> to confirm
         </label>
         <input
           ref={inputRef}
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && phraseMatches) {
+              e.preventDefault()
+              onConfirm()
+            }
+          }}
           aria-label={`Type ${requirePhrase} to confirm`}
           className={clsx(
             'mt-1.5 w-full text-sm font-mono bg-zinc-900 border rounded-xl px-3 py-2 text-zinc-100 focus:outline-none tracking-wider',

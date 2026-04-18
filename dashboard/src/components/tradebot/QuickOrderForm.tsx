@@ -13,7 +13,11 @@ export function QuickOrderForm() {
   const [action, setAction] = useState<'BUY' | 'SELL'>('BUY')
   const [status, setStatus] = useState('')
   const [busy,   setBusy]   = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [pendingOrder, setPendingOrder] = useState<null | {
+    symbol: string
+    action: 'BUY' | 'SELL'
+    quantity: number
+  }>(null)
 
   const normalizedSym = sym.trim().toUpperCase()
   const symValidation = validateSymbol(normalizedSym)
@@ -22,15 +26,17 @@ export function QuickOrderForm() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!symValidation.ok || qty <= 0) return
-    setConfirmOpen(true)
+    setPendingOrder({ symbol: normalizedSym, action, quantity: qty })
   }
 
   const handleConfirm = async () => {
-    setConfirmOpen(false)
+    const order = pendingOrder
+    if (!order) return
+    setPendingOrder(null)
     setBusy(true)
     setStatus('')
     try {
-      const r = await placeManualOrder({ symbol: normalizedSym, action, quantity: qty })
+      const r = await placeManualOrder(order)
       const msg = r.message ?? 'Order placed'
       setStatus(msg)
       toast.success(msg)
@@ -157,17 +163,17 @@ export function QuickOrderForm() {
       </form>
 
       <ConfirmModal
-        open={confirmOpen}
-        title={`Confirm ${action} order`}
-        summary={[
-          { label: 'Symbol', value: normalizedSym },
-          { label: 'Side',   value: action, tone: isBuy ? 'success' : 'danger' },
-          { label: 'Qty',    value: qty },
+        open={pendingOrder !== null}
+        title={`Confirm ${pendingOrder?.action ?? action} order`}
+        summary={pendingOrder ? [
+          { label: 'Symbol', value: pendingOrder.symbol },
+          { label: 'Side',   value: pendingOrder.action, tone: pendingOrder.action === 'BUY' ? 'success' : 'danger' },
+          { label: 'Qty',    value: pendingOrder.quantity },
           { label: 'Type',   value: 'Market' },
-        ]}
-        confirmLabel={`Place ${action}`}
+        ] : []}
+        confirmLabel={`Place ${pendingOrder?.action ?? action}`}
         onConfirm={handleConfirm}
-        onCancel={() => setConfirmOpen(false)}
+        onCancel={() => setPendingOrder(null)}
       />
     </div>
   )
