@@ -13,5 +13,5 @@ export const fetchIndicatorData = (
   if (params.slow != null)     qs.set('slow',     String(params.slow))
   if (params.signal != null)   qs.set('signal',   String(params.signal))
   if (params.band)             qs.set('band',     params.band)
-  return get<Array<{ time: number; value: number }>>(`/api/market/${symbol}/indicators?${qs}`)
+  return get<Array<{ time: number; value: number }>>(`/api/market/${encodeURIComponent(symbol)}/indicators?${qs}`)
 }

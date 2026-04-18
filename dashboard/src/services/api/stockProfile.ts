@@ -17,43 +17,43 @@ import type {
 import { get } from './client'
 
 export const fetchStockOverview = (symbol: string) =>
-  get<StockOverview>(`/api/stock/${symbol}/overview`)
+  get<StockOverview>(`/api/stock/${encodeURIComponent(symbol)}/overview`)
 
 export const fetchStockKeyStats = (symbol: string) =>
-  get<StockKeyStats>(`/api/stock/${symbol}/key-stats`)
+  get<StockKeyStats>(`/api/stock/${encodeURIComponent(symbol)}/key-stats`)
 
 export const fetchStockFinancials = (symbol: string) =>
-  get<StockFinancials>(`/api/stock/${symbol}/financials`)
+  get<StockFinancials>(`/api/stock/${encodeURIComponent(symbol)}/financials`)
 
 export const fetchStockAnalyst = (symbol: string) =>
-  get<StockAnalyst>(`/api/stock/${symbol}/analyst`)
+  get<StockAnalyst>(`/api/stock/${encodeURIComponent(symbol)}/analyst`)
 
 export const fetchStockOwnership = (symbol: string) =>
-  get<StockOwnership>(`/api/stock/${symbol}/ownership`)
+  get<StockOwnership>(`/api/stock/${encodeURIComponent(symbol)}/ownership`)
 
 export const fetchStockEvents = (symbol: string) =>
-  get<StockEvents>(`/api/stock/${symbol}/events`)
+  get<StockEvents>(`/api/stock/${encodeURIComponent(symbol)}/events`)
 
 export const fetchStockNarrative = (symbol: string) =>
-  get<StockNarrative>(`/api/stock/${symbol}/narrative`)
+  get<StockNarrative>(`/api/stock/${encodeURIComponent(symbol)}/narrative`)
 
 export const fetchStockFinancialStatements = (symbol: string) =>
-  get<StockFinancialStatements>(`/api/stock/${symbol}/financial-statements`)
+  get<StockFinancialStatements>(`/api/stock/${encodeURIComponent(symbol)}/financial-statements`)
 
 export const fetchStockAnalystDetail = (symbol: string) =>
-  get<StockAnalystDetail>(`/api/stock/${symbol}/analyst-detail`)
+  get<StockAnalystDetail>(`/api/stock/${encodeURIComponent(symbol)}/analyst-detail`)
 
 export const fetchStockRatingScorecard = (symbol: string) =>
-  get<StockRatingScorecard>(`/api/stock/${symbol}/rating-scorecard`)
+  get<StockRatingScorecard>(`/api/stock/${encodeURIComponent(symbol)}/rating-scorecard`)
 
 export const fetchStockCompanyInfo = (symbol: string) =>
-  get<StockCompanyInfo>(`/api/stock/${symbol}/company-info`)
+  get<StockCompanyInfo>(`/api/stock/${encodeURIComponent(symbol)}/company-info`)
 
 export const fetchStockSplits = (symbol: string) =>
-  get<StockSplits>(`/api/stock/${symbol}/stock-splits`)
+  get<StockSplits>(`/api/stock/${encodeURIComponent(symbol)}/stock-splits`)
 
 export const fetchStockEarningsDetail = (symbol: string) =>
-  get<StockEarningsDetail>(`/api/stock/${symbol}/earnings-detail`)
+  get<StockEarningsDetail>(`/api/stock/${encodeURIComponent(symbol)}/earnings-detail`)
 
 export const fetchStockProfile = (symbol: string) =>
-  get<StockProfileBundle>(`/api/stock/${symbol}/profile`)
+  get<StockProfileBundle>(`/api/stock/${encodeURIComponent(symbol)}/profile`)
