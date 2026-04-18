@@ -288,18 +288,31 @@ app.add_middleware(
     auth_limit=int(os.getenv("TEST_RATE_LIMIT_AUTH", "10")),
 )
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Allowed HTTP + WebSocket origins — dev defaults plus any FRONTEND_ORIGIN
+# (comma-separated) supplied via env. Shared with WS origin check below.
+_DEV_ALLOWED_ORIGINS: frozenset[str] = frozenset({
+    "http://localhost:5173", "http://localhost:5174",
+    "http://localhost:8000",
+    "http://127.0.0.1:5173", "http://127.0.0.1:5174",
+    "http://127.0.0.1:8000",
+})
+
+
+def _allowed_origins() -> list[str]:
+    env = os.getenv("FRONTEND_ORIGIN", "")
+    extra = {o.strip() for o in env.split(",") if o.strip()}
+    return sorted(_DEV_ALLOWED_ORIGINS | extra)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev server
-        "http://localhost:5174",   # Vite dev server (fallback port)
-        "http://localhost:8000",   # Same-origin
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-        "http://127.0.0.1:8000",
-    ],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
+    # Explicit method list. With credentials, browsers reject "*" anyway —
+    # Starlette expands it internally, but being explicit removes ambiguity
+    # and makes the allowed surface reviewable.
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 
