@@ -4,6 +4,7 @@ import { useToast } from '@/components/ui/ToastProvider'
 import { placeManualOrder } from '@/services/api'
 import { IconLightning } from '@/components/icons'
 import { validateSymbol } from '@/utils/validateSymbol'
+import ConfirmModal from '@/components/common/ConfirmModal'
 
 export function QuickOrderForm() {
   const toast = useToast()
@@ -12,14 +13,20 @@ export function QuickOrderForm() {
   const [action, setAction] = useState<'BUY' | 'SELL'>('BUY')
   const [status, setStatus] = useState('')
   const [busy,   setBusy]   = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const normalizedSym = sym.trim().toUpperCase()
   const symValidation = validateSymbol(normalizedSym)
   const symTouched = sym.length > 0
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!symValidation.ok || qty <= 0) return
+    setConfirmOpen(true)
+  }
+
+  const handleConfirm = async () => {
+    setConfirmOpen(false)
     setBusy(true)
     setStatus('')
     try {
@@ -148,6 +155,20 @@ export function QuickOrderForm() {
           <span className="text-[11px] font-sans text-zinc-400">{status}</span>
         )}
       </form>
+
+      <ConfirmModal
+        open={confirmOpen}
+        title={`Confirm ${action} order`}
+        summary={[
+          { label: 'Symbol', value: normalizedSym },
+          { label: 'Side',   value: action, tone: isBuy ? 'success' : 'danger' },
+          { label: 'Qty',    value: qty },
+          { label: 'Type',   value: 'Market' },
+        ]}
+        confirmLabel={`Place ${action}`}
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   )
 }
