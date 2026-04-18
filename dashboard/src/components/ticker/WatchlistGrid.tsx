@@ -8,7 +8,7 @@
  *  • Remove symbols by hovering a card and clicking ✕
  *  • Live prices via WS (handled in useMarketData hook)
  */
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useMemo } from 'react'
 import clsx from 'clsx'
 import TickerCard from './TickerCard'
 import { useMarketStore } from '@/store'
@@ -101,20 +101,24 @@ export default function WatchlistGrid() {
 
   // ── Sort ──────────────────────────────────────────────────────────────────
 
-  const sorted = [...symbols]
-    .map((sym) => quotes[sym])
-    .filter(Boolean)
-    .sort((a, b) => {
-      const mul = sortDir === 'asc' ? 1 : -1
-      switch (sortField) {
-        case 'symbol':     return mul * a.symbol.localeCompare(b.symbol)
-        case 'price':      return mul * (a.price - b.price)
-        case 'change_pct': return mul * (a.change_pct - b.change_pct)
-        case 'volume':     return mul * ((a.volume ?? a.avg_volume ?? 0) - (b.volume ?? b.avg_volume ?? 0))
-        case 'market_cap': return mul * ((a.market_cap ?? 0) - (b.market_cap ?? 0))
-        default:           return 0
-      }
-    })
+  const sorted = useMemo(
+    () =>
+      [...symbols]
+        .map((sym) => quotes[sym])
+        .filter(Boolean)
+        .sort((a, b) => {
+          const mul = sortDir === 'asc' ? 1 : -1
+          switch (sortField) {
+            case 'symbol':     return mul * a.symbol.localeCompare(b.symbol)
+            case 'price':      return mul * (a.price - b.price)
+            case 'change_pct': return mul * (a.change_pct - b.change_pct)
+            case 'volume':     return mul * ((a.volume ?? a.avg_volume ?? 0) - (b.volume ?? b.avg_volume ?? 0))
+            case 'market_cap': return mul * ((a.market_cap ?? 0) - (b.market_cap ?? 0))
+            default:           return 0
+          }
+        }),
+    [symbols, quotes, sortField, sortDir],
+  )
 
   const handleSort = (field: SortField) => {
     setSort(field, field === sortField && sortDir === 'desc' ? 'asc' : 'desc')
