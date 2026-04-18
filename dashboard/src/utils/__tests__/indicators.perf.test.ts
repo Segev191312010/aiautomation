@@ -109,10 +109,62 @@ describe('C1 rolling-window regression', () => {
     expect(calcSMA(bars.slice(0, 5), 10)).toEqual([])
   })
 
+  it('calcSMA returns empty for period = 0 or negative', () => {
+    expect(calcSMA(bars, 0)).toEqual([])
+    expect(calcSMA(bars, -5)).toEqual([])
+  })
+
+  it('calcSMA returns empty for empty bars', () => {
+    expect(calcSMA([], 20)).toEqual([])
+  })
+
+  it('calcSMA returns exactly one point when bars.length === period', () => {
+    const out = calcSMA(bars.slice(0, 20), 20)
+    expect(out).toHaveLength(1)
+    expect(out[0].time).toBe(bars[19].time)
+  })
+
   it('calcBB returns empty bands when bars < period', () => {
     const { upper, middle, lower } = calcBB(bars.slice(0, 5), 20, 2)
     expect(upper).toEqual([])
     expect(middle).toEqual([])
     expect(lower).toEqual([])
+  })
+
+  it('calcBB returns empty for period = 0 or negative', () => {
+    expect(calcBB(bars, 0, 2).middle).toEqual([])
+    expect(calcBB(bars, -5, 2).middle).toEqual([])
+  })
+
+  it('calcBB returns empty for empty bars', () => {
+    expect(calcBB([], 20, 2).middle).toEqual([])
+  })
+
+  it('calcBB remains numerically stable at high prices with tight range', () => {
+    // Simulates BRK.A-like prices ($600k base) with ~0.1% variance.
+    // E[X²]−E[X]² would catastrophically cancel here; two-pass variance holds.
+    const highBars: OHLCVBar[] = []
+    let s = 7
+    const rand = () => {
+      s = (s + 0x6D2B79F5) | 0
+      let t = s
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+    for (let i = 0; i < 100; i++) {
+      const close = 600_000 + (rand() - 0.5) * 600 // ±0.1% around 600k
+      highBars.push({ time: 1_700_000_000 + i * 86_400, open: close, high: close, low: close, close, volume: 100 })
+    }
+
+    const newResult = calcBB(highBars, 20, 2)
+    const refResult = refBB(highBars, 20, 2)
+
+    for (const field of ['upper', 'middle', 'lower'] as const) {
+      expect(newResult[field]).toHaveLength(refResult[field].length)
+      for (let i = 0; i < newResult[field].length; i++) {
+        expect(newResult[field][i].value).toBe(refResult[field][i].value)
+      }
+    }
   })
 })

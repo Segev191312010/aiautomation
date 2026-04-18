@@ -64,27 +64,30 @@ export function calcEMA(bars: OHLCVBar[], period: number): LinePoint[] {
   return result
 }
 
-// ── Bollinger Bands (rolling sums, O(n)) ──────────────────────────────────────
+// ── Bollinger Bands ───────────────────────────────────────────────────────────
 //
-// variance = E[X²] − E[X]² using rolling sum and rolling sum-of-squares.
-// Stable for typical stock-price ranges ($1–$10,000); not used near-cancel.
+// Rolling sum gives the mean in O(1) per step; variance uses a two-pass window
+// scan (sum of (x − mean)²) which is numerically stable. Avoids the
+// E[X²] − E[X]² cancellation trap for high-priced + tight-range windows.
+// Still faster than the old slice+map+reduce path thanks to index-based loop
+// and no per-step allocation.
 
 export function calcBB(bars: OHLCVBar[], period = 20, mult = 2): BandsResult {
   const upper: LinePoint[] = [], middle: LinePoint[] = [], lower: LinePoint[] = []
   const n = bars.length
   if (n < period || period <= 0) return { upper, middle, lower }
 
-  let sum = 0, sumSq = 0
-  for (let i = 0; i < period; i++) {
-    const c = bars[i].close
-    sum += c
-    sumSq += c * c
-  }
+  let sum = 0
+  for (let i = 0; i < period; i++) sum += bars[i].close
 
   const push = (i: number) => {
     const avg = sum / period
-    const variance = Math.max(0, sumSq / period - avg * avg) // clamp float-cancellation
-    const std = Math.sqrt(variance)
+    let sse = 0
+    for (let j = i - period + 1; j <= i; j++) {
+      const d = bars[j].close - avg
+      sse += d * d
+    }
+    const std = Math.sqrt(sse / period)
     middle.push({ time: bars[i].time, value: +avg.toFixed(4) })
     upper.push({  time: bars[i].time, value: +(avg + mult * std).toFixed(4) })
     lower.push({  time: bars[i].time, value: +(avg - mult * std).toFixed(4) })
@@ -92,10 +95,7 @@ export function calcBB(bars: OHLCVBar[], period = 20, mult = 2): BandsResult {
 
   push(period - 1)
   for (let i = period; i < n; i++) {
-    const enter = bars[i].close
-    const leave = bars[i - period].close
-    sum   += enter - leave
-    sumSq += enter * enter - leave * leave
+    sum += bars[i].close - bars[i - period].close
     push(i)
   }
   return { upper, middle, lower }
