@@ -18,14 +18,11 @@ import { SkeletonCard } from '@/components/ui/Skeleton'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import { useDiagnostics } from '@/hooks/useDiagnostics'
 import { useMarketStore, useAccountStore, useBotStore, useDiagnosticsStore, useUIStore } from '@/store'
+import { fmtUSD } from '@/utils/formatters'
 import type { AccountSummary, SimAccountState } from '@/types'
 
 function isSimAccount(account: AccountSummary | SimAccountState): account is SimAccountState {
   return 'is_sim' in account && account.is_sim === true
-}
-
-function fmtUSD(value: number): string {
-  return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatCompact(value?: number): string {

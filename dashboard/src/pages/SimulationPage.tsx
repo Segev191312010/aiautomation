@@ -11,10 +11,7 @@ import { SkeletonCard } from '@/components/ui/Skeleton'
 import { useToast } from '@/components/ui/ToastProvider'
 import { useSimStore, useMarketStore } from '@/store'
 import { fetchSimAccount, fetchSimPositions, fetchSimOrders, resetSimAccount } from '@/services/api'
-
-function fmtUSD(v: number) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(v)
-}
+import { fmtUSD } from '@/utils/formatters'
 
 /** Section header with a left accent bar */
 function SectionLabel({ children }: { children: React.ReactNode }) {

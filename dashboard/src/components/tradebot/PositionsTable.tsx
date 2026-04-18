@@ -4,6 +4,7 @@
  */
 import React, { useState, useEffect, useCallback } from 'react'
 import clsx from 'clsx'
+import { fmtUSD } from '@/utils/formatters'
 import { useAccountStore, useBotStore } from '@/store'
 import { useToast } from '@/components/ui/ToastProvider'
 import type { Position, SimPosition } from '@/types'
@@ -49,10 +50,6 @@ function PositionSparkline({ symbol, avgCost }: { symbol: string; avgCost: numbe
       <path d={path} fill="none" stroke="currentColor" strokeWidth="1.5" />
     </svg>
   )
-}
-
-function fmtUSD(n: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
 function isSimPos(p: Position | SimPosition): p is SimPosition {

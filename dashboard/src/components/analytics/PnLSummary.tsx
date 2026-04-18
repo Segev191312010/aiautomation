@@ -5,18 +5,10 @@
  */
 import React from 'react'
 import clsx from 'clsx'
+import { fmtUSD } from '@/utils/formatters'
 import type { PnLSummary as PnLSummaryType } from '@/types'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function fmtUSD(v: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(v)
-}
 
 function fmtPct(v: number, decimals = 2): string {
   return (v >= 0 ? '+' : '') + v.toFixed(decimals) + '%'
