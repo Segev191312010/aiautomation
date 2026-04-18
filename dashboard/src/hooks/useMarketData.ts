@@ -159,17 +159,23 @@ export function useMarketData(): void {
   // so new symbols appear with full data right away, not after the next tick.
 
   useEffect(() => {
+    let cancelled = false
     refreshQuotes() // immediate on watchlist change
     const scheduleNext = () => {
+      if (cancelled) return
       if (quoteTimer.current) clearTimeout(quoteTimer.current)
       const delay = wsMdService.connected ? QUOTE_INTERVAL_SLOW : QUOTE_INTERVAL_FAST
       quoteTimer.current = setTimeout(() => {
+        if (cancelled) return
         refreshQuotes()
         scheduleNext()
       }, delay)
     }
     scheduleNext()
-    return () => { if (quoteTimer.current) clearTimeout(quoteTimer.current) }
+    return () => {
+      cancelled = true
+      if (quoteTimer.current) clearTimeout(quoteTimer.current)
+    }
   }, [refreshQuotes])
 
   useEffect(() => {
