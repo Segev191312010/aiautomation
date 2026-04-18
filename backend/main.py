@@ -416,17 +416,18 @@ async def serve_react_app(path: str = ""):
 # WebSocket origin validation
 # ---------------------------------------------------------------------------
 
-_ALLOWED_WS_ORIGINS = {
-    "http://localhost:5173", "http://localhost:5174",
-    "http://localhost:8000",
-    "http://127.0.0.1:5173", "http://127.0.0.1:5174",
-    "http://127.0.0.1:8000",
-}
-
-
 def _check_ws_origin(ws: WebSocket) -> bool:
+    """Validate the WebSocket Origin header against the shared allowlist.
+
+    A missing Origin header is rejected by default (browsers always send it;
+    non-browser tools like Postman do not, but they should not drive the
+    live trading bot). Set WS_ALLOW_NO_ORIGIN=1 to bypass — intended for
+    local scripting against a same-origin dev server, never for production.
+    """
     origin = ws.headers.get("origin", "")
-    return origin in _ALLOWED_WS_ORIGINS
+    if not origin:
+        return os.getenv("WS_ALLOW_NO_ORIGIN", "").lower() in {"1", "true", "yes"}
+    return origin in set(_allowed_origins())
 
 
 def _validate_ws_token(ws: WebSocket) -> str | None:

@@ -57,10 +57,25 @@ def test_check_ws_origin_blocked():
     assert _check_ws_origin(ws) is False
 
 
-def test_check_ws_origin_no_header_rejected():
-    """Non-browser clients (no origin header) should now be rejected."""
+def test_check_ws_origin_no_header_rejected(monkeypatch):
+    """Non-browser clients (no origin header) are rejected by default."""
+    monkeypatch.delenv("WS_ALLOW_NO_ORIGIN", raising=False)
     ws = _FakeWS(headers={})
     assert _check_ws_origin(ws) is False
+
+
+def test_check_ws_origin_env_frontend_origin_is_honored(monkeypatch):
+    """FRONTEND_ORIGIN env entries are accepted by the WS origin check."""
+    monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.example.com")
+    ws = _FakeWS(headers={"origin": "https://app.example.com"})
+    assert _check_ws_origin(ws) is True
+
+
+def test_check_ws_origin_no_header_allowed_when_env_flag(monkeypatch):
+    """WS_ALLOW_NO_ORIGIN=1 opens the bypass for local scripting."""
+    monkeypatch.setenv("WS_ALLOW_NO_ORIGIN", "1")
+    ws = _FakeWS(headers={})
+    assert _check_ws_origin(ws) is True
 
 
 # ── HTTP route auth tests ────────────────────────────────────────────────────
