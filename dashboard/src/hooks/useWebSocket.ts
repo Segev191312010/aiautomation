@@ -78,7 +78,6 @@ export function useWebSocket(): void {
   const applyLiveQuote = useMarketStore((s) => s.applyLiveQuote)
   const setBotRunning  = useBotStore((s) => s.setBotRunning)
   const setIBKR        = useBotStore((s) => s.setIBKR)
-  const addTrade       = useAccountStore((s) => s.addTrade)
   const setPlayback    = useSimStore((s) => s.setPlayback)
   const pushReplayBar  = useSimStore((s) => s.pushReplayBar)
 
