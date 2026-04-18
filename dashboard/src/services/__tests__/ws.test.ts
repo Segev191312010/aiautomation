@@ -180,15 +180,21 @@ describe('WebSocketService (general)', () => {
     expect(sockets.length).toBe(1) // no new socket
   })
 
-  it('disconnect clears pending ping interval', async () => {
+  it('disconnect stops the ping cadence (no sends after close)', async () => {
     const { wsService } = await import('@/services/ws')
     wsService.connect('/ws')
     await vi.advanceTimersByTimeAsync(1)
 
+    // Let one ping fire so we know the interval was active
+    await vi.advanceTimersByTimeAsync(25_000)
+    const pingsBeforeDisconnect = sockets[0].sent.length
+    expect(pingsBeforeDisconnect).toBeGreaterThanOrEqual(1)
+
     wsService.disconnect()
-    // No new sends should happen even after the ping cadence window
-    await vi.advanceTimersByTimeAsync(60_000)
-    // Only the ping attempts before disconnect matter; readyState is CLOSED.
+
+    // Advance well past three more ping windows; no further sends must happen.
+    await vi.advanceTimersByTimeAsync(75_000)
+    expect(sockets[0].sent.length).toBe(pingsBeforeDisconnect)
     expect(sockets[0].readyState).toBe(MockWebSocket.CLOSED)
   })
 })

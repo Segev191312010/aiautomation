@@ -108,6 +108,15 @@ describe('calcEMA', () => {
     expect(out[0].value).toBe(100)
     approx(out[1].value, 103.3333)
   })
+
+  it('pinned values for EMA period=4 across [10,11,12,13,14,15,16]', () => {
+    // SMA(10..13)=11.5; k=2/5=0.4
+    // EMA[0]=11.5; EMA[1]=14*0.4+11.5*0.6=12.5; EMA[2]=15*0.4+12.5*0.6=13.5;
+    // EMA[3]=16*0.4+13.5*0.6=14.5
+    const bars = closesToBars([10, 11, 12, 13, 14, 15, 16])
+    const out = calcEMA(bars, 4)
+    expect(out.map((p) => p.value)).toEqual([11.5, 12.5, 13.5, 14.5])
+  })
 })
 
 // ── calcBB ────────────────────────────────────────────────────────────────────
@@ -214,6 +223,22 @@ describe('calcRSI', () => {
     const out = calcRSI(bars, 5)
     expect(out[out.length - 1].value).toBeLessThan(5)
   })
+
+  it('pinned first RSI value for [44.34, 44.09, 44.15, 43.61, 44.33, 44.83] period=5', () => {
+    // Classic Wilder example: diffs -0.25, 0.06, -0.54, 0.72, 0.50
+    // avgGain = (0.06+0.72+0.50)/5 = 0.256; avgLoss = (0.25+0.54)/5 = 0.158
+    // RS = 1.6202...; RSI = 100 - 100/(1+1.6202) ≈ 61.83
+    const bars = closesToBars([44.34, 44.09, 44.15, 43.61, 44.33, 44.83])
+    const out = calcRSI(bars, 5)
+    expect(out).toHaveLength(1)
+    approx(out[0].value, 61.83, 0.1)
+  })
+
+  it('first output time matches bars[period].time', () => {
+    const bars = closesToBars([1, 2, 3, 4, 5, 6, 7])
+    const out = calcRSI(bars, 5)
+    expect(out[0].time).toBe(bars[5].time)
+  })
 })
 
 // ── calcMACD ──────────────────────────────────────────────────────────────────
@@ -249,6 +274,21 @@ describe('calcMACD', () => {
     const bars = closesToBars(Array.from({ length: 60 }, (_, i) => 200 - i * 0.5))
     const out = calcMACD(bars, 12, 26, 9)
     expect(out.macd[out.macd.length - 1].value).toBeLessThan(0)
+  })
+
+  it('constant series produces zero MACD and zero histogram', () => {
+    const bars = closesToBars(new Array(40).fill(100))
+    const out = calcMACD(bars, 12, 26, 9)
+    for (const p of out.macd) approx(p.value, 0)
+    for (const p of out.histogram) approx(p.value, 0)
+  })
+
+  it('first MACD point times match slow-EMA first point', () => {
+    const bars = closesToBars(Array.from({ length: 40 }, (_, i) => 100 + i))
+    const out = calcMACD(bars, 12, 26, 9)
+    // Slow EMA starts at bar index 25. Fast EMA starts at 11. MACD = fast - slow,
+    // filtered to overlapping times — so first MACD time == bars[25].time.
+    expect(out.macd[0].time).toBe(bars[25].time)
   })
 })
 

@@ -111,6 +111,41 @@ describe('api client — token revocation + bearer handling', () => {
     expect(headers['Authorization']).toBeUndefined()
   })
 
+  it('does NOT resend a stale bearer token after a 401 has cleared it', async () => {
+    // Seed a token, make a successful request (resolves _bootstrapPromise
+    // under the hood for any future awaits), trigger a 401 that clears
+    // storage, then make another request and confirm no Authorization header.
+    localStorage.setItem(TOKEN_KEY, 'stale-jwt')
+
+    let nthCall = 0
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
+      nthCall += 1
+      if (nthCall === 1) return new Response('Unauthorized', { status: 401 })
+      return new Response('{}', { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { get } = await import('@/services/api/client')
+
+    await expect(get('/api/positions')).rejects.toThrow(/401/)
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
+
+    // Second request — token is gone. Race a short timeout so the test does
+    // not stall on the 5s bootstrap fallback.
+    const second = Promise.race([
+      get<unknown>('/api/positions').catch(() => 'errored'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 500)),
+    ])
+    // The key assertion: whichever branch wins, the second fetch call (if it
+    // happened) must NOT carry an Authorization header with the stale token.
+    await second
+    if (fetchMock.mock.calls.length >= 2) {
+      const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+      const headers = (init.headers ?? {}) as Record<string, string>
+      expect(headers['Authorization']).toBeUndefined()
+    }
+  })
+
   it('setAuthToken persists to localStorage; passing null removes it', async () => {
     const { setAuthToken, getAuthToken } = await import('@/services/api/client')
 
