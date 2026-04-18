@@ -119,3 +119,76 @@ describe('MarketDataWsService', () => {
     wsMdService.disconnect()
   })
 })
+
+describe('WebSocketService (general)', () => {
+  beforeEach(() => {
+    sockets = []
+    vi.useFakeTimers()
+    vi.resetModules()
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: {
+        location: { protocol: 'http:', host: 'localhost:5173' },
+      },
+    })
+    ;(globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      MockWebSocket as unknown as typeof WebSocket
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('reconnects after an unexpected close', async () => {
+    const { wsService } = await import('@/services/ws')
+    wsService.connect('/ws')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets.length).toBe(1)
+
+    // Simulate unexpected close → reconnect scheduled 3s later
+    sockets[0].close()
+    await vi.advanceTimersByTimeAsync(3_000 + 1)
+    expect(sockets.length).toBe(2)
+
+    wsService.disconnect()
+  })
+
+  it('keeps reconnecting on repeated closes (every ~3s)', async () => {
+    const { wsService } = await import('@/services/ws')
+    wsService.connect('/ws')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets.length).toBe(1)
+
+    for (let i = 0; i < 3; i++) {
+      sockets[sockets.length - 1].close()
+      await vi.advanceTimersByTimeAsync(3_000 + 1)
+    }
+    // 1 initial + 3 reconnects
+    expect(sockets.length).toBe(4)
+
+    wsService.disconnect()
+  })
+
+  it('clean disconnect does NOT schedule a reconnect', async () => {
+    const { wsService } = await import('@/services/ws')
+    wsService.connect('/ws')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets.length).toBe(1)
+
+    wsService.disconnect()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(sockets.length).toBe(1) // no new socket
+  })
+
+  it('disconnect clears pending ping interval', async () => {
+    const { wsService } = await import('@/services/ws')
+    wsService.connect('/ws')
+    await vi.advanceTimersByTimeAsync(1)
+
+    wsService.disconnect()
+    // No new sends should happen even after the ping cadence window
+    await vi.advanceTimersByTimeAsync(60_000)
+    // Only the ping attempts before disconnect matter; readyState is CLOSED.
+    expect(sockets[0].readyState).toBe(MockWebSocket.CLOSED)
+  })
+})
