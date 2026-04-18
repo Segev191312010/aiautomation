@@ -289,8 +289,10 @@ app.add_middleware(
 )
 app.add_middleware(SecurityHeadersMiddleware)
 
-# Allowed HTTP + WebSocket origins — dev defaults plus any FRONTEND_ORIGIN
-# (comma-separated) supplied via env. Shared with WS origin check below.
+# Allowed HTTP + WebSocket origins. Authoritative env is FRONTEND_ORIGIN
+# (comma-separated). Localhost dev origins are included only when no env
+# value is supplied — so hardened prod deployments that set FRONTEND_ORIGIN
+# do NOT automatically trust http://localhost. Shared with WS origin check.
 _DEV_ALLOWED_ORIGINS: frozenset[str] = frozenset({
     "http://localhost:5173", "http://localhost:5174",
     "http://localhost:8000",
@@ -302,7 +304,9 @@ _DEV_ALLOWED_ORIGINS: frozenset[str] = frozenset({
 def _allowed_origins() -> list[str]:
     env = os.getenv("FRONTEND_ORIGIN", "")
     extra = {o.strip() for o in env.split(",") if o.strip()}
-    return sorted(_DEV_ALLOWED_ORIGINS | extra)
+    # If FRONTEND_ORIGIN is set, env is authoritative (no dev defaults).
+    # If unset, fall back to localhost for zero-config dev.
+    return sorted(extra) if extra else sorted(_DEV_ALLOWED_ORIGINS)
 
 
 app.add_middleware(
@@ -311,8 +315,9 @@ app.add_middleware(
     allow_credentials=True,
     # Explicit method list. With credentials, browsers reject "*" anyway —
     # Starlette expands it internally, but being explicit removes ambiguity
-    # and makes the allowed surface reviewable.
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    # and makes the allowed surface reviewable. HEAD is included because
+    # FastAPI serves HEAD for every GET route.
+    allow_methods=["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 

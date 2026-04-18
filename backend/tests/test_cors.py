@@ -22,27 +22,27 @@ async def client():
         yield c
 
 
-def test_dev_origins_are_allowed_by_default():
+def test_dev_origins_are_allowed_when_env_unset(monkeypatch):
+    monkeypatch.delenv("FRONTEND_ORIGIN", raising=False)
     origins = set(_allowed_origins())
     assert "http://localhost:5173" in origins
     assert "http://localhost:5174" in origins
     assert "http://127.0.0.1:5173" in origins
 
 
-def test_env_origin_is_added(monkeypatch):
+def test_env_origin_replaces_dev_defaults(monkeypatch):
+    """FRONTEND_ORIGIN is authoritative when set — dev localhost is NOT trusted."""
     monkeypatch.setenv("FRONTEND_ORIGIN", "https://app.example.com,https://staging.example.com")
     origins = set(_allowed_origins())
-    assert "https://app.example.com" in origins
-    assert "https://staging.example.com" in origins
-    # dev origins still present
-    assert "http://localhost:5173" in origins
+    assert origins == {"https://app.example.com", "https://staging.example.com"}
+    assert "http://localhost:5173" not in origins
+    assert "http://127.0.0.1:5173" not in origins
 
 
 def test_env_origin_whitespace_tolerated(monkeypatch):
     monkeypatch.setenv("FRONTEND_ORIGIN", "  https://app.example.com , , https://b.example.com ")
     origins = set(_allowed_origins())
-    assert "https://app.example.com" in origins
-    assert "https://b.example.com" in origins
+    assert origins == {"https://app.example.com", "https://b.example.com"}
 
 
 @pytest.mark.asyncio
@@ -64,6 +64,8 @@ async def test_preflight_with_allowed_origin_returns_cors_headers(client):
     methods = resp.headers.get("access-control-allow-methods", "")
     assert "GET" in methods
     assert "POST" in methods
+    # HEAD must be present: FastAPI serves HEAD for every GET route
+    assert "HEAD" in methods
 
 
 @pytest.mark.asyncio
