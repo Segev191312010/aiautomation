@@ -22,8 +22,9 @@ import {
 import { wsMdService } from '@/services/ws'
 import { useMarketStore, useAccountStore, useBotStore } from '@/store'
 
-const QUOTE_INTERVAL   = 5_000   // full quote refresh (change_pct, vol, etc.)
-const ACCOUNT_INTERVAL = 10_000
+const QUOTE_INTERVAL_FAST = 5_000   // WS disconnected — poll aggressively
+const QUOTE_INTERVAL_SLOW = 30_000  // WS connected — live ticks cover freshness
+const ACCOUNT_INTERVAL    = 10_000
 
 export function useMarketData(): void {
   const watchlists        = useMarketStore((s) => s.watchlists)
@@ -39,7 +40,7 @@ export function useMarketData(): void {
   const setAccount        = useAccountStore((s) => s.setAccount)
   const setPositions      = useAccountStore((s) => s.setPositions)
 
-  const quoteTimer   = useRef<ReturnType<typeof setInterval> | null>(null)
+  const quoteTimer   = useRef<ReturnType<typeof setTimeout> | null>(null)
   const accountTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const isStockLike = (symbol: string): boolean => {
@@ -159,9 +160,16 @@ export function useMarketData(): void {
 
   useEffect(() => {
     refreshQuotes() // immediate on watchlist change
-    if (quoteTimer.current) clearInterval(quoteTimer.current)
-    quoteTimer.current = setInterval(refreshQuotes, QUOTE_INTERVAL)
-    return () => { if (quoteTimer.current) clearInterval(quoteTimer.current) }
+    const scheduleNext = () => {
+      if (quoteTimer.current) clearTimeout(quoteTimer.current)
+      const delay = wsMdService.connected ? QUOTE_INTERVAL_SLOW : QUOTE_INTERVAL_FAST
+      quoteTimer.current = setTimeout(() => {
+        refreshQuotes()
+        scheduleNext()
+      }, delay)
+    }
+    scheduleNext()
+    return () => { if (quoteTimer.current) clearTimeout(quoteTimer.current) }
   }, [refreshQuotes])
 
   useEffect(() => {

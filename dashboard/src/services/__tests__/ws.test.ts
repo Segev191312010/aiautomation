@@ -101,4 +101,21 @@ describe('MarketDataWsService', () => {
     await vi.advanceTimersByTimeAsync(36_000)
     expect(sockets[0].closeCount).toBeGreaterThan(0)
   })
+
+  it('connected getter tracks socket readyState transitions', async () => {
+    const { wsMdService } = await import('@/services/ws')
+
+    expect(wsMdService.connected).toBe(false)
+
+    wsMdService.subscribe('AAPL', () => {})
+    expect(wsMdService.connected).toBe(false) // still CONNECTING at this instant
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(wsMdService.connected).toBe(true)
+
+    sockets[0].close()
+    expect(wsMdService.connected).toBe(false)
+
+    wsMdService.disconnect()
+  })
 })
