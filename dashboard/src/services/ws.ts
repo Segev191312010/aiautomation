@@ -229,6 +229,10 @@ class MarketDataWsService {
     return Date.now() - this.lastMsgMs
   }
 
+  get connected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN
+  }
+
   private _send(data: Record<string, unknown>): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data))
