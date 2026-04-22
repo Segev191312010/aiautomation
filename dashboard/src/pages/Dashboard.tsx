@@ -17,8 +17,9 @@ import KPICard from '@/components/tradebot/KPICard'
 import { SkeletonCard } from '@/components/ui/Skeleton'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import { useDiagnostics } from '@/hooks/useDiagnostics'
-import { useMarketStore, useAccountStore, useBotStore, useDiagnosticsStore, useUIStore } from '@/store'
+import { useMarketStore, useAccountStore, useBotStore, useDiagnosticsStore } from '@/store'
 import { fmtUSD } from '@/utils/formatters'
+import { navigateToRoute } from '@/utils/routes'
 import type { AccountSummary, SimAccountState } from '@/types'
 
 function isSimAccount(account: AccountSummary | SimAccountState): account is SimAccountState {
@@ -149,7 +150,6 @@ function DiagnosticsChip({
 export default function Dashboard() {
   useDiagnostics()
 
-  const setRoute = useUIStore((s) => s.setRoute)
   const selectedSymbol = useMarketStore((s) => s.selectedSymbol)
   const selectedQuote = useMarketStore((s) => s.quotes[selectedSymbol])
   const compMode = useMarketStore((s) => s.compMode)
@@ -234,21 +234,21 @@ export default function Dashboard() {
               <div className="mt-5 flex flex-wrap gap-3">
                 <button
                   type="button"
-                  onClick={() => setRoute('market')}
+                  onClick={() => navigateToRoute('market')}
                   className="rounded-2xl bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--accent-hover)]"
                 >
                   Open market workspace
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRoute('stock')}
+                  onClick={() => navigateToRoute('stock')}
                   className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
                 >
                   Open stock analysis
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRoute('screener')}
+                  onClick={() => navigateToRoute('screener')}
                   className="rounded-2xl border border-[var(--border)] bg-transparent px-4 py-3 text-sm font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
                 >
                   Run screener
@@ -297,10 +297,10 @@ export default function Dashboard() {
                 description="Shortest path into the next tool, depending on whether you are trading, researching, or validating."
               />
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <ActionCard eyebrow="Execution" title="TradeBot" description="Review positions, recent trades, and automation state." onClick={() => setRoute('tradebot')} />
-                <ActionCard eyebrow="Research" title="Stock Profile" description="Jump from the active ticker into company detail and context." onClick={() => setRoute('stock')} />
-                <ActionCard eyebrow="Discovery" title="Screener" description="Scan broad universes and route winners straight into charts." onClick={() => setRoute('screener')} />
-                <ActionCard eyebrow="Autonomy" title="Autopilot" description="Inspect AI decisions, guardrails, and intervention queues." onClick={() => setRoute('advisor')} active />
+                <ActionCard eyebrow="Execution" title="TradeBot" description="Review positions, recent trades, and automation state." onClick={() => navigateToRoute('tradebot')} />
+                <ActionCard eyebrow="Research" title="Stock Profile" description="Jump from the active ticker into company detail and context." onClick={() => navigateToRoute('stock')} />
+                <ActionCard eyebrow="Discovery" title="Screener" description="Scan broad universes and route winners straight into charts." onClick={() => navigateToRoute('screener')} />
+                <ActionCard eyebrow="Autonomy" title="Autopilot" description="Inspect AI decisions, guardrails, and intervention queues." onClick={() => navigateToRoute('advisor')} active />
               </div>
             </div>
           </ErrorBoundary>
@@ -344,7 +344,7 @@ export default function Dashboard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRoute('market')}
+                  onClick={() => navigateToRoute('market')}
                   className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-2 text-sm font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
                 >
                   Full workspace

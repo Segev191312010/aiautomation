@@ -12,7 +12,8 @@ import { TvHeatmap } from '@/components/rotation/TvHeatmap'
 import { useLiveSectorPrices } from '@/components/rotation/useLiveSectorPrices'
 import { Q_COLORS, Q_LABEL, ROTATION_ARROWS, type Quadrant } from '@/components/rotation/constants'
 import { useRotationData } from '@/hooks/useRotationData'
-import { useMarketStore, useStockProfileStore, useUIStore } from '@/store'
+import { useMarketStore, useStockProfileStore } from '@/store'
+import { navigateToRoute } from '@/utils/routes'
 
 function SignalCard({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'success' | 'warning' }) {
   const toneClass =
@@ -43,7 +44,6 @@ function SkeletonCard({ className }: { className?: string }) {
 }
 
 export default function MarketRotationPage() {
-  const setRoute = useUIStore((state) => state.setRoute)
   const setProfileSymbol = useStockProfileStore((state) => state.setSymbol)
   const setSelectedSymbol = useMarketStore((state) => state.setSelectedSymbol)
   const { rotation, heatmap, loading, error, lastUpdate, refresh } = useRotationData(90)
@@ -54,8 +54,8 @@ export default function MarketRotationPage() {
   const handleNavigateToStock = useCallback((symbol: string) => {
     setSelectedSymbol(symbol)
     setProfileSymbol(symbol)
-    setRoute('stock')
-  }, [setRoute, setProfileSymbol, setSelectedSymbol])
+    navigateToRoute('stock')
+  }, [setProfileSymbol, setSelectedSymbol])
 
   const rotationMap = useMemo(() => new Map(rotation.map((sector) => [sector.symbol, sector])), [rotation])
   const sortedByMomentum = useMemo(() => [...rotation].sort((a, b) => b.rs_momentum - a.rs_momentum), [rotation])

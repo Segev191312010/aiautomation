@@ -315,6 +315,7 @@ export interface SystemStatus {
   next_run?: string
   bot_interval_seconds: number
   autopilot_mode?: 'OFF' | 'PAPER' | 'LIVE'
+  live_trading_enabled?: boolean
   autopilot_emergency_stop?: boolean
   autopilot_daily_loss_locked?: boolean
   features?: {
@@ -495,7 +496,107 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'charts' | 'rotation' | 'screener' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics' | 'advisor'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'charts' | 'rotation' | 'screener' | 'swing' | 'simulation' | 'backtest' | 'rules' | 'alerts' | 'settings' | 'stock' | 'analytics' | 'advisor'
+
+// ── Swing Screener Dashboard types ───────────────────────────────────────────
+
+export interface BreadthRow {
+  label:        string
+  nasdaq100:    number
+  sp500:        number
+  composite:    number
+  billion_plus: number
+}
+
+export interface BreadthMetrics {
+  rows:      BreadthRow[]
+  timestamp: string
+}
+
+export type GuruScreenerName = 'qullamaggie' | 'minervini' | 'oneil'
+
+export interface GuruScreenerResult {
+  symbol:      string
+  price:       number
+  change_pct:  number
+  volume:      number
+  rs_rank:     number
+  vcs?:        number
+  setup_notes: string[]
+}
+
+export interface ATRMatrixRow {
+  symbol:              string
+  name:                string
+  atr_pct:             number
+  price_vs_21ema_atr:  number
+  close:               number
+  atr_14:              number
+}
+
+export interface Club97Entry {
+  symbol:          string
+  price:           number
+  rs_day_pctile:   number
+  rs_week_pctile:  number
+  rs_month_pctile: number
+  is_tml:          boolean
+}
+
+export type StockbeeScanName = '9m_movers' | 'weekly_20pct' | 'daily_4pct'
+
+export interface StockbeeMover {
+  symbol:      string
+  price:       number
+  change_pct:  number
+  volume:      number
+  avg_volume:  number
+  market_cap?: number
+}
+
+export interface IndustryGroup {
+  industry:          string
+  stock_count:       number
+  avg_weekly_return: number
+  avg_monthly_return: number
+  rs_vs_spy:         number
+  top_stocks:        string[]
+}
+
+export interface StageDistribution {
+  stage_1:         number
+  stage_2:         number
+  stage_3:         number
+  stage_4:         number
+  stage_1_symbols: string[]
+  stage_2_symbols: string[]
+  stage_3_symbols: string[]
+  stage_4_symbols: string[]
+}
+
+export interface TrendGradeEntry {
+  symbol:       string
+  price:        number
+  change_pct:   number
+  grade:        string
+  rs_composite: number
+}
+
+export interface TrendGradeDistribution {
+  grades:     Record<string, number>
+  top_graded: TrendGradeEntry[]
+}
+
+export interface SwingDashboard {
+  breadth:      BreadthMetrics | null
+  guru_results: Record<GuruScreenerName, GuruScreenerResult[]>
+  atr_matrix:   ATRMatrixRow[]
+  club97:       Club97Entry[]
+  stockbee:     Record<StockbeeScanName, StockbeeMover[]>
+  industries:   IndustryGroup[]
+  stages:       StageDistribution | null
+  grades:       TrendGradeDistribution | null
+}
 
 // ── Chart types ─────────────────────────────────────────────────────────────
 

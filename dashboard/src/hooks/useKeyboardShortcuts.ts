@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react'
-import { useUIStore, useMarketStore } from '@/store'
+import { useUIStore } from '@/store'
 import type { AppRoute } from '@/types'
+import { navigateToRoute } from '@/utils/routes'
 
 // ── Route shortcuts: Ctrl+1 … Ctrl+9 ────────────────────────────────────────
 
@@ -57,7 +58,6 @@ interface Options {
 }
 
 export function useKeyboardShortcuts({ disabled = false }: Options = {}) {
-  const setRoute   = useUIStore((s) => s.setRoute)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const closeOrderModal = useUIStore((s) => s.closeOrderModal)
 
@@ -84,7 +84,7 @@ export function useKeyboardShortcuts({ disabled = false }: Options = {}) {
     // Ctrl+1-9 — navigate routes
     if (e.ctrlKey && DIGIT_ROUTES[e.key]) {
       e.preventDefault()
-      setRoute(DIGIT_ROUTES[e.key])
+      navigateToRoute(DIGIT_ROUTES[e.key])
       return
     }
 
@@ -102,7 +102,7 @@ export function useKeyboardShortcuts({ disabled = false }: Options = {}) {
       closeOrderModal()
       return
     }
-  }, [disabled, setRoute, toggleSidebar, closeOrderModal])
+  }, [disabled, toggleSidebar, closeOrderModal])
 
   useEffect(() => {
     window.addEventListener('keydown', handle)

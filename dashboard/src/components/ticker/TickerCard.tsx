@@ -7,7 +7,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import type { MarketQuote } from '@/types'
-import { useMarketStore, useUIStore } from '@/store'
+import { useMarketStore } from '@/store'
+import { navigateToRoute } from '@/utils/routes'
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,6 @@ export default function TickerCard({ quote, compact = false }: Props) {
       : '--'
 
   const setSelectedSymbol = useMarketStore((s) => s.setSelectedSymbol)
-  const setRoute          = useUIStore((s) => s.setRoute)
 
   // Flash animation on price change
   const prevPrice = useRef(price)
@@ -68,7 +68,7 @@ export default function TickerCard({ quote, compact = false }: Props) {
 
   const handleClick = () => {
     setSelectedSymbol(symbol)
-    setRoute('market')
+    navigateToRoute('market')
   }
 
   return (
@@ -183,7 +183,7 @@ export default function TickerCard({ quote, compact = false }: Props) {
           onClick={(e) => {
             e.stopPropagation()
             setSelectedSymbol(symbol)
-            setRoute('stock')
+            navigateToRoute('stock')
           }}
           className="mt-2 text-center text-[11px] font-mono text-zinc-500 hover:text-zinc-50 border border-[#E8E4DF] rounded py-1 transition-colors cursor-pointer"
         >

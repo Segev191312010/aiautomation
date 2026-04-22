@@ -3,7 +3,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 
 // ── Store mock ────────────────────────────────────────────────────────────────
-const mockSetRoute = vi.fn()
+const { mockNavigateToRoute } = vi.hoisted(() => ({
+  mockNavigateToRoute: vi.fn(),
+}))
 const mockToggleCompMode = vi.fn()
 const mockSetCompSymbol = vi.fn()
 
@@ -61,10 +63,10 @@ vi.mock('@/store', () => ({
       setEnabled: vi.fn(),
       pollRefreshRun: vi.fn(),
     }),
-  useUIStore: (sel: (s: object) => unknown) =>
-    sel({
-      setRoute: mockSetRoute,
-    }),
+}))
+
+vi.mock('@/utils/routes', () => ({
+  navigateToRoute: mockNavigateToRoute,
 }))
 
 // ── Hook mock ─────────────────────────────────────────────────────────────────
@@ -148,13 +150,13 @@ describe('Dashboard', () => {
   it('navigates to market workspace when button is clicked', () => {
     render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: /open market workspace/i }))
-    expect(mockSetRoute).toHaveBeenCalledWith('market')
+    expect(mockNavigateToRoute).toHaveBeenCalledWith('market')
   })
 
   it('navigates to screener when Run screener is clicked', () => {
     render(<Dashboard />)
     fireEvent.click(screen.getByRole('button', { name: /run screener/i }))
-    expect(mockSetRoute).toHaveBeenCalledWith('screener')
+    expect(mockNavigateToRoute).toHaveBeenCalledWith('screener')
   })
 
   it('renders the live chart section heading', () => {

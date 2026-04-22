@@ -9,6 +9,7 @@ import { useAccountStore, useBotStore, useSimStore, useUIStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, fetchAccountSummary, fetchPositions } from '@/services/api'
 import type { AccountSummary } from '@/types'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
+import { navigateToRoute } from '@/utils/routes'
 
 function HeroSignal({
   label,
@@ -42,7 +43,6 @@ export default function TradeBotPage() {
 
   const tradebotTab = useUIStore((s) => s.tradebotTab)
   const setTradebotTab = useUIStore((s) => s.setTradebotTab)
-  const setRoute = useUIStore((s) => s.setRoute)
 
   useEffect(() => {
     if (tradebotTab !== 'positions' && tradebotTab !== 'activity') {
@@ -222,14 +222,14 @@ export default function TradeBotPage() {
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => setRoute('advisor')}
+                  onClick={() => navigateToRoute('advisor')}
                   className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-2 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
                 >
                   Open Autopilot
                 </button>
                 <button
                   type="button"
-                  onClick={() => setRoute('rules')}
+                  onClick={() => navigateToRoute('rules')}
                   className="rounded-2xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-2 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)]"
                 >
                   Open Rule Lab

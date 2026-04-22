@@ -1,7 +1,8 @@
 import React, { useMemo, useState, useCallback } from 'react'
 import clsx from 'clsx'
-import { useMarketStore, useScreenerStore, useStockProfileStore, useUIStore } from '@/store'
+import { useMarketStore, useScreenerStore, useStockProfileStore } from '@/store'
 import type { ScanResultRow } from '@/types'
+import { navigateToRoute } from '@/utils/routes'
 
 type SortKey =
   | 'symbol'
@@ -320,7 +321,6 @@ function SortHeader({
 
 export default function ScanResultsTable() {
   const { results, enriched, skippedSymbols, elapsedMs, totalSymbols } = useScreenerStore()
-  const setRoute = useUIStore((s) => s.setRoute)
   const setSelectedSymbol = useMarketStore((s) => s.setSelectedSymbol)
   const setProfileSymbol = useStockProfileStore((s) => s.setSymbol)
 
@@ -430,13 +430,13 @@ export default function ScanResultsTable() {
 
   const openMarket = (row: ScanResultRow) => {
     setSelectedSymbol(row.symbol)
-    setRoute('market')
+    navigateToRoute('market')
   }
 
   const openAnalysis = (row: ScanResultRow) => {
     setSelectedSymbol(row.symbol)
     setProfileSymbol(row.symbol)
-    setRoute('stock')
+    navigateToRoute('stock')
   }
 
   const handleExportCSV = () => {

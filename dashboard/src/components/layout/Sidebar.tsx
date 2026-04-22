@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import clsx from 'clsx'
 import { useUIStore, useMarketStore, useBotStore, useStockProfileStore } from '@/store'
 import type { AppRoute } from '@/types'
+import { getRouteFromPath, navigateToRoute } from '@/utils/routes'
 
 type IconComponent = ({ className }: { className?: string }) => React.ReactElement
 
@@ -97,6 +99,13 @@ const IconRobot: IconComponent = ({ className }) => (
   </svg>
 )
 
+const IconSwing: IconComponent = ({ className }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+    <path d="M3 17l4-4 4 4 4-8 4 4 2-2" />
+    <path d="M18 9h3v3" />
+  </svg>
+)
+
 const IconSpark: IconComponent = ({ className }) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
     <path d="m13 2-1.7 5.1L6 9l5.3 1.9L13 16l1.7-5.1L20 9l-5.3-1.9L13 2Z" />
@@ -134,6 +143,7 @@ const NAV_GROUPS: NavGroup[] = [
       { route: 'charts', label: 'Charts', icon: IconWave },
       { route: 'rotation', label: 'Rotation', icon: IconRotation },
       { route: 'screener', label: 'Screener', icon: IconSearch },
+      { route: 'swing', label: 'Swing Screener', icon: IconSwing },
       { route: 'stock', label: 'Stock', icon: IconBuilding },
     ],
   },
@@ -181,10 +191,9 @@ function Chevron({ open }: { open: boolean }) {
 }
 
 export default function Sidebar() {
+  const location = useLocation()
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
-  const activeRoute = useUIStore((s) => s.activeRoute)
-  const setRoute = useUIStore((s) => s.setRoute)
   const quotes = useMarketStore((s) => s.quotes)
   const watchlists = useMarketStore((s) => s.watchlists)
   const activeWatchlist = useMarketStore((s) => s.activeWatchlist)
@@ -193,6 +202,7 @@ export default function Sidebar() {
   const setProfileSymbol = useStockProfileStore((s) => s.setSymbol)
   const ibkrConnected = useBotStore((s) => s.ibkrConnected)
   const botRunning = useBotStore((s) => s.botRunning)
+  const activeRoute = getRouteFromPath(location.pathname)
 
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => {
     const activeGroup = findGroupForRoute(activeRoute)
@@ -225,14 +235,14 @@ export default function Sidebar() {
   }
 
   const handleRoute = (route: AppRoute, groupId: string) => {
-    setRoute(route)
+    navigateToRoute(route)
     setOpenGroups((previous) => (previous.has(groupId) ? previous : new Set([...previous, groupId])))
   }
 
   const jumpTo = (route: 'market' | 'stock', symbol: string) => {
     setSelectedSymbol(symbol)
     setProfileSymbol(symbol)
-    setRoute(route)
+    navigateToRoute(route)
   }
 
   return (
@@ -327,6 +337,7 @@ export default function Sidebar() {
                             key={child.route}
                             type="button"
                             onClick={() => handleRoute(child.route, group.id)}
+                            aria-current={active ? 'page' : undefined}
                             className={clsx(
                               'flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-all',
                               active
@@ -355,7 +366,8 @@ export default function Sidebar() {
                   key={route.route}
                   type="button"
                   title={route.label}
-                  onClick={() => setRoute(route.route)}
+                  onClick={() => navigateToRoute(route.route)}
+                  aria-current={active ? 'page' : undefined}
                   className={clsx(
                     'flex h-12 w-full items-center justify-center rounded-2xl border transition-all',
                     active

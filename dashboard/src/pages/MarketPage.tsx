@@ -12,10 +12,11 @@ import Skeleton from '@/components/ui/Skeleton'
 import AlertForm from '@/components/alerts/AlertForm'
 import { useToast } from '@/components/ui/ToastProvider'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
-import { useMarketStore, useDrawingStore, useUIStore, useBotStore } from '@/store'
+import { useMarketStore, useDrawingStore, useBotStore } from '@/store'
 import { fetchYahooBars, fetchIBKRBars, fetchSettings } from '@/services/api'
 import { calcRSI, calcMACD } from '@/utils/indicators'
 import { useCrosshairSync, type ChartPane } from '@/hooks/useCrosshairSync'
+import { navigateToRoute } from '@/utils/routes'
 
 const AUTO_REFRESH_MS: Record<string, number> = {
   '1m': 10_000,
@@ -54,7 +55,6 @@ function MarketSignalCard({
 
 export default function MarketPage() {
   const toast = useToast()
-  const setRoute = useUIStore((s) => s.setRoute)
   const ibkrConnected = useBotStore((s) => s.ibkrConnected)
   const {
     selectedSymbol,
@@ -632,7 +632,7 @@ export default function MarketPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setRoute('stock')}
+                onClick={() => navigateToRoute('stock')}
                 className="text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:text-[var(--accent)]"
               >
                 Open full stock analysis

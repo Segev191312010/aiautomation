@@ -21,6 +21,8 @@ interface BotState {
   ibkrConnected: boolean
   simMode:       boolean
   botRunning:    boolean
+  autopilotMode: SystemStatus['autopilot_mode']
+  liveTradingEnabled: boolean | null
   cycleStats:    BotCycleStats
 
   setStatus:     (s: SystemStatus) => void
@@ -39,6 +41,8 @@ export const useBotStore = create<BotState>((set) => ({
   ibkrConnected: false,
   simMode:       false,
   botRunning:    false,
+  autopilotMode: undefined,
+  liveTradingEnabled: null,
   cycleStats:    { rulesEnabled: 0, rulesChecked: 0, symbolsScanned: 0, signals: 0, lastRun: null, nextRun: null },
 
   setStatus: (s) =>
@@ -47,6 +51,8 @@ export const useBotStore = create<BotState>((set) => ({
       ibkrConnected: s.ibkr_connected,
       simMode:       s.sim_mode,
       botRunning:    s.bot_running,
+      autopilotMode: s.autopilot_mode,
+      liveTradingEnabled: typeof s.live_trading_enabled === 'boolean' ? s.live_trading_enabled : null,
     }),
   setBotStatus:  (s) => set({ botStatus: s, botRunning: s.running }),
   setRules:      (r) => set({ rules: r }),

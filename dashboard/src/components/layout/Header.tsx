@@ -1,12 +1,15 @@
 import React from 'react'
+import { useLocation } from 'react-router-dom'
 import clsx from 'clsx'
 import { useBotStore, useMarketStore, useStockProfileStore, useUIStore } from '@/store'
 import { connectIBKR, startBot, stopBot } from '@/services/api'
 import AlertBell from '@/components/alerts/AlertBell'
 import { SHORTCUT_FOCUS_SEARCH } from '@/hooks/useKeyboardShortcuts'
 import type { ThemePreference } from '@/store'
+import type { AppRoute } from '@/types'
+import { getRouteFromPath, navigateToRoute } from '@/utils/routes'
 
-const PAGE_META: Record<string, { eyebrow: string; title: string; description: string }> = {
+const PAGE_META: Record<AppRoute, { eyebrow: string; title: string; description: string }> = {
   dashboard: {
     eyebrow: 'Control Room',
     title: 'Desk Overview',
@@ -36,6 +39,11 @@ const PAGE_META: Record<string, { eyebrow: string; title: string; description: s
     eyebrow: 'Discovery',
     title: 'Screener Lab',
     description: 'Run broad scans, compare opportunities, and move straight into chart or profile flows.',
+  },
+  swing: {
+    eyebrow: 'Discovery',
+    title: 'Swing Screener',
+    description: 'Market metrics, guru-inspired scans, and breadth analysis for swing trade setups.',
   },
   stock: {
     eyebrow: 'Research',
@@ -128,13 +136,15 @@ function ThemeGlyph({ theme }: { theme: ThemePreference }) {
 }
 
 export default function Header() {
-  const { activeRoute, setRoute, theme, setTheme } = useUIStore()
+  const location = useLocation()
+  const { theme, setTheme } = useUIStore()
   const { ibkrConnected, botRunning, simMode, setBotRunning, setIBKR } = useBotStore()
   const selectedSymbol = useMarketStore((s) => s.selectedSymbol)
   const selectedQuote = useMarketStore((s) => s.quotes[selectedSymbol])
   const setSelectedSymbol = useMarketStore((s) => s.setSelectedSymbol)
   const setProfileSymbol = useStockProfileStore((s) => s.setSymbol)
   const [searchInput, setSearchInput] = React.useState(selectedSymbol)
+  const activeRoute = getRouteFromPath(location.pathname)
   const searchRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
@@ -157,8 +167,8 @@ export default function Header() {
     if (!symbol) return
     setSelectedSymbol(symbol)
     setProfileSymbol(symbol)
-    setRoute(route)
-  }, [searchInput, setProfileSymbol, setRoute, setSelectedSymbol])
+    navigateToRoute(route)
+  }, [searchInput, setProfileSymbol, setSelectedSymbol])
 
   const handleConnectIBKR = async () => {
     try {
@@ -320,12 +330,12 @@ export default function Header() {
                 Open profile
               </button>
 
-              <button
-                type="button"
-                onClick={() => setRoute('dashboard')}
-                className="rounded-2xl border border-[var(--border)] bg-transparent px-4 py-3 text-sm font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
-              >
-                Command view
+                <button
+                  type="button"
+                  onClick={() => navigateToRoute('dashboard')}
+                  className="rounded-2xl border border-[var(--border)] bg-transparent px-4 py-3 text-sm font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--text-primary)]"
+                >
+                  Command view
               </button>
             </form>
           </div>
