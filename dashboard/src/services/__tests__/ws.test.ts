@@ -15,8 +15,12 @@ class MockWebSocket {
   onmessage: ((ev: MessageEvent) => void) | null = null
   sent: string[] = []
   closeCount = 0
+  url: string
+  protocols: string[] | string | undefined
 
-  constructor(_url: string) {
+  constructor(url: string, protocols?: string | string[]) {
+    this.url = url
+    this.protocols = protocols
     sockets.push(this)
     setTimeout(() => {
       this.readyState = MockWebSocket.OPEN

@@ -1,4 +1,6 @@
 """Stage 9 end-to-end consistency tests — golden-path validation of the trade truth layer."""
+from datetime import datetime, timedelta, timezone
+
 import pytest
 import aiosqlite
 
@@ -21,6 +23,17 @@ from autopilot_api import promote_autopilot_rule, PromoteRuleRequest
 from performance_ledger import compute_source_performance
 from trade_utils import get_trade_realized_pnl
 import config
+
+
+def _recent_iso(days_ago: int, hour: int = 10) -> str:
+    """Return an ISO timestamp ``days_ago`` days in the past, UTC, at ``hour:00``.
+
+    The performance ledger uses a rolling 30-day window anchored at
+    ``datetime.now(timezone.utc)``, so tests that want their trades visible
+    in that window must use dates relative to now, not fixed strings.
+    """
+    base = datetime.now(timezone.utc).replace(hour=hour, minute=0, second=0, microsecond=0)
+    return (base - timedelta(days=days_ago)).isoformat()
 
 
 @pytest.fixture
@@ -48,6 +61,8 @@ def _make_rule(**overrides) -> Rule:
 
 
 def _make_entry_trade(rule: Rule, idx: int) -> Trade:
+    # Keep all entries inside the 30-day performance window, spaced one day apart.
+    ts = _recent_iso(days_ago=20 - idx, hour=10)
     return Trade(
         rule_id=rule.id,
         rule_name=rule.name,
@@ -59,10 +74,10 @@ def _make_entry_trade(rule: Rule, idx: int) -> Trade:
         limit_price=None,
         fill_price=150.0 + idx,
         status="FILLED",
-        timestamp=f"2026-03-{10 + idx:02d}T10:00:00+00:00",
+        timestamp=ts,
         source="rule",
         mode="PAPER",
-        opened_at=f"2026-03-{10 + idx:02d}T10:00:00+00:00",
+        opened_at=ts,
         entry_price=150.0 + idx,
     )
 
@@ -79,7 +94,7 @@ def _make_exit_trade(rule: Rule, entry_trade: Trade, idx: int) -> Trade:
         limit_price=None,
         fill_price=155.0 + idx,
         status="FILLED",
-        timestamp=f"2026-03-{10 + idx:02d}T14:00:00+00:00",
+        timestamp=_recent_iso(days_ago=20 - idx, hour=14),
         source="rule",
         mode="PAPER",
         position_id=entry_trade.id,
@@ -219,13 +234,15 @@ async def test_performance_matches_canonical_pnl(_isolated_db, anyio_backend):
     """Performance reader returns the exact realized P&L from finalized trades."""
     await init_db()
 
+    entry_ts = _recent_iso(days_ago=5, hour=10)
+    exit_ts = _recent_iso(days_ago=5, hour=14)
     # Create a finalized exit trade
     entry = Trade(
         rule_id="perf-rule", rule_name="Perf Rule", symbol="MSFT",
         action="BUY", asset_type="STK", quantity=5, order_type="MKT",
         limit_price=None, fill_price=380.0, status="FILLED",
-        timestamp="2026-03-20T10:00:00+00:00", source="rule",
-        mode="PAPER", opened_at="2026-03-20T10:00:00+00:00",
+        timestamp=entry_ts, source="rule",
+        mode="PAPER", opened_at=entry_ts,
         entry_price=380.0,
     )
     entry.position_id = entry.id
@@ -235,7 +252,7 @@ async def test_performance_matches_canonical_pnl(_isolated_db, anyio_backend):
         rule_id="perf-rule", rule_name="EXIT:Perf Rule", symbol="MSFT",
         action="SELL", asset_type="STK", quantity=5, order_type="MKT",
         limit_price=None, fill_price=400.0, status="FILLED",
-        timestamp="2026-03-20T14:00:00+00:00", source="rule",
+        timestamp=exit_ts, source="rule",
         mode="PAPER", position_id=entry.id,
     )
     await save_trade(exit_trade)

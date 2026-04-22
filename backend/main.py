@@ -221,18 +221,46 @@ async def lifespan(app: FastAPI):
     await _start_market_heartbeat()
     await alert_engine.start()
 
-    # Sync autopilot mode from DB → cfg on startup (C-4/H-1 FIX)
+    # Sync autopilot mode from DB → cfg on startup (C-4/H-1 FIX).
+    # The DB value overrides the env-derived cfg, so re-run the matrix
+    # validator here: startup.py's first pass only sees the env-derived mode.
+    # Without this gate a stale DB mode could re-enable LIVE authority on a
+    # process that just booted with a default JWT_SECRET.
     try:
         from ai_guardrails import _load_guardrails_from_db
+        from startup import validate_autopilot_matrix
         db_config = await _load_guardrails_from_db()
         mode = db_config.autopilot_mode
         if mode in ("OFF", "PAPER", "LIVE"):
-            cfg.AUTOPILOT_MODE = mode
-            cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
-            cfg.AI_SHADOW_MODE = mode == "OFF"
-            from ai_params import ai_params
-            ai_params.shadow_mode = mode == "OFF"
-            log.info("Autopilot mode synced from DB: %s", mode)
+            matrix_errors = validate_autopilot_matrix(
+                mode=mode,
+                is_paper=cfg.IS_PAPER,
+                sim_mode=cfg.SIM_MODE,
+                jwt_secret=cfg.JWT_SECRET,
+                jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+            )
+            if matrix_errors:
+                # Refuse to apply the DB mode. Force OFF and keep the
+                # broker envs unchanged so the operator sees the mismatch.
+                for err in matrix_errors:
+                    log.error("SECURITY: DB autopilot mode rejected — %s", err)
+                cfg.AUTOPILOT_MODE = "OFF"
+                cfg.AI_AUTONOMY_ENABLED = False
+                cfg.AI_SHADOW_MODE = True
+                from ai_params import ai_params
+                ai_params.shadow_mode = True
+                log.error(
+                    "SECURITY: DB requested autopilot mode=%s but matrix check failed. "
+                    "Forcing AUTOPILOT_MODE=OFF. Fix .env/DB and restart.",
+                    mode,
+                )
+            else:
+                cfg.AUTOPILOT_MODE = mode
+                cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
+                cfg.AI_SHADOW_MODE = mode == "OFF"
+                from ai_params import ai_params
+                ai_params.shadow_mode = mode == "OFF"
+                log.info("Autopilot mode synced from DB: %s", mode)
     except Exception as e:
         log.warning("Failed to sync autopilot mode from DB: %s", e)
 
@@ -436,12 +464,22 @@ def _check_ws_origin(ws: WebSocket) -> bool:
 
 
 def _validate_ws_token(ws: WebSocket) -> str | None:
-    """Extract and validate JWT from query param ?token=..."""
-    token = ws.query_params.get("token")
-    if not token:
+    """Extract and validate JWT from the Sec-WebSocket-Protocol header.
+
+    Browsers cannot set arbitrary headers on a WebSocket handshake, but they
+    can set the Sec-WebSocket-Protocol subprotocol list. The frontend sends
+    ``['bearer', <token>]``; we pick the non-"bearer" entry as the token.
+    This keeps the JWT out of URLs, access logs, and browser history.
+    """
+    raw = ws.headers.get("sec-websocket-protocol", "")
+    if not raw:
+        return None
+    protocols = [p.strip() for p in raw.split(",") if p.strip()]
+    token_candidates = [p for p in protocols if p.lower() != "bearer"]
+    if not token_candidates:
         return None
     from auth import verify_token
-    return verify_token(token)
+    return verify_token(token_candidates[0])
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +497,8 @@ async def ws_general(ws: WebSocket):
         await ws.accept()
         await ws.close(code=4003, reason="Origin not allowed")
         return
-    await manager.connect(ws)
+    # Echo the "bearer" subprotocol so the browser completes the handshake.
+    await manager.connect(ws, subprotocol="bearer")
     try:
         while True:
             data = await ws.receive_text()
@@ -831,7 +870,7 @@ async def ws_market_data(ws: WebSocket):
         await ws.accept()
         await ws.close(code=4003, reason="Origin not allowed")
         return
-    await ws.accept()
+    await ws.accept(subprotocol="bearer")
     subscribed: set[str] = set()
     push_task: asyncio.Task | None = None
 

@@ -10,6 +10,10 @@ Behavior
 - Errors    : logged; if ``cfg.STRICT_CONFIG`` is ``True`` the process exits
               with code 1 so the container/supervisor restarts with a clear
               reason in the log.
+
+``validate_autopilot_matrix`` is also exported so runtime mode changes
+(e.g. DB-sync after startup, or operator mode flips) can enforce the same
+invariants on the new mode without re-running the whole startup path.
 """
 from __future__ import annotations
 
@@ -25,6 +29,68 @@ DEFAULT_DEV_JWT_SECRET = "trading-dev-secret-MUST-SET-IN-ENV"
 class StartupResult(TypedDict):
     errors: list[str]
     warnings: list[str]
+
+
+def validate_autopilot_matrix(
+    *,
+    mode: str,
+    is_paper: bool,
+    sim_mode: bool,
+    jwt_secret: str,
+    jwt_bootstrap_secret: str | None,
+) -> list[str]:
+    """Check AUTOPILOT_MODE × IS_PAPER × SIM_MODE × auth for safe combinations.
+
+    Returns a list of human-readable error strings; empty list == safe.
+    Callable both from initial startup validation and from runtime mode
+    changes (DB sync, operator flip). Keep this pure so it can be unit
+    tested without mutating cfg.
+    """
+    errors: list[str] = []
+    mode = (mode or "OFF").upper()
+
+    if mode not in ("OFF", "PAPER", "LIVE"):
+        errors.append(f"AUTOPILOT_MODE='{mode}' is invalid. Must be OFF, PAPER, or LIVE.")
+        return errors
+
+    if mode == "OFF":
+        # Inactive AI — nothing else to check.
+        return errors
+
+    # PAPER and LIVE both grant AI authority. Refuse the default JWT_SECRET.
+    if jwt_secret == DEFAULT_DEV_JWT_SECRET:
+        errors.append(
+            f"AUTOPILOT_MODE={mode} requires a non-default JWT_SECRET. "
+            "Set JWT_SECRET in .env to a strong random string before enabling AI authority."
+        )
+
+    if mode == "LIVE":
+        # Real-money AI is only safe when:
+        #   - broker is live (IS_PAPER=false) AND
+        #   - sim interception is off (SIM_MODE=false).
+        # Any other combination means AI thinks it's live but orders land
+        # somewhere else — surface the mismatch loudly.
+        if is_paper and not sim_mode:
+            errors.append(
+                "AUTOPILOT_MODE=LIVE with IS_PAPER=true routes AI orders to the "
+                "paper broker. Use AUTOPILOT_MODE=PAPER instead, or set IS_PAPER=false."
+            )
+        if sim_mode:
+            errors.append(
+                "AUTOPILOT_MODE=LIVE with SIM_MODE=true sends AI orders to the "
+                "virtual account. Real-money authority must not run in SIM_MODE."
+            )
+        # Bootstrap-token auth is not a login flow; do not let real money run
+        # on a system where an unauthenticated local caller can mint a token.
+        # Callers can still set it for dev, but LIVE explicitly rejects it.
+        if jwt_bootstrap_secret:
+            errors.append(
+                "AUTOPILOT_MODE=LIVE with JWT_BOOTSTRAP_SECRET configured is "
+                "unsafe. Remove JWT_BOOTSTRAP_SECRET from .env and use a real "
+                "login flow before enabling live AI authority."
+            )
+
+    return errors
 
 
 async def validate_startup() -> StartupResult:
@@ -46,21 +112,22 @@ async def validate_startup() -> StartupResult:
     warnings: list[str] = []
 
     # ------------------------------------------------------------------
-    # 1. JWT secret strength (C6 safety fix: ERROR in non-OFF mode)
+    # 1. JWT secret + autopilot mode matrix (C6 + autopilot-matrix safety)
     # ------------------------------------------------------------------
-    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET:
-        if cfg.AUTOPILOT_MODE == "OFF":
-            warnings.append(
-                "JWT_SECRET is the default development value. "
-                "Set a strong random secret before going to production."
-            )
-        else:
-            errors.append(
-                f"JWT_SECRET is the default development value but "
-                f"AUTOPILOT_MODE={cfg.AUTOPILOT_MODE}. Refusing to start "
-                f"with AI authority enabled on a default secret. "
-                f"Set JWT_SECRET in .env to a strong random string."
-            )
+    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET and cfg.AUTOPILOT_MODE == "OFF":
+        warnings.append(
+            "JWT_SECRET is the default development value. "
+            "Set a strong random secret before going to production."
+        )
+    errors.extend(
+        validate_autopilot_matrix(
+            mode=cfg.AUTOPILOT_MODE,
+            is_paper=cfg.IS_PAPER,
+            sim_mode=cfg.SIM_MODE,
+            jwt_secret=cfg.JWT_SECRET,
+            jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+        )
+    )
 
     # ------------------------------------------------------------------
     # 2. Database accessibility

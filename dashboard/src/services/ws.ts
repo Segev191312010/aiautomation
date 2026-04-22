@@ -23,9 +23,7 @@ class WebSocketService {
   connect(path = '/ws'): void {
     this.stopped = false
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const token = getAuthToken()
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-    this.url = `${proto}://${window.location.host}${path}${tokenParam}`
+    this.url = `${proto}://${window.location.host}${path}`
     this._connect()
   }
 
@@ -62,21 +60,20 @@ class WebSocketService {
 
   private _connect(): void {
     if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) return
-    // Refresh token on reconnect to avoid stale JWT after expiry
+    // Auth via Sec-WebSocket-Protocol (['bearer', <token>]) — keeps JWT out of
+    // URLs, server access logs, and history. Refreshed each attempt so a
+    // rotated token is used on reconnect.
     const token = getAuthToken()
-    if (token) {
-      const base = this.url.split('?')[0]
-      this.url = `${base}?token=${encodeURIComponent(token)}`
-    }
+    const protocols = token ? ['bearer', token] : undefined
     try {
-      this.ws = new WebSocket(this.url)
+      this.ws = protocols ? new WebSocket(this.url, protocols) : new WebSocket(this.url)
     } catch {
       this._scheduleReconnect()
       return
     }
 
     this.ws.onopen = () => {
-      console.info('[WS] connected to', this.url)
+      console.info('[WS] connected')
       this._startPing()
       this._emit({ type: 'ibkr_state', connected: true } as WsEvent)
     }
@@ -190,9 +187,7 @@ class MarketDataWsService {
     ) return
     this.stopped = false
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const token = getAuthToken()
-    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-    this.url = `${proto}://${window.location.host}/ws/market-data${tokenParam}`
+    this.url = `${proto}://${window.location.host}/ws/market-data`
     this._connect()
   }
 
@@ -240,14 +235,10 @@ class MarketDataWsService {
   }
 
   private _connect(): void {
-    // Refresh token on reconnect to avoid stale JWT after expiry
     const token = getAuthToken()
-    if (token) {
-      const base = this.url.split('?')[0]
-      this.url = `${base}?token=${encodeURIComponent(token)}`
-    }
+    const protocols = token ? ['bearer', token] : undefined
     try {
-      this.ws = new WebSocket(this.url)
+      this.ws = protocols ? new WebSocket(this.url, protocols) : new WebSocket(this.url)
     } catch {
       this._scheduleReconnect()
       return

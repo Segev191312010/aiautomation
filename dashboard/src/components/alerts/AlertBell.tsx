@@ -2,11 +2,12 @@
  * AlertBell — header bell icon with unread badge and fired-alert dropdown.
  *
  * Data:  useAlertStore  (unreadCount, recentFired, markRead)
- * Nav:   useUIStore     (setRoute → 'alerts')
+ * Nav:   navigateToRoute('alerts') from @/utils/routes
  */
 import { useRef, useState, useEffect, useCallback } from 'react'
-import { useAlertStore, useUIStore } from '@/store'
+import { useAlertStore } from '@/store'
 import type { AlertFiredEvent } from '@/types'
+import { navigateToRoute } from '@/utils/routes'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -69,7 +70,6 @@ export default function AlertBell() {
   const unreadCount = useAlertStore((s) => s.unreadCount)
   const recentFired = useAlertStore((s) => s.recentFired)
   const markRead    = useAlertStore((s) => s.markRead)
-  const setRoute    = useUIStore((s) => s.setRoute)
 
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -97,8 +97,8 @@ export default function AlertBell() {
 
   const handleViewAll = useCallback(() => {
     setOpen(false)
-    setRoute('alerts')
-  }, [setRoute])
+    navigateToRoute('alerts')
+  }, [])
 
   const recent5 = recentFired.slice(0, 5)
   const hasPending = unreadCount > 0

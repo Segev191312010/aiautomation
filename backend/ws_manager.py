@@ -18,8 +18,8 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._connections: list[WebSocket] = []
 
-    async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
+    async def connect(self, ws: WebSocket, subprotocol: str | None = None) -> None:
+        await ws.accept(subprotocol=subprotocol)
         self._connections.append(ws)
 
     def disconnect(self, ws: WebSocket) -> None:

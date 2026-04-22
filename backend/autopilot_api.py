@@ -130,6 +130,21 @@ async def update_autopilot_settings(payload: AutopilotConfigUpdateRequest):
 
 @router.post("/mode", response_model=AutopilotConfigResponse)
 async def set_autopilot_mode(request: AutopilotModeRequest):
+    # Gate: refuse mode flips that would violate the autopilot × broker ×
+    # auth matrix. Keeps operators from pushing LIVE while the process is
+    # running on a default JWT_SECRET or paper broker.
+    from startup import validate_autopilot_matrix
+    matrix_errors = validate_autopilot_matrix(
+        mode=request.mode,
+        is_paper=cfg.IS_PAPER,
+        sim_mode=cfg.SIM_MODE,
+        jwt_secret=cfg.JWT_SECRET,
+        jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+    )
+    if matrix_errors:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail={"errors": matrix_errors})
+
     config = await update_autopilot_config(autopilot_mode=request.mode)
     _sync_mode_runtime(request.mode)
     await log_ai_action(

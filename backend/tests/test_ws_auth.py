@@ -33,17 +33,24 @@ class _FakeWS:
 
 def test_validate_ws_token_valid():
     token = create_token("demo")
-    ws = _FakeWS(query_params={"token": token})
+    ws = _FakeWS(headers={"sec-websocket-protocol": f"bearer, {token}"})
     assert _validate_ws_token(ws) == "demo"
 
 
 def test_validate_ws_token_missing():
-    ws = _FakeWS(query_params={})
+    ws = _FakeWS(headers={})
     assert _validate_ws_token(ws) is None
 
 
 def test_validate_ws_token_invalid():
-    ws = _FakeWS(query_params={"token": "garbage.token.here"})
+    ws = _FakeWS(headers={"sec-websocket-protocol": "bearer, garbage.token.here"})
+    assert _validate_ws_token(ws) is None
+
+
+def test_validate_ws_token_query_string_no_longer_accepted():
+    """Security regression: ?token= must not be honored — subprotocol only."""
+    token = create_token("demo")
+    ws = _FakeWS(query_params={"token": token}, headers={})
     assert _validate_ws_token(ws) is None
 
 

@@ -28,6 +28,10 @@ os.environ.setdefault("DB_PATH", "test_auth_gaps.db")
 os.environ.setdefault("SIM_MODE", "true")
 os.environ.setdefault("AUTOPILOT_MODE", "OFF")
 os.environ.setdefault("ENABLE_MARKET_DIAGNOSTICS", "false")
+# Starlette's TestClient presents a non-loopback "testclient" host. The
+# loopback gate on /api/auth/token is validated separately; allow remote
+# bootstrap here so these regression tests still exercise the happy path.
+os.environ.setdefault("BOOTSTRAP_ALLOW_REMOTE", "1")
 
 import pytest
 from fastapi import FastAPI

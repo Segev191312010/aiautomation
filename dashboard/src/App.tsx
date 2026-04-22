@@ -1,9 +1,11 @@
 import React, { Suspense, lazy, useEffect } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Layout from '@/components/layout/Layout'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import Dashboard from '@/pages/Dashboard'
-import { useUIStore, useBotStore } from '@/store'
+import { useBotStore } from '@/store'
 import { fetchStatus, fetchAuthToken, setAuthToken } from '@/services/api'
+import { APP_ROUTE_PATHS } from '@/utils/routes'
 
 const TradeBotPage = lazy(() => import('@/pages/TradeBotPage'))
 const MarketPage = lazy(() => import('@/pages/MarketPage'))
@@ -18,15 +20,16 @@ const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
 const RulesPage = lazy(() => import('@/pages/RulesPage'))
 const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
 const ChartsPage = lazy(() => import('@/pages/ChartsPage'))
+const SwingDashboardPage = lazy(() => import('@/pages/SwingDashboardPage'))
 
 function PageFallback() {
   return (
-    <div className="flex items-center justify-center h-64">
-      <div className="card rounded-lg shadow-card px-6 py-5 text-center">
-        <p className="text-gray-800 font-sans text-sm font-semibold tracking-wide">
+    <div className="flex h-64 items-center justify-center">
+      <div className="card rounded-lg px-6 py-5 text-center shadow-card">
+        <p className="text-sm font-semibold tracking-wide text-gray-800 font-sans">
           Loading view
         </p>
-        <p className="text-gray-500 font-sans text-xs mt-1">
+        <p className="mt-1 text-xs text-gray-500 font-sans">
           Preparing market workspace...
         </p>
       </div>
@@ -34,70 +37,73 @@ function PageFallback() {
   )
 }
 
-// ── Route → component map ─────────────────────────────────────────────────────
-
-function PageSwitch() {
-  const route = useUIStore((s) => s.activeRoute)
-  let page: React.ReactNode
-
-  switch (route) {
-    case 'dashboard':  page = <Dashboard />; break
-    case 'tradebot':   page = <TradeBotPage />; break
-    case 'market':     page = <MarketPage />; break
-    case 'charts':     page = <ChartsPage />; break
-    case 'rotation':   page = <MarketRotationPage />; break
-    case 'screener':   page = <ScreenerPage />; break
-    case 'stock':      page = <StockProfilePage />; break
-    case 'simulation': page = <SimulationPage />; break
-    case 'backtest':   page = <BacktestPage />; break
-    case 'rules':      page = <RulesPage />; break
-    case 'alerts':     page = <AlertsPage />; break
-    case 'analytics':  page = <AnalyticsPage />; break
-    case 'advisor':    page = <AutopilotPage />; break
-    case 'settings':   page = <SettingsPage />; break
-    default:           page = <Dashboard />
-  }
+function AppRoutes() {
+  const location = useLocation()
 
   return (
-    <ErrorBoundary key={route}>
-      <Suspense fallback={<PageFallback />}>{page}</Suspense>
+    <ErrorBoundary key={location.pathname}>
+      <Suspense fallback={<PageFallback />}>
+        <Routes>
+          <Route path={APP_ROUTE_PATHS.dashboard} element={<Dashboard />} />
+          <Route path={APP_ROUTE_PATHS.tradebot} element={<TradeBotPage />} />
+          <Route path={APP_ROUTE_PATHS.market} element={<MarketPage />} />
+          <Route path={APP_ROUTE_PATHS.charts} element={<ChartsPage />} />
+          <Route path={APP_ROUTE_PATHS.rotation} element={<MarketRotationPage />} />
+          <Route path={APP_ROUTE_PATHS.screener} element={<ScreenerPage />} />
+          <Route path={APP_ROUTE_PATHS.swing} element={<SwingDashboardPage />} />
+          <Route path={APP_ROUTE_PATHS.stock} element={<StockProfilePage />} />
+          <Route path={APP_ROUTE_PATHS.simulation} element={<SimulationPage />} />
+          <Route path={APP_ROUTE_PATHS.backtest} element={<BacktestPage />} />
+          <Route path={APP_ROUTE_PATHS.rules} element={<RulesPage />} />
+          <Route path={APP_ROUTE_PATHS.alerts} element={<AlertsPage />} />
+          <Route path={APP_ROUTE_PATHS.analytics} element={<AnalyticsPage />} />
+          <Route path={APP_ROUTE_PATHS.advisor} element={<AutopilotPage />} />
+          <Route path={APP_ROUTE_PATHS.settings} element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to={APP_ROUTE_PATHS.dashboard} replace />} />
+        </Routes>
+      </Suspense>
     </ErrorBoundary>
   )
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
-
 export default function App() {
   const setStatus = useBotStore((s) => s.setStatus)
 
-  // Bootstrap auth token + system status on mount
   useEffect(() => {
     const bootstrap = async () => {
-      // Fetch demo token on init
       try {
         const { access_token } = await fetchAuthToken()
         setAuthToken(access_token)
-      } catch { /* backend offline */ }
+      } catch {
+        /* backend offline */
+      }
 
-      // Fetch system status
       try {
         const status = await fetchStatus()
         setStatus(status)
-      } catch { /* backend offline */ }
+      } catch {
+        /* backend offline */
+      }
     }
+
     bootstrap()
-    const t = setInterval(async () => {
+    const timer = setInterval(async () => {
       try {
         const status = await fetchStatus()
         setStatus(status)
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }, 30_000)
-    return () => clearInterval(t)
+
+    return () => clearInterval(timer)
   }, [setStatus])
 
   return (
-    <Layout>
-      <PageSwitch />
-    </Layout>
+    <BrowserRouter>
+      <Layout>
+        <AppRoutes />
+      </Layout>
+    </BrowserRouter>
   )
 }

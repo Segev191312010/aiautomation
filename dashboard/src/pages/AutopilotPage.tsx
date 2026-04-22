@@ -7,6 +7,7 @@ import CostReportPanel from '@/components/autopilot/CostReportPanel'
 import CircuitBreakerPanel from '@/components/autopilot/CircuitBreakerPanel'
 import { SectionHeader } from '@/components/common/SectionHeader'
 import PageErrorBanner from '@/components/common/PageErrorBanner'
+import ConfirmModal from '@/components/common/ConfirmModal'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import { IconArrows, IconBarChart, IconDollar, IconGrid, IconHistory, IconLightning, IconShield, IconTrendUp } from '@/components/icons'
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
@@ -97,6 +98,8 @@ export default function AutopilotPage() {
   // Decision/evaluation rendering delegated to DecisionDrilldown + EvaluationReplay components
   const [pageError, setPageError] = useState<string | null>(null)
   const [dailyLossLimitInput, setDailyLossLimitInput] = useState('2.0')
+  const [liveModeConfirmOpen, setLiveModeConfirmOpen] = useState(false)
+  const [killResetConfirmOpen, setKillResetConfirmOpen] = useState(false)
 
   const loadRules = useCallback(async () => {
     setRulesLoading(true)
@@ -160,12 +163,28 @@ export default function AutopilotPage() {
   ], [auditLog.length, sourcePerformance, rules.length])
 
   async function handleKillToggle() {
+    // Tripping the kill switch is always safe — allow it without a typed
+    // confirmation. Resetting it re-arms the runtime and opens the order
+    // path again, so require a typed phrase.
+    if (aiStatus?.emergency_stop) {
+      setKillResetConfirmOpen(true)
+      return
+    }
     try {
-      if (aiStatus?.emergency_stop) await resetEmergencyStop()
-      else await postEmergencyStop()
+      await postEmergencyStop()
       await Promise.all([fetchAIStatus(), fetchGuardrails(), fetchAuditLog()])
     } catch (err) {
       setPageError(err instanceof Error ? err.message : 'Failed to change kill switch state')
+    }
+  }
+
+  async function handleKillResetConfirm() {
+    setKillResetConfirmOpen(false)
+    try {
+      await resetEmergencyStop()
+      await Promise.all([fetchAIStatus(), fetchGuardrails(), fetchAuditLog()])
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : 'Failed to reset kill switch')
     }
   }
 
@@ -189,13 +208,28 @@ export default function AutopilotPage() {
     }
   }
 
-  async function handleModeChange(mode: 'OFF' | 'PAPER' | 'LIVE') {
+  async function applyModeChange(mode: 'OFF' | 'PAPER' | 'LIVE') {
     try {
       await setAutopilotMode(mode, 'Mode changed from operator console')
       await Promise.all([fetchAIStatus(), fetchGuardrails(), fetchAuditLog()])
     } catch (err) {
       setPageError(err instanceof Error ? err.message : 'Failed to update autopilot mode')
     }
+  }
+
+  async function handleModeChange(mode: 'OFF' | 'PAPER' | 'LIVE') {
+    // Flipping to LIVE grants AI real-money authority. Gate behind a typed
+    // confirmation so a stray click from the operator console cannot flip it.
+    if (mode === 'LIVE' && aiStatus?.mode !== 'LIVE') {
+      setLiveModeConfirmOpen(true)
+      return
+    }
+    await applyModeChange(mode)
+  }
+
+  async function handleLiveModeConfirm() {
+    setLiveModeConfirmOpen(false)
+    await applyModeChange('LIVE')
   }
 
   return (
@@ -343,6 +377,38 @@ export default function AutopilotPage() {
           </section>
         </div>
       </ErrorBoundary>)}
+
+      <ConfirmModal
+        open={liveModeConfirmOpen}
+        title="Enable LIVE autopilot"
+        description={
+          <>
+            <p>This grants AI authority to place real-money orders on your brokerage account.</p>
+            <p>The backend matrix check must also succeed or the change will be rejected.</p>
+          </>
+        }
+        confirmPhrase="GO LIVE"
+        confirmLabel="Enable LIVE"
+        destructive
+        onConfirm={() => { void handleLiveModeConfirm() }}
+        onCancel={() => setLiveModeConfirmOpen(false)}
+      />
+
+      <ConfirmModal
+        open={killResetConfirmOpen}
+        title="Reset emergency stop"
+        description={
+          <>
+            <p>Resetting the kill switch re-arms the runtime and allows AI entries to resume.</p>
+            <p>Confirm only after you have reviewed what triggered the stop.</p>
+          </>
+        }
+        confirmPhrase="RESET KILL"
+        confirmLabel="Reset kill switch"
+        destructive
+        onConfirm={() => { void handleKillResetConfirm() }}
+        onCancel={() => setKillResetConfirmOpen(false)}
+      />
     </div>
   )
 }

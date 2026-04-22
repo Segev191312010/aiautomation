@@ -159,17 +159,22 @@ async def test_ws_ref_counting_subscribe_unsubscribe(monkeypatch: pytest.MonkeyP
 
 class _FakeWebSocket:
     def __init__(self, incoming: list[str], delay_first_receive_s: float = 0.0) -> None:
-        self.headers = {"origin": "http://localhost:5173"}
         from auth import create_token
-        self.query_params = {"token": create_token("demo")}
+        self.headers = {
+            "origin": "http://localhost:5173",
+            "sec-websocket-protocol": f"bearer, {create_token('demo')}",
+        }
+        self.query_params = {}
         self._incoming = incoming
         self._delay_first_receive_s = delay_first_receive_s
         self._receive_calls = 0
         self.sent: list[str] = []
         self.accepted = False
+        self.accepted_subprotocol: str | None = None
 
-    async def accept(self) -> None:
+    async def accept(self, subprotocol: str | None = None) -> None:
         self.accepted = True
+        self.accepted_subprotocol = subprotocol
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         return
