@@ -680,3 +680,90 @@ class StockNarrative(BaseModel):
     risks: list[str]
     outlook: str
     fetched_at: float
+
+
+# ---------------------------------------------------------------------------
+# Swing Screener Dashboard models
+# ---------------------------------------------------------------------------
+
+class BreadthRow(BaseModel):
+    label: str
+    nasdaq100: float
+    sp500: float
+    composite: float
+    billion_plus: float
+
+class BreadthMetrics(BaseModel):
+    rows: list[BreadthRow]
+    timestamp: str
+
+class GuruScreenerResult(BaseModel):
+    symbol: str
+    price: float
+    change_pct: float
+    volume: int
+    rs_rank: float
+    vcs: float | None = None
+    setup_notes: list[str] = Field(default_factory=list)
+
+class ATRMatrixRow(BaseModel):
+    symbol: str
+    name: str
+    atr_pct: float
+    price_vs_21ema_atr: float
+    close: float
+    atr_14: float
+
+class Club97Entry(BaseModel):
+    symbol: str
+    price: float
+    rs_day_pctile: float
+    rs_week_pctile: float
+    rs_month_pctile: float
+    is_tml: bool = False
+
+class StockbeeMover(BaseModel):
+    symbol: str
+    price: float
+    change_pct: float
+    volume: int
+    avg_volume: int
+
+class IndustryGroup(BaseModel):
+    industry: str
+    stock_count: int
+    avg_weekly_return: float
+    avg_monthly_return: float
+    rs_vs_spy: float
+    top_stocks: list[str] = Field(default_factory=list)
+
+class StageDistribution(BaseModel):
+    stage_1: int
+    stage_2: int
+    stage_3: int
+    stage_4: int
+    stage_1_symbols: list[str] = Field(default_factory=list)
+    stage_2_symbols: list[str] = Field(default_factory=list)
+    stage_3_symbols: list[str] = Field(default_factory=list)
+    stage_4_symbols: list[str] = Field(default_factory=list)
+
+class TrendGradeEntry(BaseModel):
+    symbol: str
+    price: float
+    change_pct: float
+    grade: str
+    rs_composite: float
+
+class TrendGradeDistribution(BaseModel):
+    grades: dict[str, int]
+    top_graded: list[TrendGradeEntry] = Field(default_factory=list)
+
+class SwingDashboardResponse(BaseModel):
+    breadth: BreadthMetrics | None = None
+    guru_results: dict[str, list[GuruScreenerResult]] = Field(default_factory=dict)
+    atr_matrix: list[ATRMatrixRow] = Field(default_factory=list)
+    club97: list[Club97Entry] = Field(default_factory=list)
+    stockbee: dict[str, list[StockbeeMover]] = Field(default_factory=dict)
+    industries: list[IndustryGroup] = Field(default_factory=list)
+    stages: StageDistribution | None = None
+    grades: TrendGradeDistribution | None = None

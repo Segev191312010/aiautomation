@@ -17,18 +17,20 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(sectors_router)
     app.include_router(events_router)
 
-    # Batch B — light DB state
+    # Batch B — light DB state + shared screener cache
     from routers.rules_routes import router as rules_router
     from routers.bot_routes import router as bot_router
     from routers.orders import router as orders_router
     from routers.screener_routes import router as screener_router
     from routers.alerts_routes import router as alerts_router
+    from routers.swing_routes import router as swing_router
 
     app.include_router(rules_router)
     app.include_router(bot_router)
     app.include_router(orders_router)
     app.include_router(screener_router)
     app.include_router(alerts_router)
+    app.include_router(swing_router)
 
     # Batch C — IBKR/broker state
     from routers.status import router as status_router
