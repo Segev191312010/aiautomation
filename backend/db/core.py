@@ -59,8 +59,9 @@ CREATE TABLE IF NOT EXISTS users (
 
 _CREATE_RULES = """
 CREATE TABLE IF NOT EXISTS rules (
-    id   TEXT PRIMARY KEY,
-    data TEXT NOT NULL
+    id      TEXT PRIMARY KEY,
+    data    TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT 'demo'
 );
 """
 
@@ -71,7 +72,8 @@ CREATE TABLE IF NOT EXISTS trades (
     symbol    TEXT NOT NULL,
     action    TEXT NOT NULL,
     timestamp TEXT NOT NULL,
-    data      TEXT NOT NULL
+    data      TEXT NOT NULL,
+    user_id   TEXT NOT NULL DEFAULT 'demo'
 );
 """
 

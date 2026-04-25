@@ -8,8 +8,9 @@ const AUTO_REFRESH_MS = 5 * 60 * 1000
 /**
  * Whether to use mock data when the backend endpoint doesn't exist yet.
  * Set to false once the backend is wired up and returning real data.
+ * SECURITY: Must be false in production to prevent fake data injection.
  */
-const USE_MOCK_FALLBACK = true
+const USE_MOCK_FALLBACK = false
 
 export function useSwingDashboard() {
   const setDashboard = useSwingStore((s) => s.setDashboard)
