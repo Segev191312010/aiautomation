@@ -32,3 +32,11 @@ from db.direct_candidates import (  # noqa: F401
     queue_candidate, drain_candidates, mark_candidate_status,
     purge_expired_candidates, get_candidate_status,
 )
+from db.retention import (  # noqa: F401
+    run_retention_cleanup,
+    get_retention_stats,
+    RetentionPolicy,
+    RetentionConfig,
+    CleanupResult,
+    DEFAULT_RETENTION_DAYS,
+)

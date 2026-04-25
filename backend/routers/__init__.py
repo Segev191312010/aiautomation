@@ -48,3 +48,8 @@ def register_routers(app: FastAPI) -> None:
     from routers.market_routes import router as market_router
 
     app.include_router(market_router)
+
+    # Batch F — Admin/Maintenance
+    from routers.admin_routes import router as admin_router
+
+    app.include_router(admin_router)

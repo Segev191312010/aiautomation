@@ -25,6 +25,12 @@ backend/_rm_append.py
 backend/.env
 .claude/settings.local.json
 .claude/worktrees/
+.qwen/
+
+# Runtime artifacts (codex review .md files in logs/ are kept)
+*.pid
+logs/*.log
+logs/*.pid
 
 # Database files
 *.db
