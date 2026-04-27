@@ -131,7 +131,32 @@
       "Bash(echo \"exists: $?\")",
       "mcp__ide__getDiagnostics",
       "Bash(while read:*)",
-      "Bash(do sed:*)"
+      "Bash(do sed:*)",
+      "Bash(git rev-list:*)",
+      "Bash(git cat-file:*)",
+      "Bash(git push:*)",
+      "Bash(git fsck:*)",
+      "Bash(git tag:*)",
+      "Bash(git stash:*)",
+      "Read(//mnt/c/Users/segev/sdvesdaW/**)",
+      "Bash(find backend:*)",
+      "Bash(pip list:*)",
+      "mcp__codex-review__codex",
+      "Bash(awk -F: '$1<=417 && $1>=200 {print}')",
+      "Bash(git worktree:*)",
+      "Bash(find:*)",
+      "Bash(sort -k5 -rn)",
+      "Bash(sort echo:*)",
+      "Bash(read f:*)",
+      "Bash(bash *)",
+      "Bash(git reset *)",
+      "Bash(claude --version)",
+      "Bash(claude plugin *)",
+      "Bash(C:/Users/segev/.claude/plugins/cache/claude-nights-watch-marketplace/claude-nights-watch/1.0.0/claude-nights-watch-manager.sh start *)",
+      "Bash(git *)",
+      "Bash(awk -F: '{print NR\": \"$1\": \"$2}')",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\" && grep -c \"def test_\" {}')",
+      "Bash(xargs -I{} sh -c 'echo \"=== {} ===\" && grep -c \"^\\\\s*it\\(\" {} 2>/dev/null || grep -c \"^\\\\s*test\\(\" {} 2>/dev/null || echo 0')"
     ]
   }
 }
