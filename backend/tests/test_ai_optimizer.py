@@ -1,5 +1,7 @@
 """Regression tests for ai_optimizer — prompt building and partial context safety."""
 import json
+from unittest.mock import patch
+
 import pytest
 
 import config
@@ -169,6 +171,7 @@ async def test_ai_params_save_and_restore_round_trip(_isolated_db, anyio_backend
     """AI-5 regression: parameters saved to DB must be restored on startup."""
     await init_db()
     from ai_params import AIParameterStore
+    from config import cfg
 
     store = AIParameterStore()
     store.shadow_mode = False  # getters return stored values, not shadow defaults
@@ -189,11 +192,15 @@ async def test_ai_params_save_and_restore_round_trip(_isolated_db, anyio_backend
 
     restored = await fresh.load_from_db()
     assert restored is True
-    assert fresh.get_min_score() == 67.5
-    assert fresh.get_risk_multiplier() == 1.3
-    assert fresh.get_exit_params("AAPL") == {"atr_stop_mult": 2.5, "atr_trail_mult": 1.8}
-    assert fresh.get_signal_weights("BULL") == {"rsi": 1.2, "sma": 0.8}
-    assert fresh.get_rule_sizing_multiplier("rule-abc") == 1.5
+    # Batch 4: getters return stored AI values only in LIVE mode. Patch
+    # autopilot_mode for the getter contract; the tripwire forces shadow
+    # outputs in any other mode.
+    with patch.object(cfg, "AUTOPILOT_MODE", "LIVE"):
+        assert fresh.get_min_score() == 67.5
+        assert fresh.get_risk_multiplier() == 1.3
+        assert fresh.get_exit_params("AAPL") == {"atr_stop_mult": 2.5, "atr_trail_mult": 1.8}
+        assert fresh.get_signal_weights("BULL") == {"rsi": 1.2, "sma": 0.8}
+        assert fresh.get_rule_sizing_multiplier("rule-abc") == 1.5
 
 
 @pytest.mark.anyio
@@ -229,7 +236,9 @@ async def test_ai_params_save_overwrites_latest(_isolated_db, anyio_backend):
     fresh = AIParameterStore()
     fresh.shadow_mode = False
     await fresh.load_from_db()
-    assert fresh.get_min_score() == 72.0
+    from config import cfg
+    with patch.object(cfg, "AUTOPILOT_MODE", "LIVE"):
+        assert fresh.get_min_score() == 72.0
 
 
 @pytest.mark.anyio
@@ -259,5 +268,7 @@ async def test_ai_params_clamp_on_load(_isolated_db, anyio_backend):
     store = AIParameterStore()
     store.shadow_mode = False
     await store.load_from_db()
-    assert store.get_min_score() == 90.0  # clamped to max
-    assert store.get_risk_multiplier() == 2.0  # clamped to max
+    from config import cfg
+    with patch.object(cfg, "AUTOPILOT_MODE", "LIVE"):
+        assert store.get_min_score() == 90.0  # clamped to max
+        assert store.get_risk_multiplier() == 2.0  # clamped to max

@@ -28,20 +28,25 @@ def restore_runtime_flags():
 
 
 @pytest.mark.parametrize(
-    ("mode", "autonomy_enabled", "shadow_mode"),
+    ("mode", "autonomy_enabled", "cfg_shadow", "params_shadow"),
     [
-        ("OFF", False, True),
-        ("PAPER", True, False),
-        ("LIVE", True, False),
+        # cfg.AI_SHADOW_MODE: OFF semantics (only True when autopilot is OFF).
+        # ai_params.shadow_mode: LIVE-only semantics (Batch 4 invariant — AI
+        # mutates live risk params ONLY in LIVE; OFF and PAPER are shadow).
+        ("OFF", False, True, True),
+        ("PAPER", True, False, True),
+        ("LIVE", True, False, False),
     ],
 )
-def test_sync_mode_runtime_keeps_mode_semantics_consistent(mode: str, autonomy_enabled: bool, shadow_mode: bool):
+def test_sync_mode_runtime_keeps_mode_semantics_consistent(
+    mode: str, autonomy_enabled: bool, cfg_shadow: bool, params_shadow: bool
+):
     _sync_mode_runtime(mode)  # type: ignore[arg-type]
 
     assert cfg.AUTOPILOT_MODE == mode
     assert cfg.AI_AUTONOMY_ENABLED is autonomy_enabled
-    assert cfg.AI_SHADOW_MODE is shadow_mode
-    assert ai_params.shadow_mode is shadow_mode
+    assert cfg.AI_SHADOW_MODE is cfg_shadow
+    assert ai_params.shadow_mode is params_shadow
 
 
 @pytest.mark.anyio
@@ -76,4 +81,7 @@ async def test_auto_tighten_level2_reverts_to_paper_mode(anyio_backend):
     saved_config = mock_save.await_args.args[0]
     assert result["actions_taken"] == ["level2_paper_revert"]
     assert saved_config.autopilot_mode == "PAPER"
-    assert ai_params.shadow_mode is False  # PAPER = AI still active (creates paper rules), no live orders
+    # Batch 4 authority invariant: AI gets LESS authority on recovery, not
+    # more. Level 2 paper-revert MUST keep shadow_mode=True so the same AI
+    # that just failed cannot continue to mutate risk multipliers / min_score.
+    assert ai_params.shadow_mode is True

@@ -263,8 +263,14 @@ async def lifespan(app: FastAPI):
                 cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
                 cfg.AI_SHADOW_MODE = mode == "OFF"
                 from ai_params import ai_params
-                ai_params.shadow_mode = mode == "OFF"
-                log.info("Autopilot mode synced from DB: %s", mode)
+                # Authority invariant (Batch 4): shadow ON unless LIVE.
+                # PAPER and OFF both keep AI as a shadow consumer of params so
+                # a process boot cannot land in PAPER with shadow_mode=False.
+                ai_params.shadow_mode = mode != "LIVE"
+                log.info(
+                    "Autopilot mode synced from DB: mode=%s shadow_mode=%s",
+                    mode, ai_params.shadow_mode,
+                )
     except Exception as e:
         log.warning("Failed to sync autopilot mode from DB: %s", e)
 

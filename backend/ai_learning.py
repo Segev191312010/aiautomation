@@ -478,10 +478,14 @@ async def check_auto_tighten() -> dict:
             and metrics_30d["hit_rate"] < config.auto_tighten_bad_hit_rate_30d
             and metrics_30d["scored_decisions"] >= config.auto_tighten_min_decisions_30d):
 
-        # Revert to PAPER mode: keep AI active, but move execution back to simulated-only.
+        # Revert to PAPER mode: keep AI active for shadow logging, but a
+        # failing AI gets LESS authority on recovery, not more. PAPER must
+        # set shadow_mode=True so the AI parameter store returns config
+        # defaults instead of the same AI tuning that just failed.
+        # (See Batch 4 authority invariant in ai_params.py.)
         config = config.model_copy(update={"autopilot_mode": "PAPER"})
         await save_guardrails_to_db(config)
-        ai_params.shadow_mode = False  # PAPER = AI still active (creates paper rules), but no live orders
+        ai_params.shadow_mode = True
         await log_ai_action(
             action_type="auto_tighten_level2",
             category="self_evaluation",

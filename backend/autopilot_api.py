@@ -102,7 +102,11 @@ def _sync_mode_runtime(mode: Literal["OFF", "PAPER", "LIVE"]) -> None:
     cfg.AUTOPILOT_MODE = mode
     cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
     cfg.AI_SHADOW_MODE = mode == "OFF"
-    ai_params.shadow_mode = mode == "OFF"
+    # Batch 4 invariant: ai_params.shadow_mode is True unless LIVE.
+    # cfg.AI_SHADOW_MODE retains its narrower "OFF" semantics; the parameter
+    # store has the stricter contract because its consumers (risk_manager,
+    # order_executor sizing) only want AI authority in actual LIVE mode.
+    ai_params.shadow_mode = mode != "LIVE"
 
 
 @router.get("/status", response_model=AIStatusResponse)

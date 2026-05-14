@@ -7,6 +7,14 @@ Falls back to config.py when AI hasn't computed values yet.
 
 AI-5 fix: parameters are now persisted to the ai_parameter_snapshots table
 after each optimizer run, and restored from the latest snapshot on startup.
+
+Authority invariant (Batch 4): the AI must NEVER mutate live parameters
+unless ``cfg.AUTOPILOT_MODE == "LIVE"``. Setters in ai_optimizer/ai_learning
+must keep ``shadow_mode = (mode != "LIVE")``. Every getter below enforces a
+runtime tripwire: if mode is not LIVE but shadow_mode somehow became False,
+the getter logs CRITICAL with stack_info and treats the call as shadow for
+that call. This makes any future setter regression self-detecting without
+trusting upstream code.
 """
 from __future__ import annotations
 
@@ -17,6 +25,24 @@ from datetime import datetime, timezone
 from config import cfg
 
 log = logging.getLogger(__name__)
+
+
+def _enforce_shadow_authority(getter_name: str, current_shadow: bool) -> bool:
+    """Runtime tripwire — return True if this call MUST behave as shadow.
+
+    If the global autopilot_mode is not LIVE but shadow_mode is False, the
+    invariant has been violated upstream. Log CRITICAL with a Python stack so
+    the responsible code path is identifiable, and force shadow for this call.
+    """
+    mode = getattr(cfg, "AUTOPILOT_MODE", "OFF")
+    if mode != "LIVE" and current_shadow is False:
+        log.critical(
+            "ai_params authority desync in %s: mode=%s shadow=False — "
+            "forcing shadow for this call (see Batch 4 invariant)",
+            getter_name, mode, stack_info=True,
+        )
+        return True
+    return current_shadow
 
 
 class AIParameterStore:
@@ -35,7 +61,7 @@ class AIParameterStore:
 
     def get_signal_weights(self, regime: str) -> dict | None:
         """Return AI-optimized signal weights for the given regime, or None for defaults."""
-        if self._shadow_mode:
+        if _enforce_shadow_authority("get_signal_weights", self._shadow_mode):
             return None
         return self._signal_weights.get(regime)
 
@@ -46,7 +72,7 @@ class AIParameterStore:
 
     def get_exit_params(self, symbol: str) -> dict:
         """Return AI-optimized exit params for a symbol, falling back to _default then config."""
-        if self._shadow_mode:
+        if _enforce_shadow_authority("get_exit_params", self._shadow_mode):
             return {
                 "atr_stop_mult": cfg.ATR_STOP_MULT,
                 "atr_trail_mult": cfg.ATR_TRAIL_MULT,
@@ -77,7 +103,7 @@ class AIParameterStore:
 
     def get_risk_multiplier(self) -> float:
         """Return AI risk multiplier (1.0 = no change from config defaults)."""
-        if self._shadow_mode:
+        if _enforce_shadow_authority("get_risk_multiplier", self._shadow_mode):
             return 1.0
         return self._risk_multipliers.get("global", 1.0)
 
@@ -89,7 +115,7 @@ class AIParameterStore:
 
     def get_min_score(self) -> float:
         """Return AI-optimized min signal score, or default 50."""
-        if self._shadow_mode:
+        if _enforce_shadow_authority("get_min_score", self._shadow_mode):
             return 50.0
         return self._min_score if self._min_score is not None else 50.0
 
@@ -101,7 +127,7 @@ class AIParameterStore:
 
     def get_rule_sizing_multiplier(self, rule_id: str) -> float:
         """Return sizing multiplier for a rule (1.0 = no change)."""
-        if self._shadow_mode:
+        if _enforce_shadow_authority("get_rule_sizing_multiplier", self._shadow_mode):
             return 1.0
         return self._rule_sizing_multipliers.get(rule_id, 1.0)
 

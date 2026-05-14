@@ -570,7 +570,11 @@ async def ai_optimization_loop() -> None:
     while True:
         try:
             config = await get_autopilot_config_dict()
-            ai_params.shadow_mode = config["autopilot_mode"] == "OFF"
+            # Authority invariant (Batch 4): AI parameters are only authoritative
+            # in LIVE mode. PAPER must keep shadow_mode=True so the optimizer
+            # cannot silently mutate live risk multipliers / min_score / rule
+            # sizing during paper-soak.
+            ai_params.shadow_mode = config["autopilot_mode"] != "LIVE"
             if should_recompute():
                 await run_full_optimization()
         except Exception as e:
