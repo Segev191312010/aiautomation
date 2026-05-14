@@ -48,8 +48,8 @@ async def screener_universes():
 
 
 @router.get("/presets")
-async def screener_list_presets():
-    presets = await get_screener_presets()
+async def screener_list_presets(user=Depends(get_current_user)):
+    presets = await get_screener_presets(user_id=user.id)
     return [p.model_dump() for p in presets]
 
 
@@ -64,8 +64,8 @@ async def screener_save_preset(body: SavePresetRequest, user=Depends(get_current
 
 
 @router.delete("/presets/{preset_id}")
-async def screener_delete_preset(preset_id: str):
-    if not await delete_screener_preset(preset_id):
+async def screener_delete_preset(preset_id: str, user=Depends(get_current_user)):
+    if not await delete_screener_preset(preset_id, user_id=user.id):
         raise HTTPException(404, "Preset not found or is built-in")
     return {"deleted": True}
 

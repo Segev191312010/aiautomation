@@ -77,16 +77,27 @@ async def api_backtest_history(user=Depends(get_current_user)):
 
 
 @router.get("/{backtest_id}")
-async def api_backtest_get(backtest_id: str):
-    """Retrieve a specific saved backtest."""
-    result = await get_backtest(backtest_id)
+async def api_backtest_get(backtest_id: str, user=Depends(get_current_user)):
+    """Retrieve a specific saved backtest.
+
+    Filtered by `user.id` so a caller cannot read another tenant's saved
+    backtest by guessing the UUID (Batch 5 IDOR fix).
+    """
+    result = await get_backtest(backtest_id, user_id=user.id)
     if not result:
         raise HTTPException(404, "Backtest not found")
     return result
 
 
 @router.delete("/{backtest_id}")
-async def api_backtest_delete(backtest_id: str):
-    """Delete a saved backtest."""
-    deleted = await delete_backtest(backtest_id)
-    return {"deleted": deleted}
+async def api_backtest_delete(backtest_id: str, user=Depends(get_current_user)):
+    """Delete a saved backtest.
+
+    Filtered by `user.id`. Previously this called `delete_backtest(id)` with
+    the implicit "demo" default, which meant real users could never delete
+    their own backtests (Batch 5 fix).
+    """
+    deleted = await delete_backtest(backtest_id, user_id=user.id)
+    if not deleted:
+        raise HTTPException(404, "Backtest not found")
+    return {"deleted": True}

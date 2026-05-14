@@ -52,12 +52,19 @@ async def get_backtests(user_id: str = "demo", limit: int = 50) -> list[dict]:
     return results
 
 
-async def get_backtest(backtest_id: str) -> dict | None:
-    """Return full backtest with strategy_data and result_data."""
+async def get_backtest(backtest_id: str, user_id: str = "demo") -> dict | None:
+    """Return full backtest with strategy_data and result_data.
+
+    INVARIANT (Batch 5): filter by `user_id` so a caller cannot read another
+    tenant's saved backtest by guessing the UUID. Routes must pass
+    `user.id` from the auth dep; the demo default preserves internal /
+    test usage without leaking across users.
+    """
     async with get_db() as db:
         async with db.execute(
-            "SELECT id, name, strategy_data, result_data, created_at FROM backtests WHERE id=?",
-            (backtest_id,),
+            "SELECT id, name, strategy_data, result_data, created_at FROM backtests "
+            "WHERE id=? AND user_id=?",
+            (backtest_id, user_id),
         ) as cur:
             row = await cur.fetchone()
     if not row:
