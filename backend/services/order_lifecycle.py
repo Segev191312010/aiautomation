@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from config import cfg
 from database import (
@@ -16,6 +17,12 @@ from models import OpenPosition, Trade
 from position_tracker import register_position
 
 log = logging.getLogger(__name__)
+
+# Sentinel ATR when bar fetch fails during position registration. Encoded as a
+# literal constant (not a tunable knob) and pinned by test_nan_chain.py so a
+# future dev cannot silently retune it. Operators looking at the data_gap
+# audit log can read "atr=fill_price * 0.02" as a known degraded-mode value.
+DEGRADED_ATR_FRACTION: float = 0.02
 
 
 async def persist_filled_trade_record(trade_rec: Trade, fill_price: float) -> Trade:
@@ -37,15 +44,50 @@ async def register_entry_position_from_fill(
     *,
     rule_name: str | None = None,
 ) -> bool:
-    """Register a tracked open position for a filled BUY trade."""
-    if trade.action != "BUY" or not trade.fill_price:
+    """Register a tracked open position for a filled BUY trade.
+
+    INVARIANT: trade.fill_price must be finite and positive. NaN is truthy
+    under `not`, so the original `not trade.fill_price` guard let NaN-priced
+    trades through and registered positions with NaN entry_price, which then
+    silently broke every stop/target/PnL comparison.
+
+    On bar-fetch failure (yfinance / IBKR down), the position is still
+    registered with a degraded sentinel ATR (`DEGRADED_ATR_FRACTION` of fill
+    price) so the exit tracker keeps running. A CRITICAL ``data_gap`` audit
+    entry is emitted with the symbol and computed ATR so operators can grep
+    `data_gap` to see which live positions are running on degraded data.
+    """
+    if trade.action != "BUY":
+        return False
+    fp = trade.fill_price
+    if fp is None or not math.isfinite(fp) or fp <= 0:
+        log.error(
+            "register_entry_position_from_fill rejected non-finite fill_price: "
+            "trade=%s symbol=%s fill_price=%r",
+            trade.id, trade.symbol, fp,
+        )
         return False
 
     try:
         df = await get_historical_bars(trade.symbol, duration="60 D", bar_size="1D")
         if df is None or len(df) < 14:
-            log.warning("Insufficient bars for position registration of %s", trade.id)
-            return False
+            # Degraded path: register with sentinel ATR so the exit tracker
+            # still has a managed position. Previously this returned False
+            # silently and left a live IBKR position with no exit logic.
+            sentinel_atr = fp * DEGRADED_ATR_FRACTION
+            log.critical(
+                "data_gap: registering degraded OpenPosition — trade=%s symbol=%s "
+                "fill_price=%.4f sentinel_atr=%.4f (DEGRADED_ATR_FRACTION=%.4f) "
+                "reason=insufficient_bars_for_atr",
+                trade.id, trade.symbol, fp, sentinel_atr, DEGRADED_ATR_FRACTION,
+            )
+            await register_position(
+                trade,
+                df,
+                rule_name or trade.rule_name,
+                degraded_atr=sentinel_atr,
+            )
+            return True
         await register_position(trade, df, rule_name or trade.rule_name)
         return True
     except Exception as exc:

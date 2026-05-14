@@ -34,15 +34,22 @@ async def register_position(
     df: pd.DataFrame,
     rule_name: str,
     user_id: str = "demo",
+    *,
+    degraded_atr: float | None = None,
 ) -> OpenPosition:
     """
     Create and persist an OpenPosition after a fill.
 
     Args:
-        trade:     Filled Trade record (fill_price must be set).
-        df:        OHLCV DataFrame used to compute ATR(14) at entry.
-        rule_name: Human-readable rule name stored for display.
-        user_id:   Owner of the position.
+        trade:        Filled Trade record (fill_price must be set).
+        df:           OHLCV DataFrame used to compute ATR(14) at entry. May be
+                      None/short when ``degraded_atr`` is supplied.
+        rule_name:    Human-readable rule name stored for display.
+        user_id:      Owner of the position.
+        degraded_atr: Sentinel ATR to use when df is insufficient for a real
+                      ATR(14) calc (set by ``order_lifecycle`` on data gap).
+                      When provided, this overrides any computed ATR — the
+                      caller is asserting "no live bars, run on a sentinel".
 
     Returns:
         The persisted OpenPosition.
@@ -51,9 +58,11 @@ async def register_position(
     if entry_price <= 0:
         raise ValueError(f"Cannot register position for {trade.symbol}: fill_price={trade.fill_price}")
 
-    # ATR(14) at entry — needs at least 14 bars
+    # ATR(14) at entry — needs at least 14 bars, unless caller passed sentinel
     atr_val = 0.0
-    if df is not None and len(df) >= 14:
+    if degraded_atr is not None and degraded_atr > 0:
+        atr_val = float(degraded_atr)
+    elif df is not None and len(df) >= 14:
         atr_series = _atr(df["high"], df["low"], df["close"], 14)
         atr_raw = atr_series.iloc[-1]
         if pd.notna(atr_raw):

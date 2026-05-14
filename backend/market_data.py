@@ -136,7 +136,7 @@ def clear_bar_cache() -> None:
     _bar_cache.clear()
 
 
-def _finite_positive(value) -> Optional[float]:
+def finite_positive(value) -> Optional[float]:
     """Return a finite, positive float or None.
 
     Guards against NaN (which is truthy in Python and silently poisons
@@ -162,7 +162,7 @@ async def get_latest_price(symbol: str) -> Optional[float]:
             ticker = ibkr.ib.reqMktData(contract, "", False, False)
             try:
                 await asyncio.sleep(2)  # allow tick to populate
-                price = _finite_positive(ticker.last) or _finite_positive(ticker.close)
+                price = finite_positive(ticker.last) or finite_positive(ticker.close)
                 if price is not None:
                     return price
             finally:
@@ -214,7 +214,7 @@ async def subscribe_realtime(symbol: str, on_tick: Callable[[str, float], None])
     def _on_pending_tickers(tickers):
         for t in tickers:
             if t.contract.symbol == symbol:
-                price = _finite_positive(t.last) or _finite_positive(t.close)
+                price = finite_positive(t.last) or finite_positive(t.close)
                 if price is not None:
                     for cb in _tick_callbacks.get(symbol, []):
                         cb(symbol, price)

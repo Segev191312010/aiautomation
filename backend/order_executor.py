@@ -10,7 +10,7 @@ from typing import Callable, Optional
 from ib_insync import MarketOrder, LimitOrder, Trade as IBTrade
 from ibkr_client import ibkr
 from database import save_trade, update_trade_status
-from market_data import get_latest_price
+from market_data import get_latest_price, finite_positive
 from models import Rule, Trade
 from config import cfg
 from services import order_lifecycle, order_recovery, safety_gate
@@ -55,10 +55,14 @@ async def _get_limit_price(symbol: str, action: str, slip_pct: float = 0.005,
         [ticker] = await asyncio.wait_for(
             ibkr.ib.reqTickersAsync(c), timeout=5
         )
-        price = ticker.last or ticker.close or ticker.bid or ticker.ask
-        if price and price > 0:
-            multiplier = 1 + slip_pct if action == "BUY" else 1 - slip_pct
-            return round(float(price) * multiplier, 2)
+        # NaN is truthy in Python, so the original `a or b or c or d` chain
+        # short-circuits to NaN on the first NaN-valued field and never tries
+        # the fallbacks. Filter each candidate explicitly.
+        for candidate in (ticker.last, ticker.close, ticker.bid, ticker.ask):
+            price = finite_positive(candidate)
+            if price is not None:
+                multiplier = 1 + slip_pct if action == "BUY" else 1 - slip_pct
+                return round(price * multiplier, 2)
     except Exception:
         pass
 
@@ -68,10 +72,14 @@ async def _get_limit_price(symbol: str, action: str, slip_pct: float = 0.005,
         info = await asyncio.get_running_loop().run_in_executor(
             None, lambda: yf.Ticker(symbol).fast_info
         )
-        price = getattr(info, "last_price", None) or getattr(info, "regular_market_price", None)
-        if price and price > 0:
-            multiplier = 1 + slip_pct if action == "BUY" else 1 - slip_pct
-            return round(float(price) * multiplier, 2)
+        for candidate in (
+            getattr(info, "last_price", None),
+            getattr(info, "regular_market_price", None),
+        ):
+            price = finite_positive(candidate)
+            if price is not None:
+                multiplier = 1 + slip_pct if action == "BUY" else 1 - slip_pct
+                return round(price * multiplier, 2)
     except Exception:
         pass
     return None
@@ -301,7 +309,20 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
                 trade_rec.quantity = actual_filled
                 await save_trade(trade_rec)
 
-            fill_price = float(trade_rec.fill_price or ib_trade.orderStatus.avgFillPrice or 0.0)
+            # INVARIANT: do not propagate a non-finite fill price. If the broker
+            # returned NaN avgFillPrice (and the recovery path didn't already
+            # supply a finite one), mark the trade ERROR and SKIP _handle_fill
+            # entirely. order_recovery treats this case as "avg_fill_non_finite".
+            fill_price = finite_positive(trade_rec.fill_price) or finite_positive(ib_trade.orderStatus.avgFillPrice)
+            if fill_price is None:
+                log.critical(
+                    "avg_fill_non_finite: trade=%s symbol=%s broker_avg=%r — marking ERROR, "
+                    "not calling _handle_fill (no fill inference from positions)",
+                    trade_rec.id, trade_rec.symbol, ib_trade.orderStatus.avgFillPrice,
+                )
+                trade_rec.status = "ERROR"  # type: ignore[assignment]
+                await save_trade(trade_rec)
+                return
             log.info("Order FILLED: %s %d %s @ %.4f",
                      trade_rec.action, trade_rec.quantity, trade_rec.symbol, fill_price)
 
@@ -325,13 +346,23 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
             # Check if there was a partial fill before cancellation
             partial = int(getattr(ib_trade.orderStatus, 'filled', 0) or 0)
             if partial > 0:
+                partial_fill_price = finite_positive(ib_trade.orderStatus.avgFillPrice)
+                if partial_fill_price is None:
+                    log.critical(
+                        "avg_fill_non_finite (partial-on-cancel): trade=%s symbol=%s "
+                        "broker_avg=%r — marking ERROR, not recording partial",
+                        trade_rec.id, trade_rec.symbol, ib_trade.orderStatus.avgFillPrice,
+                    )
+                    trade_rec.status = "ERROR"  # type: ignore[assignment]
+                    await save_trade(trade_rec)
+                    return
                 log.warning(
                     "Order %s cancelled with partial fill: %d/%d shares — recording partial",
                     trade_rec.order_id, partial, trade_rec.quantity,
                 )
                 trade_rec.quantity = partial
                 trade_rec.status = "FILLED"  # type: ignore[assignment]
-                trade_rec.fill_price = float(ib_trade.orderStatus.avgFillPrice or 0.0)
+                trade_rec.fill_price = partial_fill_price
                 await save_trade(trade_rec)
                 for cb in _fill_callbacks:
                     cb(trade_rec)
@@ -346,8 +377,16 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
             if open_trade.order.orderId == trade_rec.order_id:
                 final_status = open_trade.orderStatus.status
                 if order_recovery.normalize_trade_status(final_status) == "FILLED":
+                    broker_fill = finite_positive(open_trade.orderStatus.avgFillPrice)
+                    if broker_fill is None:
+                        log.critical(
+                            "avg_fill_non_finite (broker-state-resync): trade=%s symbol=%s "
+                            "broker_avg=%r — leaving trade unresolved",
+                            trade_rec.id, trade_rec.symbol, open_trade.orderStatus.avgFillPrice,
+                        )
+                        return
                     log.critical("Order %s actually FILLED at broker — syncing now", trade_rec.order_id)
-                    await _handle_fill(trade_rec, float(open_trade.orderStatus.avgFillPrice or 0.0))
+                    await _handle_fill(trade_rec, broker_fill)
                     return
                 break
     except Exception as exc:

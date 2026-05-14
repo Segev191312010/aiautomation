@@ -1,13 +1,17 @@
 """Shared order recovery helpers for post-submit reconciliation."""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterable, Literal
 
 from database import update_trade_status
+from market_data import finite_positive
 from models import OpenPosition, Trade
 from services import order_lifecycle
+
+log = logging.getLogger(__name__)
 
 NormalizedTradeStatus = Literal["PENDING", "FILLED", "CANCELLED", "ERROR", "UNKNOWN"]
 PendingExitState = Literal["pending", "filled", "retry"]
@@ -56,10 +60,29 @@ async def reconcile_trade_status_update(
     fill_price: float | None = None,
     fill_callbacks: Iterable[Callable[[Trade], None]] | None = None,
 ) -> NormalizedTradeStatus:
-    """Apply a broker/app status update to a trade record consistently."""
+    """Apply a broker/app status update to a trade record consistently.
+
+    INVARIANT: a FILLED status with a non-finite fill_price is treated as the
+    named outcome ``avg_fill_non_finite``. The trade is marked ERROR and
+    fill_callbacks are NOT invoked. The recovery layer must NEVER infer a
+    fill from position deltas or a stale ticker when the broker's
+    avgFillPrice is non-finite — that would let a NaN price reach
+    OpenPosition.entry_price and silently break every subsequent
+    stop/target/PnL comparison.
+    """
     normalized = normalize_trade_status(status)
     if normalized == "FILLED":
-        persisted = await order_lifecycle.persist_filled_trade_record(trade_rec, float(fill_price or 0.0))
+        clean_price = finite_positive(fill_price)
+        if clean_price is None:
+            log.critical(
+                "avg_fill_non_finite: trade=%s symbol=%s broker_avg=%r — "
+                "marking ERROR, not invoking fill_callbacks",
+                trade_rec.id, trade_rec.symbol, fill_price,
+            )
+            await update_trade_status(trade_rec.id, "ERROR")
+            trade_rec.status = "ERROR"  # type: ignore[assignment]
+            return "ERROR"
+        persisted = await order_lifecycle.persist_filled_trade_record(trade_rec, clean_price)
         for cb in fill_callbacks or []:
             cb(persisted)
         return normalized
