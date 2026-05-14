@@ -117,17 +117,28 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
     """
     ind = indicator.upper()
 
+    # Batch 6 backward-compat: legacy rule_templates payloads used `period`
+    # for RSI/SMA/EMA/ATR/BBANDS and `k_period`/`d_period` for STOCH. The
+    # canonical keys are `length` and `k`/`d`. New rules saved via the
+    # updated templates use canonical keys; this helper accepts both so
+    # existing user rules in the DB keep firing without a data migration.
+    def _key(name: str, *aliases: str, default: int) -> int:
+        for k in (name, *aliases):
+            if k in params:
+                return int(params[k])
+        return default
+
     if ind == "PRICE":
         return df["close"]
 
     if ind == "RSI":
-        return _rsi(df["close"], length=int(params.get("length", 14)))
+        return _rsi(df["close"], length=_key("length", "period", default=14))
 
     if ind == "SMA":
-        return _sma(df["close"], length=int(params.get("length", 20)))
+        return _sma(df["close"], length=_key("length", "period", default=20))
 
     if ind == "EMA":
-        return _ema(df["close"], length=int(params.get("length", 20)))
+        return _ema(df["close"], length=_key("length", "period", default=20))
 
     if ind == "MACD":
         macd_line, _, _ = _macd(
@@ -139,7 +150,7 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
         return macd_line
 
     if ind == "BBANDS":
-        bb_length = max(2, int(params.get("length", 20)))
+        bb_length = max(2, _key("length", "period", default=20))
         bb_std = max(0.1, min(10.0, float(params.get("std", 2.0))))
         upper, mid, lower = _bbands(
             df["close"],
@@ -152,17 +163,27 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
     if ind == "ATR":
         return _atr(
             df["high"], df["low"], df["close"],
-            length=int(params.get("length", 14)),
+            length=_key("length", "period", default=14),
         )
 
     if ind == "STOCH":
         k_line, _ = _stoch(
             df["high"], df["low"], df["close"],
-            k=int(params.get("k", 14)),
-            d=int(params.get("d", 3)),
+            k=_key("k", "k_period", default=14),
+            d=_key("d", "d_period", default=3),
             smooth_k=int(params.get("smooth_k", 3)),
         )
         return k_line
+
+    # Batch 6: VOLUME and CHANGE_PCT were declared in the Condition.indicator
+    # Literal but not implemented — rules saved with them validated cleanly
+    # then silently never fired. Implement minimally so the model contract
+    # is honored.
+    if ind == "VOLUME":
+        return df["volume"]
+
+    if ind == "CHANGE_PCT":
+        return df["close"].pct_change() * 100.0
 
     raise ValueError(f"Unknown indicator: {indicator}")
 

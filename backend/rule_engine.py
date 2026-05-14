@@ -109,15 +109,24 @@ def evaluate_rule(rule: Rule, df: pd.DataFrame) -> bool:
     if not rule.enabled:
         return False
 
-    # Check cooldown
+    # Check cooldown. A malformed ISO timestamp in the JSON blob (from import
+    # or manual DB edit) used to raise ValueError and abort the entire
+    # evaluate_all pass mid-iteration; the sibling _check_symbol_cooldown
+    # already guards this. Mirror the same try/except here.
     if rule.last_triggered:
-        last = datetime.fromisoformat(rule.last_triggered)
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        cooldown_end = last + timedelta(minutes=rule.cooldown_minutes)
-        if datetime.now(timezone.utc) < cooldown_end:
-            log.debug("Rule '%s' is in cooldown until %s", rule.name, cooldown_end)
-            return False
+        try:
+            last = datetime.fromisoformat(rule.last_triggered)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            cooldown_end = last + timedelta(minutes=rule.cooldown_minutes)
+            if datetime.now(timezone.utc) < cooldown_end:
+                log.debug("Rule '%s' is in cooldown until %s", rule.name, cooldown_end)
+                return False
+        except (ValueError, TypeError):
+            log.warning(
+                "Rule '%s' has malformed last_triggered=%r — ignoring cooldown",
+                rule.name, rule.last_triggered,
+            )
 
     if df.empty or len(df) < 2:
         log.warning("Insufficient data for rule '%s'", rule.name)
@@ -210,6 +219,13 @@ def evaluate_all(
     """
     if universe_cache is None:
         universe_cache = {}
+
+    # Clear the cross-cycle indicator cache at the start of every evaluate_all
+    # pass. The cache key includes `last_time` so stale keys accumulate
+    # unbounded across cycles (memory leak); clearing here is the cheapest
+    # bound. Single-symbol caches WITHIN a cycle still reuse computed
+    # indicators via the populated dict.
+    clear_indicator_cache()
 
     triggered: list[tuple[Rule, str]] = []
 
