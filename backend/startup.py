@@ -170,6 +170,22 @@ async def validate_startup() -> StartupResult:
         )
 
     # ------------------------------------------------------------------
+    # 5. Direct-trades intent token gate (live / staging environments)
+    # ------------------------------------------------------------------
+    # /api/autopilot/direct-trades/execute lets an authenticated caller place
+    # an arbitrary AIDirectTrade. The HTTP path now forces skip_safety=False,
+    # but in any non-dev environment we additionally require an explicit
+    # X-Intent-Token header matched against DIRECT_TRADE_INTENT_TOKEN. If the
+    # env is "live" or "staging" and the token is empty, refuse to boot.
+    import os
+    env_name = (os.getenv("ENV") or "").strip().lower()
+    if env_name in {"live", "staging"} and not getattr(cfg, "DIRECT_TRADE_INTENT_TOKEN", ""):
+        errors.append(
+            f"ENV='{env_name}' requires DIRECT_TRADE_INTENT_TOKEN to be set. "
+            "Refusing to boot — direct-trades HTTP endpoint would be ungated."
+        )
+
+    # ------------------------------------------------------------------
     # Summary log
     # ------------------------------------------------------------------
     log.info("=== Trading Platform Startup ===")

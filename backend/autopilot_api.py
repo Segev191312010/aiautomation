@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from auth import get_current_user
@@ -426,7 +426,40 @@ async def apply_rule_lab_actions(payload: RuleLabApplyRequest):
 
 
 @router.post("/direct-trades/execute")
-async def execute_autopilot_direct_trade(decision: AIDirectTrade):
+async def execute_autopilot_direct_trade(
+    decision: AIDirectTrade,
+    request: Request,
+    user=Depends(get_current_user),
+):
+    """Execute a direct AI trade.
+
+    Two-factor gate (router-level auth + intent token):
+    - `Depends(get_current_user)` ensures the caller is authenticated.
+    - `X-Intent-Token` must match `cfg.DIRECT_TRADE_INTENT_TOKEN`.
+      Empty config -> endpoint is disabled (503). Mismatch -> 403.
+    - HTTP callers can NEVER trigger skip_safety=True; the safety kernel
+      remains in the path regardless of the AIDirectTrade payload.
+
+    A startup assertion in `startup.py` refuses to boot an ENV=live or
+    ENV=staging instance with an empty DIRECT_TRADE_INTENT_TOKEN.
+    """
+    expected = (cfg.DIRECT_TRADE_INTENT_TOKEN or "").strip()
+    if not expected:
+        # Endpoint disabled in this deployment.
+        raise HTTPException(
+            status_code=503,
+            detail="direct-trades HTTP path disabled (DIRECT_TRADE_INTENT_TOKEN unset)",
+        )
+    provided = (request.headers.get("X-Intent-Token") or "").strip()
+    if provided != expected:
+        raise HTTPException(status_code=403, detail="Invalid X-Intent-Token")
+
+    # The audit trail must make it unambiguous that HTTP cannot bypass safety.
+    log.warning(
+        "direct_trade_http_invocation: user=%s symbol=%s side=%s qty=%s "
+        "skip_safety=False intent_token_present=True",
+        user.id, decision.symbol, decision.action, getattr(decision, "quantity", "?"),
+    )
     return await execute_direct_trade(decision)
 
 

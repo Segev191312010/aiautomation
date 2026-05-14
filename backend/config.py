@@ -143,6 +143,11 @@ class Config:
     JWT_ACCESS_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_EXPIRE_MINUTES", "1440"))
     # Bootstrap secret for /api/auth/token — must be set before any remote exposure
     JWT_BOOTSTRAP_SECRET: str = os.getenv("JWT_BOOTSTRAP_SECRET", "")
+    # Intent token for /api/autopilot/direct-trades/execute — empty (default)
+    # disables the HTTP path entirely (returns 503). Required when ENV is
+    # set to "live" or "staging"; a startup assertion in startup.py refuses
+    # to boot a non-dev instance with this empty.
+    DIRECT_TRADE_INTENT_TOKEN: str = os.getenv("DIRECT_TRADE_INTENT_TOKEN", "")
 
     # ── Strict config validation ──────────────────────────────────────────────
     STRICT_CONFIG: bool = os.getenv("STRICT_CONFIG", "true").lower() == "true"
