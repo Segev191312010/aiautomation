@@ -7,6 +7,8 @@ import clsx from 'clsx'
 import { fmtUSD } from '@/utils/formatters'
 import { useAccountStore, useBotStore } from '@/store'
 import { useToast } from '@/components/ui/ToastProvider'
+import { get, put } from '@/services/api/client'
+import { fetchYahooBars } from '@/services/api/market'
 import type { Position, SimPosition } from '@/types'
 
 interface SparklineBar {
@@ -24,15 +26,20 @@ function isSparklineBar(value: unknown): value is SparklineBar {
 function PositionSparkline({ symbol, avgCost }: { symbol: string; avgCost: number }) {
   const [prices, setPrices] = useState<number[]>([])
   useEffect(() => {
-    fetch(`/api/yahoo/${symbol}/bars?timeframe=1d&limit=20`)
-      .then(r => r.json())
-      .then((bars: unknown) => {
-        if (Array.isArray(bars)) {
-          const closePrices = bars.filter(isSparklineBar).map((bar) => bar.close)
-          if (closePrices.length > 0) setPrices(closePrices)
-        }
+    let cancelled = false
+    // Use the authenticated API client so the request carries a bearer token
+    // and 401s flow through the central session-expired handler instead of
+    // being silently swallowed by .catch(() => {}).
+    fetchYahooBars(symbol, '1mo', '1d')
+      .then((bars) => {
+        if (cancelled) return
+        const closePrices = bars.filter(isSparklineBar).map((bar) => bar.close)
+        if (closePrices.length > 0) setPrices(closePrices)
       })
-      .catch(() => {})
+      .catch(() => {
+        // Sparkline is decorative — failure here should not toast spam.
+      })
+    return () => { cancelled = true }
   }, [symbol])
 
   if (prices.length < 2) return <span className="text-zinc-700 text-xs">-</span>
@@ -191,25 +198,24 @@ export default function PositionsTable() {
   const [enriched, setEnriched] = useState<EnrichedPosition[]>([])
   const toast = useToast()
 
-  // Fetch bracket data for live positions
+  // Fetch bracket data for live positions through the authenticated client
+  // so 401s drive session-expired and 404s surface as toasts. The legacy
+  // raw-fetch pair bypassed auth and silently 401'd or 404'd.
   const fetchBrackets = useCallback(async () => {
     if (simMode || positions.length === 0) {
       setEnriched(positions as EnrichedPosition[])
       return
     }
     try {
-      const res = await fetch('/api/positions/brackets')
-      if (res.ok) {
-        const data: unknown = await res.json()
-        if (Array.isArray(data)) {
-          setEnriched(data.filter(isEnrichedPosition))
-        } else {
-          setEnriched(positions as EnrichedPosition[])
-        }
+      const data = await get<unknown>('/api/positions/brackets')
+      if (Array.isArray(data)) {
+        setEnriched(data.filter(isEnrichedPosition))
       } else {
         setEnriched(positions as EnrichedPosition[])
       }
     } catch {
+      // Endpoint may not exist or be temporarily unavailable — fall back to
+      // the plain positions list without bracket overlays.
       setEnriched(positions as EnrichedPosition[])
     }
   }, [positions, simMode])
@@ -218,16 +224,14 @@ export default function PositionsTable() {
 
   const handleModifyOrder = async (orderId: number, newPrice: number) => {
     try {
-      const res = await fetch(`/api/orders/${orderId}/modify?price=${newPrice}`, { method: 'PUT' })
-      if (res.ok) {
-        toast.success(`Order ${orderId} modified to $${newPrice.toFixed(2)}`)
-        setTimeout(fetchBrackets, 1000) // refresh after IBKR processes
-      } else {
-        const data = await res.json()
-        toast.error(data.detail || 'Failed to modify order')
-      }
-    } catch {
-      toast.error('Failed to modify order')
+      await put(`/api/orders/${orderId}/modify?price=${newPrice}`)
+      toast.success(`Order ${orderId} modified to $${newPrice.toFixed(2)}`)
+      setTimeout(fetchBrackets, 1000) // refresh after IBKR processes
+    } catch (err) {
+      // put() throws on non-2xx; surface the real reason rather than the
+      // silent fail the old raw-fetch path produced under 401.
+      const detail = err instanceof Error ? err.message : 'Failed to modify order'
+      toast.error(detail)
     }
   }
 

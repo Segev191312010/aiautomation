@@ -261,6 +261,15 @@ def assert_risk_budget(
     For rule-driven entries without a concrete stop, we conservatively fall back
     to order notional.
     """
+    import math
+    # Non-finite inputs (NaN, inf) bypass `<= 0` and `>` comparisons silently.
+    # Reject them explicitly before any arithmetic.
+    if not math.isfinite(price_estimate):
+        raise SafetyViolation(f"price_estimate is not finite ({price_estimate}) - cannot verify risk budget")
+    if not math.isfinite(account_equity):
+        raise SafetyViolation(f"account_equity is not finite ({account_equity}) - cannot verify risk budget")
+    if stop_price is not None and not math.isfinite(stop_price):
+        raise SafetyViolation(f"stop_price is not finite ({stop_price}) - cannot verify risk budget")
     if quantity <= 0:
         raise SafetyViolation(f"quantity is {quantity} — cannot verify risk budget")
     if account_equity <= 0:
@@ -273,6 +282,9 @@ def assert_risk_budget(
         risk_amount = abs(price_estimate - stop_price) * quantity
     else:
         risk_amount = quantity * price_estimate
+
+    if not math.isfinite(risk_amount):
+        raise SafetyViolation(f"computed risk_amount is not finite ({risk_amount}) - blocking trade")
 
     if risk_amount > max_risk:
         raise SafetyViolation(

@@ -136,19 +136,43 @@ def clear_bar_cache() -> None:
     _bar_cache.clear()
 
 
+def _finite_positive(value) -> Optional[float]:
+    """Return a finite, positive float or None.
+
+    Guards against NaN (which is truthy in Python and silently poisons
+    `value or fallback` chains throughout the price pipeline).
+    """
+    import math
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f) or f <= 0:
+        return None
+    return f
+
+
 async def get_latest_price(symbol: str) -> Optional[float]:
     """Return the last traded price for a symbol (IBKR → Yahoo fallback)."""
     # Try IBKR first
     if ibkr.is_connected():
+        contract = ibkr.make_stock_contract(symbol)
         try:
-            contract = ibkr.make_stock_contract(symbol)
             await ibkr.ib.qualifyContractsAsync(contract)
             ticker = ibkr.ib.reqMktData(contract, "", False, False)
-            await asyncio.sleep(2)  # allow tick to populate
-            price = ticker.last or ticker.close or None
-            ibkr.ib.cancelMktData(contract)
-            if price is not None:
-                return price
+            try:
+                await asyncio.sleep(2)  # allow tick to populate
+                price = _finite_positive(ticker.last) or _finite_positive(ticker.close)
+                if price is not None:
+                    return price
+            finally:
+                # Ensure subscription is always cancelled, even on cancellation
+                # or unexpected exception inside the wait — otherwise IBKR
+                # accumulates orphaned market-data subscriptions.
+                try:
+                    ibkr.ib.cancelMktData(contract)
+                except Exception as cancel_exc:
+                    log.debug("cancelMktData failed for %s: %s", symbol, cancel_exc)
         except Exception as exc:
             log.warning("IBKR price fetch failed for %s: %s", symbol, exc)
 
@@ -190,8 +214,8 @@ async def subscribe_realtime(symbol: str, on_tick: Callable[[str, float], None])
     def _on_pending_tickers(tickers):
         for t in tickers:
             if t.contract.symbol == symbol:
-                price = t.last or t.close
-                if price:
+                price = _finite_positive(t.last) or _finite_positive(t.close)
+                if price is not None:
                     for cb in _tick_callbacks.get(symbol, []):
                         cb(symbol, price)
 

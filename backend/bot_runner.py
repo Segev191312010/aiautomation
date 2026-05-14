@@ -257,7 +257,12 @@ async def _run_cycle() -> None:
                         lambda b=batch: yf.download(
                             b, period="1y", interval="1d",
                             auto_adjust=True, progress=False,
-                            group_by="ticker", threads=True,
+                            # threads=False: passing True here lets yfinance spawn
+                            # its own worker pool *inside* the executor thread,
+                            # compounding pressure on the OS thread / DNS
+                            # resolver budget. Keep the outer executor as the
+                            # only source of parallelism.
+                            group_by="ticker", threads=False,
                         )
                     )
                     if raw.empty:

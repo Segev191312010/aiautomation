@@ -106,10 +106,13 @@ async def get_watchlist_quotes(symbols: str = "BTC-USD,ETH-USD,AAPL,TSLA,SPY,QQQ
         return []
     try:
         quotes = await yf_quotes(",".join(syms))
-        if quotes:
-            return quotes
     except Exception as exc:
         log.warning("Yahoo Finance failed: %s", exc)
+        raise HTTPException(503, "No market data available")
+    if quotes:
+        return quotes
+    # All symbols resolved to None (per-symbol failures filtered to empty list)
+    # — this is a partial/total upstream failure, not "no symbols requested".
     raise HTTPException(503, "No market data available")
 
 
@@ -126,10 +129,14 @@ async def get_yahoo_bars(symbol: str, period: str = "5d", interval: str = "5m"):
             raise HTTPException(400, f"{interval} interval requires period <= {max_days}d")
     try:
         bars = await yf_bars(symbol, period, interval)
-        if bars:
-            return bars
     except Exception as exc:
+        # Distinguish upstream failure (network, DNS, rate limit) from genuinely
+        # empty data. A 404 implies "symbol doesn't exist" which is misleading
+        # when the real cause is provider unavailability.
         log.warning("Yahoo bars failed for %s: %s", symbol, exc)
+        raise HTTPException(503, f"Data source unavailable for {symbol}")
+    if bars:
+        return bars
     raise HTTPException(404, f"No data for {symbol}")
 
 

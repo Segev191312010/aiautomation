@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -12,6 +13,16 @@ log = logging.getLogger(__name__)
 # Optional data health recording (set by main.py at startup)
 _record_success = None
 _record_failure = None
+
+# Module-level shared executor. Previously each yf_quotes / yf_bars call
+# spawned a fresh ThreadPoolExecutor (and yfinance internally spawns urllib3
+# helper threads), which under concurrent watchlist + chart + alert traffic
+# saturated the per-process thread / FD limit on macOS and surfaced as
+# "getaddrinfo() thread failed to start" (misreported by yfinance as
+# "possibly delisted; no price data found"). Cap the pool so we cannot starve
+# the resolver again.
+_YF_POOL_SIZE = int(os.getenv("YF_POOL_SIZE", "8"))
+_yf_executor = ThreadPoolExecutor(max_workers=_YF_POOL_SIZE, thread_name_prefix="yf")
 
 
 def set_health_callbacks(success_fn, failure_fn):
@@ -52,8 +63,9 @@ async def yf_quotes(symbols_str: str, source: str = "watchlist_quotes") -> list[
             return None
 
     def _all():
-        with ThreadPoolExecutor(max_workers=min(len(syms), 10)) as ex:
-            return [r for r in ex.map(_one, syms) if r is not None]
+        # Reuse the shared bounded executor instead of spawning a fresh pool
+        # on every call.
+        return [r for r in _yf_executor.map(_one, syms) if r is not None]
 
     try:
         quotes = await asyncio.to_thread(_all)

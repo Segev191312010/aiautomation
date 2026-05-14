@@ -198,6 +198,10 @@ async def lifespan(app: FastAPI):
     ibkr.set_broadcast(_broadcast)
     alert_engine.set_broadcast(_broadcast)
     notification_service.set_ws_broadcast(_broadcast)
+    # Wire yahoo_data freshness recording into the central monitor so
+    # /api/data/health reports real Yahoo state instead of "unknown" forever.
+    import yahoo_data as _yahoo_data_module
+    _yahoo_data_module.set_health_callbacks(_record_data_success, _record_data_failure)
     initialize_runtime_state(ws_manager=manager, data_health=_data_health, diag_service=_diag_service)
 
     # Register order-fill ? tracked position lifecycle
@@ -490,11 +494,16 @@ def _validate_ws_token(ws: WebSocket) -> str | None:
 async def ws_general(ws: WebSocket):
     user_id = _validate_ws_token(ws)
     if not user_id:
-        await ws.accept()
+        # Browsers refuse the handshake when the server accepts without echoing
+        # one of the requested subprotocols. Accept WITH the bearer subprotocol
+        # before closing so the client gets a clean close frame (code 4001)
+        # and can stop reconnecting, instead of falling into a handshake-reject
+        # / 3-second-reconnect storm.
+        await ws.accept(subprotocol="bearer")
         await ws.close(code=4001, reason="Authentication required")
         return
     if not _check_ws_origin(ws):
-        await ws.accept()
+        await ws.accept(subprotocol="bearer")
         await ws.close(code=4003, reason="Origin not allowed")
         return
     # Echo the "bearer" subprotocol so the browser completes the handshake.
@@ -863,11 +872,15 @@ async def _ws_collect_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
 async def ws_market_data(ws: WebSocket):
     user_id = _validate_ws_token(ws)
     if not user_id:
-        await ws.accept()
+        # Accept WITH the requested bearer subprotocol before closing so the
+        # browser sees a successful handshake and a clean close frame, instead
+        # of a "subprotocol mismatch" handshake reject that produces the
+        # observed open/close storm.
+        await ws.accept(subprotocol="bearer")
         await ws.close(code=4001, reason="Authentication required")
         return
     if not _check_ws_origin(ws):
-        await ws.accept()
+        await ws.accept(subprotocol="bearer")
         await ws.close(code=4003, reason="Origin not allowed")
         return
     await ws.accept(subprotocol="bearer")

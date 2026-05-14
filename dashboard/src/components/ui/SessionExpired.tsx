@@ -16,8 +16,15 @@ export default function SessionExpired() {
 
   useEffect(() => {
     const handler = () => setVisible(true)
+    // Listen for both event names: api:unauthorized is what the API client
+    // dispatches on 401; session:expired is the documented public event for
+    // callers that want to trigger the modal directly.
     window.addEventListener(SESSION_EXPIRED_EVENT, handler)
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handler)
+    window.addEventListener('api:unauthorized', handler)
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, handler)
+      window.removeEventListener('api:unauthorized', handler)
+    }
   }, [])
 
   if (!visible) return null
@@ -31,7 +38,7 @@ export default function SessionExpired() {
       aria-label="Session expired"
     >
       <div
-        className="card rounded-2xl -lg w-full max-w-sm p-7 flex flex-col gap-5 animate-fade-in-up"
+        className="card rounded-2xl shadow-lg w-full max-w-sm p-7 flex flex-col gap-5 animate-fade-in-up"
         style={{ background: 'var(--bg-card)', border: '1px solid var(--border)' }}
       >
         {/* Icon */}

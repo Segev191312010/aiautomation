@@ -151,8 +151,8 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
         {ICONS[toast.type]}
       </div>
 
-      {/* Message */}
-      <span className="flex-1 text-xs font-sans font-medium text-zinc-100 leading-relaxed">
+      {/* Message — dark text for legibility on the cream card surface */}
+      <span className="flex-1 text-xs font-sans font-medium text-zinc-800 leading-relaxed">
         {toast.message}
       </span>
 

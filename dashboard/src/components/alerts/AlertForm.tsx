@@ -355,7 +355,7 @@ export default function AlertForm({ onClose, editAlert, initialSymbol, initialPr
         ref={dialogRef}
         className={[
           'relative w-full max-w-lg mx-4',
-          'card-elevated rounded-2xl -lg',
+          'card-elevated rounded-2xl shadow-lg',
           'flex flex-col max-h-[90vh] overflow-hidden',
           'border border-zinc-800',
         ].join(' ')}

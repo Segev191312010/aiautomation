@@ -91,10 +91,22 @@ class WebSocketService {
       // onclose fires right after; handle reconnect there
     }
 
-    this.ws.onclose = () => {
-      console.warn('[WS] disconnected')
+    this.ws.onclose = (ev?: CloseEvent) => {
+      const code = ev?.code
+      console.warn('[WS] disconnected', code)
       this._clearTimers()
-      if (!this.stopped) this._scheduleReconnect()
+      if (this.stopped) return
+      // Auth (4001) and origin (4003) failures are non-transient — do not
+      // reconnect every 3s. Dispatch the unauthorized event for 4001 so the
+      // session-expired modal fires.
+      if (code === 4001 || code === 4003) {
+        this.stopped = true
+        if (code === 4001) {
+          window.dispatchEvent(new Event('api:unauthorized'))
+        }
+        return
+      }
+      this._scheduleReconnect()
     }
   }
 
@@ -265,9 +277,22 @@ class MarketDataWsService {
 
     this.ws.onerror = () => { /* onclose fires after */ }
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev?: CloseEvent) => {
+      const code = ev?.code
       this._clearTimers()
-      if (!this.stopped) this._scheduleReconnect()
+      if (this.stopped) return
+      // Auth (4001) and origin (4003) failures are not transient — reconnecting
+      // every 3s just produces an open/close storm and burns CPU + log volume.
+      // Surface the unauthorized signal so the session-expired modal can fire
+      // and let the user re-login; stop the loop until the page reloads.
+      if (code === 4001 || code === 4003) {
+        this.stopped = true
+        if (code === 4001) {
+          window.dispatchEvent(new Event('api:unauthorized'))
+        }
+        return
+      }
+      this._scheduleReconnect()
     }
   }
 

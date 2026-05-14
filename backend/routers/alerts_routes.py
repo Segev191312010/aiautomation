@@ -72,26 +72,53 @@ async def api_alerts_test(body: AlertCreate, user=Depends(get_current_user)):
     summary = _alert_condition_summary(temp_alert)
     now = datetime.now(timezone.utc).isoformat()
 
-    # Broadcast via runtime state
-    from runtime_state import get_ws_manager
-    mgr = get_ws_manager()
-    if mgr:
-        await mgr.broadcast({
-            "type": "alert_fired",
-            "alert_id": temp_alert.id,
-            "name": temp_alert.name,
-            "symbol": temp_alert.symbol,
-            "condition_summary": summary,
-            "price": price,
-            "timestamp": now,
-        })
+    # Actually evaluate the condition against the resolved price.
+    # Previously this endpoint always returned triggered=True and broadcast a
+    # fake alert_fired event, making "Test" a UX lie.
+    triggered = False
+    eval_error: str | None = None
+    if body.condition.indicator == "PRICE":
+        from alert_engine import _evaluate_price_condition
+        try:
+            triggered = _evaluate_price_condition(body.condition, body.symbol.upper(), price)
+        except Exception as exc:
+            eval_error = f"price evaluation failed: {exc}"
+    else:
+        # Indicator-based: fetch bars and run rule_engine condition eval.
+        try:
+            from market_data import get_historical_bars
+            from rule_engine import _evaluate_condition
+            df = await get_historical_bars(body.symbol.upper(), duration="60 D", bar_size="1D")
+            if df is not None and not df.empty and len(df) >= 2:
+                triggered = _evaluate_condition(body.condition, df, {})
+            else:
+                eval_error = "insufficient historical bars to evaluate indicator condition"
+        except Exception as exc:
+            eval_error = f"indicator evaluation failed: {exc}"
+
+    # Only broadcast when the condition actually evaluates true.
+    if triggered:
+        from runtime_state import get_ws_manager
+        mgr = get_ws_manager()
+        if mgr:
+            await mgr.broadcast({
+                "type": "alert_fired",
+                "alert_id": temp_alert.id,
+                "name": temp_alert.name,
+                "symbol": temp_alert.symbol,
+                "condition_summary": summary,
+                "price": price,
+                "timestamp": now,
+                "test": True,
+            })
 
     return {
         "alert_id": temp_alert.id,
         "symbol": temp_alert.symbol,
         "price": price,
-        "triggered": True,
+        "triggered": triggered,
         "condition_summary": summary,
+        "error": eval_error,
     }
 
 

@@ -97,8 +97,13 @@ export function useMarketData(): void {
     try {
       const positions = await fetchPositions()
       setPositions(positions)
-    } catch {
-      setPositions([])
+    } catch (err) {
+      // Do NOT clear positions on transient fetch failure (401, 503, network
+      // hiccup). A trading UI that flips to "no open positions" because of a
+      // momentary auth/network error is a dangerous false-flat indicator —
+      // the user may think they are flat when they are not. Keep the last
+      // known book and let the 401 handler (api:unauthorized) drive reauth.
+      console.warn('[useMarketData] Positions fetch failed (keeping last known):', err)
     }
   }, [setAccount, setPositions])
 
