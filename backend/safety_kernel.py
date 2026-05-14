@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from config import cfg
 
@@ -110,13 +111,45 @@ async def trip_circuit_breaker(source: str, *, close_positions: bool = False) ->
         log.error("Failed to activate emergency stop via circuit breaker: %s", exc)
 
 
-async def _emergency_close_all_positions(source: str) -> None:
-    """Best-effort emergency close of all open positions."""
-    try:
-        from database import get_open_positions
-        from ibkr_client import ibkr
-        from config import cfg
+def _is_regular_trading_hours(now_utc: datetime | None = None) -> bool:
+    """True if `now_utc` is inside US RTH (Mon-Fri 13:30-20:00 UTC).
 
+    Used by emergency close to decide whether a naked-MKT fallback is safe.
+    A more rigorous check would consult an exchange calendar (NYSE holidays),
+    but for emergency-stop purposes "weekday + standard window" is enough —
+    holidays just mean the broker rejects and the outcome is recorded.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    if now.weekday() >= 5:  # Sat/Sun
+        return False
+    hhmm = now.hour * 100 + now.minute
+    return 1330 <= hhmm <= 2000
+
+
+async def _emergency_close_all_positions(source: str) -> None:
+    """Best-effort emergency close of all open positions.
+
+    Hardened design (see plan: Batch 2):
+    - Side derived from pos.qty sign as a defensive backstop on top of
+      pos.side (defends against future model drift).
+    - Marketable LimitOrder priced from finite IBKR ticker bid/ask/last with
+      a ±2% safety band, instead of a naked MarketOrder + outsideRth=True.
+    - MKT fallback ONLY when (a) no finite quote AND (b) inside RTH. Outside
+      both conditions we record a CRITICAL `emergency_close_no_price` audit
+      entry and SKIP the position rather than fire MKT on garbage quotes.
+    - Per-position outcome is logged as a structured `emergency_close_outcome`
+      audit entry: position_id, symbol, qty, close_action, outcome, reason,
+      latency_ms, ts. This schema is pinned by test_emergency_close.py.
+    """
+    from ib_insync import LimitOrder as _LmtOrder, MarketOrder as _MktOrder
+
+    from database import get_open_positions
+    from ibkr_client import ibkr
+    from config import cfg
+    from market_data import finite_positive
+
+    started = time.time()
+    try:
         if cfg.SIM_MODE or not ibkr.is_connected():
             log.warning("Cannot emergency-close: SIM_MODE=%s connected=%s",
                         cfg.SIM_MODE, ibkr.is_connected() if not cfg.SIM_MODE else "N/A")
@@ -126,22 +159,113 @@ async def _emergency_close_all_positions(source: str) -> None:
         if not positions:
             return
 
-        log.critical("EMERGENCY CLOSE: attempting to close %d positions (source=%s)", len(positions), source)
-        from ib_insync import MarketOrder as _MktOrder
+        log.critical(
+            "EMERGENCY CLOSE: attempting to close %d positions (source=%s)",
+            len(positions), source,
+        )
+
+        in_rth = _is_regular_trading_hours()
+
         for pos in positions:
+            pos_started = time.time()
+            outcome_payload: dict = {
+                "type": "emergency_close_outcome",
+                "position_id": pos.id,
+                "symbol": pos.symbol,
+                "qty": float(pos.quantity),
+                "close_action": "",
+                "outcome": "rejected",
+                "reason": "",
+                "latency_ms": 0,
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "source": source,
+            }
             try:
+                # Side from qty sign (defensive) — must agree with pos.side
+                if pos.quantity > 0:
+                    close_action = "SELL" if pos.side == "BUY" else "BUY"
+                else:
+                    # Negative qty is a short; close by BUY.
+                    close_action = "BUY"
+                outcome_payload["close_action"] = close_action
+
+                qty = abs(int(pos.quantity))
+                if qty <= 0:
+                    outcome_payload.update(outcome="skipped_no_qty", reason="abs(qty) is zero")
+                    log.critical("emergency_close_outcome %s", outcome_payload)
+                    continue
+
                 contract = ibkr.make_stock_contract(pos.symbol)
                 await ibkr.ib.qualifyContractsAsync(contract)
-                close_action = "SELL" if pos.side == "BUY" else "BUY"
-                order = _MktOrder(close_action, int(pos.quantity))
-                order.tif = "GTC"
-                order.outsideRth = True
-                ibkr.ib.placeOrder(contract, order)
-                log.critical("Emergency MKT %s %d %s placed", close_action, int(pos.quantity), pos.symbol)
+
+                # Resolve a finite limit price from the latest IBKR ticker.
+                limit_px: float | None = None
+                try:
+                    [ticker] = await asyncio.wait_for(
+                        ibkr.ib.reqTickersAsync(contract), timeout=5,
+                    )
+                    candidates = (
+                        ticker.bid if close_action == "SELL" else ticker.ask,
+                        ticker.last,
+                        ticker.close,
+                        ticker.ask if close_action == "SELL" else ticker.bid,
+                    )
+                    for cand in candidates:
+                        px = finite_positive(cand)
+                        if px is not None:
+                            # ±2% safety band: cross the spread aggressively but
+                            # refuse to chase a gap further than 2% away.
+                            multiplier = 0.98 if close_action == "SELL" else 1.02
+                            limit_px = round(px * multiplier, 2)
+                            break
+                except Exception as exc:
+                    log.warning("emergency_close: ticker fetch failed for %s: %s", pos.symbol, exc)
+
+                if limit_px is not None:
+                    order = _LmtOrder(close_action, qty, limit_px)
+                    order.tif = "GTC"
+                    order.outsideRth = True
+                    ibkr.ib.placeOrder(contract, order)
+                    outcome_payload.update(
+                        outcome="filled",  # submitted; real fill arrives via orderStatus
+                        reason=f"marketable_limit @ {limit_px}",
+                    )
+                elif in_rth:
+                    # No finite quote but RTH — MKT is the last resort.
+                    order = _MktOrder(close_action, qty)
+                    order.tif = "GTC"
+                    order.outsideRth = False
+                    ibkr.ib.placeOrder(contract, order)
+                    outcome_payload.update(
+                        outcome="filled",  # submitted as MKT inside RTH
+                        reason="mkt_fallback_rth_no_finite_quote",
+                    )
+                else:
+                    # No finite quote AND outside RTH — refuse to send a MKT
+                    # order on garbage quotes after-hours. Record and skip.
+                    outcome_payload.update(
+                        outcome="skipped_no_price",
+                        reason="emergency_close_no_price: no finite bid/ask/last and outside RTH",
+                    )
+                    log.critical(
+                        "emergency_close_no_price: skipping %s qty=%d action=%s "
+                        "(no finite quote, outside RTH)",
+                        pos.symbol, qty, close_action,
+                    )
+
             except Exception as exc:
+                outcome_payload.update(outcome="rejected", reason=f"{type(exc).__name__}: {exc}")
                 log.error("Failed to emergency-close %s: %s", pos.symbol, exc)
+            finally:
+                outcome_payload["latency_ms"] = int((time.time() - pos_started) * 1000)
+                log.critical("emergency_close_outcome %s", outcome_payload)
     except Exception as exc:
         log.error("Emergency close failed: %s", exc)
+    finally:
+        log.critical(
+            "EMERGENCY CLOSE: complete (source=%s, latency_ms=%d)",
+            source, int((time.time() - started) * 1000),
+        )
 
 
 def reset_circuit_breaker() -> None:
