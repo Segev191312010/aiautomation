@@ -7,6 +7,8 @@ const PAGE_LABELS: Record<string, string> = {
   dashboard:  'Dashboard',
   tradebot:   'TradeBot Command Center',
   market:     'Market Analyzer',
+  screener:   'US Stock Screener',
+  alerts:     'Price Alerts',
   simulation: 'Simulation Engine',
   rules:      'Automation Rules',
   settings:   'Settings',

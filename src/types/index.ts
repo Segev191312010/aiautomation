@@ -233,4 +233,12 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'simulation' | 'rules' | 'settings'
+export type AppRoute =
+  | 'dashboard'
+  | 'tradebot'
+  | 'market'
+  | 'screener'
+  | 'alerts'
+  | 'simulation'
+  | 'rules'
+  | 'settings'

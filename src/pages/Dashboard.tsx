@@ -4,7 +4,7 @@
  */
 import React from 'react'
 import WatchlistGrid from '@/components/ticker/WatchlistGrid'
-import TradingChart from '@/components/chart/TradingChart'
+import ChartView from '@/components/chart/ChartView'
 import KPICard from '@/components/tradebot/KPICard'
 import { useMarketStore, useAccountStore, useBotStore } from '@/store'
 import type { AccountSummary, SimAccountState } from '@/types'
@@ -70,7 +70,7 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex-1 min-h-0">
-            <TradingChart symbol={selectedSymbol} className="h-full" />
+            <ChartView symbol={selectedSymbol} className="h-full" />
           </div>
         </div>
 

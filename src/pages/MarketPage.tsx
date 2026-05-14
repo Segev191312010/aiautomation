@@ -7,7 +7,7 @@
  */
 import React, { useState, useEffect, useRef } from 'react'
 import clsx from 'clsx'
-import TradingChart from '@/components/chart/TradingChart'
+import ChartView from '@/components/chart/ChartView'
 import IndicatorPanel from '@/components/chart/IndicatorPanel'
 import IndicatorSelector from '@/components/indicators/IndicatorSelector'
 import TickerCard from '@/components/ticker/TickerCard'
@@ -235,7 +235,7 @@ export default function MarketPage() {
               </span>
             </div>
             <div className="h-[calc(100%-44px)]">
-              <TradingChart symbol={selectedSymbol} barSeconds={barSeconds} className="h-full" />
+              <ChartView symbol={selectedSymbol} barSeconds={barSeconds} className="h-full" />
             </div>
           </div>
 

@@ -8,14 +8,20 @@ import { useBotStore } from '@/store'
 import { startBot, stopBot } from '@/services/api'
 
 export default function BotToggle() {
-  const { botRunning, ibkrConnected, simMode, setBotRunning } = useBotStore()
+  const { botRunning, ibkrConnected, simMode, mockMode, setBotRunning } = useBotStore()
   const [busy, setBusy] = useState(false)
+
+  // The bot is enabled whenever *any* execution backend is available:
+  //   - mockMode  — safe in-browser simulation
+  //   - simMode   — paper account on the backend
+  //   - ibkrConnected — live IBKR
+  const canEnable = simMode || mockMode || ibkrConnected
+  const isLive    = !simMode && !mockMode && ibkrConnected
 
   const handleToggle = async () => {
     if (busy) return
 
-    // Safety confirmation for live trading
-    if (!botRunning && !simMode && ibkrConnected) {
+    if (!botRunning && isLive) {
       const ok = window.confirm(
         '⚠️  You are about to enable automated trading with a LIVE account.\n\nRules will place real orders. Continue?',
       )
@@ -55,7 +61,12 @@ export default function BotToggle() {
               SIMULATION
             </span>
           )}
-          {!simMode && !ibkrConnected && (
+          {mockMode && !simMode && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-terminal-amber/15 text-terminal-amber">
+              MOCK MODE
+            </span>
+          )}
+          {!mockMode && !simMode && !ibkrConnected && (
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-terminal-red/15 text-terminal-red">
               IBKR OFFLINE
             </span>
@@ -71,7 +82,7 @@ export default function BotToggle() {
       {/* Toggle switch */}
       <button
         onClick={handleToggle}
-        disabled={busy || (!ibkrConnected && !simMode)}
+        disabled={busy || !canEnable}
         aria-label="Toggle automated trading"
         className={clsx(
           'relative w-14 h-7 rounded-full border-2 transition-all duration-200 focus:outline-none',
