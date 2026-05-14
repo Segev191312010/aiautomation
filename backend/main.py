@@ -211,6 +211,16 @@ async def lifespan(app: FastAPI):
         await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
     on_fill(lambda t: asyncio.create_task(_on_trade_fill_register(t)))
 
+    # Orphan PENDING reaper (Batch 5b). Runs BEFORE reconcile_pending_orders so
+    # the trades it sweeps (no order_id, older than 10 minutes) cannot collide
+    # with the broker-side reconciliation loop. Marks them ERROR with reason
+    # ``orphan_pending_reaped`` and WARN-logs each row.
+    try:
+        from order_executor import reap_orphan_pending_trades
+        await reap_orphan_pending_trades()
+    except Exception as exc:
+        log.error("orphan reaper failed on startup: %s", exc)
+
     # Attempt IBKR connection (non-blocking)
     connected = await ibkr.connect()
     if connected:

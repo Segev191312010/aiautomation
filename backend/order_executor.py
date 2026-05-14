@@ -4,8 +4,9 @@ Order executor — places orders via IBKR and logs them to SQLite.
 from __future__ import annotations
 import asyncio
 import logging
+import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 from ib_insync import MarketOrder, LimitOrder, Trade as IBTrade
 from ibkr_client import ibkr
@@ -19,6 +20,55 @@ log = logging.getLogger(__name__)
 
 # Track active fill watcher tasks for monitoring
 _active_watch_tasks: dict[str, asyncio.Task] = {}
+
+# Single time source for the rate-cap window and the orphan reaper. All
+# timestamp comparisons must go through these helpers — no mixing
+# time.time() with ISO strings or naive datetime.now() (Batch 5b invariant).
+def _now_ts() -> float:
+    """Unix seconds, UTC-anchored via time.time() (POSIX timestamp)."""
+    return time.time()
+
+
+def _now_utc() -> datetime:
+    """tz-aware datetime in UTC."""
+    return datetime.now(timezone.utc)
+
+
+# Per-symbol order-rate cap. The existing _recent_orders dedup is keyed by
+# `symbol:action`, so a buggy rule that alternates BUY/SELL/BUY/SELL for one
+# symbol slips through. This window is keyed by symbol only and caps the
+# total submissions per 60 seconds regardless of action. Initial cap is
+# generous (6/min); tighten via env once we see the WARN line fire.
+#
+# This is a per-process counter — a multi-worker deployment would need a
+# cross-process limiter (Redis / DB counter); flagged for the next batch.
+_order_rate_window: dict[str, list[float]] = {}
+_order_rate_lock = asyncio.Lock()
+MAX_ORDERS_PER_SYMBOL_PER_MIN = int(os.getenv("MAX_ORDERS_PER_SYMBOL_PER_MIN", "6"))
+
+
+async def _check_and_record_rate_cap(symbol: str) -> bool:
+    """Return True if the order is permitted; False if it exceeds the cap.
+
+    Held under a single lock so two concurrent place_order calls cannot both
+    pass the check and append a new timestamp (TOCTOU). The window is also
+    evicted of timestamps older than 60s on every call.
+    """
+    sym = symbol.upper()
+    now = _now_ts()
+    async with _order_rate_lock:
+        window = _order_rate_window.setdefault(sym, [])
+        # Evict stale entries (older than 60s)
+        cutoff = now - 60.0
+        window[:] = [ts for ts in window if ts >= cutoff]
+        if len(window) >= MAX_ORDERS_PER_SYMBOL_PER_MIN:
+            log.warning(
+                "order_rate_cap_exceeded: symbol=%s window=%d cap=%d",
+                sym, len(window), MAX_ORDERS_PER_SYMBOL_PER_MIN,
+            )
+            return False
+        window.append(now)
+        return True
 
 
 def _safe_create_task(coro, *, name: str = "") -> asyncio.Task:
@@ -161,6 +211,14 @@ async def place_order(
     if err:
         log.error("Pre-flight check failed: %s", err)
         return None
+
+    # Per-symbol order-rate cap (Batch 5b). Stricter than the BUY/SELL-keyed
+    # dedup: a BUY/SELL/BUY/SELL flap on one symbol must not slip through.
+    # Exits are exempt — emergency exits can come in bursts.
+    if not is_exit:
+        permitted = await _check_and_record_rate_cap(rule.symbol)
+        if not permitted:
+            return None
 
     price_estimate = rule.action.limit_price
     if price_estimate is None:
@@ -404,6 +462,58 @@ async def cancel_order(order_id: int) -> bool:
             return True
     log.warning("Order %d not found among open trades", order_id)
     return False
+
+
+async def reap_orphan_pending_trades(stale_after_seconds: int = 600) -> int:
+    """Reap PENDING trade rows with no order_id older than the threshold.
+
+    A process crash between ``save_trade(PENDING)`` and ``ibkr.ib.placeOrder``
+    leaves a DB row that ``reconcile_pending_orders`` cannot resolve — it
+    only looks at IBKR's open trades, but no broker order was ever sent.
+    On startup we sweep these rows, mark them ERROR with reason
+    ``orphan_pending_reaped``, and emit a WARN so the operator can investigate.
+
+    Time comparison uses the single ``_now_utc()`` helper to avoid any
+    naive/aware mismatch with ISO timestamps stored in the trade row.
+    """
+    from database import get_trades
+
+    threshold = _now_utc() - timedelta(seconds=stale_after_seconds)
+    reaped = 0
+    try:
+        recent = await get_trades(limit=500)
+    except Exception as exc:
+        log.error("orphan reaper: get_trades failed: %s", exc)
+        return 0
+
+    for trade in recent:
+        if trade.status != "PENDING":
+            continue
+        if trade.order_id is not None:
+            continue  # has a broker order — reconcile_pending_orders handles it
+        try:
+            ts = datetime.fromisoformat(trade.timestamp.replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError):
+            # Malformed timestamp — reap defensively
+            ts = threshold - timedelta(seconds=1)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= threshold:
+            continue
+        log.warning(
+            "orphan_pending_reaped: trade=%s symbol=%s action=%s timestamp=%s "
+            "(no order_id, older than %ds)",
+            trade.id, trade.symbol, trade.action, trade.timestamp, stale_after_seconds,
+        )
+        try:
+            await update_trade_status(trade.id, "ERROR")
+            reaped += 1
+        except Exception as exc:
+            log.error("orphan reaper: failed to mark %s as ERROR: %s", trade.id, exc)
+
+    if reaped:
+        log.warning("orphan reaper: marked %d PENDING-without-order_id trade(s) as ERROR", reaped)
+    return reaped
 
 
 async def reconcile_pending_orders() -> None:
