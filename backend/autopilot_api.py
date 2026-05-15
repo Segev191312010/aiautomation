@@ -575,27 +575,41 @@ async def get_decision_runs_endpoint(
     source: str | None = Query(default=None),
     mode: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    user=Depends(get_current_user),
 ):
+    """List the calling user's decision runs.
+
+    Batch 10: filtered by user.id so user A cannot enumerate user B's runs.
+    """
     from ai_decision_ledger import get_decision_runs
-    return await get_decision_runs(limit=limit, offset=offset, source=source, mode=mode, status=status)
+    return await get_decision_runs(
+        limit=limit, offset=offset, source=source, mode=mode, status=status,
+        user_id=user.id,
+    )
 
 
 @router.get("/decision-runs/{run_id}", response_model=DecisionRunResponse)
-async def get_decision_run_endpoint(run_id: str):
+async def get_decision_run_endpoint(run_id: str, user=Depends(get_current_user)):
+    """Get a single decision run owned by the caller.
+
+    Batch 10 IDOR fix: filter by user.id; cross-user IDs return 404 (no
+    existence disclosure).
+    """
     from ai_decision_ledger import get_decision_run
-    run = await get_decision_run(run_id)
+    run = await get_decision_run(run_id, user_id=user.id)
     if not run:
         raise HTTPException(404, f"Decision run '{run_id}' not found")
     return run
 
 
 @router.get("/decision-runs/{run_id}/items", response_model=list[DecisionItemResponse])
-async def get_decision_run_items_endpoint(run_id: str):
+async def get_decision_run_items_endpoint(run_id: str, user=Depends(get_current_user)):
+    """Get items for a decision run owned by the caller. Same IDOR fix."""
     from ai_decision_ledger import get_decision_run, get_decision_items
-    run = await get_decision_run(run_id)
+    run = await get_decision_run(run_id, user_id=user.id)
     if not run:
         raise HTTPException(404, f"Decision run '{run_id}' not found")
-    return await get_decision_items(run_id)
+    return await get_decision_items(run_id, user_id=user.id)
 
 
 # ── S10: Evaluation Endpoints ────────────────────────────────────────────────
