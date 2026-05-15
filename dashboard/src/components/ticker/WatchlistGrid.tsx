@@ -54,25 +54,6 @@ const SORT_OPTIONS: { field: SortField; label: string }[] = [
   { field: 'symbol',     label: 'Symbol'  },
 ]
 
-// ── Settings icon (inline SVG, no external dep) ───────────────────────────────
-
-function IconSettings({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <circle cx="8" cy="8" r="2.2" />
-      <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M2.93 2.93l1.06 1.06M12.01 12.01l1.06 1.06M2.93 13.07l1.06-1.06M12.01 3.99l1.06-1.06" />
-    </svg>
-  )
-}
-
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function WatchlistGrid() {
@@ -179,12 +160,8 @@ export default function WatchlistGrid() {
             LIVE
           </span>
         </div>
-        <button
-          title="Watchlist settings"
-          className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
-        >
-          <IconSettings className="w-3.5 h-3.5" />
-        </button>
+        {/* Watchlist settings button removed (Batch 10) — it had no onClick.
+            Re-add when the settings panel is wired. */}
       </div>
 
       <div className="px-4 pt-3 pb-4">

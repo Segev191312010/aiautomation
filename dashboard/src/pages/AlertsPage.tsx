@@ -90,8 +90,8 @@ export default function AlertsPage() {
         <div>
           <div className="flex items-center gap-2.5 mb-1">
             {/* Bell icon */}
-            <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-50 shrink-0">
-              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 text-indigo-600">
+            <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-indigo-500/15 shrink-0">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 text-indigo-300">
                 <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
               </svg>
             </div>
@@ -109,8 +109,8 @@ export default function AlertsPage() {
             onClick={handleCreateNew}
             className={[
               'flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-sans font-semibold shrink-0',
-              'bg-indigo-100 text-indigo-600 border border-indigo-100',
-              'hover:bg-indigo-100 hover:border-indigo-600/50 hover:shadow-glow-blue',
+              'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30',
+              'hover:bg-indigo-500/25 hover:border-indigo-400/50 hover:shadow-glow-blue',
               'transition-all duration-150',
             ].join(' ')}
           >

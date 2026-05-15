@@ -364,8 +364,8 @@ export default function AlertForm({ onClose, editAlert, initialSymbol, initialPr
         {/* ── Header ──────────────────────────────────────────────────── */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800 shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="flex items-center justify-center w-6 h-6 rounded-md bg-indigo-50 shrink-0">
-              <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 text-indigo-600">
+            <div className="flex items-center justify-center w-6 h-6 rounded-md bg-indigo-500/15 shrink-0">
+              <svg viewBox="0 0 24 24" fill="currentColor" className="w-3.5 h-3.5 text-indigo-300">
                 <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
               </svg>
             </div>
@@ -428,7 +428,7 @@ export default function AlertForm({ onClose, editAlert, initialSymbol, initialPr
               {/* Condition preview pill */}
               <div className="mt-2 flex items-center gap-2">
                 <span className="text-[10px] font-sans text-zinc-500 uppercase tracking-wider">Preview</span>
-                <span className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-100 text-xs font-mono text-indigo-600">
+                <span className="px-2 py-0.5 rounded-md bg-indigo-500/15 border border-indigo-500/30 text-xs font-mono text-indigo-300">
                   {conditionPreview}
                 </span>
               </div>
@@ -446,7 +446,7 @@ export default function AlertForm({ onClose, editAlert, initialSymbol, initialPr
                     className={[
                       'px-3.5 py-2 rounded-xl border text-xs font-sans font-semibold transition-all duration-150',
                       alertType === t
-                        ? 'bg-indigo-100 text-indigo-600 border-indigo-100 shadow-glow-blue'
+                        ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30 shadow-glow-blue'
                         : 'border-zinc-800 text-zinc-400 hover:border-zinc-800 hover:text-zinc-100',
                     ].join(' ')}
                   >

@@ -25,8 +25,8 @@ function StatCard({
   accent: 'indigo' | 'amber' | 'green'
 }) {
   const accentMap = {
-    indigo: 'bg-indigo-50 text-indigo-600 border-indigo-100',
-    amber:  'bg-amber-50  text-amber-600  border-amber-100',
+    indigo: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+    amber:  'bg-amber-500/10  text-amber-300  border-amber-500/30',
     green:  'bg-emerald-500/10  text-emerald-400  border-emerald-100',
   }
   return (

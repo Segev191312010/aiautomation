@@ -25,8 +25,8 @@ function TypeBadge({ alertType }: { alertType: Alert['alert_type'] }) {
       className={[
         'px-2 py-0.5 rounded-md text-[10px] font-sans font-semibold uppercase tracking-wider',
         isOneShot
-          ? 'bg-indigo-50 text-indigo-600 border border-indigo-100'
-          : 'bg-amber-50 text-amber-600 border border-amber-600/25',
+          ? 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'
+          : 'bg-amber-500/10 text-amber-300 border border-amber-500/30',
       ].join(' ')}
     >
       {isOneShot ? 'One-shot' : 'Recurring'}
@@ -150,7 +150,7 @@ function AlertCard({ alert, onEdit, onToggle, onDelete }: AlertCardProps) {
             className={[
               'px-2.5 py-1 rounded-lg text-[11px] font-sans font-medium',
               'text-zinc-500 hover:text-indigo-600',
-              'hover:bg-indigo-50 border border-transparent hover:border-indigo-100',
+              'hover:bg-indigo-500/10 border border-transparent hover:border-indigo-500/30',
               'transition-all duration-100',
             ].join(' ')}
           >

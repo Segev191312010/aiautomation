@@ -22,13 +22,14 @@ from api_contracts import (
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/advisor", tags=["advisor"], dependencies=[Depends(get_current_user)])
 
-# Simple in-memory cache (1 hour TTL)
+# Simple in-memory cache (1 hour TTL). Batch 10: cache key includes user_id
+# so user A's cached report (rules, trades, P&L) is not served to user B.
 _cache: dict[str, dict] = {}
 _CACHE_TTL = 3600
 
 
-async def _get_report(lookback_days: int, refresh: bool = False) -> dict:
-    key = f"report:{lookback_days}"
+async def _get_report(lookback_days: int, refresh: bool = False, *, user_id: str = "demo") -> dict:
+    key = f"report:{user_id}:{lookback_days}"
     if not refresh and key in _cache and time.time() - _cache[key]["ts"] < _CACHE_TTL:
         return _cache[key]["data"]
     report = await build_full_report(lookback_days=lookback_days)
@@ -40,18 +41,20 @@ async def _get_report(lookback_days: int, refresh: bool = False) -> dict:
 async def get_advisor_report(
     lookback_days: int = Query(default=90, ge=7, le=365),
     refresh: bool = Query(default=False),
+    user=Depends(get_current_user),
 ):
-    """Full analysis report. Cached 1 hour unless ?refresh=true."""
-    return await _get_report(lookback_days, refresh)
+    """Full analysis report. Cached 1 hour per user unless ?refresh=true."""
+    return await _get_report(lookback_days, refresh, user_id=user.id)
 
 
 @router.get("/recommendations")
 async def get_recommendations(
     lookback_days: int = Query(default=90, ge=7, le=365),
     max_priority: str = Query(default="low"),
+    user=Depends(get_current_user),
 ):
     """Recommendations filtered by max priority (high/medium/low)."""
-    report = await _get_report(lookback_days)
+    report = await _get_report(lookback_days, user_id=user.id)
     priority_order = {"high": 1, "medium": 2, "low": 3}
     max_p = priority_order.get(max_priority, 3)
     recs = [r for r in report.get("recommendations", []) if priority_order.get(r.get("priority", "low"), 3) <= max_p]
@@ -59,9 +62,12 @@ async def get_recommendations(
 
 
 @router.get("/analysis")
-async def get_analysis(lookback_days: int = Query(default=90, ge=7, le=365)):
+async def get_analysis(
+    lookback_days: int = Query(default=90, ge=7, le=365),
+    user=Depends(get_current_user),
+):
     """Rule performance + sector stats for the dashboard."""
-    report = await _get_report(lookback_days)
+    report = await _get_report(lookback_days, user_id=user.id)
     return {
         "rule_performance": report.get("rule_performance", []),
         "sector_performance": report.get("sector_performance", []),
@@ -72,9 +78,12 @@ async def get_analysis(lookback_days: int = Query(default=90, ge=7, le=365)):
 
 
 @router.get("/daily-report")
-async def get_daily_report(lookback_days: int = Query(default=90, ge=7, le=365)):
+async def get_daily_report(
+    lookback_days: int = Query(default=90, ge=7, le=365),
+    user=Depends(get_current_user),
+):
     """AI-generated natural language summary."""
-    report = await _get_report(lookback_days, refresh=True)
+    report = await _get_report(lookback_days, refresh=True, user_id=user.id)
     return {"report": report.get("report", "No report available.")}
 
 

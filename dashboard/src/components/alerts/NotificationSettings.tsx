@@ -160,7 +160,7 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
                   className={[
                     'px-2.5 py-1 rounded-lg border text-[11px] font-sans font-semibold transition-all duration-100',
                     prefs.sound === opt.id
-                      ? 'bg-indigo-100 text-indigo-600 border-indigo-200'
+                      ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
                       : 'border-zinc-800 text-zinc-400 hover:border-zinc-800 hover:text-zinc-200',
                   ].join(' ')}
                 >
