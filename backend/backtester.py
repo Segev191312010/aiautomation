@@ -33,6 +33,47 @@ log = logging.getLogger(__name__)
 MAX_WARMUP = 1000
 MIN_BARS_AFTER_WARMUP = 20
 
+# Engine version. Bumped when result-changing semantics are fixed (no
+# look-ahead entries, correct slippage sign, interval-aware Sharpe, explicit
+# auto_adjust). Stored on every saved backtest row so v1 results are
+# visually marked as legacy/optimistic in the UI.
+BACKTEST_ENGINE_VERSION = 2
+
+# Interval -> approximate bars per year (US equities, ~6.5h trading day,
+# 252 trading days). Used for interval-aware Sharpe/Sortino annualization.
+# A regression test iterates every interval the API accepts and fails
+# loudly with the missing interval's name if a new one isn't added here.
+_PERIODS_PER_YEAR: dict[str, float] = {
+    "1m": 252 * 6.5 * 60,    # ~98,280
+    "2m": 252 * 6.5 * 30,    # ~49,140
+    "5m": 252 * 6.5 * 12,    # ~19,656
+    "15m": 252 * 6.5 * 4,    # ~6,552
+    "30m": 252 * 6.5 * 2,    # ~3,276
+    "60m": 252 * 6.5,        # ~1,638
+    "90m": 252 * 6.5 / 1.5,  # ~1,092
+    "1h": 252 * 6.5,         # ~1,638
+    "1d": 252,
+    "5d": 52,
+    "1wk": 52,
+    "1mo": 12,
+    "3mo": 4,
+}
+
+
+def _periods_per_year(interval: str) -> float:
+    """Lookup with a clear failure mode if a new interval is added.
+
+    Tests pin every API-accepted interval; if the API later adds an
+    interval string that isn't in the table, the test fails loudly with
+    the exact interval name so a dev cannot silently regress Sharpe.
+    """
+    if interval not in _PERIODS_PER_YEAR:
+        raise KeyError(
+            f"interval {interval!r} missing from _PERIODS_PER_YEAR — "
+            "add an annualization factor before using this interval for backtests"
+        )
+    return _PERIODS_PER_YEAR[interval]
+
 
 # ---------------------------------------------------------------------------
 # Warmup detection
@@ -188,8 +229,15 @@ def _compute_metrics(
     equity_curve: list[dict[str, Any]],
     initial_capital: float,
     total_bars: int,
+    interval: str = "1d",
 ) -> BacktestMetrics:
-    """Compute all performance metrics from trade list and equity curve."""
+    """Compute all performance metrics from trade list and equity curve.
+
+    Sharpe and Sortino annualization use ``_periods_per_year(interval)``
+    instead of a hard-coded ``sqrt(252)`` — the old constant inflated
+    intraday backtests (~sqrt(6.5)x for 1h, ~sqrt(78)x for 5m) and
+    deflated weekly/monthly ones.
+    """
     final_equity = equity_curve[-1]["equity"] if equity_curve else initial_capital
 
     # -- Total return --
@@ -222,16 +270,17 @@ def _compute_metrics(
 
     dr = np.array(daily_returns) if daily_returns else np.array([0.0])
 
-    # -- Sharpe --
+    # -- Sharpe (interval-aware annualization) --
+    annualization = float(np.sqrt(_periods_per_year(interval)))
     if np.std(dr) > 0:
-        sharpe_ratio = float(np.mean(dr) / np.std(dr) * np.sqrt(252))
+        sharpe_ratio = float(np.mean(dr) / np.std(dr) * annualization)
     else:
         sharpe_ratio = 0.0
 
-    # -- Sortino --
+    # -- Sortino (interval-aware annualization) --
     neg_returns = dr[dr < 0]
     if len(neg_returns) > 0 and np.std(neg_returns) > 0:
-        sortino_ratio = float(np.mean(dr) / np.std(neg_returns) * np.sqrt(252))
+        sortino_ratio = float(np.mean(dr) / np.std(neg_returns) * annualization)
     else:
         sortino_ratio = 0.0
 
@@ -342,14 +391,19 @@ async def run_backtest(
     _atr_trail_m = atr_trail_mult if atr_trail_mult > 0 else cfg.ATR_TRAIL_MULT
 
     # -- Fetch historical data (in thread to avoid blocking event loop) --
+    # auto_adjust=True is explicit so the adjusted close pairs with adjusted
+    # OHLC consistently. Before Batch 7 the default was version-dependent,
+    # which let bars on split days mix adjusted close with raw high/low and
+    # produced phantom stop-outs.
     def _fetch() -> Any:
         if start_date:
             return yf.Ticker(symbol).history(
                 start=start_date,
                 end=end_date or None,
                 interval=interval,
+                auto_adjust=True,
             )
-        return yf.Ticker(symbol).history(period=period, interval=interval)
+        return yf.Ticker(symbol).history(period=period, interval=interval, auto_adjust=True)
 
     raw = await asyncio.to_thread(_fetch)
     if raw.empty:
@@ -409,6 +463,13 @@ async def run_backtest(
 
     start_close = df.at[warmup, "close"]
 
+    # Batch 7: no-look-ahead staging. A signal that fires at bar i's close
+    # cannot fill at bar i's close — there is no time left to send the
+    # order. The fill is at bar i+1's open. SL/TP exits are intra-bar
+    # (price hit during the bar) and remain unchanged.
+    pending_signal_entry: bool = False
+    pending_signal_exit: bool = False
+
     # -- Bar-by-bar loop --
     for i in range(warmup, total_bars):
         bar = df.iloc[i]
@@ -425,13 +486,25 @@ async def run_backtest(
         exit_price = 0.0
         exit_reason = ""
 
-        if position_qty > 0:
-            # -- Update watermark for ATR trail mode --
+        # ── Stage-1: execute any signal staged on bar i-1 at THIS bar's open ──
+        # Signal-based fills happen at next-bar open (no look-ahead). SL/TP
+        # checks remain intra-bar below.
+        if pending_signal_exit and position_qty > 0:
+            exit_price = current_open
+            exit_reason = "signal"
+            pending_signal_exit = False
+
+        # ── Stage-2: intra-bar SL/TP checks (only if no staged signal exit) ──
+        if position_qty > 0 and not exit_reason:
+            # Update watermark for ATR trail mode
             if exit_mode == "atr_trail" and current_close > high_watermark:
                 high_watermark = current_close
 
             if exit_mode == "atr_trail":
-                # ATR-based exit checks (mirrors live bot position_tracker)
+                # ATR-based exit checks (mirrors live bot position_tracker).
+                # Note: this path still uses current_close — ATR-trail exits
+                # are not signal-based in the same sense; they react to
+                # intra-bar price levels. Future iteration can stage these too.
                 should_exit, reason, _ep = _check_atr_exits(
                     df_slice, current_close, entry_price,
                     hard_stop_price, high_watermark, _atr_trail_m,
@@ -440,92 +513,94 @@ async def run_backtest(
                     exit_price = current_close
                     exit_reason = reason
             else:
-                # Simple percentage SL/TP mode
                 if stop_loss_pct > 0 and sl_price > 0:
                     if current_low <= sl_price:
                         exit_price = min(sl_price, current_open)
                         exit_reason = "stop_loss"
-
                 if not exit_reason and take_profit_pct > 0 and tp_price > 0:
                     if current_high >= tp_price:
                         exit_price = max(tp_price, current_open)
                         exit_reason = "take_profit"
 
-            # -- Check user-defined exit conditions (both modes) --
-            if not exit_reason and exit_conditions:
+        # ── Stage-3: execute any exit booked above ──
+        if exit_reason and position_qty > 0:
+            proceeds = position_qty * exit_price - commission
+            pnl = (exit_price - entry_price) * position_qty - 2 * commission
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+
+            cash += proceeds
+
+            entry_dt = datetime.fromtimestamp(entry_time, tz=timezone.utc)
+            exit_dt = datetime.fromtimestamp(bar_time, tz=timezone.utc)
+            duration_days = (exit_dt - entry_dt).total_seconds() / 86400
+
+            trades.append({
+                "entry_date": entry_dt.isoformat(),
+                "exit_date": exit_dt.isoformat(),
+                "entry_price": round(entry_price, 2),
+                "exit_price": round(exit_price, 2),
+                "qty": position_qty,
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "duration_bars": i - entry_bar,
+                "duration_days": round(duration_days, 2),
+                "exit_reason": exit_reason,
+            })
+
+            position_qty = 0
+            entry_price = 0.0
+            sl_price = 0.0
+            tp_price = 0.0
+            hard_stop_price = 0.0
+            high_watermark = 0.0
+            just_exited = True
+
+        # ── Stage-4: execute any signal-staged entry at THIS bar's open ──
+        # Same no-look-ahead invariant: a signal from bar i-1 fills at bar i open.
+        if pending_signal_entry and position_qty == 0 and not just_exited:
+            pending_signal_entry = False
+            available = cash * (position_size_pct / 100)
+            qty = math.floor(available / current_open) if current_open > 0 else 0
+            if qty > 0:
+                cost = qty * current_open + commission
+                cash -= cost
+                position_qty = qty
+                entry_price = current_open
+                entry_bar = i
+                entry_time = bar_time
+
+                if exit_mode == "atr_trail":
+                    # Compute ATR(14) at entry for hard stop
+                    atr_at_entry = 0.0
+                    if len(df_slice) >= 14:
+                        atr_s = _atr(df_slice["high"], df_slice["low"],
+                                     df_slice["close"], 14)
+                        atr_raw = atr_s.iloc[-1]
+                        if pd.notna(atr_raw):
+                            atr_at_entry = float(atr_raw)
+                    hard_stop_price = (
+                        entry_price - _atr_stop_m * atr_at_entry
+                        if atr_at_entry > 0
+                        else entry_price * 0.97
+                    )
+                    high_watermark = entry_price
+                else:
+                    # Simple percentage SL/TP
+                    if stop_loss_pct > 0:
+                        sl_price = entry_price * (1 - stop_loss_pct / 100)
+                    if take_profit_pct > 0:
+                        tp_price = entry_price * (1 + take_profit_pct / 100)
+
+        # ── Stage-5: end-of-bar signal evaluation for NEXT-bar fill ──
+        # Only stage if there IS a next bar; the final bar has no fill window.
+        if i + 1 < total_bars:
+            if position_qty > 0 and exit_conditions and not exit_reason:
+                # Evaluate signal exits using data up to this bar (no look-ahead).
                 if evaluate_conditions(exit_conditions, df_slice, condition_logic):
-                    exit_price = current_close
-                    exit_reason = "signal"
-
-            # -- Execute exit --
-            if exit_reason:
-                proceeds = position_qty * exit_price - commission
-                pnl = (exit_price - entry_price) * position_qty - 2 * commission
-                pnl_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
-
-                cash += proceeds
-
-                # Calculate duration
-                entry_dt = datetime.fromtimestamp(entry_time, tz=timezone.utc)
-                exit_dt = datetime.fromtimestamp(bar_time, tz=timezone.utc)
-                duration_days = (exit_dt - entry_dt).total_seconds() / 86400
-
-                trades.append({
-                    "entry_date": entry_dt.isoformat(),
-                    "exit_date": exit_dt.isoformat(),
-                    "entry_price": round(entry_price, 2),
-                    "exit_price": round(exit_price, 2),
-                    "qty": position_qty,
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round(pnl_pct, 2),
-                    "duration_bars": i - entry_bar,
-                    "duration_days": round(duration_days, 2),
-                    "exit_reason": exit_reason,
-                })
-
-                position_qty = 0
-                entry_price = 0.0
-                sl_price = 0.0
-                tp_price = 0.0
-                hard_stop_price = 0.0
-                high_watermark = 0.0
-                just_exited = True
-
-        # -- Check entry conditions (only if not in position and no exit this bar) --
-        if position_qty == 0 and not just_exited:
-            if evaluate_conditions(entry_conditions, df_slice, condition_logic):
-                # BUY at current close
-                available = cash * (position_size_pct / 100)
-                qty = math.floor(available / current_close) if current_close > 0 else 0
-                if qty > 0:
-                    cost = qty * current_close + commission
-                    cash -= cost
-                    position_qty = qty
-                    entry_price = current_close
-                    entry_bar = i
-                    entry_time = bar_time
-
-                    if exit_mode == "atr_trail":
-                        # Compute ATR(14) at entry for hard stop
-                        atr_at_entry = 0.0
-                        if len(df_slice) >= 14:
-                            atr_s = _atr(df_slice["high"], df_slice["low"],
-                                         df_slice["close"], 14)
-                            atr_raw = atr_s.iloc[-1]
-                            if pd.notna(atr_raw):
-                                atr_at_entry = float(atr_raw)
-                        hard_stop_price = (
-                            entry_price - _atr_stop_m * atr_at_entry
-                            if atr_at_entry > 0
-                            else entry_price * 0.97
-                        )
-                        high_watermark = entry_price
-                    else:
-                        # Simple percentage SL/TP
-                        if stop_loss_pct > 0:
-                            sl_price = entry_price * (1 - stop_loss_pct / 100)
-                        if take_profit_pct > 0:
-                            tp_price = entry_price * (1 + take_profit_pct / 100)
+                    pending_signal_exit = True
+            elif position_qty == 0 and entry_conditions and not just_exited:
+                if evaluate_conditions(entry_conditions, df_slice, condition_logic):
+                    pending_signal_entry = True
 
         # -- Mark-to-market equity --
         equity = cash + position_qty * current_close
@@ -574,7 +649,7 @@ async def run_backtest(
         position_qty = 0
 
     # -- Compute metrics --
-    metrics = _compute_metrics(trades, equity_curve, initial_capital, total_bars)
+    metrics = _compute_metrics(trades, equity_curve, initial_capital, total_bars, interval=interval)
 
     final_equity = equity_curve[-1]["equity"] if equity_curve else initial_capital
 
@@ -599,4 +674,8 @@ async def run_backtest(
         "exit_mode": exit_mode,
         "atr_stop_mult": _atr_stop_m if exit_mode == "atr_trail" else 0.0,
         "atr_trail_mult": _atr_trail_m if exit_mode == "atr_trail" else 0.0,
+        # Batch 7: stamp every saved backtest with the engine version so the
+        # UI can visually distinguish v1 (legacy, optimistic) from v2
+        # (no-look-ahead, correct slippage sign, interval-aware Sharpe).
+        "engine_version": BACKTEST_ENGINE_VERSION,
     }

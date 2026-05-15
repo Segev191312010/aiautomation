@@ -177,7 +177,12 @@ class Portfolio:
                 symbol=signal.symbol,
                 order_type="MKT",
                 quantity=pos["qty"],
-                direction="LONG",
+                # Batch 7: tag EXIT orders as SHORT so SimulatedExecution
+                # applies slippage on the correct side. Selling to close a
+                # long should fill at `close - slippage` (you sell into the
+                # bid), NOT `close + slippage` which was inflating every
+                # backtested exit price.
+                direction="SHORT",
                 rule_id=signal.rule_id,
             )
         return None
