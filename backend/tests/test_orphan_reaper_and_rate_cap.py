@@ -221,3 +221,59 @@ def test_now_ts_returns_unix_seconds():
     assert isinstance(ts, float)
     # Should be close to current epoch seconds
     assert abs(ts - time.time()) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# 6. Reaper edge cases (Batch 9 — added per test-quality reviewer)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_reaper_handles_tz_naive_timestamp(_isolated_db, anyio_backend):
+    """A row with tz-naive timestamp must still be reaped (not crash on aware/naive cmp).
+
+    The reaper defensively patches naive -> UTC at order_executor.py:499-500.
+    This test exercises that branch; without it, datetime comparison would
+    raise TypeError ('can't compare offset-naive and offset-aware datetimes').
+    """
+    from order_executor import reap_orphan_pending_trades
+    from database import get_trades
+
+    await init_db()
+
+    # Old PENDING with NAIVE timestamp (no tzinfo)
+    old_naive = (datetime.now(timezone.utc) - timedelta(minutes=20)).replace(tzinfo=None)
+    orphan = _make_trade(
+        status="PENDING", order_id=None,
+        timestamp_iso=old_naive.isoformat(),  # no Z, no offset
+    )
+    await save_trade(orphan)
+
+    reaped = await reap_orphan_pending_trades(stale_after_seconds=600)
+    assert reaped == 1, "tz-naive old orphan must still be reaped"
+
+    rows = await get_trades(limit=10)
+    assert rows[0].status == "ERROR"
+
+
+@pytest.mark.anyio
+async def test_reaper_defensively_reaps_malformed_timestamp(_isolated_db, anyio_backend):
+    """A row with garbage timestamp gets reaped (defensive fail-safe)."""
+    from order_executor import reap_orphan_pending_trades
+    from database import get_trades
+
+    await init_db()
+    orphan = _make_trade(
+        status="PENDING", order_id=None,
+        timestamp_iso="not-a-real-iso-string",
+    )
+    await save_trade(orphan)
+
+    # The reaper's except-block treats malformed timestamps as "older than
+    # threshold" and reaps them; that's the safer-fail direction (a row
+    # we can't parse shouldn't sit PENDING forever).
+    reaped = await reap_orphan_pending_trades(stale_after_seconds=600)
+    assert reaped == 1
+
+    rows = await get_trades(limit=10)
+    assert rows[0].status == "ERROR"

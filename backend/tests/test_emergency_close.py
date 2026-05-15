@@ -15,7 +15,7 @@ Pins three invariants:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -197,19 +197,134 @@ async def test_emergency_close_short_position_uses_buy_action():
 
 
 @pytest.mark.parametrize("hour,minute,weekday,expected", [
-    (14, 0, 1, True),    # Tuesday 14:00 UTC = 10:00 ET = inside RTH
-    (13, 30, 2, True),   # Wednesday 13:30 UTC = 9:30 ET = open bell
-    (20, 0, 3, True),    # Thursday 20:00 UTC = 16:00 ET = close bell
-    (12, 0, 1, False),   # Tuesday 12:00 UTC = pre-market
-    (21, 0, 1, False),   # Tuesday 21:00 UTC = after-hours
-    (14, 0, 5, False),   # Saturday 14:00 UTC = weekend
-    (14, 0, 6, False),   # Sunday 14:00 UTC = weekend
+    # EDT season (May 2026 — UTC-4). Open bell 09:30 ET = 13:30 UTC.
+    (14, 0, 1, True),    # Tuesday 14:00 UTC = 10:00 EDT = inside RTH
+    (13, 30, 2, True),   # Wednesday 13:30 UTC = 09:30 EDT = open bell
+    (20, 0, 3, True),    # Thursday 20:00 UTC = 16:00 EDT = close bell
+    (12, 0, 1, False),   # Tuesday 12:00 UTC = pre-market EDT
+    (21, 0, 1, False),   # Tuesday 21:00 UTC = after-hours EDT
+    (14, 0, 5, False),   # Saturday = weekend
+    (14, 0, 6, False),   # Sunday = weekend
 ])
-def test_is_regular_trading_hours(hour, minute, weekday, expected):
-    """RTH check uses 13:30-20:00 UTC, Mon-Fri."""
-    # 2026-05-12 = Tuesday (weekday=1). Compute the calendar date for each
-    # weekday by walking from there.
+def test_is_regular_trading_hours_edt(hour, minute, weekday, expected):
+    """During EDT (UTC-4), 09:30-16:00 ET maps to 13:30-20:00 UTC."""
     base = datetime(2026, 5, 12, hour, minute, tzinfo=timezone.utc)
     days_to_add = (weekday - base.weekday()) % 7
-    test_dt = base.replace(day=base.day + days_to_add)
+    test_dt = base + timedelta(days=days_to_add)
+    assert safety_kernel._is_regular_trading_hours(test_dt) is expected
+
+
+# ---------------------------------------------------------------------------
+# 6. Terminal outcome via orderStatus subscription (Batch 9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_emits_terminal_outcome_on_fill(caplog):
+    """After placeOrder, the statusEvent handler must emit a SECOND outcome
+    log with outcome='filled' when ib_trade.orderStatus reaches 'Filled'.
+    """
+    # Build a fake ib_trade with an event-like statusEvent (supports += and
+    # callable subscribers). Use a simple list-backed shim.
+
+    class _FakeEvent:
+        def __init__(self):
+            self._subs = []
+
+        def __iadd__(self, handler):
+            self._subs.append(handler)
+            return self
+
+        def fire(self, payload):
+            for h in self._subs:
+                h(payload)
+
+    fake_event = _FakeEvent()
+    fake_ib_trade = SimpleNamespace(
+        statusEvent=fake_event,
+        orderStatus=SimpleNamespace(status="Submitted", avgFillPrice=0.0),
+    )
+
+    fake_ibkr_obj, mock_ib = _fake_ibkr(bid=99.5, ask=100.5, last=100.0)
+    mock_ib.placeOrder = MagicMock(return_value=fake_ib_trade)
+
+    long_pos = _make_open_position("AAPL", "BUY", 10.0)
+
+    with patch("config.cfg.SIM_MODE", False), \
+         patch("ibkr_client.ibkr", fake_ibkr_obj), \
+         patch("database.get_open_positions", new=AsyncMock(return_value=[long_pos])), \
+         caplog.at_level(logging.CRITICAL):
+        await safety_kernel._emergency_close_all_positions("test")
+
+        # Now simulate the broker reporting a Filled status
+        fake_ib_trade.orderStatus.status = "Filled"
+        fake_ib_trade.orderStatus.avgFillPrice = 99.55
+        fake_event.fire(fake_ib_trade)
+
+    outcome_logs = [r.getMessage() for r in caplog.records
+                    if "emergency_close_outcome" in r.getMessage()]
+    # Must see at least two: the submitted log + the terminal-filled log
+    assert any("'submitted'" in m for m in outcome_logs), \
+        "must emit submitted outcome on placeOrder"
+    assert any("'filled'" in m for m in outcome_logs), \
+        "must emit terminal filled outcome after statusEvent reports Filled"
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_emits_terminal_outcome_on_cancel(caplog):
+    """A Cancelled status must map to terminal outcome='rejected'."""
+    class _FakeEvent:
+        def __init__(self):
+            self._subs = []
+        def __iadd__(self, h):
+            self._subs.append(h)
+            return self
+        def fire(self, payload):
+            for h in self._subs:
+                h(payload)
+
+    fake_event = _FakeEvent()
+    fake_ib_trade = SimpleNamespace(
+        statusEvent=fake_event,
+        orderStatus=SimpleNamespace(status="Submitted", avgFillPrice=0.0),
+    )
+    fake_ibkr_obj, mock_ib = _fake_ibkr(bid=99.5, ask=100.5, last=100.0)
+    mock_ib.placeOrder = MagicMock(return_value=fake_ib_trade)
+    long_pos = _make_open_position("AAPL", "BUY", 10.0)
+
+    with patch("config.cfg.SIM_MODE", False), \
+         patch("ibkr_client.ibkr", fake_ibkr_obj), \
+         patch("database.get_open_positions", new=AsyncMock(return_value=[long_pos])), \
+         caplog.at_level(logging.CRITICAL):
+        await safety_kernel._emergency_close_all_positions("test")
+        fake_ib_trade.orderStatus.status = "Cancelled"
+        fake_event.fire(fake_ib_trade)
+
+    outcome_logs = [r.getMessage() for r in caplog.records
+                    if "emergency_close_outcome" in r.getMessage()]
+    assert any("'rejected'" in m for m in outcome_logs), \
+        "Cancelled must map to terminal outcome='rejected'"
+
+
+@pytest.mark.parametrize("hour,minute,expected", [
+    # EST season (Jan 2026 — UTC-5). Open bell 09:30 ET = 14:30 UTC.
+    # Batch 9 fix: the old static-UTC window returned True for 13:30 UTC
+    # in January (it's actually 08:30 EST — pre-market), and False for
+    # 20:30 UTC (which is 15:30 EST — inside RTH).
+    (14, 30, True),    # 14:30 UTC = 09:30 EST = open bell
+    (21, 0,  True),    # 21:00 UTC = 16:00 EST = close bell
+    (13, 30, False),   # 13:30 UTC = 08:30 EST = pre-market (was BUG=True)
+    (22, 0,  False),   # 22:00 UTC = 17:00 EST = after-hours
+    (20, 30, True),    # 20:30 UTC = 15:30 EST = inside RTH (was BUG=False)
+])
+def test_is_regular_trading_hours_est_winter_dst_off(hour, minute, expected):
+    """During EST (UTC-5, Nov-Mar), 09:30-16:00 ET maps to 14:30-21:00 UTC.
+
+    Pins the DST fix: the old static-UTC window 13:30-20:00 was wrong for
+    half the year. Calling with a January datetime exercises EST, where
+    the previous code would have returned True for 13:30 UTC (pre-market)
+    and False for 20:30 UTC (mid-session).
+    """
+    # 2026-01-13 is a Tuesday — definitely EST.
+    test_dt = datetime(2026, 1, 13, hour, minute, tzinfo=timezone.utc)
     assert safety_kernel._is_regular_trading_hours(test_dt) is expected

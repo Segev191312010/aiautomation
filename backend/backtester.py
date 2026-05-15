@@ -26,7 +26,7 @@ import yfinance as yf
 from config import cfg
 from indicators import _atr, _ema, _macd, _rsi, _sma, detect_cross
 from models import BacktestMetrics, BacktestResult, BacktestTrade, Condition
-from rule_engine import evaluate_conditions
+from rule_engine import clear_indicator_cache, evaluate_conditions
 
 log = logging.getLogger(__name__)
 
@@ -389,6 +389,15 @@ async def run_backtest(
     # Resolve ATR multipliers
     _atr_stop_m = atr_stop_mult if atr_stop_mult > 0 else cfg.ATR_STOP_MULT
     _atr_trail_m = atr_trail_mult if atr_trail_mult > 0 else cfg.ATR_TRAIL_MULT
+
+    # Batch 9: clear the rule-engine indicator cache at the start of every
+    # backtest run. The cache key is (cache_scope, len, last_time, indicator,
+    # params); empty cache_scope (used by evaluate_conditions) can collide
+    # across tests/backtests run in the same process, causing the second
+    # call to see stale series from the first. The rule engine already
+    # clears at the top of evaluate_all; mirror it here so backtests are
+    # self-isolated.
+    clear_indicator_cache()
 
     # -- Fetch historical data (in thread to avoid blocking event loop) --
     # auto_adjust=True is explicit so the adjusted close pairs with adjusted

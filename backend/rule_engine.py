@@ -38,14 +38,26 @@ def _evaluate_condition(cond: Condition, df: pd.DataFrame, cache: dict, cache_sc
     op = cond.operator.lower().strip()
 
     try:
-        # Compute the primary indicator series (with deterministic cache key)
+        # Compute the primary indicator series (with deterministic cache key).
+        # Batch 9: include a content-discriminator (first+last close, rounded
+        # to 4 decimals) so two dataframes with the same length / last_time /
+        # indicator / params but different actual data don't collide. This
+        # was previously a test-isolation hole — backtests run in the same
+        # process could leak cached series across calls.
         last_time = str(df.index[-1]) if len(df) > 0 else ""
         try:
             normalized_params = tuple(sorted(cond.params.items())) if cond.params else ()
         except TypeError:
-            # Fallback for unhashable param values (nested dicts)
             normalized_params = (str(cond.params),)
-        cache_key = (cache_scope, len(df), last_time, cond.indicator, normalized_params)
+        try:
+            data_fingerprint = (
+                round(float(df["close"].iloc[0]), 4),
+                round(float(df["close"].iloc[-1]), 4),
+            ) if len(df) > 0 else (0.0, 0.0)
+        except Exception:
+            data_fingerprint = (0.0, 0.0)
+        cache_key = (cache_scope, len(df), last_time, data_fingerprint,
+                     cond.indicator, normalized_params)
         if cache_key in _indicator_cache:
             series_a = _indicator_cache[cache_key]
         else:

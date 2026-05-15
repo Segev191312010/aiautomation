@@ -111,19 +111,76 @@ async def trip_circuit_breaker(source: str, *, close_positions: bool = False) ->
         log.error("Failed to activate emergency stop via circuit breaker: %s", exc)
 
 
+_TERMINAL_IB_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive"}
+
+
+def _wire_terminal_outcome(ib_trade, submit_payload: dict) -> None:
+    """Subscribe to ib_trade.statusEvent and emit a terminal outcome log.
+
+    The submit_payload is the "submitted" log dict; we copy its identifying
+    fields onto a new payload with the terminal outcome so audit consumers
+    can correlate the two log entries by position_id + symbol + ts.
+
+    Idempotent: only the first terminal event triggers a log.
+    """
+    submit_ts = submit_payload.get("ts")
+    fired = {"done": False}
+
+    def _on_status(_trade) -> None:
+        if fired["done"]:
+            return
+        try:
+            status = _trade.orderStatus.status
+        except Exception:
+            return
+        if status not in _TERMINAL_IB_STATUSES:
+            return
+        fired["done"] = True
+        terminal_outcome = "filled" if status == "Filled" else "rejected"
+        terminal_payload = dict(submit_payload)
+        terminal_payload["outcome"] = terminal_outcome
+        terminal_payload["reason"] = f"broker_status={status}"
+        terminal_payload["ts"] = datetime.now(timezone.utc).isoformat()
+        terminal_payload["submitted_ts"] = submit_ts
+        try:
+            avg_fill = float(_trade.orderStatus.avgFillPrice or 0.0)
+            if avg_fill > 0:
+                terminal_payload["avg_fill_price"] = avg_fill
+        except Exception:
+            pass
+        log.critical("emergency_close_outcome %s", terminal_payload)
+
+    try:
+        ib_trade.statusEvent += _on_status
+    except Exception as exc:
+        # If subscription itself fails, the audit trail keeps the submitted
+        # entry; operators investigating an incident would have to query the
+        # broker for terminal state. Better than crashing the emergency loop.
+        log.warning("emergency_close: failed to subscribe to statusEvent: %s", exc)
+
+
 def _is_regular_trading_hours(now_utc: datetime | None = None) -> bool:
-    """True if `now_utc` is inside US RTH (Mon-Fri 13:30-20:00 UTC).
+    """True if `now_utc` is inside US RTH (Mon-Fri 09:30-16:00 NYSE local).
 
     Used by emergency close to decide whether a naked-MKT fallback is safe.
+    Localizes to America/New_York via zoneinfo so the window is correct in
+    both EDT (UTC-4, ~Mar-Nov) and EST (UTC-5, ~Nov-Mar) — the previous
+    static UTC window 13:30-20:00 was correct only for EDT and produced
+    wrong fallback decisions for half the year.
+
     A more rigorous check would consult an exchange calendar (NYSE holidays),
     but for emergency-stop purposes "weekday + standard window" is enough —
     holidays just mean the broker rejects and the outcome is recorded.
     """
+    from zoneinfo import ZoneInfo
     now = now_utc or datetime.now(timezone.utc)
-    if now.weekday() >= 5:  # Sat/Sun
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    ny = now.astimezone(ZoneInfo("America/New_York"))
+    if ny.weekday() >= 5:  # Sat/Sun
         return False
-    hhmm = now.hour * 100 + now.minute
-    return 1330 <= hhmm <= 2000
+    hhmm = ny.hour * 100 + ny.minute
+    return 930 <= hhmm <= 1600
 
 
 async def _emergency_close_all_positions(source: str) -> None:
@@ -232,26 +289,27 @@ async def _emergency_close_all_positions(source: str) -> None:
                     order = _LmtOrder(close_action, qty, limit_px)
                     order.tif = "GTC"
                     order.outsideRth = True
-                    ibkr.ib.placeOrder(contract, order)
-                    # Outcome is "submitted" — terminal state (filled /
-                    # rejected / timeout) requires the orderStatus event,
-                    # which the next-iteration patch wires up. Do NOT
-                    # log "filled" at submission time; downstream tooling
-                    # treats that as confirmation that risk is flat.
+                    ib_trade = ibkr.ib.placeOrder(contract, order)
+                    # Outcome on the submission log is "submitted". Terminal
+                    # state arrives via orderStatus; wire a one-shot handler
+                    # that emits a SECOND emergency_close_outcome with the
+                    # final outcome (filled / rejected / cancelled).
                     outcome_payload.update(
                         outcome="submitted",
                         reason=f"marketable_limit @ {limit_px}",
                     )
+                    _wire_terminal_outcome(ib_trade, outcome_payload)
                 elif in_rth:
                     # No finite quote but RTH — MKT is the last resort.
                     order = _MktOrder(close_action, qty)
                     order.tif = "GTC"
                     order.outsideRth = False
-                    ibkr.ib.placeOrder(contract, order)
+                    ib_trade = ibkr.ib.placeOrder(contract, order)
                     outcome_payload.update(
                         outcome="submitted",
                         reason="mkt_fallback_rth_no_finite_quote",
                     )
+                    _wire_terminal_outcome(ib_trade, outcome_payload)
                 else:
                     # No finite quote AND outside RTH — refuse to send a MKT
                     # order on garbage quotes after-hours. Record and skip.

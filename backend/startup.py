@@ -186,6 +186,30 @@ async def validate_startup() -> StartupResult:
         )
 
     # ------------------------------------------------------------------
+    # 6. Multi-worker order-execution-cap warning (Batch 9)
+    # ------------------------------------------------------------------
+    # The per-symbol order-rate cap in order_executor is a per-process,
+    # in-memory dict guarded by an asyncio.Lock. Multi-worker uvicorn lets
+    # the effective cap scale linearly with worker count — a 6/min cap with
+    # WORKERS=2 silently becomes 12/min globally. Surface this loudly so the
+    # operator either drops to a single worker for the order-execution path
+    # or builds a Redis/SQL-backed cross-process limiter.
+    workers = int(os.getenv("WORKERS", "1") or "1")
+    if workers > 1 and getattr(cfg, "AUTOPILOT_MODE", "OFF") in ("PAPER", "LIVE"):
+        msg = (
+            f"WORKERS={workers} with autopilot active and an in-process "
+            "order-rate cap. Effective cap scales linearly with worker count; "
+            "build a cross-process limiter (Redis / SQL counter) before LIVE "
+            "or pin WORKERS=1 for the order-execution process."
+        )
+        if env_name == "live":
+            # In live, this is a hard refusal — over-trading on a doubled cap
+            # is account-threatening.
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    # ------------------------------------------------------------------
     # Summary log
     # ------------------------------------------------------------------
     log.info("=== Trading Platform Startup ===")

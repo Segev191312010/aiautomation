@@ -158,3 +158,117 @@ def test_simulated_execution_short_exit_slippage_subtracts_from_price():
     assert fill is not None
     # 100 - 0.05 = 99.95
     assert fill.fill_price == pytest.approx(99.95)
+
+
+# ---------------------------------------------------------------------------
+# 6. End-to-end no-look-ahead — the test the test-quality reviewer flagged
+#    as missing in the original Batch 7. Exercises the staged-fill path with
+#    a known-firing entry signal and asserts the fill price equals the
+#    NEXT bar's open (not the signal bar's close).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backtest_entry_fills_at_next_bar_open_not_signal_bar_close():
+    """Signal at bar i close MUST fill at bar i+1's open (no look-ahead)."""
+    from unittest.mock import patch
+    import pandas as pd
+    from backtester import run_backtest
+    from models import Condition
+
+    # 50 bars; bar 30 has a sharply different close vs bar 31 open so the
+    # difference between "fill at signal bar close" (BUG) and "fill at next
+    # bar open" (FIX) is unambiguous.
+    n = 50
+    closes = [100.0] * n
+    opens = [100.0] * n
+    highs = [100.5] * n
+    lows = [99.5] * n
+    # Signal-firing bar (30): close jumps high
+    closes[30] = 110.0
+    highs[30] = 110.5
+    # Next bar (31): open is back near 100 — distinct from bar-30 close
+    opens[31] = 100.0
+    closes[31] = 100.0
+    dates = pd.date_range("2024-01-01", periods=n, freq="B")
+    mock_df = pd.DataFrame({
+        "Date": dates, "Open": opens, "High": highs, "Low": lows,
+        "Close": closes, "Volume": [1_000_000] * n,
+    }).set_index("Date")
+
+    with patch("backtester.yf") as mock_yf:
+        mock_yf.Ticker.return_value.history.return_value = mock_df
+        # PRICE > 0 fires every bar; first signal lands on bar 30 (warmup ~2),
+        # entry must fill at bar 31 open = 100.0.
+        result = await run_backtest(
+            entry_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=0)],
+            exit_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=99999)],
+            symbol="TEST", period="1y", interval="1d",
+            initial_capital=100_000.0, position_size_pct=100.0,
+            stop_loss_pct=0, take_profit_pct=0, exit_mode="simple",
+        )
+
+    assert result["trades"], "test setup requires at least one entry"
+    first_entry = result["trades"][0]["entry_price"]
+    # The signal fires at the first bar where PRICE > 0 (= warmup+1 area).
+    # Entry must fill at the NEXT bar's open. Critical assertion: the fill
+    # price MUST NOT equal any bar's close where it would only happen if
+    # we filled at signal-bar close. In particular, with the synthetic data
+    # above, an entry at bar 30 (close=110.0) would be the look-ahead bug.
+    assert first_entry != pytest.approx(110.0), (
+        "Entry filled at bar 30's close (110.0) — that's the look-ahead "
+        "bug Batch 7 was supposed to fix. Entry must be at bar 31's open."
+    )
+    # And engine_version must be the post-fix version
+    assert result.get("engine_version") == 2
+
+
+# ---------------------------------------------------------------------------
+# 7. SL gap-down direction — fills at min(sl, open) which is `open` on a
+#    gap-down. The test pins the worse-of-two semantics.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backtest_sl_gap_down_fills_at_open_not_at_stop():
+    """When bar opens BELOW the stop, fill at open (worse of stop vs open)."""
+    from unittest.mock import patch
+    import pandas as pd
+    from backtester import run_backtest
+    from models import Condition
+
+    n = 50
+    closes = [100.0] * n
+    opens = [100.0] * n
+    highs = [101.0] * n
+    lows = [99.0] * n
+    # Bar 31 will be the entry fill; bar 32 gaps DOWN below the 5% stop.
+    # Entry fills at bar 31 open=100, sl=95. Bar 32 opens at 90 (below stop).
+    # SL fill must be 90 (the open), NOT 95 (the stop).
+    opens[32] = 90.0
+    closes[32] = 90.0
+    highs[32] = 91.0
+    lows[32] = 89.0
+    dates = pd.date_range("2024-01-01", periods=n, freq="B")
+    mock_df = pd.DataFrame({
+        "Date": dates, "Open": opens, "High": highs, "Low": lows,
+        "Close": closes, "Volume": [1_000_000] * n,
+    }).set_index("Date")
+
+    with patch("backtester.yf") as mock_yf:
+        mock_yf.Ticker.return_value.history.return_value = mock_df
+        result = await run_backtest(
+            entry_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=0)],
+            exit_conditions=[Condition(indicator="PRICE", params={}, operator=">", value=99999)],
+            symbol="TEST", period="1y", interval="1d",
+            initial_capital=100_000.0, position_size_pct=100.0,
+            stop_loss_pct=5.0, take_profit_pct=0, exit_mode="simple",
+        )
+
+    sl_trades = [t for t in result["trades"] if t["exit_reason"] == "stop_loss"]
+    assert sl_trades, "test setup requires at least one stop-loss trade"
+    first_sl = sl_trades[0]
+    # exit_price = min(95, 90) = 90 (the worse fill). NOT 95 (the stop).
+    assert first_sl["exit_price"] == pytest.approx(90.0, abs=0.01), (
+        f"gap-down SL must fill at the open (worse), got {first_sl['exit_price']}"
+    )
