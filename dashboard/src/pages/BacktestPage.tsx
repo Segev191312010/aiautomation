@@ -415,6 +415,24 @@ export default function BacktestPage() {
                         }`}>
                           {result.exit_mode === 'atr_trail' ? 'ATR Trail' : 'Simple'}
                         </span>
+                        {/* Batch 7: visually distinguish v2 (no-look-ahead,
+                            correct slippage sign, interval-aware Sharpe) from
+                            legacy v1 saved results. */}
+                        {result.engine_version === 2 ? (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 text-xs font-mono"
+                            title="Engine v2 — no look-ahead, correct slippage sign, interval-aware Sharpe"
+                          >
+                            engine v2
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-flex items-center px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-500 text-xs font-mono"
+                            title="Computed with legacy engine — may be optimistic. Re-run to get a v2 result."
+                          >
+                            engine v1
+                          </span>
+                        )}
                         <span className="text-xs font-mono text-zinc-500">
                           {result.total_bars.toLocaleString()} bars
                         </span>

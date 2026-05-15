@@ -831,6 +831,11 @@ export interface BacktestResult {
   exit_mode: ExitMode
   atr_stop_mult: number
   atr_trail_mult: number
+  // Backtest engine version (Batch 7). 2 = no-look-ahead, correct
+  // slippage sign, interval-aware Sharpe. Undefined / 1 = legacy
+  // result computed before the fix — render with a "may be optimistic"
+  // tooltip in the UI.
+  engine_version?: number
   created_at?: string
 }
 
