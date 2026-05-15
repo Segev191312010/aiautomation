@@ -212,14 +212,6 @@ async def place_order(
         log.error("Pre-flight check failed: %s", err)
         return None
 
-    # Per-symbol order-rate cap (Batch 5b). Stricter than the BUY/SELL-keyed
-    # dedup: a BUY/SELL/BUY/SELL flap on one symbol must not slip through.
-    # Exits are exempt — emergency exits can come in bursts.
-    if not is_exit:
-        permitted = await _check_and_record_rate_cap(rule.symbol)
-        if not permitted:
-            return None
-
     price_estimate = rule.action.limit_price
     if price_estimate is None:
         try:
@@ -248,6 +240,17 @@ async def place_order(
         )
         if not allowed:
             log.warning("Runtime safety gate REJECTED order: %s", reason)
+            return None
+
+    # Per-symbol order-rate cap (Batch 5b/8). Stricter than the BUY/SELL-keyed
+    # dedup: a BUY/SELL/BUY/SELL flap on one symbol must not slip through.
+    # Exits are exempt — emergency exits can come in bursts.
+    # Moved AFTER the safety_gate (Batch 8) so an order the kernel would
+    # have rejected does NOT consume a slot in the rolling window and
+    # starve subsequent legitimate orders for up to 60 seconds.
+    if not is_exit:
+        permitted = await _check_and_record_rate_cap(rule.symbol)
+        if not permitted:
             return None
 
     if not ibkr.is_connected():
@@ -470,20 +473,22 @@ async def reap_orphan_pending_trades(stale_after_seconds: int = 600) -> int:
     A process crash between ``save_trade(PENDING)`` and ``ibkr.ib.placeOrder``
     leaves a DB row that ``reconcile_pending_orders`` cannot resolve — it
     only looks at IBKR's open trades, but no broker order was ever sent.
-    On startup we sweep these rows, mark them ERROR with reason
-    ``orphan_pending_reaped``, and emit a WARN so the operator can investigate.
+    On startup we sweep these rows across ALL users (Batch 8 fix — the
+    previous demo-only query left real users' orphans leaking forever),
+    mark them ERROR with reason ``orphan_pending_reaped``, and emit a WARN
+    so the operator can investigate.
 
     Time comparison uses the single ``_now_utc()`` helper to avoid any
     naive/aware mismatch with ISO timestamps stored in the trade row.
     """
-    from database import get_trades
+    from database import get_pending_trades_all_users
 
     threshold = _now_utc() - timedelta(seconds=stale_after_seconds)
     reaped = 0
     try:
-        recent = await get_trades(limit=500)
+        recent = await get_pending_trades_all_users(limit=2000)
     except Exception as exc:
-        log.error("orphan reaper: get_trades failed: %s", exc)
+        log.error("orphan reaper: get_pending_trades_all_users failed: %s", exc)
         return 0
 
     for trade in recent:

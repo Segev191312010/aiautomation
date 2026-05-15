@@ -13,12 +13,18 @@ async def save_backtest(
     strategy_data: str,
     result_data: str,
     created_at: str,
+    engine_version: int = 1,
 ) -> None:
+    """Persist a backtest. ``engine_version`` defaults to 1 (legacy) so
+    callers that haven't been updated still write a sensible value; new
+    callers from `backtester.run_backtest` pass BACKTEST_ENGINE_VERSION=2.
+    """
     async with get_db() as db:
         await db.execute(
-            "INSERT OR REPLACE INTO backtests (id, user_id, name, strategy_data, result_data, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (backtest_id, user_id, name, strategy_data, result_data, created_at),
+            "INSERT OR REPLACE INTO backtests "
+            "(id, user_id, name, strategy_data, result_data, created_at, engine_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (backtest_id, user_id, name, strategy_data, result_data, created_at, int(engine_version)),
         )
         await db.commit()
 
@@ -27,7 +33,7 @@ async def get_backtests(user_id: str = "demo", limit: int = 50) -> list[dict]:
     """Return list of saved backtests with summary info."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT id, name, result_data, created_at FROM backtests "
+            "SELECT id, name, result_data, created_at, engine_version FROM backtests "
             "WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
             (user_id, limit),
         ) as cur:
@@ -46,6 +52,7 @@ async def get_backtests(user_id: str = "demo", limit: int = 50) -> list[dict]:
                 "total_return_pct": metrics.get("total_return_pct", 0),
                 "num_trades": metrics.get("num_trades", 0),
                 "sharpe_ratio": metrics.get("sharpe_ratio", 0),
+                "engine_version": int(row[4] or 1),
             })
         except (json.JSONDecodeError, KeyError):
             continue
@@ -62,7 +69,7 @@ async def get_backtest(backtest_id: str, user_id: str = "demo") -> dict | None:
     """
     async with get_db() as db:
         async with db.execute(
-            "SELECT id, name, strategy_data, result_data, created_at FROM backtests "
+            "SELECT id, name, strategy_data, result_data, created_at, engine_version FROM backtests "
             "WHERE id=? AND user_id=?",
             (backtest_id, user_id),
         ) as cur:
@@ -75,6 +82,7 @@ async def get_backtest(backtest_id: str, user_id: str = "demo") -> dict | None:
         "strategy_data": json.loads(row[2]),
         "result_data": json.loads(row[3]),
         "created_at": row[4],
+        "engine_version": int(row[5] or 1),
     }
 
 

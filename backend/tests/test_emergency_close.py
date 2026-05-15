@@ -82,9 +82,13 @@ async def test_emergency_close_uses_marketable_limit_when_quotes_finite(caplog):
     assert order_arg.action == "SELL"  # closing a BUY (long)
     # 99.5 * 0.98 = 97.51 (cross the spread aggressively to sell)
     assert order_arg.lmtPrice == pytest.approx(97.51, abs=0.01)
-    # Structured outcome log emitted
+    # Structured outcome log emitted with the SUBMITTED outcome (terminal
+    # state requires an orderStatus subscription — Batch 8 corrects the
+    # earlier "filled-on-submit" lie).
     outcome_logs = [r for r in caplog.records if "emergency_close_outcome" in r.message]
     assert outcome_logs, "must emit at least one emergency_close_outcome log"
+    assert any("'submitted'" in r.getMessage() for r in outcome_logs), \
+        "submit-only path must use outcome='submitted', not 'filled'"
 
 
 # ---------------------------------------------------------------------------

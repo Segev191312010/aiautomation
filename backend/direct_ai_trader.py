@@ -65,7 +65,18 @@ async def preview_direct_trade(decision: AIDirectTrade | dict) -> dict:
     }
 
 
-async def execute_direct_trade(decision: AIDirectTrade) -> dict:
+async def execute_direct_trade(decision: AIDirectTrade, *, force_safety: bool = False) -> dict:
+    """Execute a direct AI trade.
+
+    ``force_safety=True`` is set by the HTTP route gate so the kernel runs
+    inside ``place_order`` as well as in the explicit safety_gate call here.
+    The internal AI optimizer path may pass False to keep the original
+    "single safety check + skip in place_order" optimization.
+
+    The audit log line in ``autopilot_api.execute_autopilot_direct_trade``
+    advertises ``skip_safety=False`` for HTTP callers; this parameter is
+    what makes that promise true.
+    """
     preview = await preview_direct_trade(decision)
     symbol = preview["symbol"]
     existing = preview["existing"]
@@ -185,7 +196,10 @@ async def execute_direct_trade(decision: AIDirectTrade) -> dict:
     trade = await place_order(
         order_rule,
         source="ai_direct",
-        skip_safety=True,
+        # Batch 8: HTTP callers (force_safety=True) get the kernel re-run
+        # inside place_order — the audit log promise is now backed by code,
+        # not by the assumption that the explicit safety_gate above stays.
+        skip_safety=not force_safety,
         require_autopilot_authority=True,
         stop_price=decision.stop_price,
         is_exit=is_exit,

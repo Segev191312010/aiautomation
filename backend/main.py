@@ -211,26 +211,33 @@ async def lifespan(app: FastAPI):
         await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
     on_fill(lambda t: asyncio.create_task(_on_trade_fill_register(t)))
 
-    # Orphan PENDING reaper (Batch 5b). Runs BEFORE reconcile_pending_orders so
-    # the trades it sweeps (no order_id, older than 10 minutes) cannot collide
-    # with the broker-side reconciliation loop. Marks them ERROR with reason
-    # ``orphan_pending_reaped`` and WARN-logs each row.
-    try:
-        from order_executor import reap_orphan_pending_trades
-        await reap_orphan_pending_trades()
-    except Exception as exc:
-        log.error("orphan reaper failed on startup: %s", exc)
-
     # Attempt IBKR connection (non-blocking)
     connected = await ibkr.connect()
     if connected:
         log.info("IBKR connected on startup")
         await ibkr.start_reconnect_loop()
+        # Orphan reaper runs AFTER ibkr.connect() so a row that's PENDING
+        # purely because IBKR was disconnected last cycle (not because of a
+        # crash mid-place_order) can be reconciled against the broker first
+        # by reconcile_pending_orders. The reaper only sweeps the residual
+        # set — PENDING rows with no order_id, older than 10 minutes.
+        try:
+            from order_executor import reap_orphan_pending_trades
+            await reap_orphan_pending_trades()
+        except Exception as exc:
+            log.error("orphan reaper failed on startup: %s", exc)
         from order_executor import reconcile_pending_orders
         asyncio.create_task(reconcile_pending_orders())
     else:
         log.warning("IBKR not connected  --  auto-reconnect running in background")
         await ibkr.start_reconnect_loop()
+        # IBKR down at boot — still reap orphans so the DB doesn't drift,
+        # but they can only be the genuine no-order_id kind anyway.
+        try:
+            from order_executor import reap_orphan_pending_trades
+            await reap_orphan_pending_trades()
+        except Exception as exc:
+            log.error("orphan reaper failed on startup: %s", exc)
 
     await _start_market_heartbeat()
     await alert_engine.start()
@@ -506,24 +513,41 @@ def _validate_ws_token(ws: WebSocket) -> str | None:
 # General WebSocket
 # ---------------------------------------------------------------------------
 
+def _client_offered_bearer(ws: WebSocket) -> bool:
+    """True if the client's Sec-WebSocket-Protocol header included 'bearer'.
+
+    Echoing a subprotocol the client did not offer raises during accept()
+    (Starlette / wsproto enforce this). Browsers always offer "bearer" via
+    the auth helper; non-browser clients (curl, websocat, integration tests)
+    may not — and their close frame must still reach them cleanly.
+    """
+    raw = ws.headers.get("sec-websocket-protocol", "")
+    return any(p.strip().lower() == "bearer" for p in raw.split(","))
+
+
 @app.websocket("/ws")
 async def ws_general(ws: WebSocket):
     user_id = _validate_ws_token(ws)
+    bearer_offered = _client_offered_bearer(ws)
     if not user_id:
-        # Browsers refuse the handshake when the server accepts without echoing
-        # one of the requested subprotocols. Accept WITH the bearer subprotocol
-        # before closing so the client gets a clean close frame (code 4001)
-        # and can stop reconnecting, instead of falling into a handshake-reject
-        # / 3-second-reconnect storm.
-        await ws.accept(subprotocol="bearer")
+        # Echo "bearer" only when the client requested it; otherwise accept
+        # with no subprotocol so the close frame still reaches non-browser
+        # clients without raising on an unrequested subprotocol.
+        if bearer_offered:
+            await ws.accept(subprotocol="bearer")
+        else:
+            await ws.accept()
         await ws.close(code=4001, reason="Authentication required")
         return
     if not _check_ws_origin(ws):
-        await ws.accept(subprotocol="bearer")
+        if bearer_offered:
+            await ws.accept(subprotocol="bearer")
+        else:
+            await ws.accept()
         await ws.close(code=4003, reason="Origin not allowed")
         return
     # Echo the "bearer" subprotocol so the browser completes the handshake.
-    await manager.connect(ws, subprotocol="bearer")
+    await manager.connect(ws, subprotocol="bearer" if bearer_offered else None)
     try:
         while True:
             data = await ws.receive_text()
@@ -887,19 +911,25 @@ async def _ws_collect_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
 @app.websocket("/ws/market-data")
 async def ws_market_data(ws: WebSocket):
     user_id = _validate_ws_token(ws)
+    bearer_offered = _client_offered_bearer(ws)
     if not user_id:
-        # Accept WITH the requested bearer subprotocol before closing so the
-        # browser sees a successful handshake and a clean close frame, instead
-        # of a "subprotocol mismatch" handshake reject that produces the
-        # observed open/close storm.
-        await ws.accept(subprotocol="bearer")
+        if bearer_offered:
+            await ws.accept(subprotocol="bearer")
+        else:
+            await ws.accept()
         await ws.close(code=4001, reason="Authentication required")
         return
     if not _check_ws_origin(ws):
-        await ws.accept(subprotocol="bearer")
+        if bearer_offered:
+            await ws.accept(subprotocol="bearer")
+        else:
+            await ws.accept()
         await ws.close(code=4003, reason="Origin not allowed")
         return
-    await ws.accept(subprotocol="bearer")
+    if bearer_offered:
+        await ws.accept(subprotocol="bearer")
+    else:
+        await ws.accept()
     subscribed: set[str] = set()
     push_task: asyncio.Task | None = None
 

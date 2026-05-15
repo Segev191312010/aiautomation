@@ -6,6 +6,7 @@ from db.rules import (  # noqa: F401
 )
 from db.trades import (  # noqa: F401
     save_trade, get_trades, get_trade, get_trade_by_order_id,
+    get_pending_trades_all_users,
     update_trade_status, finalize_trade_outcome,
 )
 from db.validation import (  # noqa: F401

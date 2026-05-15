@@ -139,7 +139,14 @@ async def _emergency_close_all_positions(source: str) -> None:
       entry and SKIP the position rather than fire MKT on garbage quotes.
     - Per-position outcome is logged as a structured `emergency_close_outcome`
       audit entry: position_id, symbol, qty, close_action, outcome, reason,
-      latency_ms, ts. This schema is pinned by test_emergency_close.py.
+      latency_ms, ts. ``outcome`` is one of:
+        ``submitted`` (placeOrder returned, awaiting fill)
+        ``rejected`` (broker rejected during submit)
+        ``skipped_no_price`` (no finite quote and outside RTH)
+        ``skipped_no_qty`` (abs(qty) == 0)
+      Terminal status (filled / cancelled) requires an orderStatus
+      subscription and is emitted as a separate audit entry by the
+      next-iteration patch. Schema is pinned by test_emergency_close.py.
     """
     from ib_insync import LimitOrder as _LmtOrder, MarketOrder as _MktOrder
 
@@ -226,8 +233,13 @@ async def _emergency_close_all_positions(source: str) -> None:
                     order.tif = "GTC"
                     order.outsideRth = True
                     ibkr.ib.placeOrder(contract, order)
+                    # Outcome is "submitted" — terminal state (filled /
+                    # rejected / timeout) requires the orderStatus event,
+                    # which the next-iteration patch wires up. Do NOT
+                    # log "filled" at submission time; downstream tooling
+                    # treats that as confirmation that risk is flat.
                     outcome_payload.update(
-                        outcome="filled",  # submitted; real fill arrives via orderStatus
+                        outcome="submitted",
                         reason=f"marketable_limit @ {limit_px}",
                     )
                 elif in_rth:
@@ -237,7 +249,7 @@ async def _emergency_close_all_positions(source: str) -> None:
                     order.outsideRth = False
                     ibkr.ib.placeOrder(contract, order)
                     outcome_payload.update(
-                        outcome="filled",  # submitted as MKT inside RTH
+                        outcome="submitted",
                         reason="mkt_fallback_rth_no_finite_quote",
                     )
                 else:

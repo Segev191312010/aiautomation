@@ -507,6 +507,11 @@ class BacktestResult(BaseModel):
     exit_mode: str = "simple"
     atr_stop_mult: float = 0.0
     atr_trail_mult: float = 0.0
+    # Batch 7/8: engine_version = 2 marks the no-look-ahead / correct-slippage /
+    # interval-Sharpe engine. Defaults to 1 (legacy) for backward-compat with
+    # historical rows that don't carry the field; the save route persists it
+    # to the dedicated DB column for fast history-list rendering.
+    engine_version: int = 1
     created_at: str = ""
 
 

@@ -464,7 +464,11 @@ async def execute_autopilot_direct_trade(
         "skip_safety=False intent_token_present=True",
         user.id, decision.symbol, decision.action, getattr(decision, "quantity", "?"),
     )
-    return await execute_direct_trade(decision)
+    # force_safety=True makes the audit promise true: place_order runs the
+    # kernel even though execute_direct_trade also calls safety_gate
+    # explicitly above. Keeps the path safe even if a future refactor drops
+    # the upstream gate.
+    return await execute_direct_trade(decision, force_safety=True)
 
 
 @router.get("/performance", response_model=AutopilotPerformanceResponse)

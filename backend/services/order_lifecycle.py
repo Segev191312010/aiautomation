@@ -68,19 +68,30 @@ async def register_entry_position_from_fill(
         )
         return False
 
+    # Bar fetch can either return short/None (data gap) OR raise (yfinance /
+    # IBKR exception). Both paths must produce a registered OpenPosition with
+    # a sentinel ATR — leaving a live IBKR position with no exit logic is
+    # exactly the bug Batch 1 set out to fix.
+    df = None
     try:
         df = await get_historical_bars(trade.symbol, duration="60 D", bar_size="1D")
-        if df is None or len(df) < 14:
-            # Degraded path: register with sentinel ATR so the exit tracker
-            # still has a managed position. Previously this returned False
-            # silently and left a live IBKR position with no exit logic.
-            sentinel_atr = fp * DEGRADED_ATR_FRACTION
-            log.critical(
-                "data_gap: registering degraded OpenPosition — trade=%s symbol=%s "
-                "fill_price=%.4f sentinel_atr=%.4f (DEGRADED_ATR_FRACTION=%.4f) "
-                "reason=insufficient_bars_for_atr",
-                trade.id, trade.symbol, fp, sentinel_atr, DEGRADED_ATR_FRACTION,
-            )
+    except Exception as exc:
+        log.critical(
+            "data_gap: bar fetch RAISED for trade=%s symbol=%s exc=%r — "
+            "will register degraded OpenPosition",
+            trade.id, trade.symbol, exc,
+        )
+
+    if df is None or len(df) < 14:
+        sentinel_atr = fp * DEGRADED_ATR_FRACTION
+        log.critical(
+            "data_gap: registering degraded OpenPosition — trade=%s symbol=%s "
+            "fill_price=%.4f sentinel_atr=%.4f (DEGRADED_ATR_FRACTION=%.4f) "
+            "reason=%s",
+            trade.id, trade.symbol, fp, sentinel_atr, DEGRADED_ATR_FRACTION,
+            "bar_fetch_exception_or_insufficient_bars",
+        )
+        try:
             await register_position(
                 trade,
                 df,
@@ -88,6 +99,11 @@ async def register_entry_position_from_fill(
                 degraded_atr=sentinel_atr,
             )
             return True
+        except Exception as exc:
+            log.error("Degraded position registration failed for %s: %s", trade.id, exc)
+            return False
+
+    try:
         await register_position(trade, df, rule_name or trade.rule_name)
         return True
     except Exception as exc:

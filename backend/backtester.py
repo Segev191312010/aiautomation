@@ -570,11 +570,17 @@ async def run_backtest(
                 entry_time = bar_time
 
                 if exit_mode == "atr_trail":
-                    # Compute ATR(14) at entry for hard stop
+                    # Batch 8: compute ATR from data through bar i-1 only.
+                    # The pending entry was signaled on bar i-1 and fills at
+                    # bar i open — bar i's high/low/close are unknown at the
+                    # open and including them would leak future information
+                    # into the hard-stop calc (the same look-ahead bug Batch 7
+                    # was supposed to close, but missed inside the entry path).
+                    atr_window = df.iloc[: i]  # exclusive of fill bar
                     atr_at_entry = 0.0
-                    if len(df_slice) >= 14:
-                        atr_s = _atr(df_slice["high"], df_slice["low"],
-                                     df_slice["close"], 14)
+                    if len(atr_window) >= 14:
+                        atr_s = _atr(atr_window["high"], atr_window["low"],
+                                     atr_window["close"], 14)
                         atr_raw = atr_s.iloc[-1]
                         if pd.notna(atr_raw):
                             atr_at_entry = float(atr_raw)

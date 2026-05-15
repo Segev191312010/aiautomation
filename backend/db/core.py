@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS backtests (
     name       TEXT NOT NULL,
     strategy_data TEXT NOT NULL,
     result_data   TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    engine_version INTEGER NOT NULL DEFAULT 1
 );
 """
 
@@ -372,7 +373,8 @@ CREATE TABLE IF NOT EXISTS direct_candidates (
     payload       TEXT NOT NULL,
     queued_at     TEXT NOT NULL,
     ttl_seconds   INTEGER NOT NULL DEFAULT 900,
-    status        TEXT NOT NULL DEFAULT 'queued'
+    status        TEXT NOT NULL DEFAULT 'queued',
+    source        TEXT NOT NULL DEFAULT 'scanner'
 );
 """
 
@@ -481,6 +483,10 @@ _ALLOWED_COLUMNS: set[tuple[str, str]] = {
     ("ai_audit_log", "decision_item_id"),
     ("ai_shadow_decisions", "decision_run_id"),
     ("ai_shadow_decisions", "decision_item_id"),
+    # TV webhook migration
+    ("direct_candidates", "source"),
+    # Batch 7/8: engine_version on saved backtests (1 = legacy, 2 = no-look-ahead)
+    ("backtests", "engine_version"),
 }
 
 
@@ -571,6 +577,9 @@ async def init_db() -> None:
         await _safe_add_column(db, "ai_audit_log", "decision_item_id", "TEXT", "NULL")
         await _safe_add_column(db, "ai_shadow_decisions", "decision_run_id", "TEXT", "NULL")
         await _safe_add_column(db, "ai_shadow_decisions", "decision_item_id", "TEXT", "NULL")
+        # Batch 7/8: stamp engine_version on saved backtests so the UI can
+        # distinguish legacy v1 (optimistic, look-ahead) from v2 results.
+        await _safe_add_column(db, "backtests", "engine_version", "INTEGER", "1")
         await db.commit()
 
         # Indexes for common query patterns (after migration so user_id exists)
@@ -607,6 +616,17 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_trade ON ai_decision_items(created_trade_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_evaluation_runs_created ON ai_evaluation_runs(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_evaluation_slices_run ON ai_evaluation_slices(evaluation_run_id)")
+        await db.commit()
+
+        # TV webhook migration: add source column to existing direct_candidates rows
+        await _safe_add_column(db, "direct_candidates", "source", "TEXT", "'scanner'")
+        await db.execute(
+            "UPDATE direct_candidates SET source='scanner' WHERE source IS NULL"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_direct_candidates_source "
+            "ON direct_candidates(source, status, queued_at)"
+        )
         await db.commit()
 
         # Seed demo user

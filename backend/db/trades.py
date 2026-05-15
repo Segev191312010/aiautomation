@@ -38,6 +38,47 @@ async def get_trades(limit: int = 200, user_id: str = "demo") -> list[Trade]:
     return [Trade.model_validate(json.loads(r[0])) for r in rows]
 
 
+async def get_pending_trades_all_users(limit: int = 2000) -> list[Trade]:
+    """Cross-tenant scan of recent PENDING trades.
+
+    Used by the startup orphan reaper, which must sweep ALL users — the
+    per-user ``get_trades`` would only see the demo bucket and leave
+    real users' crash-orphaned rows leaking forever (Batch 8 fix).
+
+    Filters by status at the row level via JSON1 if available, falling back
+    to a Python-side filter. ORDER BY timestamp ASC so the oldest orphans
+    surface first; LIMIT 2000 is generous enough for a crashed burst.
+    """
+    async with get_db() as db:
+        # status is inside the JSON `data` column. SQLite's JSON1 extension
+        # is available in the bundled build and lets us filter server-side.
+        try:
+            async with db.execute(
+                "SELECT data FROM trades "
+                "WHERE json_extract(data, '$.status') = 'PENDING' "
+                "ORDER BY timestamp ASC LIMIT ?",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+        except Exception:
+            # JSON1 unavailable — fall back to a Python-side filter on a
+            # full recent slice.
+            async with db.execute(
+                "SELECT data FROM trades ORDER BY timestamp DESC LIMIT ?",
+                (limit * 5,),
+            ) as cur:
+                rows = await cur.fetchall()
+    out: list[Trade] = []
+    for r in rows:
+        try:
+            t = Trade.model_validate(json.loads(r[0]))
+        except Exception:
+            continue
+        if t.status == "PENDING":
+            out.append(t)
+    return out
+
+
 async def get_trade(trade_id: str, user_id: str = "demo") -> Trade | None:
     """Fetch a single trade by its ID."""
     async with get_db() as db:

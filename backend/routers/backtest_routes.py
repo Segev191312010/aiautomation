@@ -59,6 +59,11 @@ async def api_backtest_save(req: BacktestSaveRequest, user=Depends(get_current_u
     })
     result_data = req.result.model_dump_json()
     backtest_id = str(uuid.uuid4())
+    # Batch 7/8: the engine_version travels in the result payload (set by
+    # backtester.run_backtest -> BACKTEST_ENGINE_VERSION). Persist it on the
+    # row so the UI can render the legacy/v2 pill without re-parsing the
+    # full result_data blob on every history list call.
+    engine_version = int(getattr(req.result, "engine_version", None) or 1)
     await save_backtest(
         backtest_id=backtest_id,
         user_id=user.id,
@@ -66,8 +71,9 @@ async def api_backtest_save(req: BacktestSaveRequest, user=Depends(get_current_u
         strategy_data=strategy_data,
         result_data=result_data,
         created_at=created_at,
+        engine_version=engine_version,
     )
-    return {"id": backtest_id, "saved": True}
+    return {"id": backtest_id, "saved": True, "engine_version": engine_version}
 
 
 @router.get("/history")
