@@ -41,3 +41,10 @@ logs/*.pid
 # IB Chart sidecar (runs on port 5001, not part of main app)
 /ib_chart/
 
+# Separate stocksdashboard repo (embedded clone, not a submodule)
+/stocksdashboard/
+
+# Editor configs
+/.vscode/
+
+dashboard/.env*
