@@ -26,16 +26,21 @@ export default function Header() {
   }
 
   const handleBotToggle = async () => {
+    const next = !botRunning
     try {
       if (botRunning) {
         await stopBot()
-        setBotRunning(false)
       } else {
         await startBot()
-        setBotRunning(true)
       }
+      setBotRunning(next)
     } catch (e) {
-      console.error(e)
+      // Backend offline (mock mode): toggle locally so the UI stays usable.
+      if (mockMode) {
+        setBotRunning(next)
+      } else {
+        console.error(e)
+      }
     }
   }
 

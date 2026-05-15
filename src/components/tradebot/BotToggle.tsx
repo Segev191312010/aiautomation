@@ -1,6 +1,11 @@
 /**
  * BotToggle — prominent "Automated Trading" master switch.
  * Confirms before enabling if operating with real money.
+ *
+ * Works in three modes:
+ *  - LIVE: IBKR connected — requires confirmation before enabling
+ *  - SIMULATION: virtual account, no real orders
+ *  - MOCK: backend offline / demo mode — toggle stays interactive client-side
  */
 import React, { useState } from 'react'
 import clsx from 'clsx'
@@ -8,14 +13,15 @@ import { useBotStore } from '@/store'
 import { startBot, stopBot } from '@/services/api'
 
 export default function BotToggle() {
-  const { botRunning, ibkrConnected, simMode, setBotRunning } = useBotStore()
+  const { botRunning, ibkrConnected, simMode, mockMode, setBotRunning } = useBotStore()
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
 
   const handleToggle = async () => {
     if (busy) return
 
     // Safety confirmation for live trading
-    if (!botRunning && !simMode && ibkrConnected) {
+    if (!botRunning && !simMode && !mockMode && ibkrConnected) {
       const ok = window.confirm(
         '⚠️  You are about to enable automated trading with a LIVE account.\n\nRules will place real orders. Continue?',
       )
@@ -23,20 +29,31 @@ export default function BotToggle() {
     }
 
     setBusy(true)
+    setError('')
+    const next = !botRunning
     try {
       if (botRunning) {
         await stopBot()
-        setBotRunning(false)
       } else {
         await startBot()
-        setBotRunning(true)
       }
+      setBotRunning(next)
     } catch (e) {
-      console.error(e)
+      // Backend offline (demo / mock mode): keep the toggle responsive
+      // client-side so the user can still explore the UI.
+      if (mockMode) {
+        setBotRunning(next)
+      } else {
+        setError(e instanceof Error ? e.message : 'Failed to toggle bot')
+        console.error(e)
+      }
     } finally {
       setBusy(false)
     }
   }
+
+  // Toggle is disabled only when no mode is available at all.
+  const disabled = busy || (!ibkrConnected && !simMode && !mockMode)
 
   return (
     <div
@@ -55,7 +72,12 @@ export default function BotToggle() {
               SIMULATION
             </span>
           )}
-          {!simMode && !ibkrConnected && (
+          {!simMode && mockMode && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-terminal-amber/15 text-terminal-amber">
+              MOCK
+            </span>
+          )}
+          {!simMode && !mockMode && !ibkrConnected && (
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-terminal-red/15 text-terminal-red">
               IBKR OFFLINE
             </span>
@@ -63,15 +85,20 @@ export default function BotToggle() {
         </div>
         <p className="text-xs text-terminal-dim mt-0.5">
           {botRunning
-            ? 'Rules engine is active — monitoring markets'
+            ? mockMode
+              ? 'Mock bot active — no real orders will be placed'
+              : 'Rules engine is active — monitoring markets'
             : 'Bot is stopped — no orders will be placed'}
         </p>
+        {error && (
+          <p className="text-xs text-terminal-red mt-1 font-mono">{error}</p>
+        )}
       </div>
 
       {/* Toggle switch */}
       <button
         onClick={handleToggle}
-        disabled={busy || (!ibkrConnected && !simMode)}
+        disabled={disabled}
         aria-label="Toggle automated trading"
         className={clsx(
           'relative w-14 h-7 rounded-full border-2 transition-all duration-200 focus:outline-none',
