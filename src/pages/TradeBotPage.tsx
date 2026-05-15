@@ -11,6 +11,7 @@ import React, { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import KPICard from '@/components/tradebot/KPICard'
 import BotToggle from '@/components/tradebot/BotToggle'
+import AutoTraderSettings from '@/components/tradebot/AutoTraderSettings'
 import PositionsTable from '@/components/tradebot/PositionsTable'
 import { useAccountStore, useBotStore, useSimStore } from '@/store'
 import { fetchTrades, fetchSimAccount, fetchSimPositions, placeManualOrder } from '@/services/api'
@@ -200,6 +201,11 @@ export default function TradeBotPage() {
       {/* ── Master toggle ───────────────────────────────────────────── */}
       <section>
         <BotToggle />
+      </section>
+
+      {/* ── Auto-trader rules (mock/sim mode only) ──────────────────── */}
+      <section>
+        <AutoTraderSettings />
       </section>
 
       {/* ── Quick order ─────────────────────────────────────────────── */}

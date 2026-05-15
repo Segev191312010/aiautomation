@@ -2,6 +2,7 @@ import React from 'react'
 import clsx from 'clsx'
 import { useBotStore, useUIStore } from '@/store'
 import { connectIBKR, startBot, stopBot } from '@/services/api'
+import { autoTrader } from '@/services/autoTrader'
 
 const PAGE_LABELS: Record<string, string> = {
   dashboard:  'Dashboard',
@@ -27,6 +28,7 @@ export default function Header() {
 
   const handleBotToggle = async () => {
     const next = !botRunning
+    const driveLocally = mockMode || simMode
     try {
       if (botRunning) {
         await stopBot()
@@ -35,12 +37,16 @@ export default function Header() {
       }
       setBotRunning(next)
     } catch (e) {
-      // Backend offline (mock mode): toggle locally so the UI stays usable.
-      if (mockMode) {
+      if (driveLocally) {
         setBotRunning(next)
       } else {
         console.error(e)
+        return
       }
+    }
+    if (driveLocally) {
+      if (next) autoTrader.start()
+      else      autoTrader.stop()
     }
   }
 

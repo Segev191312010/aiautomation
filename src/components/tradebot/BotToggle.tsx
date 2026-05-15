@@ -1,16 +1,19 @@
 /**
  * BotToggle — prominent "Automated Trading" master switch.
- * Confirms before enabling if operating with real money.
  *
  * Works in three modes:
- *  - LIVE: IBKR connected — requires confirmation before enabling
- *  - SIMULATION: virtual account, no real orders
- *  - MOCK: backend offline / demo mode — toggle stays interactive client-side
+ *  - LIVE (IBKR connected, !mockMode): requires confirmation before enabling;
+ *    real orders are routed through the backend rules engine.
+ *  - SIMULATION (simMode): virtual sim account; backend handles execution.
+ *  - MOCK / OFFLINE (mockMode and backend unreachable): we drive the local
+ *    AutoTrader engine which evaluates rules and manages positions
+ *    client-side so the user can see real automated behavior end-to-end.
  */
 import React, { useState } from 'react'
 import clsx from 'clsx'
 import { useBotStore } from '@/store'
 import { startBot, stopBot } from '@/services/api'
+import { autoTrader } from '@/services/autoTrader'
 
 export default function BotToggle() {
   const { botRunning, ibkrConnected, simMode, mockMode, setBotRunning } = useBotStore()
@@ -20,7 +23,7 @@ export default function BotToggle() {
   const handleToggle = async () => {
     if (busy) return
 
-    // Safety confirmation for live trading
+    // Safety confirmation for LIVE trading only.
     if (!botRunning && !simMode && !mockMode && ibkrConnected) {
       const ok = window.confirm(
         '⚠️  You are about to enable automated trading with a LIVE account.\n\nRules will place real orders. Continue?',
@@ -31,6 +34,10 @@ export default function BotToggle() {
     setBusy(true)
     setError('')
     const next = !botRunning
+
+    // Drive local engine when there is no live backend.
+    const driveLocally = mockMode || simMode
+
     try {
       if (botRunning) {
         await stopBot()
@@ -39,20 +46,26 @@ export default function BotToggle() {
       }
       setBotRunning(next)
     } catch (e) {
-      // Backend offline (demo / mock mode): keep the toggle responsive
-      // client-side so the user can still explore the UI.
-      if (mockMode) {
+      if (driveLocally) {
+        // Backend offline — fall through to client-side engine.
         setBotRunning(next)
       } else {
         setError(e instanceof Error ? e.message : 'Failed to toggle bot')
         console.error(e)
+        setBusy(false)
+        return
       }
-    } finally {
-      setBusy(false)
     }
+
+    // Start or stop the local engine.
+    if (driveLocally) {
+      if (next) autoTrader.start()
+      else      autoTrader.stop()
+    }
+
+    setBusy(false)
   }
 
-  // Toggle is disabled only when no mode is available at all.
   const disabled = busy || (!ibkrConnected && !simMode && !mockMode)
 
   return (
@@ -85,8 +98,8 @@ export default function BotToggle() {
         </div>
         <p className="text-xs text-terminal-dim mt-0.5">
           {botRunning
-            ? mockMode
-              ? 'Mock bot active — no real orders will be placed'
+            ? mockMode || simMode
+              ? 'Auto-trader active — evaluating signals, managing entries & exits'
               : 'Rules engine is active — monitoring markets'
             : 'Bot is stopped — no orders will be placed'}
         </p>
@@ -95,7 +108,6 @@ export default function BotToggle() {
         )}
       </div>
 
-      {/* Toggle switch */}
       <button
         onClick={handleToggle}
         disabled={disabled}

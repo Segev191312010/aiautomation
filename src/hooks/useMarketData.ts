@@ -64,19 +64,25 @@ export function useMarketData(): void {
   )
 
   // ── Account ───────────────────────────────────────────────────────────────
+  //
+  // When the local AutoTrader is running (mock/sim, no live backend) it
+  // owns the account & positions state. Don't clobber its book here.
 
   const refreshAccount = useCallback(async () => {
+    const { botRunning, mockMode, simMode } = useBotStore.getState()
+    const engineOwnsBook = botRunning && (mockMode || simMode)
+
     try {
       const account = await fetchAccountSummary()
       setAccount(account)
     } catch {
-      setAccount(getMockAccount())
+      if (!engineOwnsBook) setAccount(getMockAccount())
     }
     try {
       const positions = await fetchPositions()
       setPositions(positions)
     } catch {
-      setPositions([])
+      if (!engineOwnsBook) setPositions([])
     }
   }, [setAccount, setPositions])
 
