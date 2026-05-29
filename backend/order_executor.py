@@ -311,6 +311,12 @@ async def place_order(
     trade_rec.position_id = trade_rec.id
     await save_trade(trade_rec)
 
+    # Execution idempotency: stamp the broker order with our trade id so a retry
+    # or reconnect after a crash between save_trade(PENDING) and placeOrder can be
+    # reconciled against the broker's open orders by orderRef instead of placing a
+    # duplicate. (reap_orphan_pending_trades handles the local recovery side.)
+    ib_order.orderRef = trade_rec.id
+
     try:
         ib_trade: IBTrade = ibkr.ib.placeOrder(contract, ib_order)
         trade_rec.order_id = ib_trade.order.orderId
