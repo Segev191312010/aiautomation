@@ -198,7 +198,7 @@ class RetentionConfig:
             timestamp_column="queued_at",
             retention_days=days["direct_candidates"],
             backup_before_delete=False,
-            extra_where="status IN ('completed', 'rejected', 'expired')",
+            extra_where="status IN ('applied', 'failed', 'expired', 'declined_by_ai')",
         ))
 
 

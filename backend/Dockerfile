@@ -2,13 +2,13 @@
 # Trading Platform — Backend Dockerfile
 # 
 # Multi-layer production-ready image:
-# - Python 3.12 slim base
+# - Python 3.11 slim base (matches backend/.venv + CI)
 # - Non-root user for security
 # - Health checks
 # - Environment-based tuning
 # =============================================================================
 
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 # Create non-root user for least-privilege execution
 RUN groupadd --gid 1001 appgroup && \

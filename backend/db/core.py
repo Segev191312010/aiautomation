@@ -378,6 +378,19 @@ CREATE TABLE IF NOT EXISTS direct_candidates (
 );
 """
 
+# TradingView webhook idempotency ledger — dedupes inbound TV events by their
+# stable event_key so a redelivered webhook never re-queues a second candidate.
+# FK -> direct_candidates(id); must be created AFTER direct_candidates since
+# foreign_keys is ON.
+_CREATE_TV_IDEMPOTENCY = """
+CREATE TABLE IF NOT EXISTS tv_idempotency (
+    event_key   TEXT PRIMARY KEY,
+    signal_id   TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (signal_id) REFERENCES direct_candidates(id)
+);
+"""
+
 # ── S10: Decision Ledger Tables ──────────────────────────────────────────────
 
 _CREATE_AI_DECISION_RUNS = """
@@ -551,6 +564,9 @@ async def init_db() -> None:
         await db.execute(_CREATE_MANUAL_INTERVENTIONS)
         await db.execute(_CREATE_REGIME_SNAPSHOTS)
         await db.execute(_CREATE_DIRECT_CANDIDATES)
+        # TV webhook idempotency ledger (child of direct_candidates — parent
+        # above must be created first because foreign_keys is ON).
+        await db.execute(_CREATE_TV_IDEMPOTENCY)
         # S10: decision ledger tables
         await db.execute(_CREATE_AI_DECISION_RUNS)
         await db.execute(_CREATE_AI_DECISION_ITEMS)
@@ -609,6 +625,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_manual_interventions_resolved ON manual_interventions(resolved_at, opened_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(timestamp DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_direct_candidates_status_queued ON direct_candidates(user_id, status, queued_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tv_idempotency_created ON tv_idempotency(created_at)")
         # S10: decision ledger indexes
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_runs_created ON ai_decision_runs(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_run ON ai_decision_items(run_id)")

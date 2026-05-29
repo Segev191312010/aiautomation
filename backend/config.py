@@ -71,6 +71,26 @@ class Config:
     # TTL for persisted AI direct candidates before they are treated as stale.
     AI_DIRECT_CANDIDATE_TTL_SECONDS: int = int(os.getenv("AI_DIRECT_CANDIDATE_TTL_SECONDS", "900"))
 
+    # ── TradingView webhook ingest (Phase 1) ────────────────────────────────
+    # Shared secret expected on the inbound alert (body.secret OR X-TV-Secret
+    # header). Empty => the webhook rejects all requests. Claude review of TV
+    # signals reuses ANTHROPIC_API_KEY above.
+    TV_WEBHOOK_SECRET: str = os.getenv("TV_WEBHOOK_SECRET", "")
+    # Comma-separated EXACT TradingView egress IPs (NOT CIDR). Empty + strict => reject-all.
+    TV_ALLOWED_IPS: str = os.getenv("TV_ALLOWED_IPS", "")
+    TV_IP_STRICT: bool = os.getenv("TV_IP_STRICT", "true").lower() == "true"
+    # Freshness window (seconds) for the alert fire time ({{timenow}}).
+    TV_FRESHNESS_SECONDS: int = int(os.getenv("TV_FRESHNESS_SECONDS", "90"))
+
+    # ── Claude review worker (Phase 3, opt-in) ──────────────────────────────
+    # Drains pending_review TV candidates and asks Claude to approve/decline.
+    # Default OFF; explicit opt-in only after the paper soak.
+    CLAUDE_WORKER_ENABLED: bool = os.getenv("CLAUDE_WORKER_ENABLED", "false").lower() == "true"
+    CLAUDE_WORKER_POLL_SECONDS: int = int(os.getenv("CLAUDE_WORKER_POLL_SECONDS", "5"))
+    CLAUDE_DAILY_COST_USD_CAP: float = float(os.getenv("CLAUDE_DAILY_COST_USD_CAP", "20.0"))
+    # Reuse the repo's existing model IDs (see AI_MODEL_* above).
+    CLAUDE_WORKER_MODEL: str = os.getenv("CLAUDE_WORKER_MODEL", "claude-sonnet-4-20250514")
+
     # ── Bull/Bear debate telemetry ──────────────────────────────────────────
     # Number of JSON parse failures within a 24h window before emitting a
     # MetricEvent so the operator can notice silent degradation.

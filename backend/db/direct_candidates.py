@@ -3,6 +3,18 @@
 Queued direct AI candidates were previously held in an in-memory asyncio.Queue,
 which meant a crash/restart dropped anything not yet executed. This module
 persists them to SQLite keyed by ``id`` with a TTL stamped at queue time.
+
+Status state machines
+---------------------
+Scanner candidates: queued -> draining -> applied|failed|expired.
+
+TradingView (TV) candidates use a human/AI review state machine layered on the
+same table:
+
+    pending_review -> in_review -> applied | declined_by_ai | failed | expired
+
+``pending_review`` and ``in_review`` are non-terminal and remain TTL-expirable;
+``applied``, ``failed``, ``expired`` and ``declined_by_ai`` are terminal.
 """
 from __future__ import annotations
 
@@ -105,11 +117,16 @@ async def mark_candidate_status(
     *,
     db: aiosqlite.Connection | None = None,
 ) -> None:
-    """Mark a queued candidate as applied / failed / expired.
+    """Mark a candidate's status.
 
-    Allowed statuses: 'queued', 'draining', 'applied', 'failed', 'expired'.
+    Scanner state machine:     queued -> draining -> applied|failed|expired
+    TradingView state machine: pending_review -> in_review ->
+                               applied|declined_by_ai|failed|expired
     """
-    if status not in {"queued", "draining", "applied", "failed", "expired"}:
+    if status not in {
+        "queued", "draining", "applied", "failed", "expired",
+        "pending_review", "in_review", "declined_by_ai",
+    }:
         raise ValueError(f"invalid candidate status: {status}")
 
     async def _execute(conn: aiosqlite.Connection) -> None:
@@ -144,7 +161,7 @@ async def purge_expired_candidates(*, user_id: str | None = None) -> int:
 
         async with db.execute(
             f"SELECT id, queued_at, ttl_seconds FROM direct_candidates "
-            f"WHERE status IN ('queued','draining') {user_clause}",
+            f"WHERE status IN ('queued','draining','pending_review','in_review') {user_clause}",
             args_prefix,
         ) as cur:
             rows = await cur.fetchall()
