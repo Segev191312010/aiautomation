@@ -1,0 +1,45 @@
+// ─────────────────────────────────────────────────────────────────────────
+// TradingView → /api/webhook/tv alert message template
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Paste the JSON block below into the "Message" box of a TradingView alert
+// (Create Alert → Notifications → Webhook URL → https://<host>/api/webhook/tv).
+//
+// TradingView placeholder substitutions used here:
+//   {{ticker}}                  → symbol, e.g. AAPL
+//   {{strategy.order.action}}   → "buy" or "sell" (lowercased entry side)
+//   {{close}}                   → bar close price (numeric)
+//   {{timenow}}                 → alert FIRE time as a REAL ISO-8601 UTC
+//                                 timestamp, e.g. 2026-05-29T14:31:07Z.
+//                                 This drives the server freshness check —
+//                                 it MUST NOT be empty.
+//   {{time}}                    → the BAR open time (ISO-8601). Reported as
+//                                 bar_time for audit; NOT used for freshness.
+//   {{interval}}                → chart interval, e.g. 1D, 60, 5
+//   {{strategy.order.id}}       → strategy order id (part of the dedupe key)
+//
+// Authenticity: the shared secret may travel in the JSON body (below) OR in an
+// X-TV-Secret request header. The header takes precedence. The secret must be
+// at least 8 characters and is always redacted in logs / error responses.
+//
+// Idempotency: TradingView retries a webhook on any non-2xx response. The
+// server derives a stable event_key from
+//     sha256(symbol | action | interval | timenow | strategy_order_id)
+// so a redelivered alert is de-duplicated and returns the ORIGINAL signal_id
+// ({"status":"duplicate", ...}) instead of queuing a second candidate. Keep
+// {{timenow}} and {{strategy.order.id}} in the payload so retries collapse to
+// the same key.
+//
+// Note: "close"/flat exits are NOT routed here — action must be buy or sell.
+//
+// ─── Alert message (JSON) ────────────────────────────────────────────────
+{
+  "symbol": "{{ticker}}",
+  "action": "{{strategy.order.action}}",
+  "price": {{close}},
+  "timenow": "{{timenow}}",
+  "bar_time": "{{time}}",
+  "interval": "{{interval}}",
+  "strategy_order_id": "{{strategy.order.id}}",
+  "secret": "replace-with-your-TV_WEBHOOK_SECRET"
+}

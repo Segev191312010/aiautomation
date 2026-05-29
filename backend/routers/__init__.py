@@ -35,9 +35,11 @@ def register_routers(app: FastAPI) -> None:
     # Batch C — IBKR/broker state
     from routers.status import router as status_router
     from routers.positions import router as positions_router
+    from routers.account_routes import router as account_router
 
     app.include_router(status_router)
     app.include_router(positions_router)
+    app.include_router(account_router)
 
     # Batch D — Simulation
     from routers.simulation_routes import router as simulation_router
@@ -53,3 +55,11 @@ def register_routers(app: FastAPI) -> None:
     from routers.admin_routes import router as admin_router
 
     app.include_router(admin_router)
+
+    # Batch G — TradingView webhook ingest + extended health probes
+    from routers.webhook_routes import router as webhook_router, signals_router
+    from routers.health_extended import router as health_extended_router
+
+    app.include_router(webhook_router)
+    app.include_router(signals_router)
+    app.include_router(health_extended_router)

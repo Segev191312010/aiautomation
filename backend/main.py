@@ -300,6 +300,14 @@ async def lifespan(app: FastAPI):
         log.info("AI optimization loop started (interval=%ds)", cfg.AI_OPTIMIZE_INTERVAL_SECONDS)
         log.info("AI learning loop started (interval=6h)")
 
+    # Claude review worker for pending TradingView candidates (PAPER-only).
+    # The loop self-gates on cfg.CLAUDE_WORKER_ENABLED; gate here too so we don't
+    # spawn an idle task when the feature is off (the default).
+    if cfg.CLAUDE_WORKER_ENABLED:
+        from claude_worker import claude_worker_loop
+        asyncio.create_task(claude_worker_loop())
+        log.info("Claude review worker loop started")
+
     yield
 
     # â"€â"€ Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
