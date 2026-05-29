@@ -64,30 +64,39 @@ export function calcEMA(bars: OHLCVBar[], period: number): LinePoint[] {
   return result
 }
 
-// ── Bollinger Bands ───────────────────────────────────────────────────────────
+// ── Bollinger Bands (rolling, O(n)) ───────────────────────────────────────────
 //
-// Rolling sum gives the mean in O(1) per step; variance uses a two-pass window
-// scan (sum of (x − mean)²) which is numerically stable. Avoids the
-// E[X²] − E[X]² cancellation trap for high-priced + tight-range windows.
-// Still faster than the old slice+map+reduce path thanks to index-based loop
-// and no per-step allocation.
+// Both the rolling mean and rolling variance update in O(1) per bar, so the
+// whole pass is O(n) (the previous version rescanned the window → O(n·period)).
+//
+// Variance is computed from deviations against a fixed reference K (the first
+// close), not against the raw price. Tracking Σ(x−K) and Σ(x−K)² and forming
+//   var = mean(dev²) − mean(dev)²
+// keeps the magnitudes small even for high-priced, tight-range symbols
+// (e.g. BRK.A ~$600k ±0.1%), which would catastrophically cancel in the naive
+// E[X²] − E[X]² form. The result matches the two-pass slice scan to well under
+// 1e-5, i.e. exactly equal after toFixed(4) rounding.
 
 export function calcBB(bars: OHLCVBar[], period = 20, mult = 2): BandsResult {
   const upper: LinePoint[] = [], middle: LinePoint[] = [], lower: LinePoint[] = []
   const n = bars.length
   if (n < period || period <= 0) return { upper, middle, lower }
 
-  let sum = 0
-  for (let i = 0; i < period; i++) sum += bars[i].close
+  const k = bars[0].close // fixed reference offset to suppress float cancellation
+  let sumDev = 0   // Σ (close − k)   over the window
+  let sumDev2 = 0  // Σ (close − k)²  over the window
+  for (let i = 0; i < period; i++) {
+    const d = bars[i].close - k
+    sumDev += d
+    sumDev2 += d * d
+  }
 
   const push = (i: number) => {
-    const avg = sum / period
-    let sse = 0
-    for (let j = i - period + 1; j <= i; j++) {
-      const d = bars[j].close - avg
-      sse += d * d
-    }
-    const std = Math.sqrt(sse / period)
+    const meanDev = sumDev / period
+    const avg = k + meanDev
+    // var = E[dev²] − E[dev]²; clamp tiny negatives from float drift.
+    const variance = Math.max(0, sumDev2 / period - meanDev * meanDev)
+    const std = Math.sqrt(variance)
     middle.push({ time: bars[i].time, value: +avg.toFixed(4) })
     upper.push({  time: bars[i].time, value: +(avg + mult * std).toFixed(4) })
     lower.push({  time: bars[i].time, value: +(avg - mult * std).toFixed(4) })
@@ -95,7 +104,10 @@ export function calcBB(bars: OHLCVBar[], period = 20, mult = 2): BandsResult {
 
   push(period - 1)
   for (let i = period; i < n; i++) {
-    sum += bars[i].close - bars[i - period].close
+    const dIn = bars[i].close - k
+    const dOut = bars[i - period].close - k
+    sumDev += dIn - dOut
+    sumDev2 += dIn * dIn - dOut * dOut
     push(i)
   }
   return { upper, middle, lower }

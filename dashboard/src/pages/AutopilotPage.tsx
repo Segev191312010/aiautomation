@@ -13,8 +13,12 @@ import { IconArrows, IconBarChart, IconDollar, IconGrid, IconHistory, IconLightn
 import AutopilotRuleLab from '@/components/rules/AutopilotRuleLab'
 import { DecisionDrilldown } from '@/components/autopilot/DecisionDrilldown'
 import { EvaluationReplay } from '@/components/autopilot/EvaluationReplay'
+import SignalsTable from '@/components/autopilot/SignalsTable'
+import TVSignalDetail from '@/components/autopilot/TVSignalDetail'
+import ClaudeDecisionPanel from '@/components/autopilot/ClaudeDecisionPanel'
 import { useAutopilotStore } from '@/store'
 import type { Rule } from '@/types'
+import type { SignalRow } from '@/types/signals'
 import type { AutopilotIntervention, RulePerformanceRow, SourcePerformance } from '@/types/advisor'
 import {
   acknowledgeAutopilotIntervention,
@@ -30,7 +34,7 @@ import {
   setAutopilotMode,
 } from '@/services/api'
 
-type ConsoleTab = 'feed' | 'performance' | 'rule-lab' | 'evaluation'
+type ConsoleTab = 'feed' | 'signals' | 'performance' | 'rule-lab' | 'evaluation'
 
 function fmtUsd(value: number | null | undefined) {
   if (value == null) return '--'
@@ -100,6 +104,7 @@ export default function AutopilotPage() {
   const [dailyLossLimitInput, setDailyLossLimitInput] = useState('2.0')
   const [liveModeConfirmOpen, setLiveModeConfirmOpen] = useState(false)
   const [killResetConfirmOpen, setKillResetConfirmOpen] = useState(false)
+  const [selectedSignal, setSelectedSignal] = useState<SignalRow | null>(null)
 
   const loadRules = useCallback(async () => {
     setRulesLoading(true)
@@ -157,6 +162,7 @@ export default function AutopilotPage() {
   const topSource = useMemo(() => [...sourcePerformance].sort((a, b) => (b.realized_pnl + b.unrealized_pnl) - (a.realized_pnl + a.unrealized_pnl))[0] ?? null, [sourcePerformance])
   const tabs = useMemo(() => [
     { id: 'feed', label: 'Feed', count: auditLog.length },
+    { id: 'signals', label: 'Signals' },
     { id: 'performance', label: 'Performance', count: sourcePerformance.reduce((sum, item) => sum + item.trades_count, 0) },
     { id: 'rule-lab', label: 'Rule Lab', count: rules.length },
     { id: 'evaluation', label: 'Evaluation' },
@@ -333,6 +339,32 @@ export default function AutopilotPage() {
               )) : <div className="flex items-center justify-center rounded-[24px] border border-[var(--border)] bg-[var(--bg-hover)] px-5 py-12 text-sm text-[var(--text-muted)]">No open intervention items.</div>}
             </div>
           </section>
+        </div>
+      </ErrorBoundary>)}
+
+      {activeTab === 'signals' && (<ErrorBoundary>
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">
+          <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '60ms' }}>
+            <SectionHeader icon={<IconLightning className="h-3.5 w-3.5 text-[var(--accent)]" />} eyebrow="Inbound" title="TradingView Signals" badge={<span className="shell-chip px-3 py-1 text-[10px] font-mono">10s refresh</span>} />
+            <div className="mt-4">
+              <SignalsTable
+                source="tv_webhook"
+                selectedId={selectedSignal?.id ?? null}
+                onSelect={setSelectedSignal}
+                refreshMs={10000}
+              />
+            </div>
+          </section>
+          <div className="space-y-6">
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '90ms' }}>
+              <SectionHeader icon={<IconHistory className="h-3.5 w-3.5 text-indigo-500" />} eyebrow="Signal" title="Payload Detail" />
+              <div className="mt-4"><TVSignalDetail signal={selectedSignal} /></div>
+            </section>
+            <section className="shell-panel animate-fade-in-up p-5 sm:p-6" style={{ animationDelay: '120ms' }}>
+              <SectionHeader icon={<IconShield className="h-3.5 w-3.5 text-rose-500" />} eyebrow="AI Worker" title="Claude Decision" />
+              <div className="mt-4"><ClaudeDecisionPanel signalId={selectedSignal?.id ?? null} /></div>
+            </section>
+          </div>
         </div>
       </ErrorBoundary>)}
 

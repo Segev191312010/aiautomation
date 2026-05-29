@@ -3,6 +3,8 @@ import { useLocation } from 'react-router-dom'
 import clsx from 'clsx'
 import { useBotStore, useMarketStore, useStockProfileStore, useUIStore } from '@/store'
 import { connectIBKR, startBot, stopBot } from '@/services/api'
+import { fetchDayPnl, type DayPnl } from '@/services/api/account'
+import { fmtUSD } from '@/utils/formatters'
 import AlertBell from '@/components/alerts/AlertBell'
 import { SHORTCUT_FOCUS_SEARCH } from '@/hooks/useKeyboardShortcuts'
 import type { ThemePreference } from '@/store'
@@ -238,6 +240,8 @@ export default function Header() {
                 </span>
               )}
 
+              <DayPnlBadge />
+
               <div className="shell-chip px-3 py-2 text-[11px]">
                 <Clock />
               </div>
@@ -342,6 +346,45 @@ export default function Header() {
         </div>
       </div>
     </header>
+  )
+}
+
+function DayPnlBadge() {
+  const [pnl, setPnl] = React.useState<DayPnl | null>(null)
+
+  React.useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        const data = await fetchDayPnl()
+        if (active) setPnl(data)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+    load()
+    const timer = setInterval(load, 30_000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  if (!pnl) return null
+
+  const positive = pnl.total >= 0
+
+  return (
+    <span
+      className={clsx(
+        'shell-chip px-3 py-2 text-[11px] font-semibold',
+        positive ? 'text-[var(--success)]' : 'text-[var(--danger)]',
+      )}
+      title={`Day P&L — Realized ${fmtUSD(pnl.realized)} / Unrealized ${fmtUSD(pnl.unrealized)} · ${pnl.count_trades_today} trade${pnl.count_trades_today === 1 ? '' : 's'} today`}
+    >
+      <span className={clsx('h-2 w-2 rounded-full', positive ? 'bg-[var(--success)]' : 'bg-[var(--danger)]')} />
+      Day {fmtUSD(pnl.total)}
+    </span>
   )
 }
 

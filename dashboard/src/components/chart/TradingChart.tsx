@@ -26,13 +26,15 @@ import clsx from 'clsx'
 import { useChart, CHART_THEME } from '@/hooks/useChart'
 import { useMarketStore, useSimStore } from '@/store'
 import {
-  calcSMA, calcEMA, calcBB, calcVWAP,
+  calcSMA, calcEMA, calcBB,
   INDICATOR_DEFS,
   type IndicatorId,
   type LinePoint,
 } from '@/utils/indicators'
+import { calcSessionVWAP } from '@/utils/indicators_session'
 import { toHeikinAshi } from '@/utils/heikinAshi'
 import DrawingCanvas from '@/components/chart/DrawingCanvas'
+import AccessibleDataTable from '@/components/chart/AccessibleDataTable'
 import type { OHLCVBar, ChartType } from '@/types'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -205,6 +207,11 @@ export default function TradingChart({
   const mainSeriesRef = useRef<ISeriesApi<AnyData> | null>(null)
   const compRef       = useRef<ISeriesApi<'Line'> | null>(null)
   const prevBarsRef   = useRef<OHLCVBar[]>([])
+  // Identity of the bars array last pushed via a full setData(). Lets us skip
+  // a redundant setData when the array reference hasn't changed (the store
+  // returns a new array only when bars actually change), which keeps repeated
+  // renders from re-flowing the whole series.
+  const lastSetBarsRef = useRef<OHLCVBar[] | null>(null)
   const lastQuoteMsRef = useRef<number>(Date.now())
   const indSeriesRef  = useRef<Map<string, ISeriesApi<'Line'>[]>>(new Map())
   const chartTypeRef  = useRef<ChartType>('candlestick')
@@ -272,10 +279,13 @@ export default function TradingChart({
     // Create new series
     mainSeriesRef.current = createMainSeries(chart, chartType)
 
-    // Reload data
+    // Reload data — new series has no data, so force the next push through.
     if (bars.length) {
       loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
+      lastSetBarsRef.current = bars
       chart.timeScale().fitContent()
+    } else {
+      lastSetBarsRef.current = null
     }
   }, [chartType, bars, chartRef])
 
@@ -294,8 +304,12 @@ export default function TradingChart({
       (prevLast && last.time < prevLast.time)
 
     if (replaceAll) {
-      loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
-      if (prevBars.length === 0) chartRef.current?.timeScale().fitContent()
+      // Skip the full re-flow if this exact array was already pushed.
+      if (lastSetBarsRef.current !== bars) {
+        loadDataIntoSeries(mainSeriesRef.current, bars, chartType)
+        lastSetBarsRef.current = bars
+        if (prevBars.length === 0) chartRef.current?.timeScale().fitContent()
+      }
     } else {
       try {
         if (isSingleValue(chartTypeRef.current)) {
@@ -321,6 +335,7 @@ export default function TradingChart({
 
   useEffect(() => {
     prevBarsRef.current = []
+    lastSetBarsRef.current = null
   }, [symbol, timeframe, chartType])
 
   // WS can become stale without fully closing; fallback to REST refresh via parent callback.
@@ -405,6 +420,7 @@ export default function TradingChart({
 
     if (!compMode || !compBars.length) {
       loadDataIntoSeries(mainSeriesRef.current, bars, chartTypeRef.current)
+      lastSetBarsRef.current = bars
       return
     }
 
@@ -423,11 +439,27 @@ export default function TradingChart({
 
     const normMain = normalizeBars(bars)
     loadDataIntoSeries(mainSeriesRef.current, normMain, chartTypeRef.current)
+    // Normalized data was pushed; the raw-bars guard no longer reflects the
+    // series contents, so force the next raw push to re-flow.
+    lastSetBarsRef.current = null
   }, [compMode, compBars, bars]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const chartTitleId = `chart-title-${symbol}`
 
   return (
     <div className={clsx('relative w-full h-full', className)} style={{ touchAction: 'none' }}>
-      <div ref={containerRef} className="w-full h-full" role="img" aria-label="Price chart" />
+      <div
+        ref={containerRef}
+        className="w-full h-full"
+        role="img"
+        aria-labelledby={chartTitleId}
+      />
+      <AccessibleDataTable
+        symbol={symbol}
+        bars={bars}
+        timeframe={timeframe}
+        titleId={chartTitleId}
+      />
       {chartReady && chartRef.current && mainSeriesRef.current && (
         <DrawingCanvas
           key={`${symbol}_${timeframe}_${chartType}`}
@@ -468,7 +500,7 @@ function _setOverlayData(
     else if (id === 'sma50') series[0].setData(toTV(calcSMA(bars, 50)) as AnyData)
     else if (id === 'ema12') series[0].setData(toTV(calcEMA(bars, 12)) as AnyData)
     else if (id === 'ema26') series[0].setData(toTV(calcEMA(bars, 26)) as AnyData)
-    else if (id === 'vwap')  series[0].setData(toTV(calcVWAP(bars)) as AnyData)
+    else if (id === 'vwap')  series[0].setData(toTV(calcSessionVWAP(bars)) as AnyData)
     else if (id === 'bb') {
       const bb = calcBB(bars)
       series[0].setData(toTV(bb.upper)  as AnyData)
