@@ -90,6 +90,11 @@ class Config:
     CLAUDE_DAILY_COST_USD_CAP: float = float(os.getenv("CLAUDE_DAILY_COST_USD_CAP", "20.0"))
     # Reuse the repo's existing model IDs (see AI_MODEL_* above).
     CLAUDE_WORKER_MODEL: str = os.getenv("CLAUDE_WORKER_MODEL", "claude-sonnet-4-20250514")
+    # Hard paper fence: TV/Claude-sourced orders are refused against a LIVE broker
+    # account (IS_PAPER=false) unless this is explicitly true. The scanner and the
+    # TV/Claude path share one IBKR connection, so this enforces "TV/Claude stays
+    # paper" in code rather than by operator convention. Default OFF.
+    CLAUDE_LIVE_TRADING_ENABLED: bool = os.getenv("CLAUDE_LIVE_TRADING_ENABLED", "false").lower() == "true"
 
     # ── Bull/Bear debate telemetry ──────────────────────────────────────────
     # Number of JSON parse failures within a 24h window before emitting a

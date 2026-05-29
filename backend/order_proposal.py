@@ -26,8 +26,13 @@ import risk_manager
 from models import Rule
 from services import safety_gate
 import order_executor
+from config import cfg
 
 log = logging.getLogger(__name__)
+
+# Externally-sourced proposals (TradingView webhook / Claude worker) are fenced
+# off a LIVE broker account — see the paper fence in place_proposed_order.
+_PAPER_FENCED_SOURCES = {"claude_worker", "tv_webhook"}
 
 
 @dataclass
@@ -62,6 +67,26 @@ async def place_proposed_order(
     ``False`` at the executor so the runtime kernel runs a second time inside
     ``place_order`` — defense in depth, never a bypass.
     """
+    # Hard paper fence: externally-sourced proposals (TV webhook / Claude worker)
+    # must never reach a LIVE broker account. The scanner and this path share one
+    # IBKR connection, so we fail closed here regardless of AUTOPILOT_MODE rather
+    # than rely on operator convention. (CLAUDE_LIVE_TRADING_ENABLED overrides.)
+    if (source in _PAPER_FENCED_SOURCES
+            and not cfg.IS_PAPER
+            and not cfg.CLAUDE_LIVE_TRADING_ENABLED):
+        log.warning(
+            "order_proposal paper-fence: refusing live-account order for source=%s symbol=%s",
+            source, rule.symbol,
+        )
+        return ProposalResult(
+            status="rejected",
+            stage="paper_fence",
+            reason=(
+                f"source '{source}' is paper-only; refusing to place against a live "
+                "broker account (IS_PAPER=false). Set CLAUDE_LIVE_TRADING_ENABLED=true to override."
+            ),
+        )
+
     symbol = rule.symbol
     side = rule.action.type
     qty = rule.action.quantity
