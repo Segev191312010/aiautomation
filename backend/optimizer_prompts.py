@@ -83,7 +83,8 @@ Analyze this data and return a JSON object with your decisions:
 }}
 
 Rules:
-- New rules start as 'paper' (not live) - BUY only, no shorts
+- BUY only, no shorts
+- New rules may be activated by the platform only when autopilot is in a safe paper/sim/live execution mode
 - Only pause/retire rules with clear evidence of poor performance
 - Max 3 new rules per cycle
 - Include a thesis for new rules explaining the edge

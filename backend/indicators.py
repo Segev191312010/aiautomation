@@ -19,6 +19,13 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 
+def _param_int(params: dict[str, Any], *names: str, default: int) -> int:
+    for name in names:
+        if name in params:
+            return int(params[name])
+    return default
+
+
 # ---------------------------------------------------------------------------
 # Low-level indicator functions (pandas/numpy only)
 # ---------------------------------------------------------------------------
@@ -114,20 +121,31 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
     Returns:
         pd.Series of indicator values, aligned with df index.
         For multi-output indicators (MACD, BBANDS, STOCH), returns the primary signal line.
+        Accepts both "length" and template-style "period" aliases.
     """
     ind = indicator.upper()
 
     if ind == "PRICE":
         return df["close"]
 
+    if ind == "VOLUME":
+        length = _param_int(params, "length", "period", default=1)
+        if length > 1:
+            return df["volume"].rolling(window=length).mean()
+        return df["volume"]
+
+    if ind == "CHANGE_PCT":
+        length = max(1, _param_int(params, "length", "period", default=1))
+        return df["close"].pct_change(periods=length) * 100.0
+
     if ind == "RSI":
-        return _rsi(df["close"], length=int(params.get("length", 14)))
+        return _rsi(df["close"], length=_param_int(params, "length", "period", default=14))
 
     if ind == "SMA":
-        return _sma(df["close"], length=int(params.get("length", 20)))
+        return _sma(df["close"], length=_param_int(params, "length", "period", default=20))
 
     if ind == "EMA":
-        return _ema(df["close"], length=int(params.get("length", 20)))
+        return _ema(df["close"], length=_param_int(params, "length", "period", default=20))
 
     if ind == "MACD":
         macd_line, _, _ = _macd(
@@ -139,7 +157,7 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
         return macd_line
 
     if ind == "BBANDS":
-        bb_length = max(2, int(params.get("length", 20)))
+        bb_length = max(2, _param_int(params, "length", "period", default=20))
         bb_std = max(0.1, min(10.0, float(params.get("std", 2.0))))
         upper, mid, lower = _bbands(
             df["close"],
@@ -152,14 +170,14 @@ def calculate(df: pd.DataFrame, indicator: str, params: dict[str, Any]) -> pd.Se
     if ind == "ATR":
         return _atr(
             df["high"], df["low"], df["close"],
-            length=int(params.get("length", 14)),
+            length=_param_int(params, "length", "period", default=14),
         )
 
     if ind == "STOCH":
         k_line, _ = _stoch(
             df["high"], df["low"], df["close"],
-            k=int(params.get("k", 14)),
-            d=int(params.get("d", 3)),
+            k=_param_int(params, "k", "k_period", "length", "period", default=14),
+            d=_param_int(params, "d", "d_period", default=3),
             smooth_k=int(params.get("smooth_k", 3)),
         )
         return k_line
@@ -238,6 +256,18 @@ def resolve_value(
             _, _, hist = _macd(df["close"])
             indicator_cache[cache_key] = hist
         return indicator_cache[cache_key]
+
+    if v.startswith("BBANDS_"):
+        parts = v.split("_")
+        if len(parts) == 3 and parts[1] in {"UPPER", "MID", "LOWER"}:
+            cache_key = v
+            if cache_key not in indicator_cache:
+                indicator_cache[cache_key] = calculate(
+                    df,
+                    "BBANDS",
+                    {"length": int(parts[2]), "band": parts[1].lower()},
+                )
+            return indicator_cache[cache_key]
 
     if "_" in v:
         parts = v.split("_", 1)

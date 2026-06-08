@@ -176,8 +176,43 @@ async def _loop() -> None:
             )
 
 
+def _block_live_entry_in_recovery(is_exit: bool) -> bool:
+    """True when a REAL-money rule ENTRY must be blocked because AUTOPILOT_MODE=OFF
+    is acting as a recovery stop.
+
+    Exits always flow (return False) so positions remain closable. Paper/sim
+    accounts and PAPER/LIVE autopilot are never blocked here. Operators can opt
+    back in to live rule entries while OFF via ALLOW_LIVE_RULES_WHEN_AUTOPILOT_OFF.
+    The kill switch and daily-loss lock are enforced separately in safety_kernel
+    and are unaffected by this gate.
+    """
+    if is_exit:
+        return False
+    if cfg.SIM_MODE or cfg.IS_PAPER:
+        return False
+    if cfg.AUTOPILOT_MODE != "OFF":
+        return False
+    return not getattr(cfg, "ALLOW_LIVE_RULES_WHEN_AUTOPILOT_OFF", False)
+
+
 async def _run_cycle() -> None:
     rules = await get_rules()
+
+    if not any(rule.enabled for rule in rules):
+        try:
+            from auto_rule_manager import ensure_auto_rules
+
+            auto_result = await ensure_auto_rules(rules)
+            if auto_result.get("created") or auto_result.get("activated"):
+                rules = await get_rules()
+                await _emit({
+                    "type": "auto_rules_ready",
+                    "created": auto_result.get("created", []),
+                    "activated": auto_result.get("activated", []),
+                })
+        except Exception as exc:
+            log.warning("Fully-auto rule bootstrap skipped: %s", exc)
+
     enabled = [r for r in rules if r.enabled]
 
     # Load open positions BEFORE bar fetch so their symbols are included
@@ -316,13 +351,16 @@ async def _run_cycle() -> None:
     except Exception as exc:
         log.exception("Exit processing failed: %s", exc)
 
-    try:
-        from execution_brain import drain_direct_candidates
+    direct_candidates: list[dict] = []
+    if cfg.AUTOPILOT_MODE != "OFF":
+        try:
+            from execution_brain import drain_direct_candidates
 
-        direct_candidates = await drain_direct_candidates()
-    except Exception as exc:
-        log.debug("Direct candidate queue unavailable: %s", exc)
-        direct_candidates = []
+            direct_candidates = await drain_direct_candidates()
+        except Exception as exc:
+            log.debug("Direct candidate queue unavailable: %s", exc)
+    else:
+        log.debug("Autopilot OFF - direct AI candidate queue left untouched")
 
     # ── Emit MarketEvents for all fetched bars ─────────────────────────────────
     now = datetime.now(timezone.utc)
@@ -397,12 +435,10 @@ async def _run_cycle() -> None:
         log.debug("Regime detection failed (non-critical, using defaults): %s", exc)
     metrics.record("regime", {"label": cycle_regime, "risk_mult": cycle_regime_risk_mult})
 
-    # ── Phase 2: Evaluate entry rules ─────────────────────────────────────────
-    if cfg.AUTOPILOT_MODE == "OFF":
-        log.info("Autopilot OFF — skipping new entries")
-        triggered = []
-    else:
-        triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
+    # ── Phase 2: Evaluate deterministic entry rules ─────────────────────────
+    # AUTOPILOT_MODE gates AI authority only; operator-authored rules are
+    # controlled by bot start/stop plus each rule's enabled/status flags.
+    triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
 
     # ── Score and rank signals ───────────────────────────────────────────────
     rule_candidates: list[dict] = []
@@ -420,8 +456,8 @@ async def _run_cycle() -> None:
                 result["_rule"] = rule
                 result["_symbol"] = sym
                 scored.append(result)
-        ai_min_score = ai_params.get_min_score()
-        ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=ai_min_score)
+        min_score = ai_params.get_min_score() if cfg.AUTOPILOT_MODE != "OFF" else 0
+        ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=min_score)
         if ranked:
             log.info("Signal scores: %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
             # Emit SignalEvents
@@ -479,7 +515,9 @@ async def _run_cycle() -> None:
             log.debug("Sector prefetch skipped: %s", exc)
 
     selected_candidates: list[dict] = []
-    if cfg.AUTOPILOT_MODE != "OFF":
+    if cfg.AUTOPILOT_MODE == "OFF":
+        selected_candidates = rule_candidates
+    else:
         try:
             from execution_brain import choose_candidates
 
@@ -572,6 +610,7 @@ async def _run_cycle() -> None:
             continue
 
         if source == "ai_direct":
+            candidate_id = candidate.get("_candidate_id")
             # Concentration check for direct AI BUYs (same guard as rule path)
             preview: dict | None = None
             if cfg.ENABLE_PORTFOLIO_CONCENTRATION_ENFORCEMENT:
@@ -596,10 +635,24 @@ async def _run_cycle() -> None:
                                 "Concentration BLOCKED ai_direct %s: reason=%s | %s",
                                 symbol, impact.reason, impact.details,
                             )
+                            if candidate_id:
+                                try:
+                                    from db.direct_candidates import mark_candidate_status
+
+                                    await mark_candidate_status(str(candidate_id), "failed")
+                                except Exception as status_exc:
+                                    log.debug("Failed to mark direct candidate %s failed: %s", candidate_id, status_exc)
                             continue
                     except Exception as exc:
                         # HB1-04: Fail closed � do not execute when concentration check errors
                         log.warning("Concentration check FAILED for ai_direct %s -- blocking trade: %s", symbol, exc)
+                        if candidate_id:
+                            try:
+                                from db.direct_candidates import mark_candidate_status
+
+                                await mark_candidate_status(str(candidate_id), "failed")
+                            except Exception as status_exc:
+                                log.debug("Failed to mark direct candidate %s failed: %s", candidate_id, status_exc)
                         continue
 
             try:
@@ -613,7 +666,21 @@ async def _run_cycle() -> None:
                 # Only count if execution actually succeeded (not error/rejected)
                 if outcome.get("status") == "error" or not trade_payload:
                     log.warning("Direct AI trade for %s returned error/empty — not counting", decision.symbol)
+                    if candidate_id:
+                        try:
+                            from db.direct_candidates import mark_candidate_status
+
+                            await mark_candidate_status(str(candidate_id), "failed")
+                        except Exception as status_exc:
+                            log.debug("Failed to mark direct candidate %s failed: %s", candidate_id, status_exc)
                     continue
+                if candidate_id:
+                    try:
+                        from db.direct_candidates import mark_candidate_status
+
+                        await mark_candidate_status(str(candidate_id), "applied")
+                    except Exception as status_exc:
+                        log.debug("Failed to mark direct candidate %s applied: %s", candidate_id, status_exc)
                 direct_rule_id = f"ai-direct:{decision.symbol.upper()}"
                 order_event = OrderEvent(
                     timestamp=now,
@@ -669,6 +736,13 @@ async def _run_cycle() -> None:
                 })
             except Exception as exc:
                 log.warning("Direct AI trade blocked for %s: %s", symbol, exc)
+                if candidate_id:
+                    try:
+                        from db.direct_candidates import mark_candidate_status
+
+                        await mark_candidate_status(str(candidate_id), "failed")
+                    except Exception as status_exc:
+                        log.debug("Failed to mark direct candidate %s failed: %s", candidate_id, status_exc)
             continue
 
         rule = candidate.get("rule")
@@ -814,10 +888,22 @@ async def _run_cycle() -> None:
             account_equity=available_cash,
             price_estimate=price,
             is_exit=False,
-            require_autopilot_authority=True,
+            require_autopilot_authority=False,
         )
         if not allowed:
             log.warning("Runtime safety gate REJECTED %s %s: %s", order_rule.action.type, order_rule.symbol, reason)
+            continue
+
+        # Recovery brake: AUTOPILOT_MODE=OFF blocks REAL-money rule ENTRIES unless
+        # explicitly opted in. Exits always flow; paper/sim and PAPER/LIVE autopilot
+        # are unaffected. Kill switch + daily-loss lock are enforced in the gate above.
+        if _block_live_entry_in_recovery(is_exit):
+            log.warning(
+                "Live-account rule ENTRY for %s BLOCKED: AUTOPILOT_MODE=OFF is a recovery "
+                "stop. Set AUTOPILOT_MODE=PAPER/LIVE, or ALLOW_LIVE_RULES_WHEN_AUTOPILOT_OFF=true "
+                "to trade live rules while OFF.",
+                order_rule.symbol,
+            )
             continue
         # Emit OrderEvent
         order_event = OrderEvent(
@@ -830,8 +916,9 @@ async def _run_cycle() -> None:
         event_logger.log_event(order_event)
 
         try:
-            if cfg.AUTOPILOT_MODE == "LIVE" and not cfg.SIM_MODE:
+            if not cfg.SIM_MODE:
                 trade = await place_order(order_rule, source="rule", skip_safety=False,
+                                        require_autopilot_authority=False,
                                         is_exit=is_exit, has_existing_position=is_exit)
             else:
                 _fill_price = price if price > 0 else (order_rule.action.limit_price or 0)
@@ -931,6 +1018,18 @@ async def _run_cycle() -> None:
 
 async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Trade:
     now_iso = datetime.now(timezone.utc).isoformat()
+    if cfg.SIM_MODE:
+        from simulation import sim_engine
+
+        ok, msg = await sim_engine.execute_order(
+            symbol=order_rule.symbol,
+            action=order_rule.action.type,
+            qty=float(order_rule.action.quantity),
+            price=float(fill_price or 0.0),
+        )
+        if not ok:
+            raise RuntimeError(msg)
+
     trade = Trade(
         rule_id=order_rule.id,
         rule_name=order_rule.name,
@@ -946,12 +1045,13 @@ async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Tra
         timestamp=now_iso,
         source="rule",
         metadata={"paper": True, "autopilot_mode": cfg.AUTOPILOT_MODE},
-        mode="PAPER",
+        mode="SIM" if cfg.SIM_MODE else "PAPER",
         opened_at=now_iso,
         entry_price=fill_price,
     )
     trade.position_id = trade.id
     await save_trade(trade)
+    await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
     return trade
 
 

@@ -32,6 +32,15 @@ class Config:
     # ── Bot behaviour ────────────────────────────────────────────────────────
     BOT_INTERVAL_SECONDS: int = int(os.getenv("BOT_INTERVAL_SECONDS", "900"))  # 15 min default; fits ~1000-stock scans
 
+    # Recovery stop: when AUTOPILOT_MODE=OFF, operator rules still evaluate, but
+    # routing a REAL (non-paper, non-sim) ENTRY requires explicit opt-in. Default
+    # False keeps AUTOPILOT_MODE=OFF a true "no live entries" stop. Exits always
+    # flow so positions remain closable. (Kill switch + daily-loss lock always
+    # apply regardless — see safety_kernel.)
+    ALLOW_LIVE_RULES_WHEN_AUTOPILOT_OFF: bool = os.getenv(
+        "ALLOW_LIVE_RULES_WHEN_AUTOPILOT_OFF", "false"
+    ).lower() == "true"
+
     # ── Trading risk limits ───────────────────────────────────────────────────
     SHORT_ALLOWED: bool = os.getenv("SHORT_ALLOWED", "false").lower() == "true"
     RISK_PER_TRADE_PCT: float = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
@@ -70,6 +79,19 @@ class Config:
     # ── Direct AI candidate queue ───────────────────────────────────────────
     # TTL for persisted AI direct candidates before they are treated as stale.
     AI_DIRECT_CANDIDATE_TTL_SECONDS: int = int(os.getenv("AI_DIRECT_CANDIDATE_TTL_SECONDS", "900"))
+
+    # Hands-free rule bootstrap. Default-on for SIM/PAPER, explicit opt-in for
+    # real-money LIVE.
+    _fully_auto_default = "true" if _apm == "PAPER" or os.getenv("SIM_MODE", "false").lower() == "true" else "false"
+    FULLY_AUTO_RULES_ENABLED: bool = os.getenv("FULLY_AUTO_RULES_ENABLED", _fully_auto_default).lower() == "true"
+    FULLY_AUTO_RULE_UNIVERSE: str = os.getenv("FULLY_AUTO_RULE_UNIVERSE", "etfs")
+    FULLY_AUTO_RULE_QUANTITY: int = int(os.getenv("FULLY_AUTO_RULE_QUANTITY", "1"))
+    # Quiet period between fully-auto rule bootstraps. Without it, a
+    # disabled-all-rules state re-fires (and re-activates auto rules) every bot
+    # cycle, so disabling rules never durably halts hands-free trading. Default 1h.
+    FULLY_AUTO_RULE_BOOTSTRAP_COOLDOWN_SECONDS: int = int(
+        os.getenv("FULLY_AUTO_RULE_BOOTSTRAP_COOLDOWN_SECONDS", "3600")
+    )
 
     # ── Bull/Bear debate telemetry ──────────────────────────────────────────
     # Number of JSON parse failures within a 24h window before emitting a

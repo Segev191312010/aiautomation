@@ -38,6 +38,39 @@ async def test_rule_lab_create_is_gated_to_paper(anyio_backend):
 
 
 @pytest.mark.anyio
+async def test_rule_lab_create_can_be_active_when_execution_is_allowed(anyio_backend):
+    await init_db()
+
+    results = await apply_rule_actions([
+        {
+            "action": "create",
+            "rule_payload": {
+                "name": "AI Executable Momentum",
+                "symbol": "MSFT",
+                "conditions": [
+                    {"indicator": "rsi", "params": {"period": 14}, "operator": ">", "value": 55}
+                ],
+                "logic": "AND",
+                "action_type": "BUY",
+                "cooldown_minutes": 60,
+                "status": "paper",
+            },
+            "reason": "Safe paper automation is enabled",
+            "confidence": 0.78,
+        }
+    ], author="ai", allow_active=True)
+
+    assert results[0]["ok"] is True
+    rules = await get_rules()
+    created = next(rule for rule in rules if rule.name == "AI Executable Momentum")
+    assert created.status == "active"
+    assert created.enabled is True
+    assert created.conditions[0].indicator == "RSI"
+    assert created.conditions[0].params["length"] == 14
+    assert "period" not in created.conditions[0].params
+
+
+@pytest.mark.anyio
 async def test_rule_lab_pause_updates_existing_rule_and_versions(anyio_backend):
     await init_db()
     rule = Rule(

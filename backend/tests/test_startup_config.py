@@ -94,6 +94,11 @@ def test_matrix_paper_requires_strong_jwt():
     assert any("JWT_SECRET" in e for e in errors)
 
 
+def test_matrix_paper_rejects_live_broker_without_sim():
+    errors = _matrix(mode="PAPER", is_paper=False, sim_mode=False)
+    assert any("live-money broker" in e for e in errors)
+
+
 def test_matrix_live_rejects_is_paper_broker():
     errors = _matrix(mode="LIVE", is_paper=True, sim_mode=False)
     assert any("IS_PAPER=true" in e for e in errors)

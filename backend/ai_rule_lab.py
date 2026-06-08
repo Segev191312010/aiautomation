@@ -23,6 +23,18 @@ def _as_action(value: AIRuleAction | dict) -> AIRuleAction:
     return value if isinstance(value, AIRuleAction) else AIRuleAction(**value)
 
 
+def _normalize_condition_payloads(payload: dict) -> None:
+    """Normalize common AI/template aliases to the Rule engine's parameter names."""
+    for cond in payload.get("conditions", []) or []:
+        params = cond.setdefault("params", {})
+        if "period" in params and "length" not in params:
+            params["length"] = params.pop("period")
+        if "k_period" in params and "k" not in params:
+            params["k"] = params.pop("k_period")
+        if "d_period" in params and "d" not in params:
+            params["d"] = params.pop("d_period")
+
+
 async def apply_rule_actions(
     actions: Iterable[AIRuleAction | dict],
     *,
@@ -104,9 +116,13 @@ async def _apply_rule_action(
         for cond in payload.get("conditions", []):
             ind = cond.get("indicator", "")
             cond["indicator"] = indicator_map.get(ind.lower(), ind.upper())
+        _normalize_condition_payloads(payload)
         # Default symbol if missing
         if not payload.get("symbol") and not payload.get("universe"):
             payload["symbol"] = "SPY"  # safe default
+        if allow_active:
+            payload["status"] = "active"
+            payload["enabled"] = True
         create_payload = RuleCreate(**payload)
         rule = Rule(**create_payload.model_dump())
         rule.ai_generated = True
@@ -170,8 +186,12 @@ async def _apply_rule_action(
                 s for s in (str(u).strip().upper() for u in patch["universe"])
                 if _SYMBOL_RE.match(s)
             ]
+        if "conditions" in patch:
+            _normalize_condition_payloads(patch)
         if not allow_active and patch.get("status") == "active":
             patch["status"] = "paper"
+        if allow_active and patch.get("status") == "active":
+            patch["enabled"] = True
         updated = updated.model_copy(update=patch)
         if updated.status != "active":
             updated.enabled = False

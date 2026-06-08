@@ -132,19 +132,22 @@ async def test_dedup_allows_after_window(anyio_backend):
 @pytest.mark.anyio
 async def test_check_all_passes_clean(anyio_backend):
     _recent_checks.clear()
-    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
+    with patch("safety_kernel.assert_emergency_stop_not_active", new_callable=AsyncMock) as mock_kill, patch(
         "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
-    ) as mock_daily:
+    ) as mock_daily, patch(
+        "safety_kernel.assert_autopilot_authority", new_callable=AsyncMock
+    ) as mock_auth:
         await check_all("AAPL", "BUY", 1, "rule", account_equity=10000, price_estimate=100, stop_price=98.0)
     mock_kill.assert_awaited_once()
     mock_daily.assert_awaited_once_with(is_exit=False)
+    mock_auth.assert_awaited_once()
 
 
 @pytest.mark.anyio
 async def test_check_all_rejects_killed(anyio_backend):
     _recent_checks.clear()
     with patch(
-        "safety_kernel.assert_not_killed",
+        "safety_kernel.assert_emergency_stop_not_active",
         new_callable=AsyncMock,
         side_effect=SafetyViolation("Kill switch"),
     ):
@@ -155,9 +158,11 @@ async def test_check_all_rejects_killed(anyio_backend):
 @pytest.mark.anyio
 async def test_check_all_exit_skips_authority_risk_and_dedup(anyio_backend):
     _recent_checks.clear()
-    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
+    with patch("safety_kernel.assert_emergency_stop_not_active", new_callable=AsyncMock) as mock_kill, patch(
         "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
-    ) as mock_daily, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
+    ) as mock_daily, patch(
+        "safety_kernel.assert_autopilot_authority", new_callable=AsyncMock
+    ) as mock_auth, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
         "safety_kernel.assert_not_duplicate", new_callable=AsyncMock
     ) as mock_dup:
         await check_all(
@@ -172,16 +177,23 @@ async def test_check_all_exit_skips_authority_risk_and_dedup(anyio_backend):
         )
     mock_kill.assert_not_awaited()
     mock_daily.assert_not_awaited()
+    mock_auth.assert_not_awaited()
     mock_risk.assert_not_called()
     mock_dup.assert_not_called()
 
 
 @pytest.mark.anyio
 async def test_check_all_manual_bypasses_authority_but_keeps_common_entry_guards(anyio_backend):
+    """Operator/manual entries skip ONLY the AI-authority gate. The kill switch,
+    daily-loss lock, risk budget, and dedup are the operator's hard stops and
+    MUST still run even when require_autopilot_authority=False (C-fix regression:
+    that flag previously also disarmed the kill switch + daily-loss lock)."""
     _recent_checks.clear()
-    with patch("safety_kernel.assert_not_killed", new_callable=AsyncMock) as mock_kill, patch(
+    with patch("safety_kernel.assert_emergency_stop_not_active", new_callable=AsyncMock) as mock_kill, patch(
         "safety_kernel.assert_daily_loss_not_locked", new_callable=AsyncMock
-    ) as mock_daily, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
+    ) as mock_daily, patch(
+        "safety_kernel.assert_autopilot_authority", new_callable=AsyncMock
+    ) as mock_auth, patch("safety_kernel.assert_risk_budget", new=Mock()) as mock_risk, patch(
         "safety_kernel.assert_not_duplicate", new_callable=AsyncMock
     ) as mock_dup:
         await check_all(
@@ -193,7 +205,60 @@ async def test_check_all_manual_bypasses_authority_but_keeps_common_entry_guards
             price_estimate=100,
             require_autopilot_authority=False,
         )
-    mock_kill.assert_not_awaited()
-    mock_daily.assert_not_awaited()
+    mock_kill.assert_awaited_once()  # kill switch STILL enforced
+    mock_daily.assert_awaited_once_with(is_exit=False)  # daily-loss lock STILL enforced
+    mock_auth.assert_not_awaited()  # ONLY the AI-authority gate is skipped
     mock_risk.assert_called_once()
     mock_dup.assert_called_once_with("AAPL", "BUY", "manual")
+
+
+@pytest.mark.anyio
+async def test_operator_entry_still_blocked_by_kill_switch(anyio_backend):
+    """C-fix regression: an operator rule entry (require_autopilot_authority=False)
+    must still be blocked by the emergency kill switch, end to end."""
+    _recent_checks.clear()
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_load.return_value = type(
+            "C", (), {"emergency_stop": True, "autopilot_mode": "OFF", "daily_loss_locked": False}
+        )()
+        with pytest.raises(SafetyViolation, match="Kill switch"):
+            await check_all(
+                "AAPL", "BUY", 1, "rule",
+                account_equity=10000, price_estimate=100, stop_price=98.0,
+                require_autopilot_authority=False,
+            )
+
+
+@pytest.mark.anyio
+async def test_operator_entry_still_blocked_by_daily_loss(anyio_backend):
+    """C-fix regression: an operator rule entry must still be blocked by the
+    daily-loss lock, end to end."""
+    _recent_checks.clear()
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_load.return_value = type(
+            "C", (), {"emergency_stop": False, "autopilot_mode": "OFF", "daily_loss_locked": True}
+        )()
+        with pytest.raises(SafetyViolation, match="Daily loss lock"):
+            await check_all(
+                "AAPL", "BUY", 1, "rule",
+                account_equity=10000, price_estimate=100, stop_price=98.0,
+                require_autopilot_authority=False,
+            )
+
+
+@pytest.mark.anyio
+async def test_operator_entry_not_blocked_by_autopilot_off(anyio_backend):
+    """An operator rule entry (require_autopilot_authority=False) is NOT blocked
+    by AUTOPILOT_MODE=OFF — that gate governs AI authority only. The other brakes
+    still pass for a clean small entry."""
+    _recent_checks.clear()
+    with patch("ai_guardrails._load_guardrails_from_db", new_callable=AsyncMock) as mock_load:
+        mock_load.return_value = type(
+            "C", (), {"emergency_stop": False, "autopilot_mode": "OFF", "daily_loss_locked": False}
+        )()
+        # Must NOT raise.
+        await check_all(
+            "AAPL", "BUY", 1, "rule",
+            account_equity=10000, price_estimate=100, stop_price=98.0,
+            require_autopilot_authority=False,
+        )

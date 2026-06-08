@@ -414,8 +414,11 @@ async def promote_autopilot_rule(rule_id: str, payload: PromoteRuleRequest):
 
 @router.post("/rule-lab/apply")
 async def apply_rule_lab_actions(payload: RuleLabApplyRequest):
-    # Server-side gate: allow_active only when autopilot is actually LIVE
-    effective_allow_active = payload.allow_active and cfg.AUTOPILOT_MODE == "LIVE"
+    from auto_rule_manager import automation_rule_activation_allowed
+
+    # Server-side gate: active rules are allowed in PAPER only when orders route
+    # to paper/sim, and in LIVE only when the broker is truly live.
+    effective_allow_active = payload.allow_active and automation_rule_activation_allowed()
     return {
         "results": await apply_rule_actions(
             payload.actions,

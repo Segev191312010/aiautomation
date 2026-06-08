@@ -341,11 +341,11 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
         ra_item_ids = [_next_item_id() for _ in rule_actions]
         try:
             from ai_rule_lab import apply_rule_actions
-            from safety_kernel import is_autopilot_live
+            from auto_rule_manager import automation_rule_activation_allowed
 
             # S10-BE-07: pass run_id and item_ids for origin tracking
             lab_results = await apply_rule_actions(
-                rule_actions, author="ai", allow_active=is_autopilot_live(),
+                rule_actions, author="ai", allow_active=automation_rule_activation_allowed(),
                 decision_run_id=run_id, decision_item_ids=ra_item_ids,
             )
             for idx, lr in enumerate(lab_results):

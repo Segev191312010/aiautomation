@@ -189,9 +189,18 @@ async def check_all(
     if not _SYMBOL_RE.match(symbol):
         raise SafetyViolation(f"Invalid symbol format: {symbol!r}")
 
-    if require_autopilot_authority and not is_exit:
-        await assert_not_killed()
+    if not is_exit:
+        # Operator emergency brakes — ALWAYS enforced for new entries, for both
+        # operator-authored rules and AI actions. The kill switch and daily-loss
+        # lock are the operator's hard stops; they must never be bypassed by the
+        # require_autopilot_authority flag, which governs AI authority only.
+        await assert_emergency_stop_not_active()
         await assert_daily_loss_not_locked(is_exit=False)
+        # AI-authority gate — only AI-authored actions require AUTOPILOT_MODE to
+        # be non-OFF. Operator rules pass require_autopilot_authority=False and
+        # execute under bot start/stop plus each rule's enabled flag.
+        if require_autopilot_authority:
+            await assert_autopilot_authority()
     assert_no_shorts(side, is_exit=is_exit, has_existing_position=has_existing_position)
     if not is_exit:
         assert_risk_budget(quantity, price_estimate, account_equity, stop_price=stop_price)
@@ -207,21 +216,58 @@ async def check_all(
     )
 
 
-async def assert_not_killed() -> None:
-    """Reject if the Autopilot kill switch is active."""
+async def assert_emergency_stop_not_active() -> None:
+    """Reject any new entry while the operator emergency kill switch is active.
+
+    Applies to ALL non-exit entries — operator-authored rules and AI actions
+    alike — independent of AI authority / AUTOPILOT_MODE. Fails closed when the
+    guardrails store cannot be read.
+    """
+    try:
+        from ai_guardrails import _load_guardrails_from_db
+
+        config = await _load_guardrails_from_db()
+        if config.emergency_stop:
+            raise SafetyViolation("Kill switch active - all new entries blocked")
+    except SafetyViolation:
+        raise
+    except Exception as exc:
+        log.error("Kill switch check FAILED (DB unavailable) - blocking for safety: %s", exc)
+        raise SafetyViolation("Kill switch check unavailable - blocking for safety")
+
+
+async def assert_autopilot_authority() -> None:
+    """Reject AI-authored entries when autopilot has no execution authority (OFF).
+
+    Governs AI authority only. Operator-authored rule entries deliberately skip
+    this check by passing ``require_autopilot_authority=False`` — they are still
+    subject to the emergency kill switch and daily-loss lock. Fails closed when
+    the guardrails store cannot be read.
+    """
     try:
         from ai_guardrails import _load_guardrails_from_db
 
         config = await _load_guardrails_from_db()
         if config.autopilot_mode == "OFF":
             raise SafetyViolation("Autopilot is OFF")
-        if config.emergency_stop:
-            raise SafetyViolation("Kill switch active - all new AI entries blocked")
     except SafetyViolation:
         raise
     except Exception as exc:
-        log.error("Kill switch check FAILED (DB unavailable) - blocking for safety: %s", exc)
-        raise SafetyViolation("Kill switch check unavailable - blocking for safety")
+        log.error("Autopilot authority check FAILED (DB unavailable) - blocking for safety: %s", exc)
+        raise SafetyViolation("Autopilot authority check unavailable - blocking for safety")
+
+
+async def assert_not_killed() -> None:
+    """Backward-compatible combined kill-switch + AI-authority check.
+
+    Retained for callers/tests that expect the original semantics (raises on
+    ``emergency_stop`` OR autopilot ``OFF``). New code should call
+    :func:`assert_emergency_stop_not_active` and :func:`assert_autopilot_authority`
+    separately so operator entries keep the kill switch without the AI-authority
+    gate.
+    """
+    await assert_emergency_stop_not_active()
+    await assert_autopilot_authority()
 
 
 async def assert_daily_loss_not_locked(*, is_exit: bool = False) -> None:

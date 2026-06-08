@@ -64,6 +64,13 @@ def validate_autopilot_matrix(
             "Set JWT_SECRET in .env to a strong random string before enabling AI authority."
         )
 
+    if mode == "PAPER" and not is_paper and not sim_mode:
+        errors.append(
+            "AUTOPILOT_MODE=PAPER with IS_PAPER=false and SIM_MODE=false would give "
+            "AI paper authority on a live-money broker. Use AUTOPILOT_MODE=LIVE for "
+            "real-money AI, or set IS_PAPER=true / SIM_MODE=true for paper testing."
+        )
+
     if mode == "LIVE":
         # Real-money AI is only safe when:
         #   - broker is live (IS_PAPER=false) AND

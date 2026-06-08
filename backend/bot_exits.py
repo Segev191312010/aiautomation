@@ -167,6 +167,7 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
     from database import save_open_position
     from order_executor import OrderError, place_order
     from services import order_lifecycle, order_recovery
+    from config import cfg
 
     # Re-fetch position from DB to avoid stale reads (BUG-7)
     fresh_pos = await get_open_position(pos.id)
@@ -199,6 +200,83 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
         cooldown_minutes=0,
     )
     now = datetime.now(timezone.utc)
+    if cfg.SIM_MODE:
+        from models import Trade
+        from simulation import sim_engine
+
+        sim_lookup_available = True
+        sim_position = None
+        try:
+            sim_positions = await sim_engine.get_positions()
+            sim_position = next((p for p in sim_positions if p.symbol.upper() == sym.upper()), None)
+        except Exception as exc:
+            sim_lookup_available = False
+            log.debug("SIM position lookup unavailable for %s - using standard exit path: %s", sym, exc)
+
+        if sim_lookup_available and (sim_position is None or sim_position.qty < qty):
+            log.warning(
+                "SIM_MODE exit for %s has no matching sim position (needed=%s) - using standard exit path",
+                sym,
+                qty,
+            )
+
+        if sim_position is not None and sim_position.qty >= qty:
+            try:
+                exit_trade = Trade(
+                    rule_id=pos.rule_id,
+                    rule_name=f"EXIT:{pos.rule_name}",
+                    symbol=sym,
+                    action=exit_action,  # type: ignore[arg-type]
+                    asset_type="STK",
+                    quantity=qty,
+                    order_type="MKT",
+                    limit_price=None,
+                    fill_price=current_price,
+                    status="FILLED",
+                    order_id=None,
+                    timestamp=now.isoformat(),
+                    source="rule",
+                    mode="SIM",
+                )
+                ok, msg = await sim_engine.execute_order(
+                    symbol=sym,
+                    action=exit_action,
+                    qty=float(qty),
+                    price=float(current_price),
+                    order_id=exit_trade.id,
+                )
+                if not ok:
+                    order_recovery.mark_exit_retry_state(pos, msg, now=now)
+                    await save_open_position(pos)
+                    log.error("SIM exit failed for %s (attempt %d): %s", sym, pos.exit_attempts, msg)
+                    if not force_close:
+                        await _check_retry_cap(pos)
+                    return
+
+                await order_lifecycle.stamp_exit_trade_context(exit_trade, pos)
+                finalized = await order_lifecycle.finalize_filled_exit_trade(
+                    exit_trade,
+                    pos,
+                    close_reason=reason,
+                    fallback_exit_price=current_price,
+                )
+                pnl = finalized.realized_pnl if finalized else round((current_price - pos.entry_price) * pos.quantity, 2)
+                await _emit({
+                    "type": "exit", "symbol": sym, "reason": reason,
+                    "action": exit_action, "qty": qty,
+                    "entry_price": pos.entry_price, "exit_price": current_price, "pnl": pnl,
+                })
+                log.info("SIM EXIT %s qty=%d reason='%s' pnl=%.2f", sym, qty, reason, pnl)
+                _exited_this_cycle.add(sym.upper())
+                return
+            except Exception as exc:
+                order_recovery.mark_exit_retry_state(pos, str(exc), now=now)
+                await save_open_position(pos)
+                log.error("SIM exit order FAILED for %s (attempt %d): %s", sym, pos.exit_attempts, exc)
+                if not force_close:
+                    await _check_retry_cap(pos)
+                return
+
     try:
         exit_trade = await place_order(exit_rule, source="rule", is_exit=True, has_existing_position=True)
         if not exit_trade:
