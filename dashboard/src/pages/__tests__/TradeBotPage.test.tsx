@@ -2,7 +2,6 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 
-// ── API mock ──────────────────────────────────────────────────────────────────
 vi.mock('@/services/api', () => ({
   fetchTrades: vi.fn().mockResolvedValue([]),
   fetchSimAccount: vi.fn().mockResolvedValue(null),
@@ -11,8 +10,6 @@ vi.mock('@/services/api', () => ({
   fetchPositions: vi.fn().mockResolvedValue([]),
 }))
 
-// ── Store mock ────────────────────────────────────────────────────────────────
-// vi.mock is hoisted — all state must be defined inside the factory.
 vi.mock('@/store', () => {
   const accountState = {
     account: {
@@ -39,7 +36,6 @@ vi.mock('@/store', () => {
     setTradebotTab: vi.fn(),
   }
 
-  // Support both: useStore(sel) and const { ... } = useStore()
   const ms =
     <T extends object>(state: T) =>
     (sel?: (s: T) => unknown) =>
@@ -55,7 +51,6 @@ vi.mock('@/store', () => {
   }
 })
 
-// ── Component mocks ───────────────────────────────────────────────────────────
 vi.mock('@/components/tradebot/BotToggle', () => ({
   default: () => <div data-testid="bot-toggle" />,
 }))
@@ -93,8 +88,8 @@ vi.mock('@/components/tradebot/PositionsContent', () => ({
     initialLoad: boolean
   }) => (
     <div data-testid="positions-content">
-      {positions.map((p) => (
-        <div key={p.symbol}>{p.symbol}</div>
+      {positions.map((position) => (
+        <div key={position.symbol}>{position.symbol}</div>
       ))}
     </div>
   ),
@@ -108,75 +103,82 @@ vi.mock('@/components/tradebot/ActivityContent', () => ({
     initialLoad: boolean
   }) => (
     <div data-testid="activity-content">
-      {trades.map((t) => (
-        <div key={t.id}>{t.symbol}</div>
+      {trades.map((trade) => (
+        <div key={trade.id}>{trade.symbol}</div>
       ))}
     </div>
   ),
 }))
 
-// Lazy-loaded pages — stub them so Suspense resolves immediately
 vi.mock('@/pages/RulesPage', () => ({ default: () => <div data-testid="rules-page" /> }))
 vi.mock('@/pages/AutopilotPage', () => ({ default: () => <div data-testid="autopilot-page" /> }))
 
 import TradeBotPage from '../TradeBotPage'
+import * as api from '@/services/api'
+
+async function renderTradeBotPage() {
+  render(<TradeBotPage />)
+  await waitFor(() => {
+    expect(api.fetchTrades).toHaveBeenCalledTimes(1)
+    expect(api.fetchAccountSummary).toHaveBeenCalledTimes(1)
+    expect(api.fetchPositions).toHaveBeenCalledTimes(1)
+  })
+}
 
 describe('TradeBotPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
-  it('renders without crashing and shows the TradeBot heading', () => {
-    render(<TradeBotPage />)
+  it('renders without crashing and shows the TradeBot heading', async () => {
+    await renderTradeBotPage()
     expect(screen.getByText('TradeBot')).toBeInTheDocument()
   })
 
-  it('shows bot status chips', () => {
-    render(<TradeBotPage />)
+  it('shows bot status chips', async () => {
+    await renderTradeBotPage()
     expect(screen.getByText('Bot active')).toBeInTheDocument()
     expect(screen.getByText('IBKR connected')).toBeInTheDocument()
     expect(screen.getByText('Live account')).toBeInTheDocument()
   })
 
   it('shows account KPI cards when account data is available', async () => {
-    render(<TradeBotPage />)
-    await waitFor(() => {
-      expect(screen.getByText('Net Liquidation')).toBeInTheDocument()
-    })
+    await renderTradeBotPage()
+    expect(screen.getByText('Net Liquidation')).toBeInTheDocument()
     expect(screen.getByText('$55,000.00')).toBeInTheDocument()
   })
 
-  it('shows position count chip', () => {
-    render(<TradeBotPage />)
+  it('shows position count chip', async () => {
+    await renderTradeBotPage()
     expect(screen.getByText('1 open position')).toBeInTheDocument()
   })
 
-  it('shows recent trades count chip', () => {
-    render(<TradeBotPage />)
+  it('shows recent trades count chip', async () => {
+    await renderTradeBotPage()
     expect(screen.getByText('1 recent trade')).toBeInTheDocument()
   })
 
-  it('renders the positions tab content by default', () => {
-    render(<TradeBotPage />)
+  it('renders the positions tab content by default', async () => {
+    await renderTradeBotPage()
     expect(screen.getByTestId('positions-content')).toBeInTheDocument()
     expect(screen.getByText('NVDA')).toBeInTheDocument()
   })
 
-  it('renders the BotToggle component', () => {
-    render(<TradeBotPage />)
+  it('renders the BotToggle component', async () => {
+    await renderTradeBotPage()
     expect(screen.getByTestId('bot-toggle')).toBeInTheDocument()
   })
 
-  it('renders tab navigation with both tabs', () => {
-    render(<TradeBotPage />)
+  it('renders tab navigation with both tabs', async () => {
+    await renderTradeBotPage()
     const tabs = screen.getByTestId('tradebot-tabs')
     expect(tabs).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Positions' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Activity' })).toBeInTheDocument()
   })
 
-  it('shows refreshes-every chip', () => {
-    render(<TradeBotPage />)
+  it('shows refreshes-every chip', async () => {
+    await renderTradeBotPage()
     expect(screen.getByText('Refreshes every 10s')).toBeInTheDocument()
   })
 })

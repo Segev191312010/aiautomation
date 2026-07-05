@@ -24,8 +24,10 @@ backend/_rm_append.py
 *.env.local
 backend/.env
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 .claude/worktrees/
 .qwen/
+aiautomation/
 
 # Runtime artifacts (codex review .md files in logs/ are kept)
 *.pid

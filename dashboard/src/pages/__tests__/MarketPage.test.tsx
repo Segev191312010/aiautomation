@@ -2,15 +2,12 @@ import React from 'react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 
-// ── API mock ──────────────────────────────────────────────────────────────────
 vi.mock('@/services/api', () => ({
   fetchYahooBars: vi.fn().mockResolvedValue([]),
   fetchIBKRBars: vi.fn().mockResolvedValue([]),
   fetchSettings: vi.fn().mockResolvedValue({}),
 }))
 
-// ── Store mock ────────────────────────────────────────────────────────────────
-// vi.mock is hoisted — all state must be defined inside the factory.
 vi.mock('@/store', () => {
   const marketState = {
     selectedSymbol: 'AAPL',
@@ -39,7 +36,6 @@ vi.mock('@/store', () => {
     selectedIndicators: [],
   }
 
-  // Support both: useStore(sel) and const { ... } = useStore()
   const ms = (sel?: (s: typeof marketState) => unknown) => (sel ? sel(marketState) : marketState)
 
   return {
@@ -59,14 +55,10 @@ vi.mock('@/store', () => {
   }
 })
 
-// ── Hooks mock ────────────────────────────────────────────────────────────────
 vi.mock('@/hooks/useCrosshairSync', () => ({ useCrosshairSync: vi.fn() }))
 
-// ── Component mocks ───────────────────────────────────────────────────────────
 vi.mock('@/components/chart/TradingChart', () => ({
-  default: ({ symbol }: { symbol: string }) => (
-    <div data-testid="trading-chart">{symbol}</div>
-  ),
+  default: ({ symbol }: { symbol: string }) => <div data-testid="trading-chart">{symbol}</div>,
 }))
 
 vi.mock('@/components/chart/VolumePanel', () => ({
@@ -128,6 +120,14 @@ class ResizeObserverMock {
   unobserve() {}
 }
 
+async function renderMarketPage() {
+  render(<MarketPage />)
+  await waitFor(() => {
+    expect(api.fetchYahooBars).toHaveBeenCalledTimes(1)
+    expect(api.fetchSettings).toHaveBeenCalledTimes(1)
+  })
+}
+
 describe('MarketPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -143,80 +143,75 @@ describe('MarketPage', () => {
     delete (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
   })
 
-  it('renders without crashing and shows the Live market workspace label', () => {
-    render(<MarketPage />)
+  it('renders without crashing and shows the Live market workspace label', async () => {
+    await renderMarketPage()
     expect(screen.getByText('Live market workspace')).toBeInTheDocument()
   })
 
-  it('shows the selected symbol in the hero header', () => {
-    render(<MarketPage />)
-    // Symbol appears multiple times in the page (hero + chart header + fundamentals)
+  it('shows the selected symbol in the hero header', async () => {
+    await renderMarketPage()
     const symbols = screen.getAllByText('AAPL')
     expect(symbols.length).toBeGreaterThan(0)
   })
 
-  it('renders the trading chart', () => {
-    render(<MarketPage />)
+  it('renders the trading chart', async () => {
+    await renderMarketPage()
     expect(screen.getByTestId('trading-chart')).toBeInTheDocument()
   })
 
-  it('renders the chart toolbar', () => {
-    render(<MarketPage />)
+  it('renders the chart toolbar', async () => {
+    await renderMarketPage()
     expect(screen.getByTestId('chart-toolbar')).toBeInTheDocument()
   })
 
-  it('renders the drawing tools rail', () => {
-    render(<MarketPage />)
+  it('renders the drawing tools rail', async () => {
+    await renderMarketPage()
     expect(screen.getByTestId('drawing-tools')).toBeInTheDocument()
   })
 
-  it('renders volume and indicator panels', () => {
-    render(<MarketPage />)
+  it('renders volume and indicator panels', async () => {
+    await renderMarketPage()
     expect(screen.getByTestId('volume-panel')).toBeInTheDocument()
     expect(screen.getByTestId('indicator-panel')).toBeInTheDocument()
   })
 
-  it('renders the ticker card for the active symbol quote', () => {
-    render(<MarketPage />)
+  it('renders the ticker card for the active symbol quote', async () => {
+    await renderMarketPage()
     expect(screen.getByTestId('ticker-card')).toBeInTheDocument()
   })
 
-  it('shows market cap in the right-column stats', () => {
-    render(<MarketPage />)
-    // $3.20T for 3_200_000_000_000 — appears in both signal cards and sidebar
+  it('shows market cap in the right-column stats', async () => {
+    await renderMarketPage()
     expect(screen.getAllByText('$3.20T').length).toBeGreaterThan(0)
   })
 
-  it('shows the 52W range signal card', () => {
-    render(<MarketPage />)
+  it('shows the 52W range signal card', async () => {
+    await renderMarketPage()
     expect(screen.getByText('$164 - $237')).toBeInTheDocument()
   })
 
-  it('shows "Add compare" button when not in compare mode', () => {
-    render(<MarketPage />)
+  it('shows "Add compare" button when not in compare mode', async () => {
+    await renderMarketPage()
     expect(screen.getByRole('button', { name: /add compare/i })).toBeInTheDocument()
   })
 
-  it('shows the symbol search input', () => {
-    render(<MarketPage />)
+  it('shows the symbol search input', async () => {
+    await renderMarketPage()
     expect(screen.getByPlaceholderText('Enter symbol...')).toBeInTheDocument()
   })
 
   it('calls fetchSettings on mount to load drawings', async () => {
-    render(<MarketPage />)
-    await waitFor(() => {
-      expect(api.fetchSettings).toHaveBeenCalled()
-    })
+    await renderMarketPage()
+    expect(api.fetchSettings).toHaveBeenCalledTimes(1)
   })
 
-  it('shows the Chart command rail heading', () => {
-    render(<MarketPage />)
+  it('shows the Chart command rail heading', async () => {
+    await renderMarketPage()
     expect(screen.getByText('Chart command rail')).toBeInTheDocument()
   })
 
-  it('shows Yahoo history label when IBKR is not connected', () => {
-    render(<MarketPage />)
-    // historyFeedLabel = 'Yahoo history' when ibkrConnected === false
+  it('shows Yahoo history label when IBKR is not connected', async () => {
+    await renderMarketPage()
     expect(screen.getAllByText('Yahoo history').length).toBeGreaterThan(0)
   })
 })
