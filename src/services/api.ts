@@ -17,6 +17,13 @@ import type {
   SimPosition,
   SystemStatus,
   Trade,
+  AutopilotStatus,
+  AutopilotConfig,
+  AutopilotMode,
+  AutopilotRule,
+  AutopilotPerformance,
+  AuditFeed,
+  PromotionReadiness,
 } from '@/types'
 
 // Not exported from types/index.ts yet — define locally
@@ -32,17 +39,63 @@ interface RuleCreate_ {
 
 const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
+// ── Auth token (loopback bootstrap) ───────────────────────────────────────────
+// Protected endpoints (/api/autopilot/*, /api/rules, …) require a Bearer token.
+// Requests block on a one-time bootstrap gate so the first protected calls on
+// startup don't 401-cascade before App's auth bootstrap completes.
+const AUTH_TOKEN_KEY = 'aiauto_auth_token'
+let _resolveToken: ((t: string) => void) | null = null
+let _tokenReady = false
+const _tokenPromise: Promise<string> = new Promise((resolve) => {
+  const existing = localStorage.getItem(AUTH_TOKEN_KEY)
+  if (existing) { _tokenReady = true; resolve(existing) }
+  else { _resolveToken = (t) => { _tokenReady = true; resolve(t) } }
+})
+
+export function setAuthToken(token: string | null): void {
+  if (token) {
+    localStorage.setItem(AUTH_TOKEN_KEY, token)
+    _tokenReady = true
+    _resolveToken?.(token)
+  } else {
+    localStorage.removeItem(AUTH_TOKEN_KEY)
+  }
+}
+export function getAuthToken(): string | null {
+  return localStorage.getItem(AUTH_TOKEN_KEY)
+}
+
+async function _waitForToken(): Promise<string | null> {
+  const existing = localStorage.getItem(AUTH_TOKEN_KEY)
+  if (existing) return existing
+  if (_tokenReady) return null  // post-bootstrap with empty storage = logged out
+  return Promise.race([
+    _tokenPromise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+  ])
+}
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {}
+  if (body) headers['Content-Type'] = 'application/json'
+  const token = path === '/api/auth/token' ? null : await _waitForToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
   const resp = await fetch(`${BASE}${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!resp.ok) {
+    if (resp.status === 401) {
+      localStorage.removeItem(AUTH_TOKEN_KEY)
+      window.dispatchEvent(new Event('api:unauthorized'))
+    }
     const text = await resp.text().catch(() => resp.statusText)
     throw new Error(`${method} ${path} → ${resp.status}: ${text}`)
   }
-  return resp.json() as Promise<T>
+  const text = await resp.text()
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
 const get  = <T>(p: string)            => req<T>('GET',    p)
@@ -128,3 +181,26 @@ export const toggleRule    = (id: string) => post<{ id: string; enabled: boolean
 
 export const startBot = () => post<{ running: boolean }>('/api/bot/start')
 export const stopBot  = () => post<{ running: boolean }>('/api/bot/stop')
+
+// ── Autopilot / AI automation ──────────────────────────────────────────────────
+
+export const fetchAutopilotStatus      = () => get<AutopilotStatus>('/api/autopilot/status')
+export const fetchAutopilotConfig      = () => get<AutopilotConfig>('/api/autopilot/config')
+export const fetchAutopilotRules       = () => get<AutopilotRule[]>('/api/autopilot/rules')
+export const fetchAutopilotPerformance = () => get<AutopilotPerformance>('/api/autopilot/performance')
+export const fetchAutopilotFeed        = (limit = 25) =>
+  get<AuditFeed>(`/api/autopilot/feed?limit=${limit}`)
+export const fetchPromotionReadiness   = (id: string) =>
+  get<PromotionReadiness>(`/api/autopilot/rules/${id}/promotion-readiness`)
+
+export const setAutopilotMode = (mode: AutopilotMode, reason?: string) =>
+  post<AutopilotConfig>('/api/autopilot/mode', { mode, reason })
+export const activateKillSwitch = () =>
+  post<{ emergency_stop: boolean; message: string }>('/api/autopilot/kill')
+export const resetKillSwitch    = () =>
+  post<{ emergency_stop: boolean; message: string }>('/api/autopilot/kill/reset')
+export const resetDailyLossLock = () => post<AutopilotConfig>('/api/autopilot/daily-loss/reset')
+
+export const promoteRule = (id: string, reason: string)  => post<AutopilotRule>(`/api/autopilot/rules/${id}/promote`, { reason })
+export const pauseRule   = (id: string, reason?: string) => post<AutopilotRule>(`/api/autopilot/rules/${id}/manual-pause`, { reason })
+export const retireRule  = (id: string, reason?: string) => post<AutopilotRule>(`/api/autopilot/rules/${id}/manual-retire`, { reason })

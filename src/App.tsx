@@ -4,26 +4,13 @@ import Dashboard from '@/pages/Dashboard'
 import TradeBotPage from '@/pages/TradeBotPage'
 import MarketPage from '@/pages/MarketPage'
 import SimulationPage from '@/pages/SimulationPage'
+import AutopilotPage from '@/pages/AutopilotPage'
+import AiSystemPage from '@/pages/AiSystemPage'
+import RulesPage from '@/pages/RulesPage'
+import SettingsPage from '@/pages/SettingsPage'
 import { useUIStore, useBotStore } from '@/store'
-import { fetchStatus } from '@/services/api'
-
-// ── Lazy pages (rules, settings) ─────────────────────────────────────────────
-
-function RulesPage() {
-  return (
-    <div className="flex items-center justify-center h-64 text-terminal-ghost font-mono text-sm">
-      Rules engine — coming soon
-    </div>
-  )
-}
-
-function SettingsPage() {
-  return (
-    <div className="flex items-center justify-center h-64 text-terminal-ghost font-mono text-sm">
-      Settings — coming soon
-    </div>
-  )
-}
+import { fetchStatus, getAuthToken, setAuthToken } from '@/services/api'
+import { fetchAuthToken } from '@/services/auth'
 
 // ── Route → component map ─────────────────────────────────────────────────────
 
@@ -35,6 +22,8 @@ function PageSwitch() {
     case 'tradebot':   return <TradeBotPage />
     case 'market':     return <MarketPage />
     case 'simulation': return <SimulationPage />
+    case 'autopilot':  return <AutopilotPage />
+    case 'aisystem':   return <AiSystemPage />
     case 'rules':      return <RulesPage />
     case 'settings':   return <SettingsPage />
     default:           return <Dashboard />
@@ -45,6 +34,21 @@ function PageSwitch() {
 
 export default function App() {
   const setStatus = useBotStore((s) => s.setStatus)
+
+  // Bootstrap an auth token once on mount so protected endpoints (autopilot,
+  // rules) don't 401. Public endpoints (status) work regardless of this.
+  useEffect(() => {
+    let cancelled = false
+    const boot = async () => {
+      if (getAuthToken()) return
+      try {
+        const { access_token } = await fetchAuthToken()
+        if (!cancelled) setAuthToken(access_token)
+      } catch { /* no bootstrap secret / backend offline — protected views show a notice */ }
+    }
+    boot()
+    return () => { cancelled = true }
+  }, [])
 
   // Bootstrap system status on mount
   useEffect(() => {

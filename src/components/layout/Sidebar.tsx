@@ -49,6 +49,24 @@ const NAV_ITEMS: NavItem[] = [
     ),
   },
   {
+    route: 'autopilot',
+    label: 'Autopilot',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+        <path d="M12 2a10 10 0 100 20 10 10 0 000-20zm0 5a5 5 0 015 5 5 5 0 01-5 5 5 5 0 01-5-5 5 5 0 015-5zm0 3a2 2 0 00-2 2 2 2 0 002 2 2 2 0 002-2 2 2 0 00-2-2z" />
+      </svg>
+    ),
+  },
+  {
+    route: 'aisystem',
+    label: 'AI System',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+        <path d="M9 2v2H7a2 2 0 00-2 2v2H3v2h2v2H3v2h2v2a2 2 0 002 2h2v2h2v-2h2v2h2v-2h2a2 2 0 002-2v-2h2v-2h-2v-2h2V8h-2V6a2 2 0 00-2-2h-2V2h-2v2h-2V2H9zm-2 5h10v10H7V7zm2 2v6h6V9H9z" />
+      </svg>
+    ),
+  },
+  {
     route: 'rules',
     label: 'Rules',
     icon: (

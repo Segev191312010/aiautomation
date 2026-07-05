@@ -233,4 +233,109 @@ export interface WatchlistSort {
   dir:   SortDir
 }
 
-export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'simulation' | 'rules' | 'settings'
+export type AppRoute = 'dashboard' | 'tradebot' | 'market' | 'simulation' | 'autopilot' | 'aisystem' | 'rules' | 'settings'
+
+// ── Autopilot / AI automation ──────────────────────────────────────────────────
+
+export type AutopilotMode = 'OFF' | 'PAPER' | 'LIVE'
+
+export interface AutopilotStatus {
+  mode: AutopilotMode
+  autonomy_active: boolean
+  shadow_mode: boolean
+  emergency_stop: boolean
+  daily_loss_locked: boolean
+  daily_loss_limit_pct: number
+  broker_connected: boolean
+  open_positions_count: number
+  active_rules_count: number
+  direct_ai_open_trades_count: number
+  last_action_at: string | null
+  changes_today: number
+  next_optimization_at: string | null
+  last_optimization_at: string | null
+  daily_budget_remaining: number
+  optimizer_running: boolean
+  bot_health: string | null
+}
+
+export interface AutopilotConfig {
+  autopilot_mode: AutopilotMode
+  emergency_stop: boolean
+  daily_loss_locked: boolean
+  daily_loss_limit_pct: number
+}
+
+export type RuleStatus = 'active' | 'paused' | 'retired' | 'draft' | 'shadow'
+
+export interface AutopilotRule {
+  id: string
+  name: string
+  symbol: string
+  universe: string | null
+  enabled: boolean
+  conditions: Condition[]
+  logic: 'AND' | 'OR'
+  action: TradeAction
+  cooldown_minutes: number
+  last_triggered: string | null
+  status: RuleStatus | string
+  ai_generated: boolean
+  ai_reason: string | null
+  thesis: string | null
+  hold_style: string | null
+  version: number
+  created_by: string
+  supersedes_rule_id: string | null
+  updated_at: string | null
+}
+
+export interface SourcePerformance {
+  source: string
+  trades?: number
+  total_trades?: number
+  hit_rate: number | null
+  realized_pnl?: number
+  roi: number | null
+}
+
+export interface AutopilotPerformance {
+  window_days: number
+  total_trades: number
+  hit_rate: number | null
+  realized_pnl: number
+  unrealized_pnl: number
+  total_cost: number
+  roi: number | null
+  by_source: SourcePerformance[]
+}
+
+export interface AuditEntry {
+  id: number
+  timestamp: string
+  action_type: string
+  category: string
+  description: string
+  old_value: string | null
+  new_value: string | null
+  reason: string | null
+  confidence: number | null
+  status: string
+  reverted_at: string | null
+}
+
+export interface AuditFeed {
+  entries: AuditEntry[]
+  total: number
+  offset: number
+  limit: number
+}
+
+export interface PromotionReadiness {
+  rule_id: string
+  status: string
+  eligible: boolean
+  reasons: string[]
+  latest_validation: Record<string, unknown> | null
+  data_quality_note: string | null
+}
