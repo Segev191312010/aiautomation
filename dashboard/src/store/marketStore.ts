@@ -9,6 +9,19 @@ import type {
 } from '@/types'
 import type { IndicatorId } from '@/utils/indicators'
 
+export const MARKET_WATCHLIST_STORAGE_KEY = 'market:watchlists:v1'
+
+const DEFAULT_WATCHLISTS: Watchlist[] = [
+  { id: 'default', name: 'Watchlist', symbols: ['BTC-USD', 'ETH-USD', 'AAPL', 'TSLA', 'SPY', 'QQQ', 'NVDA'] },
+  { id: 'crypto',  name: 'Crypto',    symbols: ['BTC-USD', 'ETH-USD', 'SOL-USD'] },
+  { id: 'tech',    name: 'Tech',      symbols: ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN'] },
+]
+
+interface PersistedWatchlists {
+  watchlists: Watchlist[]
+  activeWatchlist: string
+}
+
 interface MarketState {
   quotes:           Record<string, MarketQuote>
   bars:             Record<string, OHLCVBar[]>
@@ -54,6 +67,91 @@ interface MarketState {
   setLoading:         (v: boolean) => void
 }
 
+function cloneDefaultWatchlists(): Watchlist[] {
+  return DEFAULT_WATCHLISTS.map((watchlist) => ({
+    ...watchlist,
+    symbols: [...watchlist.symbols],
+  }))
+}
+
+function defaultWatchlistState(): PersistedWatchlists {
+  return {
+    watchlists: cloneDefaultWatchlists(),
+    activeWatchlist: 'default',
+  }
+}
+
+function isWatchlist(value: unknown): value is Watchlist {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Partial<Watchlist>
+  return (
+    typeof candidate.id === 'string' &&
+    candidate.id.trim().length > 0 &&
+    typeof candidate.name === 'string' &&
+    candidate.name.trim().length > 0 &&
+    Array.isArray(candidate.symbols) &&
+    candidate.symbols.every((symbol) => typeof symbol === 'string' && symbol.trim().length > 0)
+  )
+}
+
+function normalizeWatchlists(value: unknown): Watchlist[] | null {
+  if (!Array.isArray(value)) return null
+  const watchlists = value
+    .filter(isWatchlist)
+    .map((watchlist) => ({
+      id: watchlist.id.trim(),
+      name: watchlist.name.trim(),
+      symbols: watchlist.symbols.map((symbol) => symbol.trim().toUpperCase()),
+    }))
+
+  if (!watchlists.length) return null
+
+  const seen = new Set<string>()
+  return watchlists.filter((watchlist) => {
+    if (seen.has(watchlist.id)) return false
+    seen.add(watchlist.id)
+    return true
+  })
+}
+
+function loadPersistedWatchlists(): PersistedWatchlists {
+  if (typeof localStorage === 'undefined') return defaultWatchlistState()
+
+  try {
+    const raw = localStorage.getItem(MARKET_WATCHLIST_STORAGE_KEY)
+    if (!raw) return defaultWatchlistState()
+
+    const parsed = JSON.parse(raw) as Partial<PersistedWatchlists>
+    const watchlists = normalizeWatchlists(parsed.watchlists)
+    if (!watchlists) return defaultWatchlistState()
+
+    const activeWatchlist =
+      typeof parsed.activeWatchlist === 'string' &&
+      watchlists.some((watchlist) => watchlist.id === parsed.activeWatchlist)
+        ? parsed.activeWatchlist
+        : watchlists[0].id
+
+    return { watchlists, activeWatchlist }
+  } catch {
+    return defaultWatchlistState()
+  }
+}
+
+function persistWatchlists(watchlists: Watchlist[], activeWatchlist: string) {
+  if (typeof localStorage === 'undefined') return
+
+  try {
+    localStorage.setItem(
+      MARKET_WATCHLIST_STORAGE_KEY,
+      JSON.stringify({ watchlists, activeWatchlist }),
+    )
+  } catch {
+    // Storage can fail in private browsing or quota-limited environments.
+  }
+}
+
+const persistedWatchlistState = loadPersistedWatchlists()
+
 export const useMarketStore = create<MarketState>((set, get) => ({
   quotes:          {},
   bars:            {},
@@ -61,12 +159,8 @@ export const useMarketStore = create<MarketState>((set, get) => ({
   selectedSymbol:  'AAPL',
   compSymbol:      '',
   compMode:        false,
-  watchlists: [
-    { id: 'default', name: 'Watchlist', symbols: ['BTC-USD', 'ETH-USD', 'AAPL', 'TSLA', 'SPY', 'QQQ', 'NVDA'] },
-    { id: 'crypto',  name: 'Crypto',    symbols: ['BTC-USD', 'ETH-USD', 'SOL-USD'] },
-    { id: 'tech',    name: 'Tech',      symbols: ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN'] },
-  ],
-  activeWatchlist:    'default',
+  watchlists:         persistedWatchlistState.watchlists,
+  activeWatchlist:    persistedWatchlistState.activeWatchlist,
   sortField:          'change_pct',
   sortDir:            'desc',
   loading:            false,
@@ -175,29 +269,48 @@ export const useMarketStore = create<MarketState>((set, get) => ({
   setChartType: (ct) => set({ chartType: ct }),
 
   addWatchlist: (name) =>
-    set((s) => ({
-      watchlists: [
+    set((s) => {
+      const nextWatchlists = [
         ...s.watchlists,
         { id: crypto.randomUUID(), name, symbols: [] },
-      ],
-    })),
+      ]
+      persistWatchlists(nextWatchlists, s.activeWatchlist)
+      return { watchlists: nextWatchlists }
+    }),
   removeWatchlist: (id) =>
-    set((s) => ({ watchlists: s.watchlists.filter((w) => w.id !== id) })),
+    set((s) => {
+      const nextWatchlists = s.watchlists.filter((w) => w.id !== id)
+      const nextActiveWatchlist = nextWatchlists.some((w) => w.id === s.activeWatchlist)
+        ? s.activeWatchlist
+        : nextWatchlists[0]?.id ?? 'default'
+      persistWatchlists(nextWatchlists, nextActiveWatchlist)
+      return { watchlists: nextWatchlists, activeWatchlist: nextActiveWatchlist }
+    }),
   addToWatchlist: (listId, symbol) =>
-    set((s) => ({
-      watchlists: s.watchlists.map((w) =>
-        w.id === listId && !w.symbols.includes(symbol)
-          ? { ...w, symbols: [...w.symbols, symbol] }
+    set((s) => {
+      const normalizedSymbol = symbol.trim().toUpperCase()
+      const nextWatchlists = s.watchlists.map((w) =>
+        w.id === listId && normalizedSymbol && !w.symbols.includes(normalizedSymbol)
+          ? { ...w, symbols: [...w.symbols, normalizedSymbol] }
           : w,
-      ),
-    })),
+      )
+      persistWatchlists(nextWatchlists, s.activeWatchlist)
+      return { watchlists: nextWatchlists }
+    }),
   removeFromWatchlist: (listId, symbol) =>
-    set((s) => ({
-      watchlists: s.watchlists.map((w) =>
-        w.id === listId ? { ...w, symbols: w.symbols.filter((s) => s !== symbol) } : w,
-      ),
-    })),
-  setActiveWatchlist: (id) => set({ activeWatchlist: id }),
+    set((s) => {
+      const normalizedSymbol = symbol.trim().toUpperCase()
+      const nextWatchlists = s.watchlists.map((w) =>
+        w.id === listId ? { ...w, symbols: w.symbols.filter((s) => s !== normalizedSymbol) } : w,
+      )
+      persistWatchlists(nextWatchlists, s.activeWatchlist)
+      return { watchlists: nextWatchlists }
+    }),
+  setActiveWatchlist: (id) =>
+    set((s) => {
+      persistWatchlists(s.watchlists, id)
+      return { activeWatchlist: id }
+    }),
   setSort: (field, dir) => set({ sortField: field, sortDir: dir }),
   setLoading: (v) => set({ loading: v }),
 }))

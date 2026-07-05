@@ -133,9 +133,10 @@
 
 ---
 
-## Phase 5: Testing & Validation (Priority: High)
+## Phase 5: Testing & Validation (Priority: High) - DONE 2026-07-05
 
 **Goal:** Ensure reliability across changes
+**Status:** COMPLETE - indicator and WebSocket suites were verified, AuthGuard token-revocation coverage was added, watchlists now persist across reloads, and order place/cancel API coverage was added.
 
 ### Task 10: Unit Test Coverage
 - **Action:**
@@ -145,6 +146,7 @@
      - WebSocket reconnection logic
   2. Achieve 100% coverage for `utils/indicators.ts`
 - **Agent:** test-automator (generate test matrix)
+- **Status:** DONE - `indicators.spec.ts` and `indicators.perf.test.ts` cover the exported indicator calculations; API-client tests cover token clearing on 401; `AuthGuard.test.tsx` covers the UI return-to-login path; `ws.test.ts` covers reconnect behavior.
 
 ### Task 11: Integration Tests
 - **Action:**
@@ -152,6 +154,7 @@
   2. Verify watchlist persistence across sessions
   3. Simulate WebSocket disconnections/reconnections
 - **Agent:** test-automator (execute test scenarios)
+- **Status:** DONE - quick-order tests cover confirmed placement, `trading.spec.ts` covers place/cancel API calls, `marketWatchlistPersistence.test.ts` covers reload persistence, and WebSocket disconnect/reconnect tests already cover recovery.
 
 ---
 
