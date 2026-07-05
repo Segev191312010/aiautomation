@@ -28,8 +28,9 @@ Chronological record of sessions, discoveries, and decisions.
 - Completed: Crosshair sync across panes, time-axis sync, resizable pane heights via drag handles
 - Next: Stage 3 (Stock Screener & Scanner)
 
-### 2026-07-05 - Dashboard Hardening Phase 2
+### 2026-07-05 - Dashboard Hardening Phases 2-3
 - Completed: Quick order symbol validation and typed order confirmation are now covered by focused component tests.
+- Completed: Dashboard Hardening Phase 3 polling now includes the closed-market 5-minute cadence; indicator optimization was verified as already implemented and covered.
 - Learned: The Quantity label was visible but not associated with its input; the test caught it, and the form now has proper label wiring.
 - Verified: `npm run typecheck`, `npm run build`, `npx vitest run`, and backend `python -m pytest tests/ -v` all passed.
-- Next: Continue Dashboard Hardening Phase 3 or the remaining remote-exposure hardening items.
+- Next: Continue Dashboard Hardening Phase 4 or the remaining remote-exposure hardening items.

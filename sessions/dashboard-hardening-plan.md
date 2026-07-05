@@ -63,9 +63,10 @@
 
 ---
 
-## Phase 3: Performance Optimization (Priority: Medium-High)
+## Phase 3: Performance Optimization (Priority: Medium-High) - DONE 2026-07-05
 
 **Goal:** Reduce latency and resource usage
+**Status:** COMPLETE - quote REST polling adapts to WebSocket and closed-market state, and indicator calculations have sliding-window/linear implementations with regression coverage.
 
 ### Task 6: Adaptive Polling System
 - **Action:**
@@ -75,6 +76,7 @@
      - 30s when WS connected
      - 5m during market hours off
 - **Agent:** performance-engineer (benchmark request rates)
+- **Status:** DONE - `useMarketData` polls at 5s when WS is disconnected, 30s when connected, and 5m when connected with all stock symbols known closed.
 
 ### Task 7: Indicator Algorithm Optimization
 - **Action:** Replace O(n^2) implementations with sliding windows:
@@ -93,6 +95,7 @@
   }
   ```
 - **Agent:** refactor (audit all indicator functions)
+- **Status:** DONE - `calcSMA` uses a rolling sum; Bollinger Bands avoid per-step allocations and keep numerically stable variance; regression/perf tests cover the optimized paths.
 
 ---
 
