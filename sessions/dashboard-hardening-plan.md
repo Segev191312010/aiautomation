@@ -38,9 +38,10 @@
 
 ---
 
-## Phase 2: Functional Improvements (Priority: High)
+## Phase 2: Functional Improvements (Priority: High) - DONE 2026-07-05
 
 **Goal:** Enhance reliability and user trust
+**Status:** COMPLETE - quick manual orders validate symbols, show inline errors, and require a typed confirmation modal before the order API call. Regression coverage added in `dashboard/src/components/tradebot/__tests__/QuickOrderForm.test.tsx`.
 
 ### Task 4: Symbol Validation & Error Handling
 - **Action:**
@@ -48,6 +49,7 @@
   2. Apply to all symbol inputs (QuickOrderForm, TradeBotPage)
   3. Show error state on invalid symbols
 - **Agent:** ux-reviewer (design error UI)
+- **Status:** DONE - `validateSymbol()` is wired into `QuickOrderForm`; invalid symbols disable submission and expose an alert/error state.
 
 ### Task 5: Order Confirmation Modal
 - **Action:**
@@ -57,6 +59,7 @@
      - Cancel/Confirm buttons
   2. Integrate into QuickOrderForm flow
 - **Agent:** react-typescript (implement modal logic)
+- **Status:** DONE - quick orders open `ConfirmModal`, require `CONFIRM`, and only then call `placeManualOrder()`.
 
 ---
 

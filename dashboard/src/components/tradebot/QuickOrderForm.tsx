@@ -53,7 +53,7 @@ export function QuickOrderForm() {
   const canSubmit = symValidation.ok && qty > 0
 
   return (
-    <div className="flex flex-col gap-5">
+    <form onSubmit={handleSubmit} className="flex flex-col gap-5">
       {/* Inputs row */}
       <div className="flex flex-wrap items-end gap-4">
         {/* Symbol */}
@@ -84,10 +84,11 @@ export function QuickOrderForm() {
 
         {/* Quantity */}
         <div className="flex flex-col gap-1.5">
-          <label className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
+          <label htmlFor="quick-order-quantity" className="text-[11px] font-sans font-medium text-zinc-400 tracking-widest uppercase">
             Quantity
           </label>
           <input
+            id="quick-order-quantity"
             type="number"
             min={1}
             value={qty}
@@ -142,7 +143,7 @@ export function QuickOrderForm() {
       )}
 
       {/* Submit row */}
-      <form onSubmit={handleSubmit} className="flex items-center gap-3 flex-wrap">
+      <div className="flex items-center gap-3 flex-wrap">
         <button
           type="submit"
           disabled={busy || !canSubmit}
@@ -160,7 +161,7 @@ export function QuickOrderForm() {
         {status && (
           <span className="text-[11px] font-sans text-zinc-400">{status}</span>
         )}
-      </form>
+      </div>
 
       <ConfirmModal
         open={pendingOrder !== null}
@@ -175,6 +176,6 @@ export function QuickOrderForm() {
         onConfirm={handleConfirm}
         onCancel={() => setPendingOrder(null)}
       />
-    </div>
+    </form>
   )
 }
