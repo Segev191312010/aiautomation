@@ -99,9 +99,10 @@
 
 ---
 
-## Phase 4: Backend Enhancements (Priority: Medium)
+## Phase 4: Backend Enhancements (Priority: Medium) - DONE 2026-07-05
 
 **Goal:** Strengthen server-side defenses
+**Status:** COMPLETE - CORS uses the shared frontend-origin allowlist, and WebSocket endpoints enforce the same origin checks with regression coverage.
 
 ### Task 8: CORS Configuration
 - **Action:**
@@ -117,6 +118,7 @@
      )
      ```
 - **Agent:** backend-architect (verify middleware setup)
+- **Status:** DONE - `_allowed_origins()` honors `FRONTEND_ORIGIN`; dev localhost origins are only trusted when the env var is unset.
 
 ### Task 9: WebSocket Origin Checks
 - **Action:** Add origin validation middleware:
@@ -127,6 +129,7 @@
       raise HTTPException(status_code=403, detail="Invalid origin")
   ```
 - **Agent:** security-auditor (test edge cases)
+- **Status:** DONE - `_check_ws_origin()` gates `/ws` and `/ws/market-data`; missing origins are rejected unless `WS_ALLOW_NO_ORIGIN=1`.
 
 ---
 

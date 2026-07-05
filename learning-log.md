@@ -31,6 +31,7 @@ Chronological record of sessions, discoveries, and decisions.
 ### 2026-07-05 - Dashboard Hardening Phases 2-3
 - Completed: Quick order symbol validation and typed order confirmation are now covered by focused component tests.
 - Completed: Dashboard Hardening Phase 3 polling now includes the closed-market 5-minute cadence; indicator optimization was verified as already implemented and covered.
+- Completed: Dashboard Hardening Phase 4 was verified as already implemented: CORS and WebSocket origin checks are covered by backend tests.
 - Learned: The Quantity label was visible but not associated with its input; the test caught it, and the form now has proper label wiring.
 - Verified: `npm run typecheck`, `npm run build`, `npx vitest run`, and backend `python -m pytest tests/ -v` all passed.
-- Next: Continue Dashboard Hardening Phase 4 or the remaining remote-exposure hardening items.
+- Next: Continue Dashboard Hardening Phase 5 or the remaining remote-exposure hardening items.
