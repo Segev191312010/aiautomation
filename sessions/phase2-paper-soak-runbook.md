@@ -30,8 +30,8 @@ the steps below during one US equities trading day and record the outcomes.
 3. Start the backend: `cd backend && python -m uvicorn main:app --reload`.
 4. Start the dashboard: `cd dashboard && npm run dev`.
 5. Open `/` (Dashboard) and `/autopilot` in the browser.
-6. Confirm `/api/health` returns `ok` and `ibkr_connected: true`.
-7. Confirm `/api/health/bot` returns `ai_debate_parse_failures_24h: 0`
+6. Confirm open `/api/health` returns `{"status": "ok"}`, then confirm authenticated `/api/health/deep` reports database, IBKR, bot, and memory checks.
+7. Confirm authenticated `/api/health/bot` returns `ai_debate_parse_failures_24h: 0`
    (new field from P2-3 — if it is missing, the surface wiring is broken).
 
 ---

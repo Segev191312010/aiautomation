@@ -1,6 +1,6 @@
 # Phase 5 — Adaptive Polling When WS Connected
 
-**Status:** TODO
+**Status:** DONE
 **Priority:** Performance optimization
 **Depends on:** Nothing (but has internal 5a → 5b dependency)
 

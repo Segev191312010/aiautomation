@@ -2,7 +2,7 @@
 
 ## Status
 - **Frontend**: COMPLETE (12 new files, 8 sections, mock data, all quality gates pass)
-- **Backend**: NOT STARTED — this plan covers the backend implementation
+- **Backend**: PARTIAL COMPLETE — core engine and authenticated REST routes are implemented for dashboard, breadth, guru screeners, ATR matrix, 97 Club, Stockbee scans, stages, and grades. O'Neil fundamentals and leading industries remain follow-up work.
 
 ## Research Summary
 

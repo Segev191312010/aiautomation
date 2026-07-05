@@ -1,9 +1,9 @@
 # Codebase Audit Findings — 2026-03-31 (updated 2026-04-17)
 
 Original audit: Claude Opus 4.6 + Codex (OpenAI), 2026-03-31
-Status updates through: 2026-04-13 (6 critical safety findings closed)
+Status updates through: 2026-07-05 (Phase 0 safety sweep)
 
-**Score: 34/38 FIXED. 4 OPEN (all P3 — structural/feature, not safety).**
+**Score: 36/38 FIXED. 2 OPEN (P3 structural/feature debt, not safety).**
 
 ---
 
@@ -13,25 +13,23 @@ Status updates through: 2026-04-13 (6 critical safety findings closed)
 |----------|-------|------|-------|
 | Stage 3 (Runtime) | 18 | 0 | 18 |
 | Stage 2 (AI) | 8 | 0 | 8 |
-| Stage 5 (Frontend) | 3 | 3 | 6 |
+| Stage 5 (Frontend) | 5 | 1 | 6 |
 | Stage 7 (Release) | 4 | 0 | 4 |
 | Stage 0 (Baseline) | 1 | 1 | 2 |
-| **Total** | **34** | **4** | **38** |
+| **Total** | **36** | **2** | **38** |
 
 ---
 
-## Still OPEN (4 items — all tracked in P3)
+## Still OPEN (2 items — tracked in P3)
 
 | ID | Severity | Finding | Tracked As |
 |----|----------|---------|------------|
-| F5-03 | MEDIUM | Standard rules use raw condition JSON — no visual rule builder | P3-6 |
-| F5-05 | MEDIUM | Autopilot page missing decision drilldown/replay UI | P3-5 |
 | F5-06 | LOW | Canvas charts lack accessibility (ARIA, sr-only data table) | P3-8 |
 | F0-02 | MEDIUM | 237 broad `except Exception` across 62 files (was 44 at audit time) | P3-4 |
 
 ---
 
-## All FIXED findings (34 items)
+## All FIXED findings (36 items)
 
 ### Stage 3 — Trading Runtime (18/18 FIXED)
 
@@ -70,13 +68,15 @@ Status updates through: 2026-04-13 (6 critical safety findings closed)
 | F2-07 | MEDIUM | Volatile AI candidates | SQLite-backed queue with TTL (P2-2, `8ebab67`) |
 | F2-08 | MEDIUM | Bull/Bear silent NEUTRAL | Telemetry + counter + MetricEvent (P2-3, `cd1135b`) |
 
-### Stage 5 — Frontend (3/6 FIXED, 3 OPEN above)
+### Stage 5 — Frontend (5/6 FIXED, 1 OPEN above)
 
 | ID | Severity | Finding | Fix |
 |----|----------|---------|-----|
 | F5-01 | MEDIUM | 43 `any` types | Reduced to 1 production use (P4-5) |
 | F5-02 | MEDIUM | No per-page ErrorBoundary | All 9 pages wrapped (`a549705`) |
+| F5-03 | MEDIUM | Standard rules use raw condition JSON — no visual rule builder | `ConditionBuilder` replaces the raw JSON editor in `RulesPage` |
 | F5-04 | MEDIUM | Risk events stub | Removed — zero consumers (`678737e`) |
+| F5-05 | MEDIUM | Autopilot page missing decision drilldown/replay UI | Decision drilldown + evaluation replay panels wired into `AutopilotPage` |
 
 ### Stage 7 — Release/Ops (4/4 FIXED)
 

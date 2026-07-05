@@ -1,6 +1,6 @@
 # Phase 4 — Add encodeURIComponent to Symbol Path Params
 
-**Status:** TODO
+**Status:** DONE
 **Priority:** Defense-in-depth security
 **Depends on:** Nothing
 

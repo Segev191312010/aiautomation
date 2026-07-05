@@ -1,6 +1,6 @@
 # Phase 1 — Deduplicate fmtUSD
 
-**Status:** TODO
+**Status:** DONE
 **Priority:** Quick win, low risk
 **Depends on:** Nothing
 

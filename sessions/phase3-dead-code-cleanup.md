@@ -1,6 +1,6 @@
 # Phase 3 — Remove Dead Code in useWebSocket
 
-**Status:** TODO
+**Status:** DONE
 **Priority:** Quick win, cleanup
 **Depends on:** Nothing
 

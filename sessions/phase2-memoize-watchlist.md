@@ -1,6 +1,6 @@
 # Phase 2 — Memoize WatchlistGrid Sort
 
-**Status:** TODO
+**Status:** DONE
 **Priority:** Quick win, performance
 **Depends on:** Nothing
 

@@ -568,11 +568,11 @@ The following security controls are well-implemented and should be commended:
 
 ## ADDITIONAL HIGH SEVERITY ISSUES (New Findings)
 
-### 13. HIGH: SQL Injection via Dynamic Table Names
+### 13. HIGH: SQL Injection via Dynamic Table Names — FIXED 2026-07-05
 
 **Location:** `backend/db/retention.py` lines 222, 276, 280, 339, 365, 406
 
-**Issue:** Multiple functions use f-string interpolation for table names:
+**Issue:** Multiple functions previously used f-string interpolation for table names:
 
 ```python
 # retention.py:222
@@ -583,7 +583,9 @@ async with db.execute(f"SELECT COUNT(*) FROM {table}") as cur:
 log.info("Backed up %d records from %s to %s", len(records), table, backup_path)
 ```
 
-While values use parameterized queries, table names are interpolated directly. If table names ever come from user input, SQL injection is possible.
+While values used parameterized queries, table names were interpolated directly. Table names were hardcoded in practice, but this was still a defense-in-depth gap.
+
+**Status:** FIXED. `backend/db/retention.py` now validates identifiers, rejects non-allowlisted retention tables, verifies expected timestamp columns and hardcoded extra clauses, and covers allowlist rejection, dry-run/execute behavior, and the stats contract in `backend/tests/test_retention.py`.
 
 **Risk:**
 - Data exfiltration via UNION-based injection
@@ -866,7 +868,7 @@ Canonical: https://example.com/.well-known/security.txt
 |----------|-------|--------|--------|--------|
 | **P0** | Fix WebSocket auth race condition | Low | Critical | 🔴 Open |
 | **P0** | Implement timing-safe secret comparison | Low | Critical | 🔴 Open |
-| **P0** | Fix SQL injection via table names | Medium | High | 🔴 Open |
+| **P0** | Fix SQL injection via table names | Medium | High | Fixed |
 | **P0** | Secure bootstrap token endpoint | Medium | High | 🔴 Open |
 | **P1** | Add comprehensive order validation | Medium | High | 🔴 Open |
 | **P1** | Audit error responses for data leakage | Medium | High | 🔴 Open |
@@ -887,12 +889,11 @@ Canonical: https://example.com/.well-known/security.txt
 
 The trading platform has a **solid security foundation** with enterprise-grade authentication, authorization, and configuration management. The autopilot mode guardrails and JWT implementation are particularly well-designed.
 
-However, **five critical/high issues** require immediate attention:
+However, **four critical/high issues** require immediate attention:
 1. WebSocket authentication race condition
 2. Missing timing-safe secret comparison
-3. SQL injection via dynamic table names
-4. Bootstrap token endpoint security issues
-5. AI prompt injection vulnerability
+3. Bootstrap token endpoint security issues
+4. AI prompt injection vulnerability
 
 Addressing these issues will significantly improve the platform's security posture and reduce the risk of unauthorized access, data breaches, and financial losses.
 
