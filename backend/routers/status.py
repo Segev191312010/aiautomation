@@ -1,4 +1,4 @@
-"""Status & IBKR connection routes - /api/status, /api/health, /api/data/health, /api/ibkr/*"""
+"""Status & IBKR connection routes - /api/status, /api/health/deep, /api/data/health, /api/ibkr/*"""
 from __future__ import annotations
 
 import logging
@@ -20,8 +20,8 @@ router = APIRouter(tags=["status"])
 _START_TIME = _time.time()
 
 
-@router.get("/api/health")
-async def health_check():
+@router.get("/api/health/deep")
+async def deep_health_check(_user=Depends(get_current_user)):
     """Deep health check — DB writable, IBKR status, bot alive, memory."""
     checks: dict = {}
     overall = "healthy"

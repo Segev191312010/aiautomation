@@ -5,7 +5,7 @@ Routes
 ------
 GET /api/health          -- liveness probe (always 200 if process is alive)
 GET /api/health/ready    -- readiness probe (checks DB + memory)
-GET /api/health/detailed -- extended check including subsystem states
+GET /api/health/detailed -- authenticated extended check including subsystem states
 """
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ import time
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from auth import get_current_user
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/health", tags=["health"])
@@ -140,7 +142,7 @@ async def readiness():
 
 
 @router.get("/detailed")
-async def detailed():
+async def detailed(_user=Depends(get_current_user)):
     """
     Extended health report.
 
@@ -189,7 +191,7 @@ async def detailed():
 
 
 @router.get("/bot")
-async def bot_health():
+async def bot_health(_user=Depends(get_current_user)):
     """Bot/autopilot health report for operator visibility and alerting."""
     from config import cfg
     from bot_runner import get_bot_health

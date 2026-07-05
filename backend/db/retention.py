@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -48,6 +49,60 @@ DEFAULT_RETENTION_DAYS = {
     "direct_candidates": 7,           # 7 days for stale candidates
 }
 
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ALLOWED_RETENTION_TABLES = frozenset(DEFAULT_RETENTION_DAYS)
+_RETENTION_TIMESTAMP_COLUMNS = {
+    "trades": "timestamp",
+    "backtests": "created_at",
+    "alert_history": "fired_at",
+    "ai_audit_log": "timestamp",
+    "ai_shadow_decisions": "timestamp",
+    "ai_parameter_snapshots": "timestamp",
+    "ai_rule_validation_runs": "created_at",
+    "manual_interventions": "opened_at",
+    "regime_snapshots": "timestamp",
+    "diag_indicator_values": "created_at",
+    "diag_system_snapshots": "created_at",
+    "diag_news_cache": "fetched_at",
+    "diag_refresh_runs": "started_at",
+    "ai_decision_runs": "created_at",
+    "ai_evaluation_runs": "created_at",
+    "direct_candidates": "queued_at",
+}
+_ALLOWED_EXTRA_WHERE = {
+    "direct_candidates": "status IN ('completed', 'rejected', 'expired')",
+}
+
+
+def _safe_identifier(identifier: str, *, kind: str = "identifier") -> str:
+    """Return a SQL identifier only after strict validation."""
+    if not _IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(f"Unsafe SQL {kind}: {identifier!r}")
+    return identifier
+
+
+def _safe_table_name(table: str) -> str:
+    table = _safe_identifier(table, kind="table")
+    if table not in _ALLOWED_RETENTION_TABLES:
+        raise ValueError(f"Retention table is not allowlisted: {table}")
+    return table
+
+
+def _safe_policy_parts(policy: "RetentionPolicy") -> tuple[str, str, str | None]:
+    table = _safe_table_name(policy.table)
+    timestamp_column = _safe_identifier(policy.timestamp_column, kind="column")
+    expected_column = _RETENTION_TIMESTAMP_COLUMNS[table]
+    if timestamp_column != expected_column:
+        raise ValueError(
+            f"Unexpected retention timestamp column for {table}: {timestamp_column}"
+        )
+
+    extra_where = policy.extra_where
+    if extra_where is not None and extra_where != _ALLOWED_EXTRA_WHERE.get(table):
+        raise ValueError(f"Unexpected retention extra WHERE clause for {table}")
+
+    return table, timestamp_column, extra_where
+
 # Tables that support soft-delete (have a 'deleted_at' or 'archived' column)
 # Currently none — we do hard deletes with optional backup
 
@@ -71,11 +126,18 @@ class RetentionConfig:
         Args:
             custom_policies: Dict mapping table name to retention days
         """
+        custom_policies = custom_policies or {}
+        unknown_tables = sorted(set(custom_policies) - _ALLOWED_RETENTION_TABLES)
+        if unknown_tables:
+            raise ValueError(
+                "Unknown retention table(s): " + ", ".join(unknown_tables)
+            )
+
         self.policies: list[RetentionPolicy] = []
         self.backup_dir = Path(cfg.DB_PATH).parent / "backups"
         
         # Build policies from defaults + overrides
-        retention_days = {**DEFAULT_RETENTION_DAYS, **(custom_policies or {})}
+        retention_days = {**DEFAULT_RETENTION_DAYS, **custom_policies}
         
         # Define all retention policies
         self._add_policies(retention_days)
@@ -214,6 +276,7 @@ class CleanupResult:
 
 async def _get_table_count(db: aiosqlite.Connection, table: str) -> int:
     """Get current row count for a table."""
+    table = _safe_table_name(table)
     try:
         async with db.execute(f"SELECT COUNT(*) FROM {table}") as cur:
             row = await cur.fetchone()
@@ -232,6 +295,13 @@ async def _backup_records(
 ) -> Path | None:
     """Backup records to JSONL file before deletion."""
     try:
+        table = _safe_table_name(table)
+        timestamp_column = _safe_identifier(timestamp_column, kind="column")
+        if timestamp_column != _RETENTION_TIMESTAMP_COLUMNS[table]:
+            raise ValueError(
+                f"Unexpected retention timestamp column for {table}: {timestamp_column}"
+            )
+
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"{table}_{timestamp}.jsonl"
@@ -283,6 +353,8 @@ async def _backup_records(
 
 async def _table_has_column(db: aiosqlite.Connection, table: str, column: str) -> bool:
     """Check if a table has a specific column."""
+    table = _safe_table_name(table)
+    column = _safe_identifier(column, kind="column")
     try:
         async with db.execute(f"PRAGMA table_info({table})") as cur:
             rows = await cur.fetchall()
@@ -306,13 +378,15 @@ async def _cleanup_table(
     )
     
     try:
+        table, timestamp_column, extra_where = _safe_policy_parts(policy)
+
         # Check if table exists
         async with db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (policy.table,)
+            (table,)
         ) as cur:
             if not await cur.fetchone():
-                log.debug("Table %s does not exist, skipping", policy.table)
+                log.debug("Table %s does not exist, skipping", table)
                 return result
         
         # Calculate cutoff date
@@ -320,24 +394,24 @@ async def _cleanup_table(
         cutoff_str = cutoff.isoformat()
         
         # Count records to be deleted
-        where_clause = f"{policy.timestamp_column} < ?"
+        where_clause = f"{timestamp_column} < ?"
         params = [cutoff_str]
         
-        if policy.extra_where:
-            where_clause += f" AND ({policy.extra_where})"
+        if extra_where:
+            where_clause += f" AND ({extra_where})"
         
-        count_query = f"SELECT COUNT(*) FROM {policy.table} WHERE {where_clause}"
+        count_query = f"SELECT COUNT(*) FROM {table} WHERE {where_clause}"
         async with db.execute(count_query, params) as cur:
             row = await cur.fetchone()
             to_delete = row[0] if row else 0
         
         if to_delete == 0:
-            log.debug("No old records to delete in %s", policy.table)
+            log.debug("No old records to delete in %s", table)
             return result
         
         log.info(
             "Found %d records in %s older than %s days (before %s)",
-            to_delete, policy.table, policy.retention_days, cutoff_str[:10]
+            to_delete, table, policy.retention_days, cutoff_str[:10]
         )
         
         if dry_run:
@@ -347,18 +421,18 @@ async def _cleanup_table(
         # Backup before delete if configured
         if policy.backup_before_delete:
             backup_path = await _backup_records(
-                db, policy.table, policy.timestamp_column, cutoff, backup_dir
+                db, table, timestamp_column, cutoff, backup_dir
             )
             if backup_path:
                 result.backed_up = True
                 result.backup_path = backup_path
         
         # Delete records
-        delete_query = f"DELETE FROM {policy.table} WHERE {where_clause}"
+        delete_query = f"DELETE FROM {table} WHERE {where_clause}"
         await db.execute(delete_query, params)
         
         result.rows_deleted = to_delete
-        log.info("Deleted %d records from %s", to_delete, policy.table)
+        log.info("Deleted %d records from %s", to_delete, table)
         
     except Exception as e:
         error_msg = str(e)
@@ -559,6 +633,13 @@ def main() -> None:
             stats = await get_retention_stats()
             print(json.dumps(stats, indent=2))
             return
+
+        if args.table:
+            unknown_tables = sorted(set(args.table) - _ALLOWED_RETENTION_TABLES)
+            if unknown_tables:
+                parser.error(
+                    "Unknown retention table(s): " + ", ".join(unknown_tables)
+                )
         
         # Build custom policies
         custom_policies = None

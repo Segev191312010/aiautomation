@@ -9,8 +9,10 @@ from httpx import ASGITransport, AsyncClient
 
 import bot_runner
 import bot_health
+from auth import get_current_user
 from config import cfg
 from health import router as health_router
+from models import User
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +38,15 @@ def restore_health_state():
         bot_health._last_error_message = previous["last_error_message"]
         bot_health._error_timestamps[:] = previous["error_timestamps"]
         bot_health._degraded_timestamps[:] = previous["degraded_timestamps"]
+
+
+async def _test_user() -> User:
+    return User(
+        id="demo",
+        email="demo@local",
+        created_at=datetime.now(timezone.utc).isoformat(),
+        settings={},
+    )
 
 
 def test_get_bot_health_reports_stale_warning():
@@ -74,6 +85,7 @@ async def test_bot_health_endpoint_shape():
 
     app = FastAPI()
     app.include_router(health_router)
+    app.dependency_overrides[get_current_user] = _test_user
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -86,3 +98,15 @@ async def test_bot_health_endpoint_shape():
     assert payload["total_cycles_today"] == 4
     assert payload["last_signal_symbol"] == "MSFT"
     assert "minutes_since_last_cycle" in payload
+
+
+@pytest.mark.asyncio
+async def test_bot_health_endpoint_requires_auth():
+    app = FastAPI()
+    app.include_router(health_router)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/health/bot")
+
+    assert response.status_code == 401
