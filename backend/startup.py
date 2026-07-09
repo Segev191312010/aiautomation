@@ -24,6 +24,7 @@ from typing import TypedDict
 log = logging.getLogger(__name__)
 
 DEFAULT_DEV_JWT_SECRET = "trading-dev-secret-MUST-SET-IN-ENV"
+BACKEND_WORKER_COUNT = 1
 
 
 class StartupResult(TypedDict):
@@ -182,6 +183,7 @@ async def validate_startup() -> StartupResult:
     log.info("=== Trading Platform Startup ===")
     log.info("version  : %s", cfg.APP_VERSION)
     log.info("autopilot: %s", getattr(cfg, "AUTOPILOT_MODE", "OFF"))
+    log.info("workers  : %d (single-process runtime required)", BACKEND_WORKER_COUNT)
     log.info("mode     : %s", "PAPER" if cfg.IS_PAPER else "LIVE")
     log.info("sim_mode : %s", "ON" if cfg.SIM_MODE else "OFF")
     log.info("ibkr_port: %d", cfg.IBKR_PORT)

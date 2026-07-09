@@ -266,6 +266,9 @@ http {
 
 #### Supervisor Configuration
 
+The current backend is a stateful trading runtime. Run exactly one Uvicorn
+worker unless the backend has first been split into coordinated services.
+
 ```ini
 [supervisord]
 nodaemon=true
@@ -274,7 +277,7 @@ logfile=/var/log/supervisor/supervisord.log
 pidfile=/var/run/supervisord.pid
 
 [program:backend]
-command=uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+command=uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
  directory=/app/backend
 user=root
 autostart=true
@@ -332,7 +335,7 @@ Environment=DB_PATH=/opt/trading/data/trading.db
 Environment=JWT_SECRET=your-secret-key
 Environment=SIM_MODE=false
 Environment=IS_PAPER=true
-ExecStart=/opt/trading/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+ExecStart=/opt/trading/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 Restart=always
 RestartSec=5
 

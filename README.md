@@ -139,6 +139,10 @@ BOT_INTERVAL_SECONDS=60
 
 ### 4. Run backend
 
+The backend is intentionally single-process while it owns IBKR, alert,
+WebSocket, heartbeat, and AI loops in one runtime. Do not launch it with
+multiple Uvicorn workers.
+
 ```bash
 cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload

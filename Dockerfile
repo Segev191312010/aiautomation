@@ -57,11 +57,12 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Production entry point:
-#   - 2 Uvicorn workers (safe default for single-CPU container; tune with WORKERS env var)
-#   - Bind to all interfaces so Docker port mapping works
+#   - One Uvicorn worker: the current backend owns stateful IBKR, alert,
+#     WebSocket, heartbeat, and AI loops inside the FastAPI lifespan.
+#   - Bind to all interfaces so Docker port mapping works.
 CMD uvicorn main:app \
       --host 0.0.0.0 \
       --port 8000 \
-      --workers ${WORKERS:-2} \
+      --workers 1 \
       --log-level ${LOG_LEVEL:-info} \
       --no-access-log

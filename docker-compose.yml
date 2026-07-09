@@ -51,8 +51,7 @@ services:
       # Dashboard static files embedded in container
       DASHBOARD_BUILD_DIR: "./dashboard/dist"
 
-      # Uvicorn tuning (workers, log level)
-      WORKERS: "${WORKERS:-2}"
+      # Runtime logging. Worker count is intentionally pinned to 1 in Dockerfile.
       LOG_LEVEL: "${LOG_LEVEL:-info}"
 
     # Persistent SQLite database volume
