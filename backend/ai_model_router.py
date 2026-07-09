@@ -26,7 +26,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from config import cfg
+from config import DEFAULT_AI_FALLBACK_MODEL, cfg
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def _build_model_chain(primary: str) -> list[str]:
     if fallback and fallback != primary:
         chain.append(fallback)
     # Last resort: always try haiku if nothing else worked
-    last_resort = "claude-haiku-4-5-20251001"
+    last_resort = DEFAULT_AI_FALLBACK_MODEL
     if last_resort not in chain:
         chain.append(last_resort)
     return chain

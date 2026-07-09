@@ -194,10 +194,10 @@ This is a sophisticated algorithmic trading system with AI-driven decision makin
 - `evaluate_promotion_readiness()`: Shadow to live gating
 
 **Models Used:**
-- `AI_MODEL_OPTIMIZER`: Strategy optimization (Sonnet 4)
-- `AI_MODEL_NARRATIVE`: Market narrative (Sonnet 4)
-- `AI_MODEL_REGIME`: Regime detection (Sonnet 4)
-- `AI_MODEL_FALLBACK`: Lightweight fallback (Haiku 4.5)
+- `AI_MODEL_OPTIMIZER`: Strategy optimization (Claude Sonnet 4.6 default)
+- `AI_MODEL_NARRATIVE`: Market narrative (Claude Sonnet 4.6 default)
+- `AI_MODEL_REGIME`: Regime detection (Claude Sonnet 4.6 default)
+- `AI_MODEL_FALLBACK`: Lightweight fallback (Claude Haiku 4.5 default)
 
 ---
 
@@ -514,7 +514,7 @@ ATR_STOP_MULT=3.0                # Hard stop multiplier
 ATR_TRAIL_MULT=2.0               # Trailing stop multiplier
 
 # AI Configuration
-AI_MODEL_OPTIMIZER=claude-sonnet-4-20250514
+AI_MODEL_OPTIMIZER=claude-sonnet-4-6
 AI_OPTIMIZE_INTERVAL_SECONDS=3600
 SHADOW_TO_LIVE_HIT_RATE=0.55     # Promotion threshold
 

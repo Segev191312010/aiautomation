@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+DEFAULT_AI_PRIMARY_MODEL = "claude-sonnet-4-6"
+DEFAULT_AI_FALLBACK_MODEL = "claude-haiku-4-5-20251001"
+
 
 class Config:
     # ── IBKR connection ──────────────────────────────────────────────────────
@@ -66,11 +69,11 @@ class Config:
     AI_AUTONOMY_ENABLED: bool = _apm in ("PAPER", "LIVE")
     AI_SHADOW_MODE: bool = _apm == "OFF"
     AI_OPTIMIZE_INTERVAL_SECONDS: int = int(os.getenv("AI_OPTIMIZE_INTERVAL_SECONDS", "3600"))  # 1h default
-    AI_MODEL_OPTIMIZER: str = os.getenv("AI_MODEL_OPTIMIZER", "claude-sonnet-4-20250514")
-    AI_MODEL_NARRATIVE: str = os.getenv("AI_MODEL_NARRATIVE", "claude-sonnet-4-20250514")
-    AI_MODEL_REGIME: str = os.getenv("AI_MODEL_REGIME", "claude-sonnet-4-20250514")
-    AI_MODEL_PORTFOLIO: str = os.getenv("AI_MODEL_PORTFOLIO", "claude-sonnet-4-20250514")
-    AI_MODEL_FALLBACK: str = os.getenv("AI_MODEL_FALLBACK", "claude-haiku-4-5-20251001")
+    AI_MODEL_OPTIMIZER: str = os.getenv("AI_MODEL_OPTIMIZER", DEFAULT_AI_PRIMARY_MODEL)
+    AI_MODEL_NARRATIVE: str = os.getenv("AI_MODEL_NARRATIVE", DEFAULT_AI_PRIMARY_MODEL)
+    AI_MODEL_REGIME: str = os.getenv("AI_MODEL_REGIME", DEFAULT_AI_PRIMARY_MODEL)
+    AI_MODEL_PORTFOLIO: str = os.getenv("AI_MODEL_PORTFOLIO", DEFAULT_AI_PRIMARY_MODEL)
+    AI_MODEL_FALLBACK: str = os.getenv("AI_MODEL_FALLBACK", DEFAULT_AI_FALLBACK_MODEL)
 
     # ── Circuit breaker / AI resilience ─────────────────────────────────────
     AI_CONSECUTIVE_FAILURE_THRESHOLD: int = int(os.getenv("AI_CONSECUTIVE_FAILURE_THRESHOLD", "3"))

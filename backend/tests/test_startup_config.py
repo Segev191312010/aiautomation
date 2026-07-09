@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from config import cfg, _validate_config
+from config import DEFAULT_AI_FALLBACK_MODEL, DEFAULT_AI_PRIMARY_MODEL, cfg, _validate_config
 from startup import DEFAULT_DEV_JWT_SECRET, validate_autopilot_matrix, validate_startup
 
 
@@ -30,6 +30,23 @@ def test_validate_config_rejects_unknown_autopilot_mode(restore_cfg):
 
     with pytest.raises(ValueError, match="AUTOPILOT_MODE='PAPRE' is invalid"):
         _validate_config(cfg)
+
+
+def test_ai_model_defaults_are_current_and_centralized(restore_cfg):
+    assert cfg.AI_MODEL_OPTIMIZER == DEFAULT_AI_PRIMARY_MODEL
+    assert cfg.AI_MODEL_NARRATIVE == DEFAULT_AI_PRIMARY_MODEL
+    assert cfg.AI_MODEL_REGIME == DEFAULT_AI_PRIMARY_MODEL
+    assert cfg.AI_MODEL_PORTFOLIO == DEFAULT_AI_PRIMARY_MODEL
+    assert cfg.AI_MODEL_FALLBACK == DEFAULT_AI_FALLBACK_MODEL
+    assert "20250514" not in "|".join(
+        [
+            cfg.AI_MODEL_OPTIMIZER,
+            cfg.AI_MODEL_NARRATIVE,
+            cfg.AI_MODEL_REGIME,
+            cfg.AI_MODEL_PORTFOLIO,
+            cfg.AI_MODEL_FALLBACK,
+        ]
+    )
 
 
 @pytest.mark.anyio

@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from config import cfg
+from config import DEFAULT_AI_PRIMARY_MODEL, cfg
 from database import get_rules, get_trades, save_rule
 from models import Rule, Trade
 from portfolio_analytics import compute_realized_pnl, compute_performance_metrics
@@ -407,7 +407,7 @@ Write a 3-paragraph daily briefing: (1) overall performance, (2) what's working 
             system="You are a quantitative trading analyst. Write concise, actionable briefings.",
             prompt=prompt,
             source="daily_report",
-            model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
+            model=getattr(cfg, "AI_MODEL_NARRATIVE", DEFAULT_AI_PRIMARY_MODEL),
             max_tokens=800,
         )
         if result.ok:
@@ -588,7 +588,7 @@ async def run_bull_bear_debate(
             system=DEBATE_SYSTEM_PROMPT.format(role=role.lower(), symbol=symbol),
             prompt=prompt,
             source="debate",
-            model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
+            model=getattr(cfg, "AI_MODEL_NARRATIVE", DEFAULT_AI_PRIMARY_MODEL),
             max_tokens=500,
             temperature=0.3,
         )
@@ -742,7 +742,7 @@ async def run_multi_persona_analysis(
             system=persona["system"],
             prompt=prompt,
             source="persona_analysis",
-            model=getattr(cfg, "AI_MODEL_NARRATIVE", "claude-haiku-4-5-20251001"),
+            model=getattr(cfg, "AI_MODEL_NARRATIVE", DEFAULT_AI_PRIMARY_MODEL),
             max_tokens=300,
             temperature=0.2,
         )

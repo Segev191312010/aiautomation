@@ -4,6 +4,7 @@ import pytest
 
 import config
 import database
+from config import DEFAULT_AI_FALLBACK_MODEL, DEFAULT_AI_PRIMARY_MODEL
 from database import init_db
 from ai_decision_ledger import start_decision_run, record_decision_items
 
@@ -16,7 +17,7 @@ def _isolated_db(tmp_path, monkeypatch):
 
 
 async def _seed_decision_run(
-    *, model: str = "claude-sonnet-4-20250514",
+    *, model: str = DEFAULT_AI_PRIMARY_MODEL,
     input_tokens: int = 1000, output_tokens: int = 500,
     items: list[dict] | None = None,
 ) -> str:
@@ -49,8 +50,8 @@ async def test_cost_report_empty_returns_zero(_isolated_db, anyio_backend):
 async def test_cost_report_model_aware_pricing(_isolated_db, anyio_backend):
     """Cost report uses per-model pricing from decision runs."""
     await init_db()
-    await _seed_decision_run(model="claude-sonnet-4-20250514", input_tokens=1000, output_tokens=500)
-    await _seed_decision_run(model="claude-haiku-4-5-20251001", input_tokens=2000, output_tokens=1000)
+    await _seed_decision_run(model=DEFAULT_AI_PRIMARY_MODEL, input_tokens=1000, output_tokens=500)
+    await _seed_decision_run(model=DEFAULT_AI_FALLBACK_MODEL, input_tokens=2000, output_tokens=1000)
 
     from ai_learning import compute_cost_report
     result = await compute_cost_report(days=30)
@@ -132,7 +133,7 @@ async def test_economic_report_with_ledger_data(_isolated_db, anyio_backend):
     """Economic report with ledger data threads quality from learning evaluation."""
     await init_db()
     await _seed_decision_run(
-        model="claude-sonnet-4-20250514",
+        model=DEFAULT_AI_PRIMARY_MODEL,
         input_tokens=1000, output_tokens=500,
         items=[
             {"item_type": "direct_trade", "action_name": "BUY", "symbol": "AAPL",

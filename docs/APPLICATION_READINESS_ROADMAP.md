@@ -194,15 +194,13 @@ unchecked. The runbook explicitly states that live authority remains gated.
 
 This is a release blocker, not optional documentation.
 
-#### AI-P0-01: Default Anthropic Model Is Past Its Recorded End-of-Life
+#### AI-P0-01: Default Anthropic Model Was Past Its Recorded End-of-Life
 
-Four defaults in `backend/config.py:69-72` use
-`claude-sonnet-4-20250514`. The current test suite emits an Anthropic SDK warning
-that this model reached end-of-life on 2026-06-15.
+A7 replaced the retired Claude Sonnet 4 dated snapshot defaults in
+`backend/config.py` with centralized, currently supported defaults.
 
-Replace the model defaults with currently supported, operator-configurable model
-IDs. Add a startup capability check and a test that fails before a configured
-model reaches retirement.
+Remaining A8 work: add startup capability validation and tests that fail before
+a configured model reaches retirement.
 
 #### SEC-P0-01: Unknown Unsigned DLL Is in the Workspace
 

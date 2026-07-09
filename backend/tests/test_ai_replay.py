@@ -4,6 +4,7 @@ import pytest
 
 import config
 import database
+from config import DEFAULT_AI_PRIMARY_MODEL
 from database import init_db
 from ai_decision_ledger import (
     start_decision_run,
@@ -25,7 +26,7 @@ async def _seed_runs(n: int = 3, user_id: str = "demo") -> list[str]:
         ctx = json.dumps({"trade_count": 10 + i, "pnl_summary": {"total_pnl": 100 * i}})
         run_id = await start_decision_run(
             source="optimizer", mode="PAPER", provider="anthropic",
-            model="claude-sonnet-4-20250514", context_json=ctx,
+            model=DEFAULT_AI_PRIMARY_MODEL, context_json=ctx,
             aggregate_confidence=0.5 + i * 0.1, user_id=user_id,
         )
         await record_decision_items(run_id, [

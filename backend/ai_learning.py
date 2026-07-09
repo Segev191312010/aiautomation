@@ -19,6 +19,7 @@ from typing import Any
 from database import get_db
 from ai_guardrails import _load_guardrails_from_db, save_guardrails_to_db, log_ai_action
 from ai_params import ai_params
+from config import DEFAULT_AI_FALLBACK_MODEL, DEFAULT_AI_PRIMARY_MODEL
 
 log = logging.getLogger(__name__)
 
@@ -26,11 +27,11 @@ SUPPORTED_WINDOWS = (7, 30, 90)
 MIN_TRADES_PER_WINDOW = 20
 TRADE_WINDOW_SIZE = 50
 
-# Sonnet 4 pricing ($/MTok)
+# Claude API pricing ($/MTok). Keep model IDs centralized for active defaults.
 MODEL_PRICING = {
-    "claude-sonnet-4-20250514": (3.0, 15.0),
+    DEFAULT_AI_PRIMARY_MODEL: (3.0, 15.0),
     "claude-3-5-sonnet-20241022": (3.0, 15.0),
-    "claude-haiku-4-5-20251001": (0.25, 1.25),
+    DEFAULT_AI_FALLBACK_MODEL: (0.25, 1.25),
     "claude-3-5-haiku-20241022": (0.25, 1.25),
 }
 DEFAULT_PRICING = (3.0, 15.0)  # Sonnet fallback

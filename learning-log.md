@@ -53,3 +53,10 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: The lock must sit before the original `validate_startup()` call because database init, IBKR reconnect, alert, heartbeat, notification, reconciliation, and AI loops all begin in lifespan startup.
 - Verified: Backend 597 tests, dashboard typecheck/build, dashboard 370 tests, and workspace hygiene all pass.
 - Next: Continue Phase A with A7 Anthropic model-default cleanup and A8 AI capability-state validation.
+
+### 2026-07-09 - Phase A A7 Anthropic Defaults
+- Completed: Replaced the retired dated Claude Sonnet 4 default with centralized active Anthropic model defaults.
+- Completed: Updated AI learning, routing, advisor fallbacks, architecture docs, and roadmap evidence to point at the centralized defaults.
+- Learned: Keeping active model IDs in `backend/config.py` lets future retirements be handled with one audited default change instead of scattered literals.
+- Verified: Backend 598 tests, dashboard typecheck/build, dashboard 370 tests, and workspace hygiene all pass.
+- Next: Continue Phase A with A8 AI capability-state validation for disabled, unconfigured, invalid, ready, and degraded AI modes.
