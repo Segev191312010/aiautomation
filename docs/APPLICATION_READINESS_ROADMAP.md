@@ -498,7 +498,7 @@ Goal: one trustworthy codebase and no known immediate runtime/release blocker.
 - [ ] Force all current deployments to one Uvicorn worker.
 - [ ] Add a process lock preventing duplicate trading runtimes.
 - [ ] Replace the end-of-life Anthropic model defaults.
-- [ ] Choose `dashboard/` as canonical in an ADR.
+- [x] Choose `dashboard/` as canonical in an ADR.
 - [ ] Port wanted nested-only features, especially `AiSystemPage`.
 - [ ] Archive nested `main` and remove the nested working repository.
 - [ ] Remove or archive legacy `frontend/`.

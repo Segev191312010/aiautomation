@@ -67,3 +67,10 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: The current mixed import layout needs relative-first imports with a top-level fallback in boundary modules until backend packaging is standardized.
 - Verified: Backend 617 tests, dashboard typecheck/build, dashboard 370 tests, and workspace hygiene all pass.
 - Next: Continue Phase A with A9 canonical product/UI decision work.
+
+### 2026-07-09 - Phase A A9 Canonical Product Surface
+- Completed: Accepted ADR 0006 naming parent `master`, `backend/`, and `dashboard/` as the canonical product line.
+- Completed: Recorded nested `aiautomation/` and legacy `frontend/` as A10 migration/archive inputs rather than active products.
+- Learned: The nested repo is clean and synced, so A10 can use it as a stable source reference while migrating keeper features.
+- Verified: Backend 617 tests, dashboard typecheck/build, dashboard 370 tests, workspace hygiene, and read-only parent/nested status checks all pass.
+- Next: Continue Phase A with A10 keeper migration and duplicate product cleanup.
