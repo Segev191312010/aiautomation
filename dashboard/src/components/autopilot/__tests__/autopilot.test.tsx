@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
+import type { AIStatus } from '@/types/advisor'
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,33 @@ vi.mock('@/services/api', () => ({
   manualRetireAutopilotRule: vi.fn().mockResolvedValue({}),
 }))
 
+const makeStatus = (overrides: Partial<AIStatus> = {}): AIStatus => ({
+  mode: 'LIVE',
+  autonomy_active: true,
+  shadow_mode: false,
+  ai_capability: 'ready',
+  ai_provider: 'anthropic',
+  ai_provider_configured: true,
+  ai_primary_model: 'claude-sonnet-4-6',
+  ai_fallback_model: 'claude-haiku-4-5-20251001',
+  ai_capability_errors: [],
+  ai_capability_warnings: [],
+  emergency_stop: false,
+  daily_loss_locked: false,
+  daily_loss_limit_pct: 4.0,
+  broker_connected: true,
+  open_positions_count: 0,
+  active_rules_count: 0,
+  direct_ai_open_trades_count: 0,
+  last_action_at: null,
+  changes_today: 0,
+  next_optimization_at: null,
+  daily_budget_remaining: 5,
+  last_optimization_at: null,
+  optimizer_running: false,
+  ...overrides,
+})
+
 // ── Tests: AIStatusBar ───────────────────────────────────────────────────────
 
 describe('AIStatusBar', () => {
@@ -28,24 +56,12 @@ describe('AIStatusBar', () => {
     const { default: AIStatusBar } = await import('../AIStatusBar')
     render(
       <AIStatusBar
-        status={{
-          mode: 'LIVE',
-          autonomy_active: true,
-          shadow_mode: false,
-          emergency_stop: false,
-          daily_loss_locked: false,
-          daily_loss_limit_pct: 4.0,
-          broker_connected: true,
+        status={makeStatus({
           open_positions_count: 3,
           active_rules_count: 25,
           direct_ai_open_trades_count: 1,
-          last_action_at: null,
           changes_today: 5,
-          next_optimization_at: null,
-          daily_budget_remaining: 5,
-          last_optimization_at: null,
-          optimizer_running: false,
-        }}
+        })}
         onKillToggle={vi.fn()}
       />,
     )
@@ -57,24 +73,12 @@ describe('AIStatusBar', () => {
     const { default: AIStatusBar } = await import('../AIStatusBar')
     render(
       <AIStatusBar
-        status={{
-          mode: 'LIVE',
-          autonomy_active: true,
-          shadow_mode: false,
-          emergency_stop: false,
-          daily_loss_locked: false,
-          daily_loss_limit_pct: 4.0,
-          broker_connected: true,
+        status={makeStatus({
           open_positions_count: 3,
           active_rules_count: 25,
           direct_ai_open_trades_count: 1,
-          last_action_at: null,
           changes_today: 5,
-          next_optimization_at: null,
-          daily_budget_remaining: 5,
-          last_optimization_at: null,
-          optimizer_running: false,
-        }}
+        })}
       />,
     )
     expect(screen.getByText('3')).toBeInTheDocument()
@@ -91,24 +95,9 @@ describe('AIStatusBar', () => {
     const { default: AIStatusBar } = await import('../AIStatusBar')
     render(
       <AIStatusBar
-        status={{
-          mode: 'LIVE',
-          autonomy_active: true,
-          shadow_mode: false,
+        status={makeStatus({
           emergency_stop: true,
-          daily_loss_locked: false,
-          daily_loss_limit_pct: 4.0,
-          broker_connected: true,
-          open_positions_count: 0,
-          active_rules_count: 0,
-          direct_ai_open_trades_count: 0,
-          last_action_at: null,
-          changes_today: 0,
-          next_optimization_at: null,
-          daily_budget_remaining: 5,
-          last_optimization_at: null,
-          optimizer_running: false,
-        }}
+        })}
         onKillToggle={vi.fn()}
       />,
     )
@@ -120,23 +109,11 @@ describe('AIStatusBar', () => {
     const { default: AIStatusBar } = await import('../AIStatusBar')
     render(
       <AIStatusBar
-        status={{
-          mode: 'LIVE',
-          autonomy_active: true,
-          shadow_mode: false,
-          emergency_stop: false,
-          daily_loss_locked: false,
-          daily_loss_limit_pct: 4.0,
-          broker_connected: true,
+        status={makeStatus({
           open_positions_count: 1,
           active_rules_count: 2,
           direct_ai_open_trades_count: 1,
-          last_action_at: null,
           changes_today: 3,
-          next_optimization_at: null,
-          daily_budget_remaining: 5,
-          last_optimization_at: null,
-          optimizer_running: false,
           bot_health: {
             is_running: true,
             minutes_since_last_cycle: 1.2,
@@ -150,7 +127,7 @@ describe('AIStatusBar', () => {
             last_fill_event_at: null,
             degraded_mode_count_24h: 2,
           },
-        }}
+        })}
       />,
     )
     expect(screen.getByText('Bot Health')).toBeInTheDocument()

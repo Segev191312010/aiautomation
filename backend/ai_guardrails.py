@@ -790,6 +790,34 @@ async def get_ai_status_dict() -> dict:
         log.debug("Bot health fetch failed: %s", exc)
         bot_health = None
 
+    try:
+        from ai_capability import resolve_ai_capability
+        from config import cfg as _cfg_ai
+        from safety_kernel import get_failure_status
+
+        ai_capability = resolve_ai_capability(
+            _cfg_ai,
+            mode=mode,
+            failure_status=get_failure_status(),
+        )
+    except Exception as exc:
+        log.debug("AI capability status failed: %s", exc)
+        ai_capability = None
+
+    capability_fields = (
+        ai_capability.as_status_fields()
+        if ai_capability
+        else {
+            "ai_capability": "degraded",
+            "ai_provider": "anthropic",
+            "ai_provider_configured": False,
+            "ai_primary_model": None,
+            "ai_fallback_model": None,
+            "ai_capability_errors": [],
+            "ai_capability_warnings": ["AI capability status could not be computed."],
+        }
+    )
+
     return {
         "mode": mode,
         "autonomy_active": mode in ("PAPER", "LIVE") and not config.emergency_stop,
@@ -808,4 +836,5 @@ async def get_ai_status_dict() -> dict:
         "last_optimization_at": None,
         "optimizer_running": False,
         "bot_health": bot_health,
+        **capability_fields,
     }

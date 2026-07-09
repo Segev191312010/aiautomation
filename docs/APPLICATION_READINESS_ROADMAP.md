@@ -199,8 +199,9 @@ This is a release blocker, not optional documentation.
 A7 replaced the retired Claude Sonnet 4 dated snapshot defaults in
 `backend/config.py` with centralized, currently supported defaults.
 
-Remaining A8 work: add startup capability validation and tests that fail before
-a configured model reaches retirement.
+A8 added explicit AI capability states, startup validation for PAPER/LIVE modes,
+status payload fields for UI health surfaces, and tests that fail before
+configured retired or near-retirement models can be treated as ready.
 
 #### SEC-P0-01: Unknown Unsigned DLL Is in the Workspace
 

@@ -142,8 +142,20 @@ async def set_autopilot_mode(request: AutopilotModeRequest):
         jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
     )
     if matrix_errors:
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail={"errors": matrix_errors})
+
+    from ai_capability import resolve_ai_capability
+
+    capability = resolve_ai_capability(cfg, mode=request.mode)
+    if capability.state in ("unconfigured", "invalid_model"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "errors": list(capability.errors),
+                "warnings": list(capability.warnings),
+                "ai_capability": capability.state,
+            },
+        )
 
     config = await update_autopilot_config(autopilot_mode=request.mode)
     _sync_mode_runtime(request.mode)

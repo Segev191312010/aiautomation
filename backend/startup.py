@@ -138,7 +138,16 @@ async def validate_startup() -> StartupResult:
     )
 
     # ------------------------------------------------------------------
-    # 2. Database accessibility
+    # 2. AI provider capability
+    # ------------------------------------------------------------------
+    from ai_capability import startup_ai_capability_errors_warnings
+
+    ai_errors, ai_warnings, ai_capability = startup_ai_capability_errors_warnings(cfg)
+    errors.extend(ai_errors)
+    warnings.extend(ai_warnings)
+
+    # ------------------------------------------------------------------
+    # 3. Database accessibility
     # ------------------------------------------------------------------
     try:
         import aiosqlite
@@ -150,7 +159,7 @@ async def validate_startup() -> StartupResult:
         errors.append(f"Database not accessible at '{cfg.DB_PATH}': {exc}")
 
     # ------------------------------------------------------------------
-    # 3. IBKR port / paper mode consistency
+    # 4. IBKR port / paper mode consistency
     # ------------------------------------------------------------------
     live_ports = {7496, 4001}
     paper_ports = {7497, 4002}
@@ -168,7 +177,7 @@ async def validate_startup() -> StartupResult:
         )
 
     # ------------------------------------------------------------------
-    # 4. SIM_MODE vs IS_PAPER advisory
+    # 5. SIM_MODE vs IS_PAPER advisory
     # ------------------------------------------------------------------
     if cfg.SIM_MODE and not cfg.IS_PAPER:
         warnings.append(
@@ -186,6 +195,14 @@ async def validate_startup() -> StartupResult:
     log.info("workers  : %d (single-process runtime required)", BACKEND_WORKER_COUNT)
     log.info("mode     : %s", "PAPER" if cfg.IS_PAPER else "LIVE")
     log.info("sim_mode : %s", "ON" if cfg.SIM_MODE else "OFF")
+    log.info(
+        "ai_state : %s provider=%s configured=%s primary=%s fallback=%s",
+        ai_capability.state,
+        ai_capability.provider,
+        ai_capability.provider_configured,
+        ai_capability.primary_model,
+        ai_capability.fallback_model,
+    )
     log.info("ibkr_port: %d", cfg.IBKR_PORT)
     log.info("database : %s", cfg.DB_PATH)
     log.info("strict   : %s", cfg.STRICT_CONFIG)

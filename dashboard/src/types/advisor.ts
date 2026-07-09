@@ -219,10 +219,19 @@ export interface AuditLogPage {
 
 // ── AI Status ───────────────────────────────────────────────────────────────
 
+export type AICapabilityState = 'disabled' | 'unconfigured' | 'invalid_model' | 'ready' | 'degraded'
+
 export interface AIStatus {
   mode: 'OFF' | 'PAPER' | 'LIVE'
   autonomy_active: boolean
   shadow_mode: boolean
+  ai_capability: AICapabilityState
+  ai_provider: string
+  ai_provider_configured: boolean
+  ai_primary_model?: string | null
+  ai_fallback_model?: string | null
+  ai_capability_errors: string[]
+  ai_capability_warnings: string[]
   emergency_stop: boolean
   daily_loss_locked: boolean
   daily_loss_limit_pct: number

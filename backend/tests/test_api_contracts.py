@@ -227,9 +227,35 @@ class TestAIStatusContract:
         assert m.mode == "OFF"
         assert not m.autonomy_active
         assert m.shadow_mode is False
+        assert m.ai_capability == "disabled"
+        assert m.ai_provider == "anthropic"
+        assert not m.ai_provider_configured
+        assert m.ai_capability_errors == []
+        assert m.ai_capability_warnings == []
         assert not m.daily_loss_locked
         assert m.daily_budget_remaining == 10
         assert m.bot_health is None
+
+    def test_ai_capability_fields(self):
+        m = AIStatusResponse(
+            mode="PAPER",
+            autonomy_active=True,
+            ai_capability="degraded",
+            ai_provider_configured=True,
+            ai_primary_model="claude-sonnet-4-6",
+            ai_fallback_model="claude-haiku-4-5-20251001",
+            ai_capability_warnings=["AI_FALLBACK_ENABLED=false leaves Anthropic calls without model fallback."],
+        )
+
+        assert m.ai_capability == "degraded"
+        assert m.ai_provider_configured
+        assert m.ai_primary_model == "claude-sonnet-4-6"
+        assert m.ai_capability_errors == []
+        assert len(m.ai_capability_warnings) == 1
+
+    def test_invalid_ai_capability_fails(self):
+        with pytest.raises(ValidationError):
+            AIStatusResponse(ai_capability="mystery")
 
     def test_with_bot_health(self):
         m = AIStatusResponse(

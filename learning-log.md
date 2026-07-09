@@ -60,3 +60,10 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: Keeping active model IDs in `backend/config.py` lets future retirements be handled with one audited default change instead of scattered literals.
 - Verified: Backend 598 tests, dashboard typecheck/build, dashboard 370 tests, and workspace hygiene all pass.
 - Next: Continue Phase A with A8 AI capability-state validation for disabled, unconfigured, invalid, ready, and degraded AI modes.
+
+### 2026-07-09 - Phase A A8 AI Capability States
+- Completed: Added a pure Anthropic capability helper with disabled, unconfigured, invalid_model, ready, and degraded states.
+- Completed: Wired capability validation into startup, Autopilot status, mode changes, backend contracts, and dashboard status types.
+- Learned: The current mixed import layout needs relative-first imports with a top-level fallback in boundary modules until backend packaging is standardized.
+- Verified: Backend 617 tests, dashboard typecheck/build, dashboard 370 tests, and workspace hygiene all pass.
+- Next: Continue Phase A with A9 canonical product/UI decision work.

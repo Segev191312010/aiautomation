@@ -14,6 +14,13 @@ def restore_cfg():
         "JWT_SECRET": cfg.JWT_SECRET,
         "STRICT_CONFIG": cfg.STRICT_CONFIG,
         "AUTOPILOT_MODE": cfg.AUTOPILOT_MODE,
+        "ANTHROPIC_API_KEY": cfg.ANTHROPIC_API_KEY,
+        "AI_MODEL_OPTIMIZER": cfg.AI_MODEL_OPTIMIZER,
+        "AI_MODEL_NARRATIVE": cfg.AI_MODEL_NARRATIVE,
+        "AI_MODEL_REGIME": cfg.AI_MODEL_REGIME,
+        "AI_MODEL_PORTFOLIO": cfg.AI_MODEL_PORTFOLIO,
+        "AI_MODEL_FALLBACK": cfg.AI_MODEL_FALLBACK,
+        "AI_FALLBACK_ENABLED": cfg.AI_FALLBACK_ENABLED,
         "IS_PAPER": cfg.IS_PAPER,
         "IBKR_PORT": cfg.IBKR_PORT,
         "SIM_MODE": cfg.SIM_MODE,
@@ -83,6 +90,56 @@ async def test_validate_startup_errors_on_default_jwt_secret_paper_mode(restore_
 
 
 # ── Autopilot matrix validator ───────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_validate_startup_errors_on_missing_ai_key_paper_mode(restore_cfg, anyio_backend):
+    cfg.DB_PATH = ":memory:"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.STRICT_CONFIG = False
+    cfg.AUTOPILOT_MODE = "PAPER"
+    cfg.ANTHROPIC_API_KEY = ""
+    cfg.IS_PAPER = True
+    cfg.IBKR_PORT = 7497
+    cfg.SIM_MODE = False
+
+    result = await validate_startup()
+
+    assert any("ANTHROPIC_API_KEY" in e for e in result["errors"])
+
+
+@pytest.mark.anyio
+async def test_validate_startup_errors_on_retired_ai_model_paper_mode(restore_cfg, anyio_backend):
+    cfg.DB_PATH = ":memory:"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.STRICT_CONFIG = False
+    cfg.AUTOPILOT_MODE = "PAPER"
+    cfg.ANTHROPIC_API_KEY = "test-key"
+    cfg.AI_MODEL_OPTIMIZER = "claude-sonnet-4-20250514"
+    cfg.IS_PAPER = True
+    cfg.IBKR_PORT = 7497
+    cfg.SIM_MODE = False
+
+    result = await validate_startup()
+
+    assert any("retired" in e for e in result["errors"])
+
+
+@pytest.mark.anyio
+async def test_validate_startup_warns_on_retired_ai_model_when_off(restore_cfg, anyio_backend):
+    cfg.DB_PATH = ":memory:"
+    cfg.JWT_SECRET = DEFAULT_DEV_JWT_SECRET
+    cfg.STRICT_CONFIG = False
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.ANTHROPIC_API_KEY = ""
+    cfg.AI_MODEL_OPTIMIZER = "claude-sonnet-4-20250514"
+    cfg.IS_PAPER = True
+    cfg.IBKR_PORT = 7497
+    cfg.SIM_MODE = False
+
+    result = await validate_startup()
+
+    assert result["errors"] == []
+    assert any("retired" in w for w in result["warnings"])
 
 
 def _matrix(**overrides) -> list[str]:

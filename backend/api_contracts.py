@@ -234,6 +234,13 @@ class AIStatusResponse(BaseModel):
     mode: Literal["OFF", "PAPER", "LIVE"] = "OFF"
     autonomy_active: bool = False
     shadow_mode: bool = False
+    ai_capability: Literal["disabled", "unconfigured", "invalid_model", "ready", "degraded"] = "disabled"
+    ai_provider: str = "anthropic"
+    ai_provider_configured: bool = False
+    ai_primary_model: Optional[str] = None
+    ai_fallback_model: Optional[str] = None
+    ai_capability_errors: list[str] = Field(default_factory=list)
+    ai_capability_warnings: list[str] = Field(default_factory=list)
     emergency_stop: bool = False
     daily_loss_locked: bool = False
     daily_loss_limit_pct: float = 2.0
