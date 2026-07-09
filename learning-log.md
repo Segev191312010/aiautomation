@@ -37,3 +37,11 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: Watchlists were not persisted at all before Phase 5; only watchlist metadata now persists, while quotes and bars stay session-scoped.
 - Verified: `npm run typecheck`, `npm run build`, `npx vitest run`, and backend `python -m pytest tests/ -v` all passed.
 - Next: Continue the remaining remote-exposure hardening items, especially canvas accessibility and broad exception cleanup.
+
+### 2026-07-09 - Desktop Application Readiness Audit
+- Completed: Reviewed the parent and nested repositories across source, tests, API contracts, security, persistence, deployment, and documentation.
+- Completed: Added `docs/APPLICATION_READINESS_ROADMAP.md` as the desktop product plan, including target architecture, prioritized findings, milestones, release gates, and definition of done.
+- Learned: The project has three frontend codebases, no desktop shell, several frontend/backend contract mismatches, and a stateful two-worker deployment default.
+- Learned: The full-session paper soak remains incomplete, and the default Anthropic Sonnet model is past the end-of-life date reported by the SDK.
+- Verified: Backend 582 tests, main dashboard 370 tests plus typecheck/build, and nested dashboard 11 tests plus typecheck/build all pass.
+- Next: Start Roadmap Phase A with single-process safety, model replacement, workspace binary quarantine, and frontend/repository consolidation.
