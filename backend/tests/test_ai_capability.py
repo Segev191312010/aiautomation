@@ -1,8 +1,10 @@
 """AI capability-state validation for Phase A8."""
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 
 from config import DEFAULT_AI_FALLBACK_MODEL, DEFAULT_AI_PRIMARY_MODEL
 from ai_capability import resolve_ai_capability, startup_ai_capability_errors_warnings
@@ -22,6 +24,15 @@ class CapabilityConfig:
 
 def test_ai_capability_imports_config_defaults():
     import ai_capability
+
+    assert hasattr(ai_capability, "DEFAULT_AI_PRIMARY_MODEL")
+    assert hasattr(ai_capability, "DEFAULT_AI_FALLBACK_MODEL")
+
+
+def test_ai_capability_package_imports_config_defaults(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+
+    ai_capability = importlib.import_module("backend.ai_capability")
 
     assert hasattr(ai_capability, "DEFAULT_AI_PRIMARY_MODEL")
     assert hasattr(ai_capability, "DEFAULT_AI_FALLBACK_MODEL")
