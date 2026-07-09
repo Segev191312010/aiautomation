@@ -45,3 +45,11 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: The full-session paper soak remains incomplete, and the default Anthropic Sonnet model is past the end-of-life date reported by the SDK.
 - Verified: Backend 582 tests, main dashboard 370 tests plus typecheck/build, and nested dashboard 11 tests plus typecheck/build all pass.
 - Next: Start Roadmap Phase A with single-process safety, model replacement, workspace binary quarantine, and frontend/repository consolidation.
+
+### 2026-07-09 - Phase A Runtime Safety Foundations
+- Completed: Captured Phase A baseline evidence, quarantined root-level binary clutter outside the repo, and added a workspace hygiene check.
+- Completed: Inventoried backend launch paths, pinned Docker/compose startup to one Uvicorn worker, and added launch-manifest regression tests.
+- Completed: Added a machine-local runtime lock acquired before FastAPI lifespan side effects and released after shutdown teardown.
+- Learned: The lock must sit before the original `validate_startup()` call because database init, IBKR reconnect, alert, heartbeat, notification, reconciliation, and AI loops all begin in lifespan startup.
+- Verified: Backend 597 tests, dashboard typecheck/build, dashboard 370 tests, and workspace hygiene all pass.
+- Next: Continue Phase A with A7 Anthropic model-default cleanup and A8 AI capability-state validation.

@@ -158,6 +158,7 @@ class Config:
     # ── API server ───────────────────────────────────────────────────────────
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
+    RUNTIME_LOCK_PATH: str = os.getenv("RUNTIME_LOCK_PATH", "")
 
     # ── JWT / Auth ─────────────────────────────────────────────────────────
     JWT_SECRET: str = os.getenv("JWT_SECRET", "trading-dev-secret-MUST-SET-IN-ENV")

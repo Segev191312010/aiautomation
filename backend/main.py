@@ -168,6 +168,20 @@ initialize_runtime_state(ws_manager=manager, data_health=_data_health, diag_serv
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Keep this lock before all side-effecting startup: DB init, IBKR,
+    # alerts, heartbeat, notifications, reconciliation, and AI loops.
+    from runtime_lock import RuntimeLock
+    runtime_lock = RuntimeLock.from_config(cfg)
+    runtime_lock.acquire()
+    try:
+        async with _run_lifespan(app):
+            yield
+    finally:
+        runtime_lock.release()
+
+
+@asynccontextmanager
+async def _run_lifespan(app: FastAPI):
     # â"€â"€ Startup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     from startup import validate_startup
     await validate_startup()

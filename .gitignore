@@ -45,6 +45,7 @@ logs/*.pid
 *.db-wal
 *.db-shm
 .tmp/
+.runtime/
 
 # IB Chart sidecar (runs on port 5001, not part of main app)
 /ib_chart/
