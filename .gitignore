@@ -10,6 +10,12 @@ coverage/
 backend/*.log
 backend/server.log
 *.exe
+*.msi
+*.zip
+*.rar
+*.7z
+*.dmg
+*.pkg
 
 # Frontend build output
 /dashboard/dist/
