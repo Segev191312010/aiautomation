@@ -84,3 +84,10 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: Release evidence must separate the tested-source commit from the later evidence commit because a commit cannot embed its own hash.
 - Verified: Backend 640, dashboard 372, typecheck/build/hygiene, 33 PowerShell blocks, and same-source GitHub Ubuntu CI all passed.
 - Next: Record renewed owner/lead re-sign-off, update deprecated GitHub action majors, complete the paper soak, then begin Phase B contract/auth work.
+
+### 2026-07-10 - Phase A Late Workspace Binary Quarantine
+- Completed: A final ignored-file audit found a validly signed Interactive Brokers installer at the repository root; it was never executed or deleted and was moved hash-preserving to a dated quarantine directory outside the repository.
+- Completed: Added a dated artifact/signature/disposition record and expanded the hygiene policy/manual to cover the original checker's `.bin`, `.so`, and `.dylib` suffixes.
+- Learned: Clean Git porcelain is insufficient workspace evidence because ignored root binaries remain active policy violations; every closeout needs an explicit hidden/no-ignore scan.
+- Verified: Backend 640, dashboard 372, typecheck/build/hygiene, zero tracked or hidden/ignored 11-suffix findings, all 11 negative suffix probes, 33 PowerShell blocks, and same-policy-commit Ubuntu CI passed after quarantine.
+- Next: Obtain explicit owner acceptance of the A5 scope change, stop-all-v1 boundary, A8 fail-closed behavior, and TWS-installer quarantine disposition before A12 can pass.

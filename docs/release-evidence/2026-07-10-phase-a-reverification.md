@@ -23,29 +23,38 @@ readiness roadmap.
   `docs/release-evidence/2026-07-10-phase-a-reverification-raw.log`
 - Condensed durable transcript:
   `docs/release-evidence/2026-07-10-phase-a-reverification-transcript.txt`
-- GitHub Actions run:
+- Runtime-remediation GitHub Actions run:
   https://github.com/Segev191312010/aiautomation/actions/runs/29091445438
+- Late hygiene-policy GitHub Actions run:
+  https://github.com/Segev191312010/aiautomation/actions/runs/29099407063
 
 ## Immutable Source Model
 
-The report intentionally distinguishes the tested source from the later
-evidence commit that contains this file. A commit cannot embed its own hash.
+The report intentionally distinguishes the runtime-remediation source, the
+later hygiene-policy source, and the final documentation-only addendum commit.
+A commit cannot embed its own hash.
 
 - Original signed Phase A tip:
   `e91be61ae89a107fa0fb20b6d12530202d8b6df7`
 - Tested remediation source:
   `e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1`
+- First documentation evidence commit:
+  `5bc95e43b08253c30c3be981351e989267c219b1`
+- Tested late hygiene-policy source:
+  `2b4db50101b6202eb7ac0a1d631264a122ea961d`
 - Branch: `master`
 - `HEAD` at formal local start/end: tested remediation source above
 - `origin/master` at formal local start/end: tested remediation source above
 - Clean at formal local start: yes
 - Clean at formal local end: yes
-- Evidence commit: the later `master` commit containing this report; resolve it
+- Final addendum commit: the later `master` commit containing this revision;
+  resolve it
   with `git log -1 --format=%H -- docs/release-evidence/2026-07-10-phase-a-reverification.md`
 
-The evidence commit changes documentation/handoff records only. The tested
-runtime, lock, tests, manifests, and dashboard harness are all in the tested
-remediation source.
+The final addendum commit changes documentation/handoff records only. The
+tested runtime, lock, tests, manifests, and dashboard harness are in the tested
+remediation source. The expanded 11-suffix hygiene policy and executable manual
+are in the separately tested late hygiene-policy source.
 
 ## Environment
 
@@ -154,11 +163,11 @@ stack. Eight intentional WebSocket disconnect diagnostics remain.
 | Stage | Result | Executed proof | Manual evidence/disposition |
 | --- | --- | --- | --- |
 | A0 | PASS | clean `master`; `HEAD == origin/master`; full gates `640/372` | baseline remains dated history |
-| A1 | PASS | tracked binary scan empty; hygiene pass | workspace inventory reconciled |
-| A2 | PASS | isolated fake DLL produced required exit `1`; clean scan passed | quarantine policy and docs present |
+| A1 | PASS - REMEDIATED | late ignored TWS installer quarantined; tracked and hidden/ignored 11-suffix scans empty | dated artifact metadata and disposition recorded |
+| A2 | PASS | all 11 isolated suffix probes produced required exit `1`; clean scan passed | quarantine policy and docs present |
 | A3 | PASS | launch-path `rg` inventory returned only documented paths | launch inventory matches source |
 | A4 | PASS | `test_launch_manifests.py`: `4 passed` | one worker plus named-volume/permission checks |
-| A5 | PASS | compile pass; Compose YAML parse pass; OS-lock source/review pass | v2 scope and stop-v1 boundary documented |
+| A5 | PASS UNDER DOCUMENTED SCOPE; ACCEPTANCE PENDING | compile pass; Compose YAML parse pass; OS-lock source/review pass | shared-path/namespace v2 scope replaces the original literal machine-global wording; stop-v1 boundary documented |
 | A6 | PASS | runtime lock `22 passed -W error`; lifespan lock `4 passed -W error`; Ubuntu backend job passed | deterministic contenders, real app subprocess, crash/error cleanup |
 | A7 | PASS | targeted backend `41 passed`; active-runtime retired-ID scan empty | current Anthropic defaults reconfirmed |
 | A8 | PASS | targeted backend `73 passed`; dashboard typecheck; Autopilot UI `14 passed` | strict persisted-mode fail-closed ordering proved |
@@ -239,6 +248,30 @@ not a Phase A functional regression.
 - `runtime_lock.py` and `main.py`: compile pass;
 - manual: 33 PowerShell blocks, zero parser errors.
 
+## Post-report A1/A2 Workspace Addendum
+
+After this report's clean detached replay, a completion audit found the ignored
+Interactive Brokers installer `ntws-latest-standalone-windows-x64.exe` in the
+primary repository root. An ignored executable still violates A1/A2 policy.
+The checker did not execute or delete it: it recorded the size, SHA-256,
+Authenticode identity, Git state, and timestamps, then moved the file with its
+hash intact to a dated quarantine directory under
+`$env:USERPROFILE\Downloads`.
+
+After quarantine, the policy checker, tracked scan, hidden/ignored all-file
+scan, backend `640`, dashboard `372`, typecheck, and build all passed again on
+clean source commit `5bc95e43b08253c30c3be981351e989267c219b1`.
+
+The checker policy was then expanded to enforce the original brief's `.bin`,
+`.so`, and `.dylib` suffixes. All 11 isolated suffix probes, the global gates,
+and set-equality checks passed locally. Immutable policy commit
+`2b4db50101b6202eb7ac0a1d631264a122ea961d` then passed both Ubuntu jobs in
+GitHub Actions run `29099407063`. Full details are in
+`docs/release-evidence/2026-07-10-a1-a2-late-binary-quarantine.md`.
+
+The disposition remains subject to the same final owner/lead acceptance that
+keeps A12 pending.
+
 ## Limitations And Required Operations
 
 1. Docker was unavailable on this verifier, so no live Compose container/volume
@@ -271,7 +304,9 @@ before this report.
 
 Phase A regression re-verification is a **TECHNICAL PASS** for the tested
 source. Administrative A12 closeout remains pending renewed owner/lead
-acceptance of the material A5/A6/A8 safety changes. Do not treat Phase A as
-fully re-signed or start Phase B solely from this report until that acceptance
-is recorded. The paper-soak, packaging, auth, contract, and live-release gates
-remain independently mandatory.
+acceptance of the material A5/A6/A8 safety changes and the late A1 quarantine
+disposition. That acceptance must include the supported shared-lock-path and
+OS/filesystem-namespace scope rather than the original literal machine-global
+wording. Do not treat Phase A as fully re-signed or start Phase B solely from
+this report until that acceptance is recorded. The paper-soak, packaging,
+auth, contract, and live-release gates remain independently mandatory.

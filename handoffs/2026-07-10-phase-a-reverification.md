@@ -5,8 +5,10 @@ Date: 2026-07-10
 ## Outcome
 
 Phase A's A0-A12 manual was executed as a regression checker. It found two
-safety regressions, both were corrected, and the clean remediation source
-passed local Windows gates plus same-source Ubuntu CI.
+safety regressions plus one late ignored workspace executable. The technical
+issues were corrected, the executable was quarantined without execution or
+deletion, and the clean remediation source passed local Windows gates plus
+same-source Ubuntu CI.
 
 Overall result: **TECHNICAL PASS; OWNER/LEAD RE-SIGN-OFF PENDING** for Phase A
 repository invariants.
@@ -14,14 +16,23 @@ repository invariants.
 Tested remediation commit:
 `e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1`
 
+Tested late hygiene-policy commit:
+`2b4db50101b6202eb7ac0a1d631264a122ea961d`
+
 Primary evidence:
 `docs/release-evidence/2026-07-10-phase-a-reverification.md`
+
+Late A1/A2 quarantine evidence:
+`docs/release-evidence/2026-07-10-a1-a2-late-binary-quarantine.md`
 
 Raw clean-source command/output record:
 `docs/release-evidence/2026-07-10-phase-a-reverification-raw.log`
 
 GitHub CI:
 https://github.com/Segev191312010/aiautomation/actions/runs/29091445438
+
+Late hygiene-policy CI:
+https://github.com/Segev191312010/aiautomation/actions/runs/29099407063
 
 ## What Changed
 
@@ -39,6 +50,9 @@ https://github.com/Segev191312010/aiautomation/actions/runs/29091445438
   commands, expected outputs, failure paths, scope, and recovery instructions.
 - Preserved old completion evidence as history and added explicit supersession
   notices rather than rewriting old results.
+- Recorded and externally quarantined a validly signed Interactive Brokers
+  installer found at the repository root; expanded hygiene enforcement to the
+  original checker's `.bin`, `.so`, and `.dylib` suffixes.
 
 ## Verification
 
@@ -50,9 +64,11 @@ https://github.com/Segev191312010/aiautomation/actions/runs/29091445438
 - Startup lock: 4 passed with warnings as errors.
 - A7 targeted: 41 passed.
 - A8 targeted: 73 passed.
-- Workspace hygiene: passed; isolated fake DLL was rejected.
+- Workspace hygiene: passed; tracked and hidden/ignored 11-suffix scans are
+  empty; all 11 isolated suffix probes were rejected and removed.
 - Manual PowerShell: 33 blocks, zero parser errors.
-- GitHub Ubuntu CI: backend and dashboard jobs passed.
+- GitHub Ubuntu CI: backend and dashboard jobs passed for both the runtime
+  remediation and late hygiene-policy commits.
 - Safety review: no remaining CRITICAL/HIGH under the stop-all-v1 premise.
 
 ## Non-negotiable Operating Boundaries
@@ -70,8 +86,11 @@ https://github.com/Segev191312010/aiautomation/actions/runs/29091445438
 
 ## Follow-up
 
-- Obtain and record renewed owner/lead acceptance of the material A5/A6/A8
-  safety changes before treating A12 as closed or beginning Phase B.
+- Obtain and record renewed owner/lead acceptance before treating A12 as
+  closed or beginning Phase B. Acceptance must cover the shared-lock-path and
+  OS/filesystem-namespace A5 scope (rather than literal machine-global scope),
+  stop-all-v1/no rolling coexistence, A8 fail-closed behavior, and the late TWS
+  installer quarantine disposition.
 - Update GitHub action majors to remove the two Node 20 action-runtime
   deprecation warnings observed in CI run 29091445438.
 - Remediate the 10 known dashboard dependency audit findings (1 critical,

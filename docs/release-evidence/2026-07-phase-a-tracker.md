@@ -47,16 +47,31 @@ v2 starts; rolling coexistence is unsupported. Full commands, stage results,
 limitations, reviews, and CI links are in
 `docs/release-evidence/2026-07-10-phase-a-reverification.md`.
 
+A later current-workspace audit found the ignored, signed Interactive Brokers
+installer `ntws-latest-standalone-windows-x64.exe` at the repository root. It
+was never executed by the checker and was moved, hash-preserving, to a dated
+quarantine directory under `$env:USERPROFILE\Downloads`. The policy checker,
+tracked scan, hidden/ignored scan, backend `640`, dashboard `372`, typecheck,
+and build all passed again after quarantine. Artifact metadata and disposition
+are recorded in
+`docs/release-evidence/2026-07-10-a1-a2-late-binary-quarantine.md`; owner
+acceptance of that disposition remains part of A12.
+
+The expanded 11-suffix policy is immutable commit
+`2b4db50101b6202eb7ac0a1d631264a122ea961d`. All 11 negative probes and global
+gates passed locally, and GitHub Actions run `29099407063` passed both Ubuntu
+jobs on that same commit.
+
 ## Latest Re-verification Results
 
 | Stage | Result | Current proof |
 | --- | --- | --- |
 | A0 | PASS | clean/synced source; full gates |
-| A1 | PASS | tracked binary scan and hygiene |
-| A2 | PASS | clean scan plus isolated fake-DLL rejection |
+| A1 | PASS - REMEDIATED | late ignored TWS installer quarantined; tracked and hidden/ignored 11-suffix scans now zero; dated evidence recorded |
+| A2 | PASS | checker rejected the ignored installer; clean scan and all 11 negative suffix probes pass; policy-source Ubuntu CI passes |
 | A3 | PASS | launch-path inventory reconciled |
 | A4 | PASS | 4 launch-manifest tests |
-| A5 | PASS | OS-held v2 lock, compile/manifest/Compose static proof |
+| A5 | PASS UNDER DOCUMENTED SCOPE; ACCEPTANCE PENDING | OS-held v2 lock proves one owner per shared local lock path/namespace, not the original literal machine-global wording |
 | A6 | PASS | 22 lock tests, 4 lifespan tests, Ubuntu backend CI |
 | A7 | PASS | 41 targeted tests and retired-ID scan |
 | A8 | PASS | 73 backend tests, typecheck, 14 UI tests |
