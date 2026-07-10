@@ -1,0 +1,104 @@
+PHASE A RE-VERIFICATION - CONDENSED DURABLE TRANSCRIPT
+Date: 2026-07-10
+Initial audit session started UTC: 2026-07-10T10:36:01Z
+Formal clean-source finish UTC: 2026-07-10T12:08:37Z
+Raw clean-source replay UTC: 2026-07-10T12:18:21Z to 2026-07-10T12:22:36Z
+Raw record: docs/release-evidence/2026-07-10-phase-a-reverification-raw.log
+
+SOURCE
+branch=master
+tested_source=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+origin_master=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+porcelain_start=empty
+porcelain_end=empty
+archive_tag_target=16280057ab04bee97904e9c59b9a5143a58bb673
+workspace_shape=PASS
+
+ENVIRONMENT
+os=Microsoft Windows 10.0.26200 x64
+powershell=5.1.26100.8655
+python=3.12.10
+node=24.13.1
+npm=11.8.0
+git=2.53.0.windows.1
+rg=15.1.0
+docker=unavailable
+wsl=no installed distribution
+
+STAGE COMMAND RESULTS
+python -m pytest tests/test_launch_manifests.py -q
+4 passed
+
+python -m pytest tests/test_runtime_lock.py -q -W error
+22 passed
+
+python -m pytest tests/test_startup_runtime_lock.py -q -W error
+4 passed
+
+python -m pytest tests/test_startup_config.py tests/test_ai_learning.py tests/test_ai_replay.py -q
+41 passed
+
+python -m pytest tests/test_ai_capability.py tests/test_startup_config.py tests/test_api_contracts.py tests/test_autopilot_mode_semantics.py -q
+73 passed
+
+python -m pytest tests/test_product_surface.py -q
+2 passed
+
+npx vitest run src/components/autopilot/__tests__/autopilot.test.tsx
+1 file passed, 14 tests passed
+
+python -m py_compile runtime_lock.py main.py
+PASS
+
+docker-compose.yml PyYAML parse and lock-volume assertions
+PASS
+
+python scripts/check_workspace_hygiene.py
+Workspace hygiene OK: no forbidden binary artifacts found.
+
+isolated fake DLL hygiene probe
+required failure observed; fake_dll_detection=PASS
+
+tracked binary scan=PASS
+retired model scan=PASS
+multi-worker scan=PASS
+stale product-surface scan=PASS
+PowerShell fenced blocks=33; parse errors=0
+
+FORMAL CLEAN-SOURCE GLOBAL GATE
+python -m pytest tests/ -q
+640 passed in 43.29s
+
+npm run typecheck
+PASS
+
+npm run build
+PASS; 610 modules transformed; Vite 2.38s
+
+npx vitest run
+27 files passed; 372 tests passed in 6.26s
+No ResizeObserver/React/unhandled exception stack.
+Eight expected WebSocket disconnect diagnostic lines remained.
+
+workspace hygiene
+PASS
+
+final HEAD unchanged=yes
+final origin/master equal=yes
+final porcelain=empty
+
+GITHUB ACTIONS
+run=https://github.com/Segev191312010/aiautomation/actions/runs/29091445438
+run_id=29091445438
+commit=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+status=success
+duration=1m11s
+backend_job=success,1m09s
+dashboard_job=success,56s
+warnings=2 Node-20 action-runtime deprecation warnings; jobs passed
+
+LIMITATIONS
+No local Docker runtime probe: Docker CLI unavailable.
+Local OS-lock execution used Windows msvcrt.
+Same-source POSIX flock execution came from Ubuntu GitHub CI.
+Stop all v1 runtimes before v2; rolling coexistence unsupported.

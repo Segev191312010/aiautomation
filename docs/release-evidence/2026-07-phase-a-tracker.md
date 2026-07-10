@@ -28,22 +28,42 @@ historical `PASS` is not an automatic pass for a later commit.
 
 Audit date: 2026-07-10
 
-Current re-verification status: **REMEDIATED; formal clean-commit/Ubuntu CI
-closeout pending**.
+Current re-verification status: **TECHNICAL PASS; OWNER/LEAD RE-SIGN-OFF
+PENDING**.
 
 Executing the manual found the A5/A6 stale-lock race and an A8 persisted-mode
-startup bypass. The current worktree replaces PID/unlink ownership with a
+startup bypass. Tested source
+`e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1` replaces PID/unlink ownership with a
 persistent OS-held v2 lock, adds deterministic contender/subprocess/crash
 coverage, and forces authority `OFF` when persisted guardrail validation or its
-strict DB read fails. Stable local gates pass at backend `640`, dashboard
-`372`, typecheck/build, and hygiene.
+strict DB read fails. Clean-source local gates pass at backend `640`, dashboard
+`372`, typecheck/build, and hygiene. GitHub Actions run `29091445438` passed
+both Ubuntu jobs on the same source.
 
 The supported lock invariant is one owner per shared lock path in one
 OS/filesystem lock namespace, not one machine-global owner across users,
 native/container boundaries, or distinct volumes. Stop every v1 runtime before
-v2 starts; rolling coexistence is unsupported. The status becomes `PASS` only
-after a clean committed source, same-source Ubuntu CI, and the dated
-re-verification report are recorded.
+v2 starts; rolling coexistence is unsupported. Full commands, stage results,
+limitations, reviews, and CI links are in
+`docs/release-evidence/2026-07-10-phase-a-reverification.md`.
+
+## Latest Re-verification Results
+
+| Stage | Result | Current proof |
+| --- | --- | --- |
+| A0 | PASS | clean/synced source; full gates |
+| A1 | PASS | tracked binary scan and hygiene |
+| A2 | PASS | clean scan plus isolated fake-DLL rejection |
+| A3 | PASS | launch-path inventory reconciled |
+| A4 | PASS | 4 launch-manifest tests |
+| A5 | PASS | OS-held v2 lock, compile/manifest/Compose static proof |
+| A6 | PASS | 22 lock tests, 4 lifespan tests, Ubuntu backend CI |
+| A7 | PASS | 41 targeted tests and retired-ID scan |
+| A8 | PASS | 73 backend tests, typecheck, 14 UI tests |
+| A9 | PASS | canonical workspace shape |
+| A10 | PASS | archive tag, 2 backend and 14 UI tests, global gates |
+| A11 | PASS | untracked dist, clean build, doc truth checks |
+| A12 | PENDING SIGN-OFF | technical evidence complete; renewed owner/lead acceptance required |
 
 ## Signed Completion Results (Historical)
 

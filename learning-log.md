@@ -74,3 +74,13 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: The nested repo is clean and synced, so A10 can use it as a stable source reference while migrating keeper features.
 - Verified: Backend 617 tests, dashboard typecheck/build, dashboard 370 tests, workspace hygiene, and read-only parent/nested status checks all pass.
 - Next: Continue Phase A with A10 keeper migration and duplicate product cleanup.
+
+### 2026-07-10 - Phase A Executable Re-verification
+- Completed: Executed the A0-A12 manual as a real checker, corrected the A5/A6 stale-lock ownership race, and added OS-held Windows/POSIX runtime ownership.
+- Completed: Closed an A8 persisted-mode bypass by validating strict DB state and AI capability before simulation, IBKR, heartbeat, alert, or AI-loop startup.
+- Completed: Added deterministic contender, real subprocess, crash, malformed/interrupted metadata, and exception-cleanup regressions; corrected hidden ResizeObserver test exceptions.
+- Learned: PID metadata is useful diagnostics but cannot be ownership authority; a persistent path plus a retained OS lock avoids unlink/inode races.
+- Learned: Cross-version safety cannot be retrofitted when v1 ignores the new primitive and uses different defaults, so stop-all-v1 is a required deployment boundary.
+- Learned: Release evidence must separate the tested-source commit from the later evidence commit because a commit cannot embed its own hash.
+- Verified: Backend 640, dashboard 372, typecheck/build/hygiene, 33 PowerShell blocks, and same-source GitHub Ubuntu CI all passed.
+- Next: Record renewed owner/lead re-sign-off, update deprecated GitHub action majors, complete the paper soak, then begin Phase B contract/auth work.

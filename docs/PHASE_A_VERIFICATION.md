@@ -24,9 +24,9 @@ run this manual against one recorded commit and produce a new dated result.
 ## Resolved Regressions And Scope Boundary
 
 The first execution of this checker on 2026-07-10 found and reopened two Phase
-A safety regressions. The current remediation candidate corrects them; they are
-closed only after clean committed verification and same-source Ubuntu CI are
-recorded in the dated report:
+A safety regressions. Clean committed verification and same-source Ubuntu CI
+confirmed the technical corrections. The dated report remains at A12 pending
+renewed owner/lead sign-off for the material safety changes:
 
 - A5/A6 replaced the stale read/check/unlink algorithm with a persistent,
   descriptor-held v2 lock: Windows uses a non-blocking byte-range lock and
@@ -1332,7 +1332,10 @@ Steps:
    need not embed its own hash; `HEAD`/`origin/master` identify it at run time.
 5. Open `docs/release-evidence/2026-07-phase-a-tracker.md` and confirm its latest
    audit points to the new report while the signed historical table is intact.
-6. Confirm A0 through A12 are all `PASS` in the new report.
+6. Confirm A0 through A11 are `PASS` in the new report. A12 may become `PASS`
+   only after renewed owner/lead acceptance is recorded; while it says
+   `PENDING SIGN-OFF`, technical verification is complete but Phase A is not
+   administratively re-signed.
 7. Run the global gate commands.
 8. Run the final shape checks:
 
@@ -1357,9 +1360,10 @@ if ($trackedDist.Count -ne 0) {
     throw "A12: dashboard/dist contains tracked files"
 }
 
-$pendingSignoff = @(rg -n 'SIGN-OFF PENDING|owner/lead sign-off pending' `
+$pendingSignoff = @(rg -ni 're-sign-off\s+pending|sign-off\s+pending|owner/lead.*pending' `
     docs/release-evidence/2026-07-phase-a-complete.md `
-    docs/release-evidence/2026-07-phase-a-tracker.md)
+    docs/release-evidence/2026-07-phase-a-tracker.md `
+    docs/release-evidence/2026-07-10-phase-a-reverification.md)
 $pendingExit = $LASTEXITCODE
 if ($pendingExit -notin 0, 1) {
     throw "A12 sign-off search failed with exit code $pendingExit"
@@ -1467,17 +1471,19 @@ template. Do not overwrite the signed Phase A completion evidence.
 
 Verifier: <name/handle>
 Reviewer: <name/handle>
-Started UTC: <ISO-8601>
-Finished UTC: <ISO-8601>
-Transcript: <durable artifact path/link>
+Initial audit started UTC: <ISO-8601>
+Formal clean-source replay started/finished UTC: <ISO-8601 values>
+Raw transcript: <durable artifact path/link>
+Condensed result record: <durable artifact path/link>
 
 ## Immutable Source
 
 - branch: master
-- full commit: <40-character SHA>
-- origin/master at start: <40-character SHA>
-- origin/master at finish: <40-character SHA>
-- clean at start/end: yes/no
+- tested-source full commit: <40-character SHA>
+- tested-source origin/master at start/finish: <40-character SHA>
+- tested source clean at start/end: yes/no
+- evidence commit: do not self-embed; resolve the later containing commit with
+  `git log -1 --format=%H -- <this report path>` during A12
 
 ## Environment
 

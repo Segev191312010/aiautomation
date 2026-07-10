@@ -1,0 +1,846 @@
+**********************
+Windows PowerShell transcript start
+Start time: 20260710151821
+Username: <redacted-user>
+RunAs User: <redacted-user>
+Configuration Name:
+Machine: <redacted-host> (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -Command try { [Console]::OutputEncoding=[System.Text.Encoding]::UTF8 } catch {}
+$ErrorActionPreference = 'Stop'
+$root = '<clean-worktree>'
+$rawPath = '<workspace>\docs\release-evidence\2026-07-10-phase-a-reverification-raw.log'
+$probeDll = Join-Path $root 'backend\fake-phase-a-probe.dll'
+function Assert-NativeSuccess([string] $label) {
+    if ($LASTEXITCODE -ne 0) { throw "$label failed with native exit code $LASTEXITCODE" }
+}
+Start-Transcript -Path $rawPath -Force -ErrorAction Stop
+try {
+    "raw_replay_started_utc=$((Get-Date).ToUniversalTime().ToString('o'))"
+    'source_prep=detached clean worktree because master is checked out in the primary worktree'
+    $initialDirty = @(git status --porcelain=v1 --untracked-files=all)
+    Assert-NativeSuccess 'initial git status'
+    if ($initialDirty.Count -ne 0) { $initialDirty; throw 'initial worktree dirty' }
+    $head = (git rev-parse HEAD).Trim()
+    Assert-NativeSuccess 'resolve HEAD'
+    $originHead = (git rev-parse origin/master).Trim()
+    Assert-NativeSuccess 'resolve origin/master'
+    if ($head -ne 'e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1') { throw "wrong HEAD: $head" }
+    if ($head -ne $originHead) { throw "HEAD/origin mismatch: $head $originHead" }
+    git status --short --branch
+    Assert-NativeSuccess 'branch status'
+    git show -s --format='%H %cI %s' HEAD
+    Assert-NativeSuccess 'source show'
+    [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+    [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    $PSVersionTable.PSVersion.ToString()
+    python --version
+    Assert-NativeSuccess 'python version'
+    node --version
+    Assert-NativeSuccess 'node version'
+    npm --version
+    Assert-NativeSuccess 'npm version'
+    git --version
+    Assert-NativeSuccess 'git version'
+    rg --version | Select-Object -First 1
+    Assert-NativeSuccess 'rg version'
+
+    Push-Location dashboard
+    try {
+        npm ci
+        Assert-NativeSuccess 'npm ci'
+        npm ls --depth=0
+        Assert-NativeSuccess 'npm dependency inventory'
+    } finally { Pop-Location }
+
+    python scripts/check_workspace_hygiene.py
+    Assert-NativeSuccess 'clean hygiene'
+    try {
+        New-Item -ItemType File -Path $probeDll -ErrorAction Stop | Out-Null
+        python scripts/check_workspace_hygiene.py
+        if ($LASTEXITCODE -ne 1) { throw 'fake DLL probe did not fail with exit 1' }
+        'fake_dll_detection=PASS'
+    } finally {
+        if (Test-Path -LiteralPath $probeDll) { Remove-Item -LiteralPath $probeDll -Force }
+    }
+
+    rg -n -e '--workers' -e 'WORKERS' -e 'uvicorn main:app' -e 'uvicorn.run' -e 'gunicorn' Dockerfile backend/Dockerfile docker-compose.yml README.md docs/DEPLOYMENT.md sessions/phase2-paper-soak-runbook.md backend/main.py .github/workflows/ci.yml dashboard/nginx.conf
+    Assert-NativeSuccess 'launch inventory'
+
+    Push-Location backend
+    try {
+        python -m py_compile runtime_lock.py main.py
+        Assert-NativeSuccess 'A5 compile'
+        python -m pytest tests/test_launch_manifests.py -q
+        Assert-NativeSuccess 'A4 launch manifests'
+        python -m pytest tests/test_runtime_lock.py -q -W error
+        Assert-NativeSuccess 'A6 runtime lock'
+        python -m pytest tests/test_startup_runtime_lock.py -q -W error
+        Assert-NativeSuccess 'A6 startup lock'
+        python -m pytest tests/test_startup_config.py tests/test_ai_learning.py tests/test_ai_replay.py -q
+        Assert-NativeSuccess 'A7 targeted'
+        python -m pytest tests/test_ai_capability.py tests/test_startup_config.py tests/test_api_contracts.py tests/test_autopilot_mode_semantics.py -q
+        Assert-NativeSuccess 'A8 targeted'
+        python -m pytest tests/test_product_surface.py -q
+        Assert-NativeSuccess 'A10 product surface'
+    } finally { Pop-Location }
+
+    Push-Location dashboard
+    try {
+        npm run typecheck
+        Assert-NativeSuccess 'targeted typecheck'
+        npx vitest run src/components/autopilot/__tests__/autopilot.test.tsx
+        Assert-NativeSuccess 'targeted autopilot UI'
+    } finally { Pop-Location }
+
+    $retired = @(rg -n 'claude-sonnet-4-20250514|claude-3-5-sonnet-20240620|claude-3-haiku-20240307' backend dashboard/src --glob '!backend/ai_capability.py' --glob '!backend/tests/**' --glob '!dashboard/src/**/__tests__/**')
+    if ($LASTEXITCODE -notin 0,1) { throw 'retired model scan error' }
+    if ($retired.Count) { $retired; throw 'active retired model hit' }
+    'retired_model_scan=PASS'
+    $workers = @(rg --pcre2 -n -e '--workers(?:=|\s+)(?:[2-9]|[1-9][0-9]+)\b' -e '(?:^|\s)-w(?:=|\s+)(?:[2-9]|[1-9][0-9]+)\b' -e 'WEB_CONCURRENCY|UVICORN_WORKERS' Dockerfile backend/Dockerfile docker-compose.yml README.md docs/DEPLOYMENT.md sessions/phase2-paper-soak-runbook.md)
+    if ($LASTEXITCODE -notin 0,1) { throw 'multi-worker scan error' }
+    if ($workers.Count) { $workers; throw 'multi-worker hit' }
+    'multi_worker_scan=PASS'
+    $surface = @(rg -n 'cd frontend|COPY frontend|frontend/package|frontend-build|serve_legacy_frontend|StaticFiles' README.md DOCUMENTATION.md docs/DEPLOYMENT.md .github backend dashboard/src --glob '!backend/tests/**' --glob '!dashboard/src/**/__tests__/**')
+    if ($LASTEXITCODE -notin 0,1) { throw 'surface scan error' }
+    if ($surface.Count) { $surface; throw 'stale surface hit' }
+    'stale_surface_scan=PASS'
+
+    $archive = (git rev-parse 'archive/aiautomation-v2-2026-07-a10^{commit}').Trim()
+    Assert-NativeSuccess 'archive tag'
+    "archive_tag_target=$archive"
+    git ls-remote origin 'refs/tags/archive/aiautomation-v2-2026-07-a10*'
+    Assert-NativeSuccess 'remote archive tag'
+
+    Push-Location backend
+    try {
+        python -m pytest tests/ -q
+        Assert-NativeSuccess 'full backend pytest'
+    } finally { Pop-Location }
+    Push-Location dashboard
+    try {
+        npm run typecheck
+        Assert-NativeSuccess 'full dashboard typecheck'
+        npm run build
+        Assert-NativeSuccess 'full dashboard build'
+        npx vitest run
+        Assert-NativeSuccess 'full dashboard vitest'
+    } finally { Pop-Location }
+    python scripts/check_workspace_hygiene.py
+    Assert-NativeSuccess 'final hygiene'
+
+    $content = Get-Content -Raw docs/PHASE_A_VERIFICATION.md
+    $blocks = [regex]::Matches($content, '(?ms)^\x60\x60\x60powershell\r?\n(.*?)^\x60\x60\x60\s*$')
+    $parseErrors = 0
+    foreach ($block in $blocks) {
+        $tokens = $null
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($block.Groups[1].Value, [ref]$tokens, [ref]$errors)
+        $parseErrors += $errors.Count
+    }
+    "powershell_blocks=$($blocks.Count)"
+    "powershell_parse_errors=$parseErrors"
+    if ($parseErrors -ne 0) { throw 'manual PowerShell parse failure' }
+
+    if (Test-Path -LiteralPath aiautomation) { throw 'aiautomation present' }
+    if (Test-Path -LiteralPath frontend) { throw 'frontend present' }
+    $trackedDist = @(git ls-files dashboard/dist)
+    Assert-NativeSuccess 'tracked dist query'
+    if ($trackedDist.Count) { $trackedDist; throw 'tracked dist found' }
+    'workspace_shape=PASS'
+    $finalHead = (git rev-parse HEAD).Trim()
+    Assert-NativeSuccess 'final HEAD'
+    $finalOrigin = (git rev-parse origin/master).Trim()
+    Assert-NativeSuccess 'final origin'
+    $finalDirty = @(git status --porcelain=v1 --untracked-files=all)
+    Assert-NativeSuccess 'final status'
+    if ($finalHead -ne $head) { throw 'HEAD changed' }
+    if ($finalOrigin -ne $originHead) { throw 'origin/master changed' }
+    if ($finalDirty.Count) { $finalDirty; throw 'final worktree dirty' }
+    "final_head=$finalHead"
+    "final_origin_master=$finalOrigin"
+    'final_porcelain=empty'
+    "raw_replay_finished_utc=$((Get-Date).ToUniversalTime().ToString('o'))"
+} finally {
+    Stop-Transcript
+}
+Process ID: 38544
+PSVersion: 5.1.26100.8655
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.8655
+BuildVersion: 10.0.26100.8655
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Transcript started, output file is <workspace>\docs\release-evidence\2026-07-10-phase-a-reverification-raw.log
+raw_replay_started_utc=2026-07-10T12:18:21.6492977Z
+source_prep=detached clean worktree because master is checked out in the primary worktree
+
+
+Microsoft Windows 10.0.26200
+X64
+5.1.26100.8655
+
+
+
+
+ripgrep 15.1.0 (rev af60c2de9d)
+
+
+
+
+fake_dll_detection=PASS
+
+
+
+
+
+
+
+
+
+
+retired_model_scan=PASS
+multi_worker_scan=PASS
+stale_surface_scan=PASS
+archive_tag_target=16280057ab04bee97904e9c59b9a5143a58bb673
+
+
+
+
+
+
+powershell_blocks=33
+powershell_parse_errors=0
+workspace_shape=PASS
+final_head=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+final_origin_master=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+final_porcelain=empty
+raw_replay_finished_utc=2026-07-10T12:19:41.5587826Z
+**********************
+Windows PowerShell transcript end
+End time: 20260710151941
+**********************
+
+
+===== EXPLICIT NATIVE OUTPUT SUPPLEMENT =====
+supplement_started_utc=2026-07-10T12:20:58.0778915Z
+
+>>> git status initial
+## HEAD (no branch)
+exit_code=0
+
+>>> git HEAD
+e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+exit_code=0
+
+>>> git origin master
+e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+exit_code=0
+
+>>> python version
+Python 3.12.10
+exit_code=0
+
+>>> node version
+v24.13.1
+exit_code=0
+
+>>> npm version
+11.8.0
+exit_code=0
+
+>>> git version
+git version 2.53.0.windows.1
+exit_code=0
+
+>>> rg version
+ripgrep 15.1.0 (rev af60c2de9d)
+
+features:+pcre2
+simd(compile):+SSE2,-SSSE3,-AVX2
+simd(runtime):+SSE2,+SSSE3,+AVX2
+
+PCRE2 10.45 is available (JIT is available)
+exit_code=0
+
+>>> npm ci
+
+added 234 packages, and audited 235 packages in 7s
+
+46 packages are looking for funding
+  run `npm fund` for details
+
+10 vulnerabilities (1 low, 4 moderate, 4 high, 1 critical)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+exit_code=0
+
+>>> npm dependency inventory
+trading-dashboard@2.0.0 <clean-worktree>\dashboard
++-- @testing-library/jest-dom@6.9.1
++-- @testing-library/react@16.3.2
++-- @types/react-dom@18.3.7
++-- @types/react@18.3.28
++-- @vitejs/plugin-react@4.7.0
++-- autoprefixer@10.4.24
++-- clsx@2.1.1
++-- date-fns@3.6.0
++-- jsdom@29.0.1
++-- lightweight-charts@4.2.3
++-- postcss@8.5.6
++-- react-dom@18.3.1
++-- react-router-dom@6.30.3
++-- react@18.3.1
++-- tailwindcss@3.4.19
++-- typescript@5.9.3
++-- vite@5.4.21
++-- vitest@4.0.18
++-- zod@4.3.6
+`-- zustand@4.5.7
+
+exit_code=0
+
+>>> workspace hygiene clean
+Workspace hygiene OK: no forbidden binary artifacts found.
+exit_code=0
+
+>>> fake DLL hygiene probe (expected exit 1)
+Workspace hygiene failed. Move these binary artifacts out of the repo:
+- backend/fake-phase-a-probe.dll
+exit_code=1
+
+>>> A5 compile
+exit_code=0
+
+>>> A4 launch manifests
+....                                                                     [100%]
+4 passed in 0.13s
+exit_code=0
+
+>>> A6 runtime lock warnings-as-errors
+......................                                                   [100%]
+22 passed in 1.84s
+exit_code=0
+
+>>> A6 startup lock warnings-as-errors
+....                                                                     [100%]
+4 passed in 0.84s
+exit_code=0
+
+>>> A7 targeted
+.........................................                                [100%]
+41 passed in 4.93s
+exit_code=0
+
+>>> A8 targeted
+........................................................................ [ 98%]
+.                                                                        [100%]
+73 passed in 0.86s
+exit_code=0
+
+>>> A10 product surface
+..                                                                       [100%]
+2 passed in 0.77s
+exit_code=0
+
+>>> targeted dashboard typecheck
+
+> trading-dashboard@2.0.0 typecheck
+> tsc --noEmit
+
+exit_code=0
+
+>>> targeted Autopilot UI
+
+ RUN  v4.0.18 C:/Users/<redacted-user>/<redacted-home>/phase-a-verify-e9ea6de/dashboard
+
+ ✓ src/components/autopilot/__tests__/autopilot.test.tsx (14 tests) 208ms
+
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Start at  15:21:25
+   Duration  1.30s (transform 94ms, setup 113ms, import 120ms, tests 208ms, environment 749ms)
+
+exit_code=0
+
+>>> archive tag local
+16280057ab04bee97904e9c59b9a5143a58bb673
+exit_code=0
+
+>>> archive tag remote
+16280057ab04bee97904e9c59b9a5143a58bb673	refs/tags/archive/aiautomation-v2-2026-07-a10
+exit_code=0
+
+>>> full backend pytest
+........................................................................ [ 11%]
+........................................................................ [ 22%]
+........................................................................ [ 33%]
+........................................................................ [ 45%]
+........................................................................ [ 56%]
+........................................................................ [ 67%]
+........................................................................ [ 78%]
+........................................................................ [ 90%]
+................................................................         [100%]
+640 passed in 29.78s
+exit_code=0
+
+>>> full dashboard typecheck
+
+> trading-dashboard@2.0.0 typecheck
+> tsc --noEmit
+
+exit_code=0
+
+>>> full dashboard build
+
+> trading-dashboard@2.0.0 build
+> tsc && vite build
+
+vite v5.4.21 building for production...
+transforming...
+✓ 610 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                               1.06 kB │ gzip:  0.54 kB
+dist/assets/index-B7Wq1UT2.css               91.00 kB │ gzip: 15.99 kB
+dist/assets/react-CYV6ibIS.js                 0.07 kB │ gzip:  0.09 kB │ map:     0.10 kB
+dist/assets/PageErrorBanner-kTi924BH.js       0.53 kB │ gzip:  0.38 kB │ map:     1.12 kB
+dist/assets/simulation-DEm7Jlru.js            0.59 kB │ gzip:  0.31 kB │ map:     2.19 kB
+dist/assets/TradeBotTabs-R0pMuieV.js          1.02 kB │ gzip:  0.60 kB │ map:     2.47 kB
+dist/assets/conditionHelpers-DZZ3Eyvm.js      1.04 kB │ gzip:  0.53 kB │ map:     3.32 kB
+dist/assets/ChartsPage-CX6NgcWM.js            2.68 kB │ gzip:  1.09 kB │ map:     7.21 kB
+dist/assets/state-DIdr22j_.js                 3.64 kB │ gzip:  1.61 kB │ map:    14.51 kB
+dist/assets/ConfirmModal-B2zAgEhr.js          4.11 kB │ gzip:  1.73 kB │ map:    11.30 kB
+dist/assets/index-BCxmvmbi.js                 4.33 kB │ gzip:  1.06 kB │ map:    10.42 kB
+dist/assets/SettingsPage-D9C8DWSy.js         10.59 kB │ gzip:  3.01 kB │ map:    25.07 kB
+dist/assets/AlertForm-VvKcr6f7.js            10.93 kB │ gzip:  3.65 kB │ map:    32.87 kB
+dist/assets/AlertsPage-CZMNLPJQ.js           11.53 kB │ gzip:  3.44 kB │ map:    30.73 kB
+dist/assets/AutopilotRuleLab-CvsYP2XP.js     14.31 kB │ gzip:  3.27 kB │ map:    35.01 kB
+dist/assets/SimulationPage-Dvs09sFt.js       15.94 kB │ gzip:  4.05 kB │ map:    40.34 kB
+dist/assets/RulesPage-WiqrYALN.js            20.84 kB │ gzip:  4.68 kB │ map:    52.84 kB
+dist/assets/SwingDashboardPage-B5jaZoWs.js   23.96 kB │ gzip:  5.71 kB │ map:    62.73 kB
+dist/assets/MarketRotationPage-Z_FTaZ41.js   24.35 kB │ gzip:  7.05 kB │ map:    66.16 kB
+dist/assets/TradeBotPage-C-fqxtQz.js         32.84 kB │ gzip:  8.86 kB │ map:    85.86 kB
+dist/assets/AnalyticsPage-Do-akxrW.js        32.99 kB │ gzip:  8.80 kB │ map:    89.27 kB
+dist/assets/BacktestPage-hc9CfY6k.js         39.02 kB │ gzip:  9.19 kB │ map:    94.46 kB
+dist/assets/MarketPage-CTgz18_u.js           43.15 kB │ gzip: 10.65 kB │ map:   128.28 kB
+dist/assets/ScreenerPage-i0S7O5Ne.js         45.78 kB │ gzip: 10.78 kB │ map:   120.90 kB
+dist/assets/AutopilotPage-DWmQg0YM.js        49.94 kB │ gzip: 11.72 kB │ map:   126.31 kB
+dist/assets/StockProfilePage-C1Asmwvd.js     82.59 kB │ gzip: 17.97 kB │ map:   220.93 kB
+dist/assets/charts-BUSuRXK4.js              162.46 kB │ gzip: 51.84 kB │ map:   409.36 kB
+dist/assets/index-DzhWCmIb.js               165.67 kB │ gzip: 47.47 kB │ map:   593.98 kB
+dist/assets/vendor-BPz8RYOC.js              248.75 kB │ gzip: 75.88 kB │ map: 1,214.27 kB
+✓ built in 2.30s
+exit_code=0
+
+>>> full dashboard vitest
+
+ RUN  v4.0.18 C:/Users/<redacted-user>/<redacted-home>/phase-a-verify-e9ea6de/dashboard
+
+ ✓ src/utils/__tests__/drawingEngine.test.ts (28 tests) 7ms
+ ✓ src/utils/__tests__/indicators.spec.ts (42 tests) 10ms
+ ✓ src/utils/__tests__/formatters.test.ts (44 tests) 28ms
+ ✓ src/services/api/__tests__/client.spec.ts (8 tests) 66ms
+ ✓ src/utils/__tests__/indicators.perf.test.ts (15 tests) 129ms
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > reconnects after an unexpected close
+[WS] connected
+
+
+===== NATIVE OUTPUT SUPPLEMENT CONTINUATION =====
+The first supplement pipeline treated intentional Vitest stderr diagnostics as a terminating PowerShell NativeCommandError. This was a capture-harness interruption, not a test failure. The clean raw replay above had already completed. Re-running the remaining command with non-terminating stderr capture.
+
+ RUN  v4.0.18 C:/Users/<redacted-user>/<redacted-home>/phase-a-verify-e9ea6de/dashboard
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > reconnects after an unexpected close
+[WS] connected
+
+node.exe : stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) >
+reconnects after an unexpected close
+At line:1 char:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (stderr...nexpected close:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+[WS] disconnected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > reconnects after an unexpected close
+[WS] connected
+
+ ✓ src/services/api/__tests__/client.spec.ts (8 tests) 59ms
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) >
+reconnects after an unexpected close
+[WS] disconnected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps reconnecting on repeated closes (every ~3s)
+[WS] connected
+
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps
+reconnecting on repeated closes (every ~3s)
+[WS] disconnected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps reconnecting on repeated closes (every ~3s)
+[WS] connected
+
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps
+reconnecting on repeated closes (every ~3s)
+[WS] disconnected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps reconnecting on repeated closes (every ~3s)
+[WS] connected
+
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps
+reconnecting on repeated closes (every ~3s)
+[WS] disconnected
+
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps
+reconnecting on repeated closes (every ~3s)
+[WS] disconnected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > keeps reconnecting on repeated closes (every ~3s)
+[WS] connected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > clean disconnect does NOT schedule a reconnect
+[WS] connected
+
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) > clean
+disconnect does NOT schedule a reconnect
+[WS] disconnected
+
+stdout | src/services/__tests__/ws.test.ts > WebSocketService (general) > disconnect stops the ping cadence (no sends after close)
+[WS] connected
+
+stderr | src/services/__tests__/ws.test.ts > WebSocketService (general) >
+disconnect stops the ping cadence (no sends after close)
+[WS] disconnected
+
+ ✓ src/services/__tests__/ws.test.ts (7 tests) 78ms
+ ✓ src/utils/__tests__/indicators.perf.test.ts (15 tests) 116ms
+ ✓ src/utils/__tests__/formatters.test.ts (44 tests) 26ms
+ ✓ src/components/common/__tests__/ConfirmModal.test.tsx (13 tests) 205ms
+ ✓ src/components/common/__tests__/AsyncStateWrapper.test.tsx (18 tests) 44ms
+ ✓ src/components/auth/__tests__/AuthGuard.test.tsx (2 tests) 63ms
+ ✓ src/components/autopilot/__tests__/autopilot.test.tsx (14 tests) 499ms
+ ✓ src/components/tradebot/__tests__/QuickOrderForm.test.tsx (3 tests) 286ms
+ ✓ src/pages/__tests__/RulesPage.test.tsx (3 tests) 453ms
+ ✓ src/pages/__tests__/MarketPage.test.tsx (14 tests) 317ms
+ ✓ src/pages/__tests__/AnalyticsPage.test.tsx (4 tests) 426ms
+ ✓ src/pages/__tests__/BacktestPage.test.tsx (15 tests) 461ms
+ ✓ src/pages/__tests__/Dashboard.test.tsx (8 tests) 454ms
+ ✓ src/pages/__tests__/TradeBotPage.test.tsx (9 tests) 955ms
+ ✓ src/utils/__tests__/indicators.spec.ts (42 tests) 11ms
+ ✓ src/services/api/__tests__/trading.spec.ts (1 test) 15ms
+ ✓ src/store/__tests__/marketWatchlistPersistence.test.ts (4 tests) 28ms
+ ✓ src/store/__tests__/alertStore.test.ts (62 tests) 19ms
+ ✓ src/utils/__tests__/drawingEngine.test.ts (28 tests) 6ms
+ ✓ src/utils/__tests__/heikinAshi.test.ts (6 tests) 4ms
+ ✓ src/utils/__tests__/opportunitySignals.test.ts (4 tests) 3ms
+ ✓ src/utils/__tests__/validateSymbol.test.ts (13 tests) 3ms
+ ✓ src/components/backtest/__tests__/backtest.test.ts (8 tests) 5ms
+ ✓ src/components/screener/__tests__/screener.test.ts (20 tests) 6ms
+ ✓ src/store/__tests__/marketLiveQuote.test.ts (2 tests) 2ms
+ ✓ src/hooks/__tests__/useMarketData.test.ts (5 tests) 1ms
+
+ Test Files  27 passed (27)
+      Tests  372 passed (372)
+   Start at  15:22:30
+   Duration  5.03s (transform 4.57s, setup 4.28s, import 6.76s, tests 4.55s, environment 40.34s)
+
+full_dashboard_vitest_exit_code=0
+Workspace hygiene OK: no forbidden binary artifacts found.
+final_hygiene_exit_code=0
+final_status_exit_code=0
+final_head=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+final_origin_master=e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1
+supplement_continuation_finished_utc=2026-07-10T12:22:36.4685860Z
+
+===== PYTHON DEPENDENCY RESOLUTION SUPPLEMENT =====
+>>> python -m pip install -r backend/requirements.txt
+Requirement already satisfied: fastapi>=0.111.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 1)) (0.129.0)
+Requirement already satisfied: uvicorn>=0.29.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from uvicorn[standard]>=0.29.0->-r backend/requirements.txt (line 2)) (0.41.0)
+Requirement already satisfied: ib_insync>=0.9.86 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 3)) (0.9.86)
+Requirement already satisfied: pandas>=2.2.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 4)) (2.3.3)
+Requirement already satisfied: numpy>=1.26.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 5)) (2.4.2)
+Requirement already satisfied: python-dotenv>=1.0.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 6)) (1.2.1)
+Requirement already satisfied: pydantic>=2.7.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 7)) (2.12.5)
+Requirement already satisfied: aiosqlite>=0.20.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 8)) (0.22.1)
+Requirement already satisfied: aiofiles>=23.2.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 9)) (25.1.0)
+Requirement already satisfied: yfinance>=0.2.40 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 10)) (1.2.0)
+Requirement already satisfied: lxml>=5.2.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 11)) (6.0.2)
+Requirement already satisfied: python-jose>=3.3.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (3.5.0)
+Requirement already satisfied: bcrypt>=4.0.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 13)) (5.0.0)
+Requirement already satisfied: httpx>=0.27.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 14)) (0.28.1)
+Requirement already satisfied: pytest>=8.0.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 15)) (9.0.2)
+Requirement already satisfied: pytest-asyncio>=0.23.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 16)) (1.3.0)
+Requirement already satisfied: anthropic>=0.40 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from -r backend/requirements.txt (line 18)) (0.107.1)
+Requirement already satisfied: starlette<1.0.0,>=0.40.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from fastapi>=0.111.0->-r backend/requirements.txt (line 1)) (0.52.1)
+Requirement already satisfied: typing-extensions>=4.8.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from fastapi>=0.111.0->-r backend/requirements.txt (line 1)) (4.15.0)
+Requirement already satisfied: typing-inspection>=0.4.2 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from fastapi>=0.111.0->-r backend/requirements.txt (line 1)) (0.4.2)
+Requirement already satisfied: annotated-doc>=0.0.2 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from fastapi>=0.111.0->-r backend/requirements.txt (line 1)) (0.0.4)
+Requirement already satisfied: click>=7.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from uvicorn>=0.29.0->uvicorn[standard]>=0.29.0->-r backend/requirements.txt (line 2)) (8.3.1)
+Requirement already satisfied: h11>=0.8 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from uvicorn>=0.29.0->uvicorn[standard]>=0.29.0->-r backend/requirements.txt (line 2)) (0.16.0)
+Requirement already satisfied: eventkit in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from ib_insync>=0.9.86->-r backend/requirements.txt (line 3)) (1.0.3)
+Requirement already satisfied: nest-asyncio in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from ib_insync>=0.9.86->-r backend/requirements.txt (line 3)) (1.6.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pandas>=2.2.0->-r backend/requirements.txt (line 4)) (2.9.0.post0)
+Requirement already satisfied: pytz>=2020.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pandas>=2.2.0->-r backend/requirements.txt (line 4)) (2025.2)
+Requirement already satisfied: tzdata>=2022.7 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pandas>=2.2.0->-r backend/requirements.txt (line 4)) (2025.3)
+Requirement already satisfied: annotated-types>=0.6.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pydantic>=2.7.0->-r backend/requirements.txt (line 7)) (0.7.0)
+Requirement already satisfied: pydantic-core==2.41.5 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pydantic>=2.7.0->-r backend/requirements.txt (line 7)) (2.41.5)
+Requirement already satisfied: requests>=2.31 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (2.32.5)
+Requirement already satisfied: multitasking>=0.0.7 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (0.0.12)
+Requirement already satisfied: platformdirs>=2.0.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (4.9.2)
+Requirement already satisfied: frozendict>=2.3.4 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (2.4.7)
+Requirement already satisfied: peewee>=3.16.2 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (4.0.0)
+Requirement already satisfied: beautifulsoup4>=4.11.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (4.14.3)
+Requirement already satisfied: curl_cffi<0.14,>=0.7 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (0.13.0)
+Requirement already satisfied: protobuf>=3.19.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (6.33.5)
+Requirement already satisfied: websockets>=13.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (16.0)
+Requirement already satisfied: ecdsa!=0.15 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from python-jose>=3.3.0->python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (0.19.1)
+Requirement already satisfied: rsa!=4.1.1,!=4.4,<5.0,>=4.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from python-jose>=3.3.0->python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (4.9.1)
+Requirement already satisfied: pyasn1>=0.5.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from python-jose>=3.3.0->python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (0.6.2)
+Requirement already satisfied: anyio in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from httpx>=0.27.0->-r backend/requirements.txt (line 14)) (4.12.1)
+Requirement already satisfied: certifi in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from httpx>=0.27.0->-r backend/requirements.txt (line 14)) (2026.1.4)
+Requirement already satisfied: httpcore==1.* in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from httpx>=0.27.0->-r backend/requirements.txt (line 14)) (1.0.9)
+Requirement already satisfied: idna in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from httpx>=0.27.0->-r backend/requirements.txt (line 14)) (3.11)
+Requirement already satisfied: colorama>=0.4 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pytest>=8.0.0->-r backend/requirements.txt (line 15)) (0.4.6)
+Requirement already satisfied: iniconfig>=1.0.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pytest>=8.0.0->-r backend/requirements.txt (line 15)) (2.3.0)
+Requirement already satisfied: packaging>=22 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pytest>=8.0.0->-r backend/requirements.txt (line 15)) (26.0)
+Requirement already satisfied: pluggy<2,>=1.5 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pytest>=8.0.0->-r backend/requirements.txt (line 15)) (1.6.0)
+Requirement already satisfied: pygments>=2.7.2 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from pytest>=8.0.0->-r backend/requirements.txt (line 15)) (2.19.2)
+Requirement already satisfied: distro<2,>=1.7.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from anthropic>=0.40->-r backend/requirements.txt (line 18)) (1.9.0)
+Requirement already satisfied: docstring-parser<1,>=0.15 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from anthropic>=0.40->-r backend/requirements.txt (line 18)) (0.18.0)
+Requirement already satisfied: jiter<1,>=0.4.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from anthropic>=0.40->-r backend/requirements.txt (line 18)) (0.13.0)
+Requirement already satisfied: sniffio in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from anthropic>=0.40->-r backend/requirements.txt (line 18)) (1.3.1)
+Requirement already satisfied: cryptography>=3.4.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (46.0.5)
+Requirement already satisfied: httptools>=0.6.3 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from uvicorn[standard]>=0.29.0->-r backend/requirements.txt (line 2)) (0.7.1)
+Requirement already satisfied: pyyaml>=5.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from uvicorn[standard]>=0.29.0->-r backend/requirements.txt (line 2)) (6.0.3)
+Requirement already satisfied: watchfiles>=0.20 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from uvicorn[standard]>=0.29.0->-r backend/requirements.txt (line 2)) (1.1.1)
+Requirement already satisfied: soupsieve>=1.6.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from beautifulsoup4>=4.11.1->yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (2.8.3)
+Requirement already satisfied: cffi>=2.0.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from cryptography>=3.4.0->python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (2.0.0)
+Requirement already satisfied: six>=1.9.0 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from ecdsa!=0.15->python-jose>=3.3.0->python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (1.17.0)
+Requirement already satisfied: charset_normalizer<4,>=2 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from requests>=2.31->yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (3.4.4)
+Requirement already satisfied: urllib3<3,>=1.21.1 in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from requests>=2.31->yfinance>=0.2.40->-r backend/requirements.txt (line 10)) (2.6.3)
+Requirement already satisfied: pycparser in <user-home>\appdata\local\programs\python\python312\lib\site-packages (from cffi>=2.0.0->cryptography>=3.4.0->python-jose[cryptography]>=3.3.0->-r backend/requirements.txt (line 12)) (3.0)
+python.exe :
+At line:26 char:14
++ ... pipInstall=(& python -m pip install -r backend/requirements.txt 2>&1  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+[notice] A new release of pip is available: 25.0.1 -> 26.1.2
+[notice] To update, run: python.exe -m pip install --upgrade pip
+
+exit_code=0
+>>> python -m pip freeze
+accelerate==1.12.0
+aider-install==0.2.0
+aiofiles==25.1.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.3
+aiosignal==1.4.0
+aiosqlite==0.22.1
+alpha_vantage==3.0.0
+altair==6.0.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.107.1
+anyio==4.12.1
+asyncio-mqtt==0.16.2
+attrs==25.4.0
+bcrypt==5.0.0
+beautifulsoup4==4.14.3
+blinker==1.9.0
+blis==1.3.3
+cachetools==6.2.6
+catalogue==2.0.10
+certifi==2026.1.4
+cffi==2.0.0
+charset-normalizer==3.4.4
+choreographer==1.2.1
+click==8.3.1
+cloudpathlib==0.23.0
+colorama==0.4.6
+confection==0.1.5
+contourpy==1.3.3
+cryptography==46.0.5
+curl_cffi==0.13.0
+cycler==0.12.1
+cymem==2.0.13
+-e git+https://github.com/0xemmkty/QuantMuse.git@f86ede35a81830ab6aded9dc745eb291ccd3efe1#egg=data_service
+dataclasses-json==0.6.7
+dateparser==1.3.0
+defusedxml==0.7.1
+distro==1.9.0
+docstring_parser==0.18.0
+ecdsa==0.19.1
+et_xmlfile==2.0.0
+eventkit==1.0.3
+fastapi==0.129.0
+filelock==3.24.3
+fonttools==4.61.1
+frozendict==2.4.7
+frozenlist==1.8.0
+fsspec==2026.2.0
+git-filter-repo==2.47.0
+gitdb==4.0.12
+GitPython==3.1.46
+greenlet==3.3.2
+h11==0.16.0
+hf-xet==1.2.0
+httpcore==1.0.9
+httptools==0.7.1
+httpx==0.28.1
+httpx-sse==0.4.3
+huggingface_hub==1.4.1
+ib-insync==0.9.86
+idna==3.11
+iniconfig==2.3.0
+Jinja2==3.1.6
+jiter==0.13.0
+joblib==1.5.3
+jsonpatch==1.33
+jsonpointer==3.0.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+kaleido==1.2.0
+kiwisolver==1.4.9
+langchain==1.2.10
+langchain-classic==1.0.1
+langchain-community==0.4.1
+langchain-core==1.2.14
+langchain-openai==1.1.10
+langchain-text-splitters==1.1.1
+langgraph==1.0.9
+langgraph-checkpoint==4.0.0
+langgraph-prebuilt==1.0.8
+langgraph-sdk==0.3.8
+langsmith==0.7.6
+logistro==2.0.1
+lxml==6.0.2
+markdown-it-py==4.0.0
+MarkupSafe==3.0.3
+marshmallow==3.26.2
+matplotlib==3.10.8
+mdurl==0.1.2
+mpmath==1.3.0
+multidict==6.7.1
+multitasking==0.0.12
+murmurhash==1.0.15
+mypy_extensions==1.1.0
+narwhals==2.16.0
+nest-asyncio==1.6.0
+networkx==3.6.1
+nltk==3.9.2
+numpy==2.4.2
+openai==2.21.0
+openpyxl==3.1.5
+orjson==3.11.7
+ormsgpack==1.12.2
+packaging==26.0
+paho-mqtt==2.1.0
+pandas==2.3.3
+passlib==1.7.4
+peewee==4.0.0
+pillow==12.1.1
+platformdirs==4.9.2
+plotly==6.5.2
+pluggy==1.6.0
+preshed==3.0.12
+propcache==0.4.1
+protobuf==6.33.5
+psutil==7.2.2
+pyarrow==23.0.1
+pyasn1==0.6.2
+pycparser==3.0
+pycryptodome==3.23.0
+pydantic==2.12.5
+pydantic-settings==2.13.1
+pydantic_core==2.41.5
+pydeck==0.9.1
+Pygments==2.19.2
+pyparsing==3.3.2
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.1
+python-jose==3.5.0
+python_binance==1.0.35
+pytz==2025.2
+PyYAML==6.0.3
+redis==7.2.0
+referencing==0.37.0
+regex==2026.2.19
+requests==2.32.5
+requests-toolbelt==1.0.0
+rich==14.3.3
+rpds-py==0.30.0
+rsa==4.9.1
+safetensors==0.7.0
+scikit-learn==1.8.0
+scipy==1.17.0
+seaborn==0.13.2
+sentence-transformers==5.2.3
+setuptools==82.0.0
+shellingham==1.5.4
+simplejson==3.20.2
+six==1.17.0
+smart_open==7.5.0
+smmap==5.0.2
+sniffio==1.3.1
+soupsieve==2.8.3
+spacy==3.8.11
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+SQLAlchemy==2.0.46
+srsly==2.5.2
+starlette==0.52.1
+streamlit==1.54.0
+sympy==1.14.0
+tenacity==9.1.4
+textblob==0.19.0
+thinc==8.3.10
+threadpoolctl==3.6.0
+tiktoken==0.12.0
+tokenizers==0.22.2
+toml==0.10.2
+torch==2.10.0
+tornado==6.5.4
+tqdm==4.67.3
+transformers==5.2.0
+typer==0.24.1
+typer-slim==0.24.0
+typing-inspect==0.9.0
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2025.3
+tzlocal==5.3.1
+urllib3==2.6.3
+uuid_utils==0.14.1
+uv==0.10.8
+uvicorn==0.41.0
+wasabi==1.1.3
+watchdog==6.0.0
+watchfiles==1.1.1
+weasel==0.4.3
+websocket-client==1.9.0
+websockets==16.0
+wordcloud==1.9.6
+wrapt==2.1.1
+xxhash==3.6.0
+yarl==1.22.0
+yfinance==1.2.0
+youtube-transcript-api==1.2.4
+zstandard==0.25.0
+
+exit_code=0
+python_dependency_supplement_finished_utc=2026-07-10T12:27:45.8217478Z
