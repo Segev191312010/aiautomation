@@ -222,23 +222,24 @@ unrelated installers and binaries outside the project workspace.
 
 #### APP-P1-01: Three Frontend Products and Two Unrelated Git Histories
 
-The workspace contains:
+Before A10, the workspace contained:
 
 - `dashboard/`: the most complete UI, 370 passing tests;
 - `frontend/`: a tracked legacy HTML/CSS/JavaScript application;
 - `aiautomation/`: a nested, separately tracked v2 dashboard with 11 tests.
 
-The parent `master` and nested `main` branches use the same GitHub remote but have
-no common ancestor. The nested dashboard has only 15 paths not present in the
-main dashboard; the principal unique product surface is `AiSystemPage.tsx`.
+A10 migrated the nested-only AI System observability value into the canonical
+dashboard Autopilot workspace, archived nested `main` at
+`archive/aiautomation-v2-2026-07-a10`, removed the nested working repository
+from the active workspace, and removed the tracked legacy `frontend/` files.
 
 Decision:
 
 - Keep parent `master` and `dashboard/` canonical.
-- Port any wanted nested-only features, especially AI System observability.
-- Preserve the old `main` branch as an archive tag/branch.
-- Remove the nested working repository and tracked legacy `frontend/` after the
-  migration is verified.
+- Keep AI System observability in the canonical dashboard.
+- Preserve the old `main` branch as archive tag
+  `archive/aiautomation-v2-2026-07-a10`.
+- Keep duplicate UI folders out of the active workspace.
 
 #### API-P1-01: Verified Frontend/Backend Contract Mismatches
 
@@ -410,7 +411,7 @@ Examples:
 
 - `README.md` and `docs/baseline.md` report 392 backend and 78 frontend tests;
 - `docs/baseline.md` describes a monolithic `services/api.ts` that was split;
-- `docs/DEPLOYMENT.md` uses obsolete `frontend/` paths;
+- `docs/DEPLOYMENT.md` used obsolete `frontend/` paths before A10;
 - deployment examples reference files that do not exist;
 - deployment documentation claims PostgreSQL readiness that the code does not have;
 - deployment examples use `chmod 777` and expose backend port 8000;
@@ -425,9 +426,9 @@ test output, and packaging configuration.
 #### REPO-P2-01: Generated and Local Artifacts Need Cleanup
 
 - Four `dashboard/dist` files remain tracked despite `.gitignore`.
-- The legacy `frontend/` remains tracked.
-- The nested `aiautomation/` repository is ignored by the parent but uses the
-  same remote with unrelated history.
+- A10 removed the tracked legacy `frontend/` files.
+- A10 archived the nested `aiautomation/` state and removed the nested working
+  repository from the active workspace.
 - Local installers and executables live beside source files.
 - The root includes a large collection of agent-definition files unrelated to
   the shipped product.
@@ -493,15 +494,15 @@ Primary references:
 
 Goal: one trustworthy codebase and no known immediate runtime/release blocker.
 
-- [ ] Quarantine/remove the unknown unsigned DLL.
-- [ ] Move unrelated installers and binaries outside the repository workspace.
-- [ ] Force all current deployments to one Uvicorn worker.
-- [ ] Add a process lock preventing duplicate trading runtimes.
-- [ ] Replace the end-of-life Anthropic model defaults.
+- [x] Quarantine/remove the unknown unsigned DLL.
+- [x] Move unrelated installers and binaries outside the repository workspace.
+- [x] Force all current deployments to one Uvicorn worker.
+- [x] Add a process lock preventing duplicate trading runtimes.
+- [x] Replace the end-of-life Anthropic model defaults.
 - [x] Choose `dashboard/` as canonical in an ADR.
-- [ ] Port wanted nested-only features, especially `AiSystemPage`.
-- [ ] Archive nested `main` and remove the nested working repository.
-- [ ] Remove or archive legacy `frontend/`.
+- [x] Port wanted nested-only features, especially `AiSystemPage`.
+- [x] Archive nested `main` and remove the nested working repository.
+- [x] Remove or archive legacy `frontend/`.
 - [ ] Untrack `dashboard/dist`.
 - [ ] Update README test counts and product status.
 

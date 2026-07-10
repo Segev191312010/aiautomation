@@ -1,5 +1,5 @@
 """
-FastAPI application  --  REST API, WebSocket, and static frontend serving.
+FastAPI application  --  REST API, WebSocket, and dashboard serving.
 
 Run:
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
@@ -67,7 +67,6 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
 # eventkit (bundled with ib_insync) calls asyncio.get_event_loop() at import
@@ -365,10 +364,6 @@ app.add_middleware(
 
 # â"€â"€ Static assets â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
-_FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
-if os.path.isdir(_FRONTEND_DIR):
-    app.mount("/static", StaticFiles(directory=_FRONTEND_DIR), name="static")
-
 _DASHBOARD_DIR = os.path.join(os.path.dirname(__file__), cfg.DASHBOARD_BUILD_DIR)
 _ASSETS_DIR = Path(os.path.join(_DASHBOARD_DIR, "assets")).resolve()
 
@@ -422,12 +417,6 @@ async def log_requests(request: Request, call_next):
     duration_ms = (_time.perf_counter() - start) * 1000
     log.info("%s %s â†’ %d (%.0fms)", request.method, request.url.path, response.status_code, duration_ms)
     return response
-
-
-@app.get("/trading", response_class=FileResponse)
-async def serve_legacy_frontend():
-    p = os.path.join(_FRONTEND_DIR, "trading.html")
-    return FileResponse(p) if os.path.exists(p) else HTMLResponse("<h1>Not found</h1>", 404)
 
 
 @app.get("/assets/{file_path:path}")

@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import React from 'react'
-import type { AIStatus } from '@/types/advisor'
+import type { AIStatus, EconomicReport, LearningMetrics } from '@/types/advisor'
 
 // ── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -47,6 +47,85 @@ const makeStatus = (overrides: Partial<AIStatus> = {}): AIStatus => ({
   last_optimization_at: null,
   optimizer_running: false,
   ...overrides,
+})
+
+const makeLearningMetrics = (overrides: Partial<LearningMetrics> = {}): LearningMetrics => ({
+  window_days: 30,
+  total_decisions: 12,
+  scored_decisions: 8,
+  hit_rate: 0.625,
+  net_score: 4,
+  net_pnl_impact: 245.5,
+  data_quality: 'moderate',
+  by_action_type: {},
+  warning: null,
+  ...overrides,
+})
+
+const makeEconomicReport = (overrides: Partial<EconomicReport> = {}): EconomicReport => ({
+  days: 30,
+  ai_pnl_impact: 245.5,
+  total_cost: 12.2,
+  cost_per_decision: 1.02,
+  roi_estimate: 20.1,
+  cost_as_pct_pnl: 5.0,
+  decisions_per_day: 0.4,
+  ...overrides,
+})
+
+describe('AISystemPanel', () => {
+  it('renders canonical AI pipeline and capability fields', async () => {
+    const { default: AISystemPanel } = await import('../AISystemPanel')
+    render(
+      <AISystemPanel
+        status={makeStatus({
+          mode: 'PAPER',
+          active_rules_count: 4,
+          open_positions_count: 2,
+          optimizer_running: true,
+        })}
+        auditLog={[
+          {
+            id: 1,
+            timestamp: new Date().toISOString(),
+            action_type: 'optimizer_cycle',
+            category: 'optimizer',
+            description: 'Optimizer evaluated AI rule changes',
+            status: 'applied',
+          },
+        ]}
+        learningMetrics={makeLearningMetrics()}
+        economicReport={makeEconomicReport()}
+      />,
+    )
+
+    expect(screen.getByText('Pipeline State')).toBeInTheDocument()
+    expect(screen.getByText('Trigger')).toBeInTheDocument()
+    expect(screen.getByText('LLM Router')).toBeInTheDocument()
+    expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
+    expect(screen.getByText('Optimizer evaluated AI rule changes')).toBeInTheDocument()
+  })
+
+  it('surfaces invalid model capability as blocked', async () => {
+    const { default: AISystemPanel } = await import('../AISystemPanel')
+    render(
+      <AISystemPanel
+        status={makeStatus({
+          ai_capability: 'invalid_model',
+          ai_primary_model: 'claude-sonnet-4-20250514',
+          ai_capability_errors: ['Model retired'],
+        })}
+        auditLog={[]}
+        learningMetrics={null}
+        economicReport={null}
+      />,
+    )
+
+    expect(screen.getAllByText('invalid_model').length).toBeGreaterThan(0)
+    expect(screen.getByText('claude-sonnet-4-20250514')).toBeInTheDocument()
+    expect(screen.getByText('Model retired')).toBeInTheDocument()
+    expect(screen.getAllByText('BLOCKED').length).toBeGreaterThan(0)
+  })
 })
 
 // ── Tests: AIStatusBar ───────────────────────────────────────────────────────

@@ -413,10 +413,10 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### Frontend
+### Dashboard
 ```bash
-cd frontend
-npm install
+cd dashboard
+npm ci
 npm run dev
 ```
 

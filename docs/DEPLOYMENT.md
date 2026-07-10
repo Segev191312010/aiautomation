@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide covers deploying the trading platform to production environments. The platform consists of a FastAPI backend and a React frontend that can be deployed together or separately.
+This guide covers deploying the trading platform to production environments. The platform consists of a FastAPI backend and the canonical React dashboard in `dashboard/`.
 
 ## Prerequisites
 
@@ -45,15 +45,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend code
 COPY backend/ .
 
-# Frontend build stage
-FROM node:18-alpine as frontend-build
+# Dashboard build stage
+FROM node:18-alpine as dashboard-build
 
 WORKDIR /app
 
-COPY frontend/package*.json ./
+COPY dashboard/package*.json ./
 RUN npm ci
 
-COPY frontend/ .
+COPY dashboard/ .
 RUN npm run build
 
 # Production stage
@@ -73,8 +73,8 @@ COPY --from=backend /app /app/backend
 COPY --from=backend /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=backend /usr/local/bin /usr/local/bin
 
-# Copy frontend build
-COPY --from=frontend-build /app/dist /var/www/html
+# Copy dashboard build
+COPY --from=dashboard-build /app/dist /var/www/html
 
 # Copy nginx config
 COPY deployment/nginx.conf /etc/nginx/nginx.conf
@@ -349,11 +349,11 @@ sudo systemctl enable trading-backend
 sudo systemctl start trading-backend
 ```
 
-#### Frontend Setup
+#### Dashboard Setup
 
 ```bash
-# Build frontend
-cd frontend
+# Build dashboard
+cd dashboard
 npm ci
 npm run build
 

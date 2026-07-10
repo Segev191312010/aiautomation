@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import TradeBotTabs from '@/components/tradebot/TradeBotTabs'
 import AIActivityFeed from '@/components/autopilot/AIActivityFeed'
 import AIStatusBar from '@/components/autopilot/AIStatusBar'
+import AISystemPanel from '@/components/autopilot/AISystemPanel'
 import AIPerformanceCard from '@/components/autopilot/AIPerformanceCard'
 import CostReportPanel from '@/components/autopilot/CostReportPanel'
 import CircuitBreakerPanel from '@/components/autopilot/CircuitBreakerPanel'
@@ -30,7 +31,7 @@ import {
   setAutopilotMode,
 } from '@/services/api'
 
-type ConsoleTab = 'feed' | 'performance' | 'rule-lab' | 'evaluation'
+type ConsoleTab = 'system' | 'feed' | 'performance' | 'rule-lab' | 'evaluation'
 
 function fmtUsd(value: number | null | undefined) {
   if (value == null) return '--'
@@ -89,7 +90,7 @@ export default function AutopilotPage() {
     setLearningWindow,
   } = useAutopilotStore()
 
-  const [activeTab, setActiveTab] = useState<ConsoleTab>('feed')
+  const [activeTab, setActiveTab] = useState<ConsoleTab>('system')
   const [rules, setRules] = useState<Rule[]>([])
   const [rulesLoading, setRulesLoading] = useState(false)
   const [sourcePerformance, setSourcePerformance] = useState<SourcePerformance[]>([])
@@ -156,6 +157,7 @@ export default function AutopilotPage() {
   const openInterventions = useMemo(() => interventions.filter((item) => !item.resolved_at), [interventions])
   const topSource = useMemo(() => [...sourcePerformance].sort((a, b) => (b.realized_pnl + b.unrealized_pnl) - (a.realized_pnl + a.unrealized_pnl))[0] ?? null, [sourcePerformance])
   const tabs = useMemo(() => [
+    { id: 'system', label: 'System' },
     { id: 'feed', label: 'Feed', count: auditLog.length },
     { id: 'performance', label: 'Performance', count: sourcePerformance.reduce((sum, item) => sum + item.trades_count, 0) },
     { id: 'rule-lab', label: 'Rule Lab', count: rules.length },
@@ -310,6 +312,15 @@ export default function AutopilotPage() {
           <TradeBotTabs activeTab={activeTab} onTabChange={(tab) => setActiveTab(tab as ConsoleTab)} tabs={tabs} />
         </div>
       </section>
+
+      {activeTab === 'system' && (<ErrorBoundary>
+        <AISystemPanel
+          status={aiStatus}
+          auditLog={auditLog}
+          learningMetrics={learningMetrics}
+          economicReport={economicReport}
+        />
+      </ErrorBoundary>)}
 
       {activeTab === 'feed' && (<ErrorBoundary>
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)]">

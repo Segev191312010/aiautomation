@@ -7,8 +7,8 @@ on:
     branches: [master]
 
 jobs:
-  frontend:
-    name: Frontend (TypeScript + Vite + Vitest)
+  dashboard:
+    name: Dashboard (TypeScript + Vite + Vitest)
     runs-on: ubuntu-latest
     defaults:
       run:
