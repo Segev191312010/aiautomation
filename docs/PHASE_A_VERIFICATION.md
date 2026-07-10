@@ -335,7 +335,7 @@ Steps:
 ```powershell
 $trackedFiles = @(git ls-files)
 Assert-NativeSuccess "A1 tracked-file listing"
-$trackedBinaryHits = @($trackedFiles | rg -i '\.(dll|exe|msi|zip|rar|7z|dmg|pkg)$')
+$trackedBinaryHits = @($trackedFiles | rg -i '\.(bin|dll|dylib|exe|msi|so|zip|rar|7z|dmg|pkg)$')
 $trackedSearchExit = $LASTEXITCODE
 if ($trackedSearchExit -notin 0, 1) {
     throw "Tracked binary search failed with exit code $trackedSearchExit"
@@ -360,8 +360,9 @@ Assert-NativeSuccess "A1 workspace hygiene"
 
 ```powershell
 $binaryFindings = @(rg --files --hidden --no-ignore `
-    --iglob '*.7z' --iglob '*.dll' --iglob '*.dmg' --iglob '*.exe' `
-    --iglob '*.msi' --iglob '*.pkg' --iglob '*.rar' --iglob '*.zip' `
+    --iglob '*.7z' --iglob '*.bin' --iglob '*.dll' --iglob '*.dmg' `
+    --iglob '*.dylib' --iglob '*.exe' --iglob '*.msi' --iglob '*.pkg' `
+    --iglob '*.rar' --iglob '*.so' --iglob '*.zip' `
     --glob '!.git/**' --glob '!**/.git/**' `
     --glob '!**/.mypy_cache/**' --glob '!**/.pytest_cache/**' `
     --glob '!**/.ruff_cache/**' --glob '!**/.tmp/**' `
@@ -439,31 +440,39 @@ Expected:
 Workspace hygiene OK: no forbidden binary artifacts found.
 ```
 
-Required negative probe using an isolated temporary root. Cleanup happens even
-if an assertion fails, and the expected checker exit is explicitly tested:
+Required negative probes use an isolated temporary root for every enforced
+suffix. Cleanup happens even if an assertion fails, and each expected checker
+exit is explicitly tested:
 
 ```powershell
-$probeRoot = Join-Path $env:TEMP "phase-a-hygiene-$([guid]::NewGuid().ToString('N'))"
-New-Item -Path $probeRoot -ItemType Directory | Out-Null
-try {
-    New-Item -Path (Join-Path $probeRoot 'phase-a-hygiene-probe.dll') -ItemType File | Out-Null
-    $probeOutput = @(python scripts/check_workspace_hygiene.py --root $probeRoot 2>&1)
-    $probeExit = $LASTEXITCODE
-    $probeOutput
-    if ($probeExit -ne 1) {
-        throw "Expected hygiene probe exit 1; got $probeExit"
+$probeSuffixes = @(
+    '.7z', '.bin', '.dll', '.dmg', '.dylib', '.exe',
+    '.msi', '.pkg', '.rar', '.so', '.zip'
+)
+foreach ($suffix in $probeSuffixes) {
+    $probeRoot = Join-Path $env:TEMP "phase-a-hygiene-$([guid]::NewGuid().ToString('N'))"
+    $probeName = "phase-a-hygiene-probe$suffix"
+    New-Item -Path $probeRoot -ItemType Directory | Out-Null
+    try {
+        New-Item -Path (Join-Path $probeRoot $probeName) -ItemType File | Out-Null
+        $probeOutput = @(python scripts/check_workspace_hygiene.py --root $probeRoot 2>&1)
+        $probeExit = $LASTEXITCODE
+        $probeOutput
+        if ($probeExit -ne 1) {
+            throw "Expected hygiene probe $suffix exit 1; got $probeExit"
+        }
+        if (($probeOutput -join "`n") -notmatch [regex]::Escape($probeName)) {
+            throw "Hygiene probe did not report $probeName"
+        }
+    } finally {
+        Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (($probeOutput -join "`n") -notmatch 'phase-a-hygiene-probe\.dll') {
-        throw "Hygiene probe did not report the fake DLL"
-    }
-} finally {
-    Remove-Item -LiteralPath $probeRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 ```
 
-Expected: exit `1`, a `Workspace hygiene failed` message, and the probe's
-relative path. Then rerun the checker against the real repository and require
-exit `0`.
+Expected for each suffix: exit `1`, a `Workspace hygiene failed` message, and
+the probe's relative path. Then rerun the checker against the real repository
+and require exit `0`.
 
 ```powershell
 python scripts/check_workspace_hygiene.py
@@ -473,7 +482,7 @@ Assert-NativeSuccess "A2 post-probe workspace hygiene"
 Pass criteria:
 
 - Hygiene script passes on a clean workspace.
-- Isolated fake-DLL probe fails as expected and is removed.
+- All 11 isolated suffix probes fail as expected and are removed.
 - `.gitignore`, `docs/DEVELOPMENT.md`, and the script agree on policy.
 
 If failed:

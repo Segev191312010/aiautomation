@@ -9,12 +9,15 @@ from pathlib import Path
 
 FORBIDDEN_SUFFIXES = {
     ".7z",
+    ".bin",
     ".dll",
     ".dmg",
+    ".dylib",
     ".exe",
     ".msi",
     ".pkg",
     ".rar",
+    ".so",
     ".zip",
 }
 
