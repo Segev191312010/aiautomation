@@ -2,7 +2,7 @@
 
 ## Overview
 
-A comprehensive algorithmic trading platform built with Python (FastAPI backend) and React (frontend). The platform supports live trading via Interactive Brokers (IBKR), paper trading simulation, backtesting, and AI-powered trading strategies.
+A comprehensive algorithmic trading platform built with a Python FastAPI backend and the canonical React dashboard in `dashboard/`. The platform supports Interactive Brokers (IBKR), paper trading simulation, backtesting, and AI-powered trading strategies.
 
 ## Architecture
 

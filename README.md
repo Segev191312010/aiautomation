@@ -2,36 +2,52 @@
 
 TradeBot is a full-stack trading platform with a FastAPI backend, a React + TypeScript dashboard, Interactive Brokers connectivity, analytics, diagnostics, alerts, stock research, and an AI/autopilot control plane.
 
-This README is the Stage 0 truth-reset version. It describes the system that is actually in the repo today, not the smaller historical version of the project.
+This README describes the system that is actually in the repo today.
 
-> **Product status (2026-07-09):** The core platform is suitable for development,
+> **Product status (2026-07-10):** The core platform is suitable for development,
 > simulation, and controlled paper testing. It is not yet an installable desktop
-> application or approved for unattended live-money use. See
+> application or approved for unattended live-money use. Docker is optional for
+> development/server-style deployment; it is not the target desktop launch path. See
 > [Desktop Application Readiness Roadmap](docs/APPLICATION_READINESS_ROADMAP.md)
 > for the verified gaps, target architecture, milestones, and release gates.
 
 ## Current baseline
 
-As of 2026-07-09:
+As of 2026-07-10:
 
-- Backend tests: `582/582` passing
-- Frontend typecheck: passing
-- Frontend build: passing
-- Frontend vitest: `370/370` passing
+- Backend tests: `620/620` passing
+- Dashboard typecheck: passing
+- Dashboard build: passing
+- Dashboard Vitest: `372/372` passing
 
 ## Tech stack
 
 - Backend: Python 3.11+, FastAPI, aiosqlite, ib_insync
-- Frontend: React 18, TypeScript 5.5, Vite, Tailwind, Zustand, lightweight-charts
+- Dashboard: React 18, TypeScript 5.5, Vite, Tailwind, Zustand, lightweight-charts
 - Broker/runtime: Interactive Brokers / IB Gateway
 - AI/autopilot: optimizer, decision ledger, replay, evaluation, rule lab
+
+## Product Boundary
+
+Today the active product is:
+
+- canonical backend: `backend/`
+- canonical dashboard: `dashboard/`
+- current release class: development, simulation, and controlled paper testing
+
+Today the product is not:
+
+- an installable desktop app;
+- a public website or hosted SaaS;
+- approved for unattended live-money trading;
+- split across the removed legacy `frontend/` or archived nested dashboard.
 
 ## Architecture
 
 ```text
 trading/
 |- backend/                 FastAPI backend, broker/runtime services, AI/autopilot, persistence
-|- dashboard/               React + TypeScript operator dashboard
+|- dashboard/               canonical React + TypeScript operator dashboard
 |- ib_chart/                chart sidecar assets
 |- sessions/                roadmap and review specs
 |- docs/                    architecture, baseline, ADRs, runbooks (being filled in)
@@ -69,7 +85,7 @@ The platform has multiple mode layers. They are related, but they are not the sa
 
 ### Simulation mode
 
-- `SIM_MODE` means the frontend/backend are operating against simulation state instead of broker state for parts of the workflow.
+- `SIM_MODE` means the dashboard/backend are operating against simulation state instead of broker state for parts of the workflow.
 - This is useful for UI/runtime rehearsal and flows that must not touch a broker account.
 
 ### Autopilot authority
@@ -120,7 +136,7 @@ pip install -r requirements.txt
 
 ```bash
 cd dashboard
-npm install
+npm ci
 ```
 
 ### 3. Configure environment

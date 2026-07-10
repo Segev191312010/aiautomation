@@ -13,21 +13,21 @@ cd backend
 python -m pytest tests/ -v
 ```
 
-Frontend typecheck:
+Dashboard typecheck:
 
 ```powershell
 cd dashboard
 npm run typecheck
 ```
 
-Frontend build:
+Dashboard build:
 
 ```powershell
 cd dashboard
 npm run build
 ```
 
-Frontend tests:
+Dashboard tests:
 
 ```powershell
 cd dashboard
@@ -36,11 +36,23 @@ npx vitest run
 
 ## Baseline At Stage 0 Start
 
+These values are historical evidence from 2026-03-27, not the current test
+counts.
+
 - Backend tests: 392/392 passing
-- Frontend typecheck: passing
-- Frontend build: passing
-- Frontend vitest: 78/78 passing
+- Dashboard typecheck: passing
+- Dashboard build: passing
+- Dashboard Vitest: 78/78 passing
 - Autopilot: live and operator-visible
+
+## Current Phase A11 Checkpoint
+
+Latest verified values on 2026-07-10:
+
+- Backend tests: 620/620 passing
+- Dashboard typecheck: passing
+- Dashboard build: passing
+- Dashboard Vitest: 372/372 passing
 
 ## Known Architectural Risks
 
@@ -52,9 +64,13 @@ npx vitest run
 
 `backend/database.py` still owns schema, migrations, repositories, and business helpers in one place. That keeps persistence changes high-risk because trade truth, rule versioning, and AI ledger updates all touch the same large file.
 
-### api.ts monolith
+### Dashboard API service surface
 
-`dashboard/src/services/api.ts` is the frontend's single large service surface. It centralizes every domain call, which makes typing, caching, error handling, and page-level ownership blur together.
+At Stage 0, `dashboard/src/services/api.ts` was the dashboard's single large
+service surface. It has since been split into domain modules under
+`dashboard/src/services/api/`, with `dashboard/src/services/api.ts` acting as a
+barrel export. Contract completeness remains tracked in the application
+readiness roadmap.
 
 ### Replay and evaluator coupling
 

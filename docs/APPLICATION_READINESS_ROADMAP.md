@@ -84,10 +84,10 @@ Validation run on 2026-07-09:
 
 | Area | Result |
 |---|---|
-| Backend pytest | 582 passed, 1 deprecation warning |
+| Backend pytest | 620 passed |
 | Main dashboard typecheck | Passed |
 | Main dashboard production build | Passed |
-| Main dashboard Vitest | 370 passed in 27 files |
+| Main dashboard Vitest | 372 passed in 27 files |
 | Nested dashboard typecheck | Passed |
 | Nested dashboard production build | Passed |
 | Nested dashboard Vitest | 11 passed in 5 files |
@@ -116,7 +116,7 @@ The project does not need to be rewritten.
 - AI decision ledger, replay, evaluation, and guardrails.
 - Retention-table SQL interpolation is now allowlisted and tested.
 - Health, CORS, WebSocket auth/origin, and route-auth regression coverage.
-- 582 passing backend tests.
+- 620 passing backend tests.
 
 ### Main Dashboard
 
@@ -127,7 +127,7 @@ The project does not need to be rewritten.
 - Typed API modules split by domain.
 - Error boundaries, confirmation modal, symbol validation, adaptive polling,
   WebSocket reconnect tests, and watchlist persistence.
-- 370 passing frontend tests.
+- 372 passing dashboard tests.
 
 ### Delivery Foundation
 
@@ -224,7 +224,7 @@ unrelated installers and binaries outside the project workspace.
 
 Before A10, the workspace contained:
 
-- `dashboard/`: the most complete UI, 370 passing tests;
+- `dashboard/`: the most complete UI, 372 passing tests;
 - `frontend/`: a tracked legacy HTML/CSS/JavaScript application;
 - `aiautomation/`: a nested, separately tracked v2 dashboard with 11 tests.
 
@@ -409,7 +409,7 @@ tests.
 
 Examples:
 
-- `README.md` and `docs/baseline.md` report 392 backend and 78 frontend tests;
+- `README.md` and `docs/baseline.md` reported stale test counts before A11;
 - `docs/baseline.md` describes a monolithic `services/api.ts` that was split;
 - `docs/DEPLOYMENT.md` used obsolete `frontend/` paths before A10;
 - deployment examples reference files that do not exist;
@@ -425,7 +425,8 @@ test output, and packaging configuration.
 
 #### REPO-P2-01: Generated and Local Artifacts Need Cleanup
 
-- Four `dashboard/dist` files remain tracked despite `.gitignore`.
+- A11 untracked the generated `dashboard/dist` files; `.gitignore` now owns
+  build output.
 - A10 removed the tracked legacy `frontend/` files.
 - A10 archived the nested `aiautomation/` state and removed the nested working
   repository from the active workspace.
@@ -503,8 +504,8 @@ Goal: one trustworthy codebase and no known immediate runtime/release blocker.
 - [x] Port wanted nested-only features, especially `AiSystemPage`.
 - [x] Archive nested `main` and remove the nested working repository.
 - [x] Remove or archive legacy `frontend/`.
-- [ ] Untrack `dashboard/dist`.
-- [ ] Update README test counts and product status.
+- [x] Untrack `dashboard/dist`.
+- [x] Update README test counts and product status.
 
 Acceptance:
 
