@@ -28,8 +28,12 @@ def test_app_startup_acquires_and_shutdown_releases_runtime_lock(tmp_path, monke
     with TestClient(main.app):
         metadata = json.loads(lock_path.read_text(encoding="utf-8"))
         assert metadata["pid"] == os.getpid()
+        assert metadata["state"] == "owned"
 
-    assert not lock_path.exists()
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["state"] == "released"
+    probe = RuntimeLock(lock_path, mode="probe")
+    probe.acquire()
+    probe.release()
 
 
 def test_duplicate_runtime_refuses_startup_before_side_effects(tmp_path, monkeypatch):
@@ -91,4 +95,34 @@ def test_stale_runtime_lock_is_reclaimed_then_released(tmp_path, monkeypatch):
     with TestClient(main.app):
         assert lock_path.exists()
 
-    assert not lock_path.exists()
+    assert json.loads(lock_path.read_text(encoding="utf-8"))["state"] == "released"
+    probe = RuntimeLock(lock_path, mode="probe")
+    probe.acquire()
+    probe.release()
+
+
+def test_startup_body_exception_releases_runtime_lock(tmp_path, monkeypatch):
+    import main
+    from config import cfg
+
+    class StartupSentinelError(RuntimeError):
+        pass
+
+    lock_path = tmp_path / "runtime.lock"
+    monkeypatch.setattr(cfg, "RUNTIME_LOCK_PATH", str(lock_path), raising=False)
+
+    @asynccontextmanager
+    async def failing_lifespan(_app):
+        assert json.loads(lock_path.read_text(encoding="utf-8"))["state"] == "owned"
+        raise StartupSentinelError("injected startup failure")
+        yield
+
+    monkeypatch.setattr(main, "_run_lifespan", failing_lifespan)
+
+    with pytest.raises(StartupSentinelError, match="injected startup failure"):
+        with TestClient(main.app):
+            pass
+
+    probe = RuntimeLock(lock_path, mode="after-failed-startup")
+    probe.acquire()
+    probe.release()

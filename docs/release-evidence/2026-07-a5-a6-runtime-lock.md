@@ -1,5 +1,12 @@
 # Phase A5/A6 Runtime Lock Evidence
 
+> Historical evidence notice: this file records the original v1 PID/unlink
+> implementation and its `9 + 3` results. The 2026-07-10 checker found a
+> concurrent stale-reclaim race. Do not use the lock/recovery behavior below as
+> current operating guidance. See `docs/PHASE_A_VERIFICATION.md` and
+> `docs/release-evidence/2026-07-10-phase-a-reverification.md` for the v2
+> OS-held lock, scope, stop-all-v1 upgrade boundary, tests, and recovery policy.
+
 Date: 2026-07-09
 Phase: A - Truth, Safety, and Product Consolidation
 Stages: A5 - Runtime process lock, A6 - Runtime lock tests and failure UX

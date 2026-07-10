@@ -15,7 +15,7 @@ This README describes the system that is actually in the repo today.
 
 As of 2026-07-10:
 
-- Backend tests: `620/620` passing
+- Backend tests: `640/640` passing
 - Dashboard typecheck: passing
 - Dashboard build: passing
 - Dashboard Vitest: `372/372` passing

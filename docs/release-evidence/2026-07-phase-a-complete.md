@@ -1,5 +1,12 @@
 # Phase A Final Regression and Closeout Evidence
 
+> Historical closeout notice: this signed record preserves the stated source,
+> command outputs, counts, and sign-off. Its A5/A6 and A8 safety conclusions
+> were superseded when a later checker run exposed regressions. Corrections and
+> their final status are tracked by
+> `docs/release-evidence/2026-07-10-phase-a-reverification.md` and the Phase A
+> tracker; do not rewrite the historical results below.
+
 Date: 2026-07-10
 
 Status: COMPLETE - owner/lead sign-off recorded on 2026-07-10.

@@ -3,10 +3,54 @@
 Date opened: 2026-07-09
 Phase: A - Truth, Safety, and Product Consolidation
 
+## Runbook Usage
+
+This table records the signed Phase A completion results from 2026-07-10. A
+historical `PASS` is not an automatic pass for a later commit.
+
+1. Start from a clean `master` that equals `origin/master`; record the full
+   commit and environment versions. Never discard local work with
+   `git reset --hard` to prepare a checker run.
+2. Follow `docs/PHASE_A_VERIFICATION.md` in A0-A12 order. Its PowerShell blocks
+   assert native exit codes, expected-empty searches, workspace shape, and
+   archive-tag identity.
+3. For each row, verify the listed files/evidence still exist, run the exact
+   commands, perform the manual checks, and record `PASS`, `FAIL`, or `BLOCKED`
+   in a new dated re-verification report.
+4. A lower test count, missing test case, unexplained search hit, or failed
+   manual invariant is a Phase A regression even when the historical command
+   remains green.
+5. Fix a regression before Phase B work continues, then rerun the affected
+   stage, all downstream stages, and the global gates from a new clean commit.
+   Do not rewrite dated completion evidence to conceal the failure.
+
+## Latest Manual Audit
+
+Audit date: 2026-07-10
+
+Current re-verification status: **REMEDIATED; formal clean-commit/Ubuntu CI
+closeout pending**.
+
+Executing the manual found the A5/A6 stale-lock race and an A8 persisted-mode
+startup bypass. The current worktree replaces PID/unlink ownership with a
+persistent OS-held v2 lock, adds deterministic contender/subprocess/crash
+coverage, and forces authority `OFF` when persisted guardrail validation or its
+strict DB read fails. Stable local gates pass at backend `640`, dashboard
+`372`, typecheck/build, and hygiene.
+
+The supported lock invariant is one owner per shared lock path in one
+OS/filesystem lock namespace, not one machine-global owner across users,
+native/container boundaries, or distinct volumes. Stop every v1 runtime before
+v2 starts; rolling coexistence is unsupported. The status becomes `PASS` only
+after a clean committed source, same-source Ubuntu CI, and the dated
+re-verification report are recorded.
+
+## Signed Completion Results (Historical)
+
 | Stage ID | Goal | Files touched | Evidence collected | Test command | Result | Follow-up if failed |
 | --- | --- | --- | --- | --- | --- | --- |
-| A0 | Freeze and baseline | `docs/release-evidence/2026-07-phase-a-baseline.md` | parent/nested commits, tree status, tracked dist baseline, gate results | backend pytest, dashboard typecheck/build/Vitest, nested typecheck/build/tests | PASS | none |
-| A1 | Inventory workspace binaries | `docs/release-evidence/2026-07-workspace-inventory.md` | hashes, sizes, signatures, Git state, disposition buckets | binary extension scan | PASS | none |
+| A0 | Freeze and baseline | `docs/release-evidence/2026-07-phase-a-baseline.md` | parent/nested commits, tree status, tracked dist baseline, gate results | `cd backend; python -m pytest tests/ -q`; `cd dashboard; npm run typecheck`; `cd dashboard; npm run build`; `cd dashboard; npx vitest run`; nested dashboard commands are historical-only after A10 removal and are preserved by the archive tag | PASS | none |
+| A1 | Inventory workspace binaries | `docs/release-evidence/2026-07-workspace-inventory.md` | hashes, sizes, signatures, Git state, disposition buckets | `git ls-files \| rg -i '\.(dll\|exe\|msi\|zip\|rar\|7z\|dmg\|pkg)$'`; `python scripts/check_workspace_hygiene.py`; independent all-file scan in the verification manual | PASS | quarantine and document any new hit; never execute it |
 | A2 | Quarantine binaries and add hygiene policy | `.gitignore`, `docs/DEVELOPMENT.md`, `scripts/check_workspace_hygiene.py` | quarantine path, clean scan, fake DLL probe | `python scripts/check_workspace_hygiene.py` | PASS | CI wiring can be considered later |
 | A3 | Inventory backend launch paths | `docs/release-evidence/2026-07-launch-path-inventory.md` | startup matrix with worker count, host bind, reload flag, intended environment | `rg -n -e "--workers" -e "WORKERS" -e "uvicorn main:app" -e "uvicorn.run" -e "gunicorn" Dockerfile backend/Dockerfile docker-compose.yml README.md docs/DEPLOYMENT.md sessions/phase2-paper-soak-runbook.md backend/main.py .github/workflows/ci.yml dashboard/nginx.conf` | PASS | none |
 | A4 | Force one-worker runtime | `Dockerfile`, `backend/Dockerfile`, `docker-compose.yml`, `README.md`, `docs/DEPLOYMENT.md`, `backend/startup.py`, `backend/tests/test_launch_manifests.py` | Docker/compose/docs edits, startup worker log, launch-manifest regression test | `cd backend; python -m pytest tests/test_launch_manifests.py -q` | PASS - 3 passed | fix any multi-worker manifest or doc reference |
@@ -17,4 +61,4 @@ Phase: A - Truth, Safety, and Product Consolidation
 | A9 | Decide canonical product surface | `docs/adr/0006-canonical-product-surface.md`, `docs/release-evidence/2026-07-a9-canonical-product-decision.md`, `docs/APPLICATION_READINESS_ROADMAP.md`, `docs/release-evidence/2026-07-phase-a-tracker.md` | ADR accepts parent `master`, `backend/`, and `dashboard/` as canonical; nested `aiautomation/` and legacy `frontend/` move to A10 migration/archive workflow | read-only repo and nested status checks | PASS | A10 migrates keepers and removes duplicate active surfaces |
 | A10 | Migrate keepers and remove duplicate products | `dashboard/src/components/autopilot/AISystemPanel.tsx`, `dashboard/src/pages/AutopilotPage.tsx`, `dashboard/src/components/autopilot/__tests__/autopilot.test.tsx`, `backend/main.py`, `backend/tests/test_product_surface.py`, `.github/workflows/ci.yml`, `DOCUMENTATION.md`, `docs/DEPLOYMENT.md`, `docs/APPLICATION_READINESS_ROADMAP.md`, `docs/release-evidence/2026-07-a10-product-migration.md`, removed `frontend/trading.*` | keeper matrix, migrated AI System observability, archive tag `archive/aiautomation-v2-2026-07-a10`, nested working repo removed, legacy static route removed | targeted A10 tests plus full backend pytest, dashboard typecheck/build/Vitest, workspace hygiene | PASS - backend 620 passed; dashboard build passed; Vitest 372 passed; hygiene passed | none |
 | A11 | Clean generated artifacts and truth-pass docs | `README.md`, `DOCUMENTATION.md`, `docs/baseline.md`, `docs/APPLICATION_READINESS_ROADMAP.md`, `docs/release-evidence/2026-07-a11-artifacts-doc-truth.md`, removed tracked `dashboard/dist/assets/*` generated files | `git ls-files dashboard/dist` empty; ignored `dashboard/dist/`; README/product status and current counts updated; stale `frontend/` setup commands removed | full backend pytest, dashboard typecheck/build/Vitest, workspace hygiene | PASS - backend 620 passed; dashboard build passed; Vitest 372 passed; hygiene passed | none |
-| A12 | Final regression and evidence closeout | `docs/release-evidence/2026-07-phase-a-complete.md`, `docs/release-evidence/2026-07-phase-a-tracker.md` | final clean source state, final gate results, archive tag, deferrals, done checklist | full backend pytest, dashboard typecheck/build/Vitest, workspace hygiene | PASS - backend 620 passed; dashboard build passed; Vitest 372 passed; hygiene passed; owner/lead sign-off recorded | none |
+| A12 | Final regression and evidence closeout | `docs/release-evidence/2026-07-phase-a-complete.md`, `docs/release-evidence/2026-07-phase-a-tracker.md`, `docs/PHASE_A_VERIFICATION.md` | final clean source state, final gate results, archive tag, deferrals, done checklist | full backend pytest, dashboard typecheck/build/Vitest, workspace hygiene | PASS - backend 620 passed; dashboard build passed; Vitest 372 passed; hygiene passed; owner/lead sign-off recorded | none |

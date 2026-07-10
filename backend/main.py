@@ -179,12 +179,90 @@ async def lifespan(app: FastAPI):
         runtime_lock.release()
 
 
+def _set_startup_autopilot_mode(mode: Literal["OFF", "PAPER", "LIVE"]) -> None:
+    """Apply one validated mode consistently to every runtime flag."""
+    from ai_params import ai_params
+
+    cfg.AUTOPILOT_MODE = mode
+    cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
+    cfg.AI_SHADOW_MODE = mode == "OFF"
+    ai_params.shadow_mode = mode == "OFF"
+
+
+def _apply_startup_autopilot_mode(mode: str, *, source: str) -> bool:
+    """Apply a startup mode only when both matrix and AI capability are safe."""
+    from ai_capability import resolve_ai_capability
+    from startup import validate_autopilot_matrix
+
+    errors: list[str] = []
+    if mode not in ("OFF", "PAPER", "LIVE"):
+        errors.append(f"AUTOPILOT_MODE={mode!r} from {source} is invalid.")
+        capability = None
+    else:
+        errors.extend(
+            validate_autopilot_matrix(
+                mode=mode,
+                is_paper=cfg.IS_PAPER,
+                sim_mode=cfg.SIM_MODE,
+                jwt_secret=cfg.JWT_SECRET,
+                jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+            )
+        )
+        capability = resolve_ai_capability(cfg, mode=mode)
+        if capability.state in ("unconfigured", "invalid_model"):
+            errors.extend(capability.errors)
+
+    if errors:
+        for error in errors:
+            log.error("SECURITY: %s autopilot mode rejected - %s", source, error)
+        _set_startup_autopilot_mode("OFF")
+        log.error(
+            "SECURITY: %s requested autopilot mode=%s but startup safety checks "
+            "failed. Forcing AUTOPILOT_MODE=OFF. Fix configuration and restart.",
+            source,
+            mode,
+        )
+        return False
+
+    validated_mode: Literal["OFF", "PAPER", "LIVE"] = mode  # type: ignore[assignment]
+    _set_startup_autopilot_mode(validated_mode)
+    log.info(
+        "Autopilot mode applied from %s: %s (ai_capability=%s)",
+        source,
+        mode,
+        capability.state if capability is not None else "unknown",
+    )
+    return True
+
+
+async def _sync_persisted_autopilot_mode() -> bool:
+    """Load and validate the DB mode before broker/background side effects."""
+    from ai_guardrails import _load_guardrails_from_db
+
+    try:
+        db_config = await _load_guardrails_from_db(strict=True)
+    except Exception as exc:
+        _set_startup_autopilot_mode("OFF")
+        log.error(
+            "Failed to load autopilot mode from DB; runtime forced OFF: %s",
+            exc,
+        )
+        return False
+
+    return _apply_startup_autopilot_mode(
+        str(db_config.autopilot_mode),
+        source="persisted DB",
+    )
+
+
 @asynccontextmanager
 async def _run_lifespan(app: FastAPI):
     # â"€â"€ Startup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     from startup import validate_startup
     await validate_startup()
+    _apply_startup_autopilot_mode(cfg.AUTOPILOT_MODE, source="environment")
     await init_db()
+    await _sync_persisted_autopilot_mode()
     # Purge stale direct AI candidates left over from a previous process.
     # Always log the count (even when zero) so the paper-soak runbook can use
     # this log line as proof the hook ran on startup.
@@ -233,49 +311,6 @@ async def _run_lifespan(app: FastAPI):
 
     await _start_market_heartbeat()
     await alert_engine.start()
-
-    # Sync autopilot mode from DB → cfg on startup (C-4/H-1 FIX).
-    # The DB value overrides the env-derived cfg, so re-run the matrix
-    # validator here: startup.py's first pass only sees the env-derived mode.
-    # Without this gate a stale DB mode could re-enable LIVE authority on a
-    # process that just booted with a default JWT_SECRET.
-    try:
-        from ai_guardrails import _load_guardrails_from_db
-        from startup import validate_autopilot_matrix
-        db_config = await _load_guardrails_from_db()
-        mode = db_config.autopilot_mode
-        if mode in ("OFF", "PAPER", "LIVE"):
-            matrix_errors = validate_autopilot_matrix(
-                mode=mode,
-                is_paper=cfg.IS_PAPER,
-                sim_mode=cfg.SIM_MODE,
-                jwt_secret=cfg.JWT_SECRET,
-                jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
-            )
-            if matrix_errors:
-                # Refuse to apply the DB mode. Force OFF and keep the
-                # broker envs unchanged so the operator sees the mismatch.
-                for err in matrix_errors:
-                    log.error("SECURITY: DB autopilot mode rejected — %s", err)
-                cfg.AUTOPILOT_MODE = "OFF"
-                cfg.AI_AUTONOMY_ENABLED = False
-                cfg.AI_SHADOW_MODE = True
-                from ai_params import ai_params
-                ai_params.shadow_mode = True
-                log.error(
-                    "SECURITY: DB requested autopilot mode=%s but matrix check failed. "
-                    "Forcing AUTOPILOT_MODE=OFF. Fix .env/DB and restart.",
-                    mode,
-                )
-            else:
-                cfg.AUTOPILOT_MODE = mode
-                cfg.AI_AUTONOMY_ENABLED = mode in ("PAPER", "LIVE")
-                cfg.AI_SHADOW_MODE = mode == "OFF"
-                from ai_params import ai_params
-                ai_params.shadow_mode = mode == "OFF"
-                log.info("Autopilot mode synced from DB: %s", mode)
-    except Exception as e:
-        log.warning("Failed to sync autopilot mode from DB: %s", e)
 
     # Start AI optimization background loop (if API key configured)
     if cfg.ANTHROPIC_API_KEY:

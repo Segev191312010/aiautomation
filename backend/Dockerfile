@@ -31,8 +31,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application code
 COPY backend/ ./
 
-# Create persistent volume mount point for SQLite database
-RUN mkdir -p /data && chown appuser:appgroup /data
+# Create writable mount points for SQLite and the shared runtime lock.
+RUN mkdir -p /data /runtime && chown appuser:appgroup /data /runtime
 
 # Switch to non-root user before running container
 USER appuser

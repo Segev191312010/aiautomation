@@ -43,8 +43,8 @@ COPY backend/ ./
 # resolves correctly from /app/backend → /app/dashboard/dist.
 COPY --from=frontend-builder /build/dashboard/dist /app/dashboard/dist
 
-# Persistent volume mount point for the SQLite database
-RUN mkdir -p /data && chown appuser:appgroup /data
+# Writable mount points for SQLite and the shared runtime lock.
+RUN mkdir -p /data /runtime && chown appuser:appgroup /data /runtime
 
 # Switch to non-root
 USER appuser

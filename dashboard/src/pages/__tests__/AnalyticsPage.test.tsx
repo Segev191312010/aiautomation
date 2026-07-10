@@ -122,21 +122,9 @@ const correlation = {
   ],
 }
 
-class ResizeObserverMock {
-  observe() {}
-  disconnect() {}
-  unobserve() {}
-}
-
 describe('AnalyticsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    Object.defineProperty(globalThis, 'ResizeObserver', {
-      configurable: true,
-      writable: true,
-      value: ResizeObserverMock,
-    })
-
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     vi.mocked(api.fetchPortfolioAnalytics).mockResolvedValue(portfolioAnalytics as never)
     vi.mocked(api.fetchDailyPnL).mockResolvedValue(dailyPnl as never)
@@ -148,7 +136,6 @@ describe('AnalyticsPage', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
-    delete (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
   })
 
   it('renders live analytics metrics when API calls succeed', async () => {

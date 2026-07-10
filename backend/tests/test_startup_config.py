@@ -1,8 +1,12 @@
 """Startup and config validation regressions."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
+from ai_params import ai_params
+from api_contracts import GuardrailConfigResponse
 from config import DEFAULT_AI_FALLBACK_MODEL, DEFAULT_AI_PRIMARY_MODEL, cfg, _validate_config
 from startup import DEFAULT_DEV_JWT_SECRET, validate_autopilot_matrix, validate_startup
 
@@ -14,6 +18,8 @@ def restore_cfg():
         "JWT_SECRET": cfg.JWT_SECRET,
         "STRICT_CONFIG": cfg.STRICT_CONFIG,
         "AUTOPILOT_MODE": cfg.AUTOPILOT_MODE,
+        "AI_AUTONOMY_ENABLED": cfg.AI_AUTONOMY_ENABLED,
+        "AI_SHADOW_MODE": cfg.AI_SHADOW_MODE,
         "ANTHROPIC_API_KEY": cfg.ANTHROPIC_API_KEY,
         "AI_MODEL_OPTIMIZER": cfg.AI_MODEL_OPTIMIZER,
         "AI_MODEL_NARRATIVE": cfg.AI_MODEL_NARRATIVE,
@@ -23,13 +29,16 @@ def restore_cfg():
         "AI_FALLBACK_ENABLED": cfg.AI_FALLBACK_ENABLED,
         "IS_PAPER": cfg.IS_PAPER,
         "IBKR_PORT": cfg.IBKR_PORT,
+        "JWT_BOOTSTRAP_SECRET": getattr(cfg, "JWT_BOOTSTRAP_SECRET", ""),
         "SIM_MODE": cfg.SIM_MODE,
     }
+    previous_param_shadow_mode = ai_params.shadow_mode
     try:
         yield
     finally:
         for key, value in previous.items():
             setattr(cfg, key, value)
+        ai_params.shadow_mode = previous_param_shadow_mode
 
 
 def test_validate_config_rejects_unknown_autopilot_mode(restore_cfg):
@@ -140,6 +149,176 @@ async def test_validate_startup_warns_on_retired_ai_model_when_off(restore_cfg, 
 
     assert result["errors"] == []
     assert any("retired" in w for w in result["warnings"])
+
+
+@pytest.mark.anyio
+async def test_persisted_paper_mode_without_ai_key_is_forced_off(
+    restore_cfg,
+    anyio_backend,
+):
+    import main
+
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.JWT_BOOTSTRAP_SECRET = ""
+    cfg.IS_PAPER = True
+    cfg.SIM_MODE = False
+    cfg.ANTHROPIC_API_KEY = ""
+
+    with patch(
+        "ai_guardrails._load_guardrails_from_db",
+        new=AsyncMock(return_value=GuardrailConfigResponse(autopilot_mode="PAPER")),
+    ):
+        applied = await main._sync_persisted_autopilot_mode()
+
+    assert applied is False
+    assert cfg.AUTOPILOT_MODE == "OFF"
+    assert cfg.AI_AUTONOMY_ENABLED is False
+    assert cfg.AI_SHADOW_MODE is True
+    assert ai_params.shadow_mode is True
+
+
+@pytest.mark.anyio
+async def test_persisted_mode_load_failure_is_forced_off(
+    restore_cfg,
+    anyio_backend,
+):
+    import main
+
+    class BrokenDatabaseContext:
+        async def __aenter__(self):
+            raise OSError("database unavailable")
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    cfg.AUTOPILOT_MODE = "PAPER"
+    cfg.AI_AUTONOMY_ENABLED = True
+    cfg.AI_SHADOW_MODE = False
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.JWT_BOOTSTRAP_SECRET = ""
+    cfg.IS_PAPER = True
+    cfg.SIM_MODE = False
+    cfg.ANTHROPIC_API_KEY = "test-key"
+    cfg.AI_MODEL_OPTIMIZER = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_NARRATIVE = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_REGIME = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_PORTFOLIO = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_FALLBACK = DEFAULT_AI_FALLBACK_MODEL
+    ai_params.shadow_mode = False
+
+    with patch("ai_guardrails.get_db", return_value=BrokenDatabaseContext()):
+        applied = await main._sync_persisted_autopilot_mode()
+
+    assert applied is False
+    assert cfg.AUTOPILOT_MODE == "OFF"
+    assert cfg.AI_AUTONOMY_ENABLED is False
+    assert cfg.AI_SHADOW_MODE is True
+    assert ai_params.shadow_mode is True
+
+
+@pytest.mark.anyio
+async def test_persisted_paper_mode_with_retired_model_is_forced_off(
+    restore_cfg,
+    anyio_backend,
+):
+    import main
+
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.JWT_BOOTSTRAP_SECRET = ""
+    cfg.IS_PAPER = True
+    cfg.SIM_MODE = False
+    cfg.ANTHROPIC_API_KEY = "test-key"
+    cfg.AI_MODEL_OPTIMIZER = "claude-sonnet-4-20250514"
+
+    with patch(
+        "ai_guardrails._load_guardrails_from_db",
+        new=AsyncMock(return_value=GuardrailConfigResponse(autopilot_mode="PAPER")),
+    ):
+        applied = await main._sync_persisted_autopilot_mode()
+
+    assert applied is False
+    assert cfg.AUTOPILOT_MODE == "OFF"
+    assert cfg.AI_AUTONOMY_ENABLED is False
+
+
+@pytest.mark.anyio
+async def test_persisted_safe_paper_mode_is_applied_before_side_effects(
+    restore_cfg,
+    anyio_backend,
+):
+    import main
+
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.JWT_BOOTSTRAP_SECRET = ""
+    cfg.IS_PAPER = True
+    cfg.SIM_MODE = False
+    cfg.ANTHROPIC_API_KEY = "test-key"
+    cfg.AI_MODEL_OPTIMIZER = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_NARRATIVE = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_REGIME = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_PORTFOLIO = DEFAULT_AI_PRIMARY_MODEL
+    cfg.AI_MODEL_FALLBACK = DEFAULT_AI_FALLBACK_MODEL
+
+    with patch(
+        "ai_guardrails._load_guardrails_from_db",
+        new=AsyncMock(return_value=GuardrailConfigResponse(autopilot_mode="PAPER")),
+    ):
+        applied = await main._sync_persisted_autopilot_mode()
+
+    assert applied is True
+    assert cfg.AUTOPILOT_MODE == "PAPER"
+    assert cfg.AI_AUTONOMY_ENABLED is True
+    assert cfg.AI_SHADOW_MODE is False
+    assert ai_params.shadow_mode is False
+
+
+@pytest.mark.anyio
+async def test_lifespan_rejects_persisted_mode_before_runtime_services(
+    restore_cfg,
+    anyio_backend,
+):
+    import main
+
+    class RuntimeServiceStarted(RuntimeError):
+        pass
+
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.JWT_BOOTSTRAP_SECRET = ""
+    cfg.IS_PAPER = True
+    cfg.SIM_MODE = False
+    cfg.ANTHROPIC_API_KEY = ""
+
+    async def assert_forced_off_before_simulation() -> None:
+        assert cfg.AUTOPILOT_MODE == "OFF"
+        assert cfg.AI_AUTONOMY_ENABLED is False
+        assert cfg.AI_SHADOW_MODE is True
+        raise RuntimeServiceStarted("simulation startup boundary reached")
+
+    with patch("startup.validate_startup", new=AsyncMock()), patch(
+        "main.init_db",
+        new=AsyncMock(),
+    ), patch(
+        "ai_guardrails._load_guardrails_from_db",
+        new=AsyncMock(return_value=GuardrailConfigResponse(autopilot_mode="PAPER")),
+    ), patch(
+        "db.direct_candidates.purge_expired_candidates",
+        new=AsyncMock(return_value=0),
+    ), patch.object(
+        ai_params,
+        "load_from_db",
+        new=AsyncMock(return_value=False),
+    ), patch.object(
+        main.sim_engine,
+        "initialize",
+        new=AsyncMock(side_effect=assert_forced_off_before_simulation),
+    ):
+        with pytest.raises(RuntimeServiceStarted, match="simulation startup boundary"):
+            async with main._run_lifespan(main.app):
+                pass
 
 
 def _matrix(**overrides) -> list[str]:

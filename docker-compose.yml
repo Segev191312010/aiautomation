@@ -51,7 +51,7 @@ services:
       # Dashboard static files embedded in container
       DASHBOARD_BUILD_DIR: "./dashboard/dist"
 
-      # Host-shared runtime lock prevents local + compose duplicate backends.
+      # Shared runtime lock prevents duplicate Compose backend stacks.
       RUNTIME_LOCK_PATH: "/runtime/tradebot-runtime.lock"
 
       # Runtime logging. Worker count is intentionally pinned to 1 in Dockerfile.
@@ -60,7 +60,7 @@ services:
     # Persistent SQLite database volume
     volumes:
       - trading-data:/data
-      - ./.runtime:/runtime
+      - tradebot-runtime-lock:/runtime
 
     # Container health check
     healthcheck:
@@ -128,3 +128,6 @@ volumes:
     driver: local
     driver_opts:
       type: local
+  tradebot-runtime-lock:
+    name: tradebot-runtime-lock
+    driver: local

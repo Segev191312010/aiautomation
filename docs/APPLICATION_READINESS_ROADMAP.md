@@ -80,11 +80,14 @@ This review covered both Git repositories in the workspace:
 - All tracked files were included in repository inventories and static pattern
   scans. High-risk and product-boundary modules were read directly.
 
-Validation run on 2026-07-09:
+Validation evidence spans the 2026-07-09 baseline, the 2026-07-10 Phase A
+closeout, and the 2026-07-10 regression re-verification. Canonical
+backend/dashboard counts below are the latest local re-verification counts;
+nested-dashboard and dependency-audit rows preserve the baseline audit:
 
 | Area | Result |
 |---|---|
-| Backend pytest | 620 passed |
+| Backend pytest | 640 passed |
 | Main dashboard typecheck | Passed |
 | Main dashboard production build | Passed |
 | Main dashboard Vitest | 372 passed in 27 files |
@@ -116,7 +119,7 @@ The project does not need to be rewritten.
 - AI decision ledger, replay, evaluation, and guardrails.
 - Retention-table SQL interpolation is now allowlisted and tested.
 - Health, CORS, WebSocket auth/origin, and route-auth regression coverage.
-- 620 passing backend tests.
+- 640 passing backend tests.
 
 ### Main Dashboard
 
@@ -170,11 +173,12 @@ The existing product is a Vite browser application plus a FastAPI web server.
 registration. A PWA would still not provide the required backend lifecycle,
 installer, secret storage, or signed update model.
 
-#### SAFE-P0-01: Production Containers Default to Multiple Stateful Workers
+#### SAFE-P0-01: Historical Baseline - Multiple Stateful Workers (A4 Resolved)
 
-`Dockerfile`, `backend/Dockerfile`, and `docker-compose.yml` default to two Uvicorn
-workers. Each worker executes the FastAPI lifespan and creates independent IBKR,
-WebSocket, alert, market-heartbeat, and AI-loop state.
+At the Phase A baseline, `Dockerfile`, `backend/Dockerfile`, and
+`docker-compose.yml` defaulted to two Uvicorn workers. Each worker would execute
+the FastAPI lifespan and create independent IBKR, WebSocket, alert,
+market-heartbeat, and AI-loop state.
 
 Evidence:
 
@@ -183,9 +187,18 @@ Evidence:
 - `docker-compose.yml:55`
 - `backend/main.py:170`
 
-This runtime must be single-process unless stateful services are separated into
-dedicated workers with distributed coordination. For the desktop release, enforce
-exactly one backend process and one application instance.
+Resolution: A4 pinned both Dockerfiles to `--workers 1`, removed the compose
+worker override, corrected supported deployment examples, and added
+`backend/tests/test_launch_manifests.py`. The runtime must remain single-process
+unless stateful services are separated with distributed coordination.
+
+A5/A6 re-verification replaced the racy stale read/check/unlink algorithm with
+a persistent OS-held v2 lock and added synchronized-contender, subprocess,
+crash, malformed-metadata, and startup-boundary tests. The supported invariant
+is one owner per shared lock path/filesystem namespace: native launches share a
+per-user path and Compose stacks share a named volume. It is not a global mutex
+across OS users, native/container boundaries, or different volumes. Upgrades
+must stop every v1 runtime before v2 starts; rolling coexistence is unsupported.
 
 #### SAFE-P0-02: The Required Paper Soak Has Not Been Completed
 
@@ -203,9 +216,9 @@ A8 added explicit AI capability states, startup validation for PAPER/LIVE modes,
 status payload fields for UI health surfaces, and tests that fail before
 configured retired or near-retirement models can be treated as ready.
 
-#### SEC-P0-01: Unknown Unsigned DLL Is in the Workspace
+#### SEC-P0-01: Historical Baseline - Unknown Unsigned DLL (A2 Resolved)
 
-Untracked file:
+The Phase A baseline contained this untracked file:
 
 `Dismays_Chameleon_Tool_2.2.1_[unknowncheats.me]_.dll`
 
@@ -215,8 +228,10 @@ Untracked file:
   `EDA1182C770737575437CC5C5C1109702AA7554DBD967AB088E4B9E355A88EDE`
 - Public hash search during this audit returned no result.
 
-Do not execute it. Quarantine or remove it after confirming ownership. Move all
-unrelated installers and binaries outside the project workspace.
+It was not executed. A2 recorded its hash/signature, quarantined it outside the
+repository with the other local binary artifacts, and added
+`scripts/check_workspace_hygiene.py`. Current verification must still run both
+the checker and the independent all-file scan in `docs/PHASE_A_VERIFICATION.md`.
 
 ### P1 - Required Product and Correctness Work
 
@@ -430,7 +445,8 @@ test output, and packaging configuration.
 - A10 removed the tracked legacy `frontend/` files.
 - A10 archived the nested `aiautomation/` state and removed the nested working
   repository from the active workspace.
-- Local installers and executables live beside source files.
+- At the Phase A baseline, local installers and executables lived beside source
+  files; A2 inventoried and quarantined them outside the active workspace.
 - The root includes a large collection of agent-definition files unrelated to
   the shipped product.
 
@@ -493,12 +509,16 @@ Primary references:
 
 ### Phase A - Truth, Safety, and Product Consolidation
 
-Goal: one trustworthy codebase and no known immediate runtime/release blocker.
+Original goal: one trustworthy codebase and no known immediate runtime/release
+blocker. The 2026-07-10 verification-manual run reopened A5/A6, corrected the
+lock race and an A8 persisted-mode bypass, and then re-ran the complete gates.
 
 - [x] Quarantine/remove the unknown unsigned DLL.
 - [x] Move unrelated installers and binaries outside the repository workspace.
 - [x] Force all current deployments to one Uvicorn worker.
-- [x] Add a process lock preventing duplicate trading runtimes.
+- [x] Add the initial shared-path process lock before stateful startup.
+- [x] Replace its racy stale-lock read/check/unlink sequence with OS-held
+      ownership and add concurrent-contender plus subprocess collision tests.
 - [x] Replace the end-of-life Anthropic model defaults.
 - [x] Choose `dashboard/` as canonical in an ADR.
 - [x] Port wanted nested-only features, especially `AiSystemPage`.
@@ -512,6 +532,8 @@ Acceptance:
 - one canonical branch and one canonical UI;
 - no unrelated binary in the workspace;
 - no supported launch path starts multiple trading runtimes;
+- exactly one contender can own each supported runtime lock scope, including
+  during stale recovery;
 - all existing tests and builds pass.
 
 ### Phase B - Contract, Auth, and Product Correctness

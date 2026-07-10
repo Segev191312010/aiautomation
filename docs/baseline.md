@@ -45,11 +45,11 @@ counts.
 - Dashboard Vitest: 78/78 passing
 - Autopilot: live and operator-visible
 
-## Current Phase A11 Checkpoint
+## Current Phase A Re-verification Checkpoint
 
 Latest verified values on 2026-07-10:
 
-- Backend tests: 620/620 passing
+- Backend tests: 640/640 passing
 - Dashboard typecheck: passing
 - Dashboard build: passing
 - Dashboard Vitest: 372/372 passing

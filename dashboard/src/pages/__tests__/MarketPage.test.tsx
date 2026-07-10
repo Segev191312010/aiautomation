@@ -114,12 +114,6 @@ vi.mock('@/components/ui/ToastProvider', () => ({
 import MarketPage from '../MarketPage'
 import * as api from '@/services/api'
 
-class ResizeObserverMock {
-  observe() {}
-  disconnect() {}
-  unobserve() {}
-}
-
 async function renderMarketPage() {
   render(<MarketPage />)
   await waitFor(() => {
@@ -131,16 +125,10 @@ async function renderMarketPage() {
 describe('MarketPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    Object.defineProperty(globalThis, 'ResizeObserver', {
-      configurable: true,
-      writable: true,
-      value: ResizeObserverMock,
-    })
   })
 
   afterEach(() => {
     vi.restoreAllMocks()
-    delete (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver
   })
 
   it('renders without crashing and shows the Live market workspace label', async () => {

@@ -18,8 +18,13 @@ log = logging.getLogger(__name__)
 
 # ── Database helpers ─────────────────────────────────────────────────────────
 
-async def _load_guardrails_from_db() -> GuardrailConfigResponse:
-    """Load guardrails config from DB. Returns defaults if not found."""
+async def _load_guardrails_from_db(*, strict: bool = False) -> GuardrailConfigResponse:
+    """Load guardrails config, optionally propagating persistence failures.
+
+    Normal request paths retain the historical environment fallback. Startup
+    uses ``strict=True`` so a failed persisted-mode read cannot silently grant
+    PAPER or LIVE authority.
+    """
     try:
         async with get_db() as db:
             cur = await db.execute(
@@ -39,6 +44,8 @@ async def _load_guardrails_from_db() -> GuardrailConfigResponse:
                 return config
     except Exception as e:
         log.warning("Failed to load guardrails from DB: %s", e)
+        if strict:
+            raise
     mode = getattr(__import__("config").cfg, "AUTOPILOT_MODE", "OFF")
     return GuardrailConfigResponse(
         autopilot_mode=mode if mode in ("OFF", "PAPER", "LIVE") else "OFF",

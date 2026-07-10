@@ -36,6 +36,21 @@ def test_compose_does_not_expose_worker_override():
     assert not WORKER_OVERRIDE_RE.search(text)
 
 
+def test_compose_uses_host_stable_runtime_lock_volume():
+    text = _read("docker-compose.yml")
+
+    assert "RUNTIME_LOCK_PATH: \"/runtime/tradebot-runtime.lock\"" in text
+    assert "- tradebot-runtime-lock:/runtime" in text
+    assert "name: tradebot-runtime-lock" in text
+    assert "./.runtime:/runtime" not in text
+
+    for relative_path in ("Dockerfile", "backend/Dockerfile"):
+        dockerfile = _read(relative_path)
+        mount_setup = "mkdir -p /data /runtime && chown appuser:appgroup /data /runtime"
+        assert mount_setup in dockerfile
+        assert dockerfile.index(mount_setup) < dockerfile.index("USER appuser")
+
+
 def test_operational_docs_do_not_recommend_multi_worker_backend():
     for relative_path in (
         "README.md",
