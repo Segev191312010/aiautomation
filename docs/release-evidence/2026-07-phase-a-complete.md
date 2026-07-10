@@ -2,10 +2,9 @@
 
 Date: 2026-07-10
 
-Status: ready for owner sign-off. Do not start Phase B from this evidence until
-the owner/lead sign-off line is filled in.
+Status: COMPLETE - owner/lead sign-off recorded on 2026-07-10.
 
-Owner/lead sign-off: PENDING
+Owner/lead sign-off: Accepted by user/owner in thread on 2026-07-10.
 
 ## Final Source State
 
@@ -70,7 +69,7 @@ Workspace hygiene OK
 | A9 | PASS | `docs/adr/0006-canonical-product-surface.md` |
 | A10 | PASS | `docs/release-evidence/2026-07-a10-product-migration.md` |
 | A11 | PASS | `docs/release-evidence/2026-07-a11-artifacts-doc-truth.md` |
-| A12 | GATES PASS; SIGN-OFF PENDING | this file |
+| A12 | PASS | this file |
 
 ## Final Done Checklist
 
@@ -91,7 +90,7 @@ Workspace hygiene OK
 - Generated artifacts untracked.
 - README/top-level docs corrected.
 - Final regression evidence recorded.
-- Owner/lead sign-off pending.
+- Owner/lead sign-off recorded.
 
 ## Explicit Deferrals to Phase B
 
@@ -108,6 +107,6 @@ remain out of scope for Phase A:
 
 ## Phase B Handoff
 
-Phase B should begin only after owner/lead sign-off is recorded here. The source
-tree is now consolidated around one backend and one dashboard, with duplicate
-runtime and duplicate product-surface blockers closed.
+Phase B may begin from this signed evidence. The source tree is now consolidated
+around one backend and one dashboard, with duplicate runtime and duplicate
+product-surface blockers closed.
