@@ -10,8 +10,9 @@ issues were corrected, the executable was quarantined without execution or
 deletion, and the clean remediation source passed local Windows gates plus
 same-source Ubuntu CI.
 
-Overall result: **TECHNICAL PASS; OWNER/LEAD RE-SIGN-OFF PENDING** for Phase A
-repository invariants.
+Overall result: **TECHNICAL AND ADMINISTRATIVE PASS** for Phase A repository
+invariants. Owner approval was recorded on 2026-07-10. Phase B is explicitly
+deferred pending a jointly agreed plan.
 
 Tested remediation commit:
 `e9ea6de6f43c6deffa0e7284ab9c00cfe2418df1`
@@ -86,11 +87,9 @@ https://github.com/Segev191312010/aiautomation/actions/runs/29099407063
 
 ## Follow-up
 
-- Obtain and record renewed owner/lead acceptance before treating A12 as
-  closed or beginning Phase B. Acceptance must cover the shared-lock-path and
-  OS/filesystem-namespace A5 scope (rather than literal machine-global scope),
-  stop-all-v1/no rolling coexistence, A8 fail-closed behavior, and the late TWS
-  installer quarantine disposition.
+- Do not begin Phase B yet. First agree the Phase B plan with the owner; the
+  Phase A approval does not authorize implementation work beyond this
+  closeout.
 - Update GitHub action majors to remove the two Node 20 action-runtime
   deprecation warnings observed in CI run 29091445438.
 - Remediate the 10 known dashboard dependency audit findings (1 critical,

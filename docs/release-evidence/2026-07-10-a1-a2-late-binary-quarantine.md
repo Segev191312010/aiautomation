@@ -4,7 +4,7 @@ Date: 2026-07-10
 
 Stages: A1 - workspace binary inventory; A2 - quarantine and hygiene policy
 
-Status: **TECHNICALLY REMEDIATED; OWNER DISPOSITION PENDING A12 SIGN-OFF**
+Status: **TECHNICALLY REMEDIATED; OWNER DISPOSITION ACCEPTED; A12 PASS**
 
 ## Detection Context
 
@@ -64,9 +64,8 @@ Post-move checks proved:
 - the destination SHA-256 is unchanged;
 - no existing destination file was overwritten.
 
-Owner disposition remains deliberately pending. Final A12 acceptance must
-explicitly approve retaining this signed installer at the external quarantine
-path or direct a different non-repository disposition.
+Owner approval recorded in-thread on `2026-07-10` explicitly accepts retaining
+this signed installer at the external quarantine path.
 
 ## Post-Quarantine Verification
 
@@ -129,5 +128,5 @@ any of the 11 enforced extensions.
 - A2: the checker correctly rejected the ignored executable; clean-workspace
   and all-11-suffix negative-probe verification passed after the policy change.
 - A10/A11/A12: global gates passed after quarantine on the unchanged source;
-  the later policy commit also passed local gates and Ubuntu CI. Owner/lead
-  acceptance remains required.
+  the later policy commit also passed local gates and Ubuntu CI. A12 owner
+  approval is recorded; Phase B remains deferred pending joint planning.

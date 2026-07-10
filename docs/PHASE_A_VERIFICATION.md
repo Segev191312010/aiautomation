@@ -25,8 +25,8 @@ run this manual against one recorded commit and produce a new dated result.
 
 The first execution of this checker on 2026-07-10 found and reopened two Phase
 A safety regressions. Clean committed verification and same-source Ubuntu CI
-confirmed the technical corrections. The dated report remains at A12 pending
-renewed owner/lead sign-off for the material safety changes:
+confirmed the technical corrections. The dated report now records A12 PASS
+after renewed owner approval for the material safety changes:
 
 - A5/A6 replaced the stale read/check/unlink algorithm with a persistent,
   descriptor-held v2 lock: Windows uses a non-blocking byte-range lock and

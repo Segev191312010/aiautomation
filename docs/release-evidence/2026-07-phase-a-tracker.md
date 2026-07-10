@@ -28,8 +28,8 @@ historical `PASS` is not an automatic pass for a later commit.
 
 Audit date: 2026-07-10
 
-Current re-verification status: **TECHNICAL PASS; OWNER/LEAD RE-SIGN-OFF
-PENDING**.
+Current re-verification status: **TECHNICAL AND ADMINISTRATIVE PASS; PHASE B
+DEFERRED PENDING JOINT PLAN**.
 
 Executing the manual found the A5/A6 stale-lock race and an A8 persisted-mode
 startup bypass. Tested source
@@ -55,7 +55,8 @@ tracked scan, hidden/ignored scan, backend `640`, dashboard `372`, typecheck,
 and build all passed again after quarantine. Artifact metadata and disposition
 are recorded in
 `docs/release-evidence/2026-07-10-a1-a2-late-binary-quarantine.md`; owner
-acceptance of that disposition remains part of A12.
+owner approval of that disposition was recorded in-thread on `2026-07-10` and
+closes the A12 follow-up.
 
 The expanded 11-suffix policy is immutable commit
 `2b4db50101b6202eb7ac0a1d631264a122ea961d`. All 11 negative probes and global
@@ -78,7 +79,7 @@ jobs on that same commit.
 | A9 | PASS | canonical workspace shape |
 | A10 | PASS | archive tag, 2 backend and 14 UI tests, global gates |
 | A11 | PASS | untracked dist, clean build, doc truth checks |
-| A12 | PENDING SIGN-OFF | technical evidence complete; renewed owner/lead acceptance required |
+| A12 | PASS | technical evidence complete; owner approval recorded; Phase B intentionally deferred pending joint planning |
 
 ## Signed Completion Results (Historical)
 

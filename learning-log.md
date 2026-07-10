@@ -91,3 +91,8 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: Clean Git porcelain is insufficient workspace evidence because ignored root binaries remain active policy violations; every closeout needs an explicit hidden/no-ignore scan.
 - Verified: Backend 640, dashboard 372, typecheck/build/hygiene, zero tracked or hidden/ignored 11-suffix findings, all 11 negative suffix probes, 33 PowerShell blocks, and same-policy-commit Ubuntu CI passed after quarantine.
 - Next: Obtain explicit owner acceptance of the A5 scope change, stop-all-v1 boundary, A8 fail-closed behavior, and TWS-installer quarantine disposition before A12 can pass.
+
+### 2026-07-10 - Phase A A12 Owner Closeout
+- Completed: Recorded explicit owner approval for the A5 shared-lock-path scope, stop-all-v1 boundary, A8 fail-closed behavior, and the external TWS-installer quarantine disposition.
+- Verified: Phase A A12 is now PASS; the final source remains clean and synchronized with successful CI.
+- Decision: Phase B is intentionally deferred. No Phase B implementation work begins until the owner and team agree on its plan.

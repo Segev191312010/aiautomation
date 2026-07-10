@@ -2,8 +2,9 @@
 
 Date: 2026-07-10
 
-Overall result: **TECHNICAL PASS; OWNER/LEAD RE-SIGN-OFF PENDING** for the
-Phase A repository invariants on the tested source below.
+Overall result: **TECHNICAL AND ADMINISTRATIVE PASS** for the Phase A
+repository invariants on the tested source below. Phase B is deliberately
+deferred pending a jointly agreed plan.
 
 This is not approval for unattended live-money trading. The paper soak,
 desktop packaging, and later release gates remain open in the application
@@ -14,7 +15,8 @@ readiness roadmap.
 - Verifier: Codex, executing `docs/PHASE_A_VERIFICATION.md`
 - Independent reviews: runtime-lock design review, safety review, quality-gate
   review, and final manual/document review
-- Renewed owner/lead sign-off after the material safety changes: pending
+- Renewed owner/lead acceptance: approved by the owner in-thread on
+  `2026-07-10`
 - Initial audit session started UTC: `2026-07-10T10:36:01Z`
 - Clean-source gate finished UTC: `2026-07-10T12:08:37Z`
 - Raw detached clean-source replay: `2026-07-10T12:18:21Z` through
@@ -174,7 +176,7 @@ stack. Eight intentional WebSocket disconnect diagnostics remain.
 | A9 | PASS | `aiautomation/` and `frontend/` absent; tracked dist empty | ADR/canonical surface consistent |
 | A10 | PASS | archive tag target verified locally/remotely; backend `2 passed`; UI `14 passed`; global gates | keepers remain in canonical dashboard |
 | A11 | PASS | dashboard build leaves tree clean; stale surface scan empty; counts/doc truth updated | old evidence labeled historical/superseded |
-| A12 | PENDING SIGN-OFF | final clean-source gates; immutable commit/remote equality; this dated record | no technical blocker; renewed owner/lead acceptance required |
+| A12 | PASS | final clean-source gates; immutable commit/remote equality; this dated record; owner approval recorded | Phase B deliberately deferred pending joint planning |
 
 ## Exact Targeted Results
 
@@ -269,8 +271,8 @@ and set-equality checks passed locally. Immutable policy commit
 GitHub Actions run `29099407063`. Full details are in
 `docs/release-evidence/2026-07-10-a1-a2-late-binary-quarantine.md`.
 
-The disposition remains subject to the same final owner/lead acceptance that
-keeps A12 pending.
+The owner approval recorded in this thread accepts the disposition and closes
+the A1/A2 follow-up for A12.
 
 ## Limitations And Required Operations
 
@@ -302,11 +304,10 @@ before this report.
 
 ## Final Decision
 
-Phase A regression re-verification is a **TECHNICAL PASS** for the tested
-source. Administrative A12 closeout remains pending renewed owner/lead
-acceptance of the material A5/A6/A8 safety changes and the late A1 quarantine
-disposition. That acceptance must include the supported shared-lock-path and
-OS/filesystem-namespace scope rather than the original literal machine-global
-wording. Do not treat Phase A as fully re-signed or start Phase B solely from
-this report until that acceptance is recorded. The paper-soak, packaging,
-auth, contract, and live-release gates remain independently mandatory.
+Phase A regression re-verification is a **TECHNICAL AND ADMINISTRATIVE PASS**
+for the tested source. The owner approval recorded in-thread accepts the
+shared-lock-path and OS/filesystem-namespace scope, stop-all-v1 boundary, A8
+fail-closed behavior, and late A1 quarantine disposition. Phase B is explicitly
+not started; it will begin only after a jointly agreed plan. The paper-soak,
+packaging, auth, contract, and live-release gates remain independently
+mandatory.
