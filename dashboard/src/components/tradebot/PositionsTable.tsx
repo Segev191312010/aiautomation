@@ -2,11 +2,10 @@
  * PositionsTable — live positions with P&L, SL/TP brackets, % of account.
  * Fetches bracket data from /api/positions/brackets for live mode.
  */
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect } from 'react'
 import clsx from 'clsx'
 import { fmtUSD } from '@/utils/formatters'
-import { useAccountStore, useBotStore } from '@/store'
-import { useToast } from '@/components/ui/ToastProvider'
+import { useAccountStore } from '@/store'
 import type { Position, SimPosition } from '@/types'
 
 interface SparklineBar {
@@ -135,10 +134,7 @@ function EditablePrice({ value, onSave, color }: {
   )
 }
 
-function PositionRow({ pos, onModifyOrder }: {
-  pos: EnrichedPosition
-  onModifyOrder: (orderId: number, price: number) => void
-}) {
+function PositionRow({ pos }: { pos: EnrichedPosition }) {
   const price = isSimPos(pos) ? pos.current_price : pos.market_price
   const pnl = pos.unrealized_pnl
   const pnlPct = pos.pnl_pct ?? (price && pos.avg_cost ? ((price / pos.avg_cost - 1) * 100) : 0)
@@ -158,20 +154,12 @@ function PositionRow({ pos, onModifyOrder }: {
       </td>
       <td className="py-2 px-2 text-right">
         {slOrder ? (
-          <EditablePrice
-            value={slOrder.price}
-            onSave={(v) => onModifyOrder(slOrder.order_id, v)}
-            color="text-red-400"
-          />
+          <span className="text-red-400 font-mono text-xs">${slOrder.price.toFixed(2)}</span>
         ) : <span className="text-zinc-700 text-xs">—</span>}
       </td>
       <td className="py-2 px-2 text-right">
         {tpOrder ? (
-          <EditablePrice
-            value={tpOrder.price}
-            onSave={(v) => onModifyOrder(tpOrder.order_id, v)}
-            color="text-emerald-400"
-          />
+          <span className="text-emerald-400 font-mono text-xs">${tpOrder.price.toFixed(2)}</span>
         ) : <span className="text-zinc-700 text-xs">—</span>}
       </td>
       <td className="py-2 px-2 text-right">
@@ -187,49 +175,8 @@ function PositionRow({ pos, onModifyOrder }: {
 
 export default function PositionsTable() {
   const { positions } = useAccountStore()
-  const simMode = useBotStore((s) => s.simMode)
   const [enriched, setEnriched] = useState<EnrichedPosition[]>([])
-  const toast = useToast()
-
-  // Fetch bracket data for live positions
-  const fetchBrackets = useCallback(async () => {
-    if (simMode || positions.length === 0) {
-      setEnriched(positions as EnrichedPosition[])
-      return
-    }
-    try {
-      const res = await fetch('/api/positions/brackets')
-      if (res.ok) {
-        const data: unknown = await res.json()
-        if (Array.isArray(data)) {
-          setEnriched(data.filter(isEnrichedPosition))
-        } else {
-          setEnriched(positions as EnrichedPosition[])
-        }
-      } else {
-        setEnriched(positions as EnrichedPosition[])
-      }
-    } catch {
-      setEnriched(positions as EnrichedPosition[])
-    }
-  }, [positions, simMode])
-
-  useEffect(() => { fetchBrackets() }, [fetchBrackets])
-
-  const handleModifyOrder = async (orderId: number, newPrice: number) => {
-    try {
-      const res = await fetch(`/api/orders/${orderId}/modify?price=${newPrice}`, { method: 'PUT' })
-      if (res.ok) {
-        toast.success(`Order ${orderId} modified to $${newPrice.toFixed(2)}`)
-        setTimeout(fetchBrackets, 1000) // refresh after IBKR processes
-      } else {
-        const data = await res.json()
-        toast.error(data.detail || 'Failed to modify order')
-      }
-    } catch {
-      toast.error('Failed to modify order')
-    }
-  }
+  useEffect(() => { setEnriched(positions as EnrichedPosition[]) }, [positions])
 
   if (positions.length === 0 && enriched.length === 0) {
     return (
@@ -246,6 +193,9 @@ export default function PositionsTable() {
 
   return (
     <div className="overflow-x-auto">
+      <p className="mb-2 text-xs text-zinc-500" role="status">
+        Broker bracket display and editing are unavailable in this build; position and P&amp;L data remain available.
+      </p>
       <table className="w-full min-w-[700px]">
         <thead>
           <tr className="border-b border-zinc-800">
@@ -258,7 +208,7 @@ export default function PositionsTable() {
         </thead>
         <tbody>
           {enriched.map((p) => (
-            <PositionRow key={p.symbol} pos={p} onModifyOrder={handleModifyOrder} />
+            <PositionRow key={p.symbol} pos={p} />
           ))}
         </tbody>
         <tfoot>

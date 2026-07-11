@@ -7,7 +7,16 @@ interface Props {
 }
 
 export default function LeadingIndustries({ data }: Props) {
-  if (data.length === 0) return null
+  if (data.length === 0) {
+    return (
+      <div className="card">
+        <h3 className="shell-kicker mb-1">Leading Industries</h3>
+        <p className="text-xs text-[var(--text-muted)]" role="status">
+          Industry ranking is unavailable in this build.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="card overflow-x-auto">

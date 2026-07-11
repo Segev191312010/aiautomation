@@ -46,7 +46,7 @@ async function _waitForToken(): Promise<string | null> {
   ])
 }
 
-export async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function reqWithStatus<T>(method: string, path: string, body?: unknown, acceptedStatuses: number[] = []): Promise<{ status: number; data: T }> {
   const headers: Record<string, string> = {}
   if (body) headers['Content-Type'] = 'application/json'
   const token = path === '/api/auth/token' ? null : await _waitForToken()
@@ -58,7 +58,7 @@ export async function req<T>(method: string, path: string, body?: unknown): Prom
     body: body ? JSON.stringify(body) : undefined,
   })
 
-  if (!resp.ok) {
+  if (!resp.ok && !acceptedStatuses.includes(resp.status)) {
     if (resp.status === 401) {
       localStorage.removeItem(AUTH_TOKEN_KEY)
       window.dispatchEvent(new Event('api:unauthorized'))
@@ -66,10 +66,18 @@ export async function req<T>(method: string, path: string, body?: unknown): Prom
     const text = await resp.text().catch(() => resp.statusText)
     throw new Error(`${method} ${path} → ${resp.status}: ${text}`)
   }
-  return resp.json() as Promise<T>
+  const text = await resp.text()
+  const data = (text ? JSON.parse(text) : undefined) as T
+  return { status: resp.status, data }
+}
+
+export async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const result = await reqWithStatus<T>(method, path, body)
+  return result.data
 }
 
 export const get  = <T>(p: string)            => req<T>('GET',    p)
 export const post = <T>(p: string, b?: unknown) => req<T>('POST', p, b)
+export const postWithStatus = <T>(p: string, b: unknown, acceptedStatuses: number[] = [202, 409]) => reqWithStatus<T>('POST', p, b, acceptedStatuses)
 export const put  = <T>(p: string, b?: unknown) => req<T>('PUT',  p, b)
 export const del  = <T>(p: string)            => req<T>('DELETE', p)

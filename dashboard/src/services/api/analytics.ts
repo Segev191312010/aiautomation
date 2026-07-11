@@ -9,7 +9,7 @@ import type {
   Trade,
   TradeHistoryRow,
 } from '@/types'
-import { get } from './client'
+import { get, post } from './client'
 // Import from trading directly (not from barrel) to avoid circular deps
 import { fetchPositions, fetchTrades, fetchAccountSummary } from './trading'
 
@@ -46,6 +46,39 @@ type RiskSettingsResponse = {
 type CorrelationApiResponse = CorrelationMatrix & { error?: string }
 
 const ANALYTICS_BASELINE_EQUITY = 100_000
+
+export interface PositionSizeRequest {
+  entry_price: number
+  stop_price: number | null
+  account_value: number
+  risk_pct: number
+  method: string
+}
+export interface PositionSizeResponse {
+  shares: number
+  value: number
+  pct_of_portfolio: number
+  method: string
+}
+export interface PositionSummary {
+  symbol: string
+  entry_date: string | null
+  hold_time_days: number
+  qty: number
+  avg_cost: number
+  current_price: number
+  pnl: number
+  pnl_pct: number
+  rule_trigger: string
+  sl_price: number | null
+  tp_price: number | null
+  pct_of_account: number
+}
+
+export const calculatePositionSize = (body: PositionSizeRequest) =>
+  post<PositionSizeResponse>('/api/risk/position-size', body)
+export const fetchPositionsSummary = () =>
+  get<{ positions_summary: PositionSummary[] }>('/api/positions/summary')
 
 function toChartTime(date: string): number {
   const parsed = Date.parse(`${date}T00:00:00Z`)

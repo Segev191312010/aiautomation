@@ -19,5 +19,3 @@ export const testAlertNotification = (body: AlertCreate) => post<AlertTestResult
 export const fetchAlertStats   = () => get<AlertStats>('/api/alerts/stats')
 
 /** Subscribe this browser to Web Push notifications. */
-export const subscribePush = (subscription: PushSubscriptionJSON) =>
-  post<{ subscribed: boolean }>('/api/push/subscribe', subscription)

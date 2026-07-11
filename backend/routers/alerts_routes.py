@@ -1,5 +1,6 @@
 """Alert routes — /api/alerts/*"""
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -92,6 +93,46 @@ async def api_alerts_test(body: AlertCreate, user=Depends(get_current_user)):
         "price": price,
         "triggered": True,
         "condition_summary": summary,
+    }
+
+
+@router.get("/stats")
+async def api_alerts_stats(user=Depends(get_current_user)):
+    history = await get_alert_history(user.id, limit=10_000)
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    counts = {"today": 0, "this_week": 0, "this_month": 0}
+    symbols: Counter[str] = Counter()
+    daily = Counter[str]()
+    for entry in history:
+        raw = getattr(entry, "fired_at", None)
+        try:
+            timestamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        age = now - timestamp
+        if timestamp.date() == today:
+            counts["today"] += 1
+        if age <= timedelta(days=7):
+            counts["this_week"] += 1
+        if age <= timedelta(days=30):
+            counts["this_month"] += 1
+        symbol = str(getattr(entry, "symbol", "") or "").upper()
+        if symbol:
+            symbols[symbol] += 1
+        if age <= timedelta(days=14):
+            daily[timestamp.date().isoformat()] += 1
+    return {
+        "total_today": counts["today"],
+        "total_week": counts["this_week"],
+        "total_month": counts["this_month"],
+        "top_symbols": [{"symbol": symbol, "count": count} for symbol, count in symbols.most_common(5)],
+        "daily_counts": [
+            {"date": (today - timedelta(days=offset)).isoformat(), "count": daily.get((today - timedelta(days=offset)).isoformat(), 0)}
+            for offset in range(13, -1, -1)
+        ],
     }
 
 

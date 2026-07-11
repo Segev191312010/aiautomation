@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { calculatePositionSize } from '@/services/api/analytics';
 
 interface SizeResult {
   shares: number;
@@ -20,18 +21,14 @@ export function PositionSizer() {
     if (!entryPrice) return;
     setLoading(true);
     try {
-      const res = await fetch('/api/risk/position-size', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const response = await calculatePositionSize({
           entry_price: +entryPrice,
           stop_price: stopPrice ? +stopPrice : null,
           account_value: +accountValue,
           risk_pct: +riskPct,
           method,
-        }),
       });
-      setResult(await res.json());
+      setResult(response);
     } catch { /* ignore */ }
     setLoading(false);
   };

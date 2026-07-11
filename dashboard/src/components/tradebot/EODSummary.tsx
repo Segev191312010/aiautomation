@@ -1,31 +1,16 @@
 import { useState } from 'react'
 import { fmtUSD } from '@/utils/formatters'
-
-interface PosSummary {
-  symbol: string
-  entry_date: string | null
-  hold_time_days: number
-  qty: number
-  avg_cost: number
-  current_price: number
-  pnl: number
-  pnl_pct: number
-  rule_trigger: string
-  sl_price: number | null
-  tp_price: number | null
-  pct_of_account: number
-}
+import { fetchPositionsSummary, type PositionSummary } from '@/services/api/analytics'
 
 export function EODSummary() {
   const [open, setOpen] = useState(false)
-  const [data, setData] = useState<PosSummary[]>([])
+  const [data, setData] = useState<PositionSummary[]>([])
   const [loading, setLoading] = useState(false)
 
   const load = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/positions/summary')
-      const json = await res.json()
+      const json = await fetchPositionsSummary()
       setData(json.positions_summary || [])
     } catch { /* ignore */ }
     setLoading(false)

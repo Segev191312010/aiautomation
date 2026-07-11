@@ -7,7 +7,6 @@ import type {
   Club97Entry,
   StockbeeMover,
   StockbeeScanName,
-  IndustryGroup,
   StageDistribution,
   TrendGradeDistribution,
 } from '@/types'
@@ -31,8 +30,6 @@ export const fetchClub97 = () =>
 export const fetchStockbeeScan = (scan: StockbeeScanName) =>
   get<StockbeeMover[]>(`/api/swing/stockbee/${scan}`)
 
-export const fetchIndustries = () =>
-  get<IndustryGroup[]>('/api/swing/industries')
 
 export const fetchStages = () =>
   get<StageDistribution>('/api/swing/stages')

@@ -11,7 +11,6 @@
  *   notify()     — imperatively show a local browser notification
  */
 import { useState, useCallback, useEffect } from 'react'
-import { subscribePush } from '@/services/api'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,7 +65,6 @@ async function subscribeToPush(): Promise<void> {
       applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) as BufferSource,
     })
 
-    await subscribePush(subscription.toJSON())
   } catch (err) {
     // Non-fatal: push subscription is best-effort
     console.warn('[useNotifications] push subscribe failed:', err)
@@ -107,7 +105,6 @@ export function useNotifications(): UseNotificationsResult {
     setPermission(result as NotificationPermission)
 
     if (result === 'granted') {
-      await subscribeToPush()
     }
 
     return result === 'granted'
