@@ -178,4 +178,7 @@ def test_launch_capability_does_not_override_loopback_transport(monkeypatch):
 def test_main_application_mounts_session_bootstrap_route():
     from main import app
 
-    assert any(route.path == "/api/session/bootstrap" for route in app.routes)
+    assert any(
+        getattr(route, "path", None) == "/api/session/bootstrap"
+        for route in app.routes
+    )
