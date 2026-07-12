@@ -557,8 +557,9 @@ Acceptance:
 
 Goal: every visible workflow has a real, authenticated backend contract.
 
-Implementation status: locally verified on 2026-07-12; B12 owner sign-off is
-still required before Phase B is recorded as closed.
+Implementation status: locally and CI verified on 2026-07-12 at source commit
+`456330e95b6401bdb1ab2bf01824a91ade815816`; B12 owner sign-off is still
+required before Phase B is recorded as closed.
 
 - [x] Resolve every missing route listed in API-P1-01.
 - [x] Move all protected calls through the shared authenticated client.

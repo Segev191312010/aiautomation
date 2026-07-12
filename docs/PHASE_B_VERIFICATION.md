@@ -233,12 +233,16 @@ The production renderer must have no legacy secret or persisted auth token:
 
 ```powershell
 rg -n "VITE_JWT_BOOTSTRAP_SECRET|fetchAuthToken|setAuthToken|remember_me" dashboard/src
-rg -n "VITE_JWT_BOOTSTRAP_SECRET|JWT_BOOTSTRAP_SECRET|auth_token|remember_me" dashboard/dist
+rg -n "VITE_JWT_BOOTSTRAP_SECRET|JWT_BOOTSTRAP_SECRET|remember_me" dashboard/dist
+rg -n "auth_token" dashboard/dist -g "!*.map"
 ```
 
-Both searches must return no production matches. Non-secret preferences may
-still use local storage. The ignored operator-owned `.env.local` is not release
-source and must not contribute a value to built assets.
+All searches must return no production matches. The generic `auth_token` scan
+excludes third-party source maps because dependency source text may use that
+ordinary identifier; the two project-specific bootstrap-secret identifiers are
+still scanned across every built file, including maps. Non-secret preferences
+may still use local storage. The ignored operator-owned `.env.local` is not
+release source and must not contribute a value to built assets.
 
 ## 5. B8 - Manual-order boundary
 

@@ -96,3 +96,11 @@ Chronological record of sessions, discoveries, and decisions.
 - Completed: Recorded explicit owner approval for the A5 shared-lock-path scope, stop-all-v1 boundary, A8 fail-closed behavior, and the external TWS-installer quarantine disposition.
 - Verified: Phase A A12 is now PASS; the final source remains clean and synchronized with successful CI.
 - Decision: Phase B is intentionally deferred. No Phase B implementation work begins until the owner and team agree on its plan.
+
+### 2026-07-12 - Phase B Contract, Auth, and Product Correctness
+- Completed: Resolved or honestly disabled every B2 contract gap, added the blocking frontend/OpenAPI CI checker, and replaced renderer bootstrap secrets with a short-lived in-memory session boundary.
+- Completed: Added fail-closed stock manual-order validation, global session-loss reset, accessible application dialogs, CSP/loopback enforcement, and explicit unavailable states for missing screener/remote contracts.
+- Learned: Tests should assert FastAPI's published OpenAPI surface rather than version-dependent internal `app.routes` entries; Ubuntu CI exposed nested router representation changes that Windows dependencies did not.
+- Learned: A generic dependency source-map identifier is not equivalent to an executable application storage key, so release scans must keep project-specific secret identifiers global while excluding vendor maps only for the generic token name.
+- Verified: Backend 720 tests, dashboard 389 tests plus typecheck/build, contract 147/145/190, hygiene/artifact scans, and same-source Ubuntu CI all passed at `456330e95b6401bdb1ab2bf01824a91ade815816`.
+- Next: Obtain B12 owner policy acceptance, record the evidence-only closeout, and jointly plan Phase C before any Phase C implementation.
