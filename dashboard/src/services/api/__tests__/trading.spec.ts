@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useSessionStore } from '@/store/sessionStore'
 
 describe('trading API order lifecycle', () => {
   beforeEach(() => {
-    vi.resetModules()
-    localStorage.clear()
-    localStorage.setItem('auth_token', 'test-token')
+    useSessionStore.setState(useSessionStore.getInitialState(), true)
+    useSessionStore.getState().setSession({
+      accessToken: 'test-token',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
   })
 
   afterEach(() => {
     vi.unstubAllGlobals()
-    localStorage.clear()
+    useSessionStore.setState(useSessionStore.getInitialState(), true)
   })
 
   it('places a manual order and cancels it through the expected endpoints', async () => {

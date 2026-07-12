@@ -39,8 +39,13 @@ DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", _secrets.token_urlsafe(24))
 # JWT helpers
 # ---------------------------------------------------------------------------
 
-def create_token(user_id: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=cfg.JWT_ACCESS_EXPIRE_MINUTES)
+def create_token(user_id: str, *, expires_at: datetime | None = None) -> str:
+    """Create a signed access token, optionally with an explicit expiry."""
+    expire = expires_at or (
+        datetime.now(timezone.utc) + timedelta(minutes=cfg.JWT_ACCESS_EXPIRE_MINUTES)
+    )
+    if expire.tzinfo is None or expire.utcoffset() is None:
+        raise ValueError("expires_at must be timezone-aware")
     payload = {"sub": user_id, "exp": expire}
     return jwt.encode(payload, cfg.JWT_SECRET, algorithm=cfg.JWT_ALGORITHM)
 

@@ -131,3 +131,37 @@ async def test_security_headers_are_mounted(client):
     assert resp.headers["x-frame-options"] == "DENY"
     assert resp.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert resp.headers["cache-control"] == "no-store"
+    csp = resp.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "script-src 'self'" in csp
+    assert "style-src 'self'" in csp
+    assert "img-src 'self' data:" in csp
+    assert "connect-src 'self'" in csp
+    assert "frame-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
+@pytest.mark.asyncio
+async def test_oneil_screener_is_explicitly_unavailable(client):
+    resp = await client.get(
+        "/api/swing/screener/oneil",
+        headers=await issue_auth_headers(client),
+    )
+    assert resp.status_code == 501
+    assert "fundamental data" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_validation_error_does_not_echo_session_capability(client, monkeypatch, caplog):
+    from session_api import SESSION_BOOTSTRAP_TOKEN_ENV
+
+    leaked_value = "leak-me"
+    monkeypatch.setenv(SESSION_BOOTSTRAP_TOKEN_ENV, "configured-capability-123456")
+    resp = await client.post(
+        "/api/session/bootstrap",
+        json={"launch_token": leaked_value},
+    )
+
+    assert resp.status_code == 422
+    assert leaked_value not in resp.text
+    assert leaked_value not in caplog.text

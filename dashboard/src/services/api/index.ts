@@ -4,6 +4,7 @@
  */
 export * from './client'
 export * from './auth'
+export * from './session'
 export * from './diagnostics'
 export * from './market'
 export * from './trading'

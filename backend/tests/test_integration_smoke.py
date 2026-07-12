@@ -126,6 +126,21 @@ async def test_order_rejected_when_no_market_data(authed_client):
         assert resp.status_code == 503
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"symbol": "aapl", "action": "BUY", "quantity": 1},
+        {"symbol": "AAPL", "action": "BUY", "quantity": 10_001},
+        {"symbol": "AAPL", "action": "BUY", "quantity": 1, "order_type": "LMT"},
+        {"symbol": "AAPL", "action": "BUY", "quantity": 1, "asset_type": "FUT"},
+    ],
+)
+async def test_invalid_manual_order_payload_fails_at_http_boundary(authed_client, payload):
+    resp = await authed_client.post("/api/orders/manual", json=payload)
+    assert resp.status_code == 422
+
+
 # ── Test 2: watchlist persistence round trip ─────────────────────────────────
 
 

@@ -26,6 +26,9 @@ async def test_place_manual_order_bypasses_autopilot_authority(anyio_backend):
     fake_trade.model_dump.return_value = {"id": "trade-1"}
 
     with patch("ibkr_client.ibkr.is_connected", return_value=True), patch(
+        "routers.orders.get_latest_price",
+        new=AsyncMock(return_value=100.0),
+    ), patch(
         "routers.orders.place_order",
         new=AsyncMock(return_value=fake_trade),
     ) as mock_place:

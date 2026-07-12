@@ -151,6 +151,23 @@ def test_auth_token_works_with_correct_secret(client):
     assert data["token_type"] == "bearer"
 
 
+def test_legacy_auth_token_is_disabled_for_broker_backed_runtime(client):
+    from config import cfg
+
+    previous_sim_mode = cfg.SIM_MODE
+    cfg.SIM_MODE = False
+    try:
+        resp = client.post(
+            "/api/auth/token",
+            headers={"X-Bootstrap-Secret": cfg.JWT_BOOTSTRAP_SECRET},
+        )
+    finally:
+        cfg.SIM_MODE = previous_sim_mode
+
+    assert resp.status_code == 503
+    assert "broker-backed" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Authed routes should still work (regression guard)
 # ---------------------------------------------------------------------------

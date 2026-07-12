@@ -195,14 +195,12 @@ export default function HeroModule({ data, loading, fiftyTwoWeekHigh, fiftyTwoWe
           </>
         )}
         {data.website && (
-          <a
-            href={data.website}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto text-[11px] font-sans text-zinc-400 hover:text-zinc-50 transition-colors truncate max-w-[220px]"
+          <span
+            className="ml-auto max-w-[220px] truncate text-[11px] font-sans text-zinc-400"
+            title="External navigation is disabled in the local-only build"
           >
             {data.website.replace(/^https?:\/\//, '').replace(/\/$/, '')}
-          </a>
+          </span>
         )}
       </div>
     </section>

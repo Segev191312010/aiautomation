@@ -2,6 +2,7 @@
 import ipaddress
 import logging
 import os
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -55,11 +56,11 @@ async def auth_token(request: Request):
             detail="Bootstrap authentication is disabled. Set JWT_BOOTSTRAP_SECRET in .env",
         )
 
-    if getattr(cfg, "AUTOPILOT_MODE", "OFF") == "LIVE":
-        log.error("SECURITY: /api/auth/token refused — AUTOPILOT_MODE=LIVE")
+    if not getattr(cfg, "SIM_MODE", True):
+        log.error("SECURITY: /api/auth/token refused — broker-backed runtime")
         raise HTTPException(
             status_code=503,
-            detail="Bootstrap auth is disabled while AUTOPILOT_MODE=LIVE. Use a real session.",
+            detail="Legacy bootstrap auth is disabled for broker-backed operation. Use a per-launch session.",
         )
 
     client_host = request.client.host if request.client else ""
@@ -72,11 +73,9 @@ async def auth_token(request: Request):
         raise HTTPException(status_code=403, detail="Bootstrap auth is restricted to loopback")
 
     provided_secret = request.headers.get("X-Bootstrap-Secret")
-    if not provided_secret or provided_secret != bootstrap_secret:
+    if not provided_secret or not secrets.compare_digest(provided_secret, bootstrap_secret):
         log.warning("SECURITY: Invalid/missing bootstrap secret on /api/auth/token")
         raise HTTPException(status_code=401, detail="Invalid bootstrap secret")
 
-    if not getattr(cfg, "SIM_MODE", True):
-        log.warning("SECURITY: Demo token issued in LIVE trading mode")
     token = create_token("demo")
     return {"access_token": token, "token_type": "bearer"}

@@ -12,6 +12,7 @@ import {
   manualPauseAutopilotRule,
   manualRetireAutopilotRule,
 } from '@/services/api'
+import ReasonModal from '@/components/common/ReasonModal'
 
 function statusTone(status?: string) {
   switch (status) {
@@ -81,6 +82,7 @@ export default function AutopilotRuleLab({ rules, onRefresh }: Props) {
   const [detailsLoading, setDetailsLoading] = useState(false)
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
+  const [pendingAction, setPendingAction] = useState<{ kind: 'pause' | 'retire'; rule: Rule } | null>(null)
 
   async function loadRuleDetails(ruleId: string) {
     setDetailsLoading(true)
@@ -153,25 +155,14 @@ export default function AutopilotRuleLab({ rules, onRefresh }: Props) {
 
   const selectedRule = rules.find((rule) => rule.id === selectedRuleId) ?? null
 
-  async function handlePause(rule: Rule) {
-    const reason = window.prompt(`Pause rule "${rule.name}"`, 'Paused by operator')
-    if (reason == null) return
+  async function confirmRuleAction(reason: string) {
+    if (!pendingAction) return
+    const { kind, rule } = pendingAction
+    setPendingAction(null)
     setActionLoading(rule.id)
     try {
-      await manualPauseAutopilotRule(rule.id, reason)
-      await onRefresh()
-      await loadRuleDetails(rule.id)
-    } finally {
-      setActionLoading(null)
-    }
-  }
-
-  async function handleRetire(rule: Rule) {
-    const reason = window.prompt(`Retire rule "${rule.name}"`, 'Retired by operator')
-    if (reason == null) return
-    setActionLoading(rule.id)
-    try {
-      await manualRetireAutopilotRule(rule.id, reason)
+      if (kind === 'pause') await manualPauseAutopilotRule(rule.id, reason)
+      else await manualRetireAutopilotRule(rule.id, reason)
       await onRefresh()
       await loadRuleDetails(rule.id)
     } finally {
@@ -180,6 +171,17 @@ export default function AutopilotRuleLab({ rules, onRefresh }: Props) {
   }
 
   return (
+    <>
+    <ReasonModal
+      open={pendingAction !== null}
+      title={`${pendingAction?.kind === 'retire' ? 'Retire' : 'Pause'} rule`}
+      description={pendingAction ? `${pendingAction.kind === 'retire' ? 'Retire' : 'Pause'} “${pendingAction.rule.name}” and record the operator reason.` : ''}
+      defaultReason={pendingAction?.kind === 'retire' ? 'Retired by operator' : 'Paused by operator'}
+      confirmLabel={pendingAction?.kind === 'retire' ? 'Retire rule' : 'Pause rule'}
+      destructive={pendingAction?.kind === 'retire'}
+      onConfirm={(reason) => void confirmRuleAction(reason)}
+      onCancel={() => setPendingAction(null)}
+    />
     <div className="grid grid-cols-1 xl:grid-cols-[1.45fr,0.95fr] gap-5">
       <section className="rounded-2xl border border-[var(--border)] bg-white overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
@@ -253,7 +255,7 @@ export default function AutopilotRuleLab({ rules, onRefresh }: Props) {
                         <div className="flex items-center justify-end gap-2">
                           <button
                             type="button"
-                            onClick={() => void handlePause(rule)}
+                            onClick={() => setPendingAction({ kind: 'pause', rule })}
                             disabled={actionLoading === rule.id || rule.status === 'paused' || rule.status === 'retired'}
                             className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-50"
                           >
@@ -261,7 +263,7 @@ export default function AutopilotRuleLab({ rules, onRefresh }: Props) {
                           </button>
                           <button
                             type="button"
-                            onClick={() => void handleRetire(rule)}
+                            onClick={() => setPendingAction({ kind: 'retire', rule })}
                             disabled={actionLoading === rule.id || rule.status === 'retired'}
                             className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
                           >
@@ -489,5 +491,6 @@ export default function AutopilotRuleLab({ rules, onRefresh }: Props) {
         )}
       </aside>
     </div>
+    </>
   )
 }

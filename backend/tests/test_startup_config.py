@@ -48,6 +48,14 @@ def test_validate_config_rejects_unknown_autopilot_mode(restore_cfg):
         _validate_config(cfg)
 
 
+def test_validate_config_rejects_default_jwt_for_broker_operation(restore_cfg):
+    cfg.SIM_MODE = False
+    cfg.JWT_SECRET = DEFAULT_DEV_JWT_SECRET
+
+    with pytest.raises(ValueError, match="Broker-backed operation"):
+        _validate_config(cfg)
+
+
 def test_ai_model_defaults_are_current_and_centralized(restore_cfg):
     assert cfg.AI_MODEL_OPTIMIZER == DEFAULT_AI_PRIMARY_MODEL
     assert cfg.AI_MODEL_NARRATIVE == DEFAULT_AI_PRIMARY_MODEL
@@ -66,8 +74,7 @@ def test_ai_model_defaults_are_current_and_centralized(restore_cfg):
 
 
 @pytest.mark.anyio
-async def test_validate_startup_warns_on_default_jwt_secret_off_mode(restore_cfg, anyio_backend):
-    """With AUTOPILOT_MODE=OFF, default JWT_SECRET is a warning (not error)."""
+async def test_validate_startup_rejects_default_jwt_secret_for_broker_mode(restore_cfg, anyio_backend):
     cfg.DB_PATH = ":memory:"
     cfg.JWT_SECRET = DEFAULT_DEV_JWT_SECRET
     cfg.STRICT_CONFIG = False
@@ -78,8 +85,7 @@ async def test_validate_startup_warns_on_default_jwt_secret_off_mode(restore_cfg
 
     result = await validate_startup()
 
-    assert any("JWT_SECRET is the default development value" in w for w in result["warnings"])
-    assert not result["errors"]
+    assert any("Broker-backed operation" in error for error in result["errors"])
 
 
 @pytest.mark.anyio
@@ -143,7 +149,7 @@ async def test_validate_startup_warns_on_retired_ai_model_when_off(restore_cfg, 
     cfg.AI_MODEL_OPTIMIZER = "claude-sonnet-4-20250514"
     cfg.IS_PAPER = True
     cfg.IBKR_PORT = 7497
-    cfg.SIM_MODE = False
+    cfg.SIM_MODE = True
 
     result = await validate_startup()
 
@@ -333,8 +339,13 @@ def _matrix(**overrides) -> list[str]:
     return validate_autopilot_matrix(**kwargs)
 
 
-def test_matrix_off_mode_always_safe():
-    assert _matrix(mode="OFF", jwt_secret=DEFAULT_DEV_JWT_SECRET) == []
+def test_matrix_off_mode_default_secret_is_safe_only_in_simulation():
+    assert _matrix(mode="OFF", sim_mode=True, jwt_secret=DEFAULT_DEV_JWT_SECRET) == []
+
+
+def test_matrix_off_mode_rejects_default_secret_for_broker_operation():
+    errors = _matrix(mode="OFF", sim_mode=False, jwt_secret=DEFAULT_DEV_JWT_SECRET)
+    assert any("Broker-backed operation" in error for error in errors)
 
 
 def test_matrix_unknown_mode_rejected():

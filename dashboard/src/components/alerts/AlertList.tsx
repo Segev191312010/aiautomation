@@ -9,6 +9,8 @@ import type { Alert } from '@/types'
 import { useAlertStore } from '@/store'
 import * as api from '@/services/api'
 import { formatConditionSummary } from '@/utils/conditionHelpers'
+import { useState } from 'react'
+import ConfirmModal from '@/components/common/ConfirmModal'
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -180,18 +182,17 @@ function AlertCard({ alert, onEdit, onToggle, onDelete }: AlertCardProps) {
 export default function AlertList({ onEdit }: Props) {
   const alerts     = useAlertStore((s) => s.alerts)
   const loadAlerts = useAlertStore((s) => s.loadAlerts)
+  const [deleteTarget, setDeleteTarget] = useState<Alert | null>(null)
 
   async function handleToggle(alert: Alert) {
     await api.toggleAlert(alert.id)
     await loadAlerts()
   }
 
-  async function handleDelete(alert: Alert) {
-    const confirmed = window.confirm(
-      `Delete alert "${alert.name}"? This cannot be undone.`,
-    )
-    if (!confirmed) return
-    await api.deleteAlert(alert.id)
+  async function confirmDelete() {
+    if (!deleteTarget) return
+    await api.deleteAlert(deleteTarget.id)
+    setDeleteTarget(null)
     await loadAlerts()
   }
 
@@ -221,6 +222,7 @@ export default function AlertList({ onEdit }: Props) {
   })
 
   return (
+    <>
     <div className="card rounded-2xl overflow-hidden border border-zinc-800">
       {sorted.map((alert) => (
         <AlertCard
@@ -228,9 +230,20 @@ export default function AlertList({ onEdit }: Props) {
           alert={alert}
           onEdit={() => onEdit(alert)}
           onToggle={() => handleToggle(alert)}
-          onDelete={() => handleDelete(alert)}
+          onDelete={() => setDeleteTarget(alert)}
         />
       ))}
     </div>
+    <ConfirmModal
+      open={deleteTarget !== null}
+      title="Delete alert"
+      description={deleteTarget ? `Delete alert “${deleteTarget.name}”? This cannot be undone.` : undefined}
+      confirmPhrase="DELETE"
+      confirmLabel="Delete alert"
+      destructive
+      onConfirm={() => void confirmDelete()}
+      onCancel={() => setDeleteTarget(null)}
+    />
+    </>
   )
 }

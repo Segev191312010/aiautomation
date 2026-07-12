@@ -50,6 +50,11 @@ async def breadth():
 @router.get("/screener/{name}", response_model=list[GuruScreenerResult])
 async def guru_screener(name: Literal["qullamaggie", "minervini", "oneil"]):
     """Guru-inspired screener."""
+    if name == "oneil":
+        raise HTTPException(
+            status_code=501,
+            detail="O'Neil/CANSLIM screening is unavailable: required fundamental data is not integrated.",
+        )
     try:
         result = await fetch_and_compute_section(f"guru_{name}")
         return result if result is not None else []

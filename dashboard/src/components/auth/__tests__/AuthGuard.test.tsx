@@ -1,74 +1,80 @@
 import React from 'react'
-import { describe, expect, it, beforeEach, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 
-const TOKEN_KEY = 'auth_token'
-
-vi.mock('@/services/api', () => ({
-  fetchAuthToken: vi.fn(async () => ({ access_token: 'fresh-token' })),
-  setAuthToken: vi.fn((token: string | null) => {
-    if (token) localStorage.setItem(TOKEN_KEY, token)
-    else localStorage.removeItem(TOKEN_KEY)
-  }),
-  getAuthToken: vi.fn(() => localStorage.getItem(TOKEN_KEY)),
-}))
-
-vi.mock('../LoginPage', () => ({
-  default: () => <div data-testid="login-page">Login required</div>,
-}))
-
-vi.mock('../RegisterPage', () => ({
-  default: () => <div data-testid="register-page">Register</div>,
-}))
-
+import { useSessionStore } from '@/store/sessionStore'
 import AuthGuard from '../AuthGuard'
-import { fetchAuthToken, setAuthToken } from '@/services/api'
 
-describe('AuthGuard token revocation flow', () => {
+
+describe('AuthGuard session boundary', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
-    localStorage.clear()
+    useSessionStore.setState(useSessionStore.getInitialState(), true)
+    window.history.replaceState({}, '', '/')
   })
 
-  it('returns to login and clears storage when the API reports an unauthorized token', async () => {
-    localStorage.setItem(TOKEN_KEY, 'stale-token')
+  it('does not mount the protected workspace before bootstrap completes', () => {
+    useSessionStore.getState().beginBootstrap()
 
     render(
-      <AuthGuard>
+      <AuthGuard onRetry={vi.fn()}>
+        <div>Protected desk</div>
+      </AuthGuard>,
+    )
+
+    expect(screen.getByText(/Establishing secure session/i)).toBeInTheDocument()
+    expect(screen.queryByText('Protected desk')).not.toBeInTheDocument()
+  })
+
+  it('mounts children only for an authenticated in-memory session', () => {
+    useSessionStore.getState().setSession({
+      accessToken: 'memory-only-token',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    })
+
+    render(
+      <AuthGuard onRetry={vi.fn()}>
+        <div>Protected desk</div>
+      </AuthGuard>,
+    )
+
+    expect(screen.getByText('Protected desk')).toBeInTheDocument()
+    expect(localStorage.getItem('auth_token')).toBeNull()
+  })
+
+  it('shows an explicit bootstrap failure and retries without fake login UI', async () => {
+    const retry = vi.fn()
+    useSessionStore.getState().failBootstrap('Session bootstrap failed: backend unavailable')
+
+    render(
+      <AuthGuard onRetry={retry}>
+        <div>Protected desk</div>
+      </AuthGuard>,
+    )
+
+    expect(screen.getByRole('alert', { name: /Session bootstrap failed/i })).toBeInTheDocument()
+    expect(screen.queryByText('Protected desk')).not.toBeInTheDocument()
+    screen.getByRole('button', { name: /Retry connection/i }).click()
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('expires an already elapsed session and unmounts children', async () => {
+    useSessionStore.setState({
+      token: 'expired-token',
+      expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      status: 'authenticated',
+      error: null,
+    })
+
+    render(
+      <AuthGuard onRetry={vi.fn()}>
         <div>Protected desk</div>
       </AuthGuard>,
     )
 
     await waitFor(() => {
-      expect(screen.getByText('Protected desk')).toBeInTheDocument()
-    })
-    expect(fetchAuthToken).not.toHaveBeenCalled()
-    expect(setAuthToken).toHaveBeenCalledWith('stale-token')
-
-    act(() => {
-      window.dispatchEvent(new Event('api:unauthorized'))
-    })
-
-    await waitFor(() => {
-      expect(screen.getByTestId('login-page')).toBeInTheDocument()
+      expect(screen.getByRole('alert', { name: /Session expired/i })).toBeInTheDocument()
     })
     expect(screen.queryByText('Protected desk')).not.toBeInTheDocument()
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
-    expect(setAuthToken).toHaveBeenCalledWith(null)
-  })
-
-  it('bootstraps a fresh token when no stored token exists', async () => {
-    render(
-      <AuthGuard>
-        <div>Protected desk</div>
-      </AuthGuard>,
-    )
-
-    await waitFor(() => {
-      expect(screen.getByText('Protected desk')).toBeInTheDocument()
-    })
-    expect(fetchAuthToken).toHaveBeenCalledTimes(1)
-    expect(setAuthToken).toHaveBeenCalledWith('fresh-token')
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('fresh-token')
+    expect(window.location.pathname).toBe('/session-expired')
   })
 })

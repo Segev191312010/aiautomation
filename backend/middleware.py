@@ -31,7 +31,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     general_limit : int
         Max requests per *window* seconds for normal routes (default 100).
     auth_limit : int
-        Tighter limit applied to any path containing ``/auth/`` (default 10).
+        Tighter limit applied to authentication and session-bootstrap paths
+        (default 10).
     window : int
         Window size in seconds (default 60).
     """
@@ -59,7 +60,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             # Evict timestamps outside the current window
             self._hits[ip] = [t for t in self._hits[ip] if now - t < self.window]
 
-            limit = self.auth_limit if "/auth/" in path else self.general_limit
+            auth_sensitive = "/auth/" in path or path == "/api/session/bootstrap"
+            limit = self.auth_limit if auth_sensitive else self.general_limit
 
             if len(self._hits[ip]) >= limit:
                 oldest = self._hits[ip][0]
@@ -90,12 +92,28 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
       sensitive data being cached by intermediaries.
     """
 
+    _CSP = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "style-src-attr 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-src 'none'; "
+        "frame-ancestors 'none'"
+    )
+
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = self._CSP
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
         return response

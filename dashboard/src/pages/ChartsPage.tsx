@@ -1,121 +1,53 @@
-/**
- * ChartsPage — embeds ib_chart (single + multi-chart) via iframe.
- *
- * ib_chart runs on port 5001 as a sidecar Flask service.
- * Supports single-symbol charts and multi-chart grid from screener results.
- */
-import { useState, useMemo } from 'react'
-import { useMarketStore } from '@/store'
+import { useState } from 'react'
+import TradingChart from '@/components/chart/TradingChart'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
-
-const IB_CHART_BASE = 'http://127.0.0.1:5001'
-
-type ChartMode = 'single' | 'multi'
-type Timeframe = 'D' | 'W' | 'M' | '5' | '1'
+import { useMarketStore } from '@/store'
+import { validateSymbol } from '@/utils/validateSymbol'
 
 export default function ChartsPage() {
-  const { selectedSymbol } = useMarketStore()
-  const [mode, setMode] = useState<ChartMode>('single')
-  const [timeframe, setTimeframe] = useState<Timeframe>('D')
-  const [multiSymbols, setMultiSymbols] = useState(selectedSymbol || 'AAPL')
-  const [symbolInput, setSymbolInput] = useState('')
+  const selectedSymbol = useMarketStore((state) => state.selectedSymbol) || 'AAPL'
+  const setSelectedSymbol = useMarketStore((state) => state.setSelectedSymbol)
+  const [symbolInput, setSymbolInput] = useState(selectedSymbol)
+  const [symbolError, setSymbolError] = useState<string | null>(null)
 
-  const chartUrl = useMemo(() => {
-    if (mode === 'multi') {
-      const syms = multiSymbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean).join(',')
-      return `${IB_CHART_BASE}/ib_multichart.html?symbols=${syms}&tf=${timeframe}`
+  const loadSymbol = () => {
+    const normalized = symbolInput.trim().toUpperCase()
+    const validation = validateSymbol(normalized)
+    if (!validation.ok) {
+      setSymbolError(validation.reason ?? 'Invalid symbol')
+      return
     }
-    const sym = selectedSymbol || 'AAPL'
-    return `${IB_CHART_BASE}/ib_chart.html?symbol=${sym}&tf=${timeframe}`
-  }, [mode, selectedSymbol, multiSymbols, timeframe])
-
-  const handleSymbolSubmit = () => {
-    if (symbolInput.trim()) {
-      setMultiSymbols(symbolInput.trim().toUpperCase())
-      setMode('multi')
-    }
+    setSymbolError(null)
+    setSelectedSymbol(normalized)
   }
 
   return (
-    <div className="flex flex-col h-full gap-3">
-      {/* Toolbar */}
-      <div className="flex items-center gap-3 rounded-xl border border-[var(--border)] bg-white px-4 py-2.5">
-        {/* Mode toggle */}
-        <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
-          <button
-            onClick={() => setMode('single')}
-            className={`px-3 py-1.5 text-xs font-medium ${mode === 'single' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-50'}`}
-          >
-            Single Chart
-          </button>
-          <button
-            onClick={() => setMode('multi')}
-            className={`px-3 py-1.5 text-xs font-medium ${mode === 'multi' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-50'}`}
-          >
-            Multi Chart
-          </button>
-        </div>
-
-        {/* Timeframe */}
-        <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
-          {(['1', '5', 'D', 'W', 'M'] as Timeframe[]).map(tf => (
-            <button
-              key={tf}
-              onClick={() => setTimeframe(tf)}
-              className={`px-2.5 py-1.5 text-xs font-medium ${timeframe === tf ? 'bg-indigo-600 text-white' : 'hover:bg-slate-50'}`}
-            >
-              {tf === '1' ? '1m' : tf === '5' ? '5m' : tf}
-            </button>
-          ))}
-        </div>
-
-        {/* Multi-symbol input */}
-        {mode === 'multi' && (
-          <div className="flex items-center gap-2 flex-1">
-            <input
-              type="text"
-              value={symbolInput}
-              onChange={e => setSymbolInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSymbolSubmit()}
-              placeholder="AAPL, MSFT, NVDA, TSLA..."
-              className="flex-1 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm"
-            />
-            <button
-              onClick={handleSymbolSubmit}
-              className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700"
-            >
-              Load Grid
-            </button>
-          </div>
-        )}
-
-        {mode === 'single' && (
-          <span className="text-sm text-[var(--text-muted)]">
-            Showing: <span className="font-semibold text-[var(--text-primary)]">{selectedSymbol || 'AAPL'}</span>
-          </span>
-        )}
-
-        {/* Open in new window */}
-        <a
-          href={chartUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="ml-auto rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs hover:bg-slate-50"
-        >
-          Pop Out
-        </a>
-      </div>
-
-      {/* Chart iframe */}
-      <ErrorBoundary>
-        <div className="flex-1 rounded-xl border border-[var(--border)] overflow-hidden bg-white min-h-0">
-          <iframe
-            key={chartUrl}
-            src={chartUrl}
-            className="w-full h-full border-0"
-            title="ib_chart"
-            allow="fullscreen"
+    <div className="flex h-full flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--border)] bg-white px-4 py-2.5">
+        <div className="flex items-center gap-2">
+          <input
+            aria-label="Chart symbol"
+            value={symbolInput}
+            onChange={(event) => setSymbolInput(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') loadSymbol() }}
+            className="w-36 rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm font-mono uppercase"
           />
+          <button type="button" onClick={loadSymbol} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700">
+            Load
+          </button>
+        </div>
+        <span className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--text-muted)]">Daily bars</span>
+        <span className="text-sm text-[var(--text-muted)]">
+          Showing <strong className="font-mono text-[var(--text-primary)]">{selectedSymbol}</strong>
+        </span>
+        <span className="ml-auto text-xs text-[var(--text-muted)]" role="status">
+          Multi-chart pop-out is unavailable in the local-only build.
+        </span>
+      </div>
+      {symbolError && <div className="text-sm text-red-500" role="alert">{symbolError}</div>}
+      <ErrorBoundary>
+        <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--border)] bg-white">
+          <TradingChart key={selectedSymbol} symbol={selectedSymbol} timeframe="1d" className="h-full" />
         </div>
       </ErrorBoundary>
     </div>

@@ -1,7 +1,9 @@
 """
 Configuration — loaded from .env file or environment variables.
 """
+import math
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,7 +26,7 @@ class Config:
     # ── Simulation mode ──────────────────────────────────────────────────────
     # SIM_MODE=true → orders go to virtual account, IBKR is NOT called at all.
     # Use this for back-testing rules without needing IB Gateway running.
-    SIM_MODE: bool = os.getenv("SIM_MODE", "false").lower() == "true"
+    SIM_MODE: bool = os.getenv("SIM_MODE", "true").lower() == "true"
     SIM_INITIAL_CASH: float = float(os.getenv("SIM_INITIAL_CASH", "100000.0"))
     SIM_COMMISSION: float = float(os.getenv("SIM_COMMISSION", "1.0"))  # $ per order
 
@@ -52,6 +54,10 @@ class Config:
     MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", "100"))
     MAX_POSITIONS_PER_SECTOR: int = int(os.getenv("MAX_POSITIONS_PER_SECTOR", "3"))
     MAX_TRADES_PER_CYCLE: int = int(os.getenv("MAX_TRADES_PER_CYCLE", "50"))
+    # Phase B manual-order fail-closed defaults. The quantity ceiling matches
+    # the executor's hard limit; operators may lower either boundary via env.
+    MANUAL_ORDER_MAX_QUANTITY: int = int(os.getenv("MANUAL_ORDER_MAX_QUANTITY", "10000"))
+    MANUAL_ORDER_MAX_NOTIONAL: float = float(os.getenv("MANUAL_ORDER_MAX_NOTIONAL", "100000.0"))
 
     # ── AI Advisor ─────────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
@@ -159,7 +165,7 @@ class Config:
     DIAG_SCHEDULER_TIMEZONE: str = os.getenv("DIAG_SCHEDULER_TIMEZONE", "America/New_York")
 
     # ── API server ───────────────────────────────────────────────────────────
-    HOST: str = os.getenv("HOST", "0.0.0.0")
+    HOST: str = os.getenv("HOST", "127.0.0.1")
     PORT: int = int(os.getenv("PORT", "8000"))
     RUNTIME_LOCK_PATH: str = os.getenv("RUNTIME_LOCK_PATH", "")
 
@@ -199,10 +205,15 @@ def _validate_config(c: Config) -> None:
             f"AUTOPILOT_MODE='{c.AUTOPILOT_MODE}' is invalid. Must be one of: {valid_modes}"
         )
 
-    # JWT_SECRET must not be the dev placeholder in production
-    if c.AUTOPILOT_MODE == "LIVE" and "MUST-SET" in c.JWT_SECRET:
-        import warnings
-        warnings.warn("JWT_SECRET is using dev default — set it in .env for production", stacklevel=2)
+    if not 1 <= c.MANUAL_ORDER_MAX_QUANTITY <= 10_000:
+        raise ValueError("MANUAL_ORDER_MAX_QUANTITY must be between 1 and 10000")
+    if not math.isfinite(c.MANUAL_ORDER_MAX_NOTIONAL) or c.MANUAL_ORDER_MAX_NOTIONAL <= 0:
+        raise ValueError("MANUAL_ORDER_MAX_NOTIONAL must be a finite positive number")
+
+    # Broker-backed manual orders are authenticated even while AI authority is
+    # OFF. Refuse the forgeable development key before the ASGI app can start.
+    if not c.SIM_MODE and "MUST-SET" in c.JWT_SECRET:
+        raise ValueError("Broker-backed operation requires a non-default JWT_SECRET")
 
     # Port guide: 7496=TWS live, 7497=TWS paper, 4001=GW live, 4002=GW paper
     paper_ports = {7497, 4002}

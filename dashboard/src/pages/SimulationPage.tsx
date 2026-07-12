@@ -12,6 +12,7 @@ import { useToast } from '@/components/ui/ToastProvider'
 import { useSimStore, useMarketStore } from '@/store'
 import { fetchSimAccount, fetchSimPositions, fetchSimOrders, resetSimAccount } from '@/services/api'
 import { fmtUSD } from '@/utils/formatters'
+import ConfirmModal from '@/components/common/ConfirmModal'
 
 /** Section header with a left accent bar */
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -30,6 +31,7 @@ export default function SimulationPage() {
   const { simAccount, simPositions, simOrders, playback, setSimAccount, setSimPositions, setSimOrders } = useSimStore()
   const replaySymbol = playback.symbol || 'AAPL'
   const [initialLoad, setInitialLoad] = useState(true)
+  const [resetOpen, setResetOpen] = useState(false)
 
   useEffect(() => {
     const load = async () => {
@@ -51,7 +53,7 @@ export default function SimulationPage() {
   }, [setSimAccount, setSimPositions, setSimOrders])
 
   const handleReset = async () => {
-    if (!window.confirm('Reset the simulation account? All virtual positions and orders will be cleared.')) return
+    setResetOpen(false)
     try {
       await resetSimAccount()
       const [acc, pos] = await Promise.all([fetchSimAccount(), fetchSimPositions()])
@@ -67,6 +69,16 @@ export default function SimulationPage() {
 
   return (
     <div className="flex flex-col gap-5 h-full pb-24">
+      <ConfirmModal
+        open={resetOpen}
+        title="Reset simulation account"
+        description="All virtual positions and orders will be cleared. This cannot be undone."
+        confirmPhrase="RESET"
+        confirmLabel="Reset account"
+        destructive
+        onConfirm={() => void handleReset()}
+        onCancel={() => setResetOpen(false)}
+      />
 
       {/* ── Page header ───────────────────────────────────────────────── */}
       <div className="flex items-start justify-between">
@@ -115,7 +127,7 @@ export default function SimulationPage() {
         <div className="flex items-center justify-between mb-3.5">
           <SectionLabel>Virtual Account</SectionLabel>
           <button
-            onClick={handleReset}
+            onClick={() => setResetOpen(true)}
             className={[
               'text-[11px] font-sans font-medium px-3 py-1 rounded-xl border transition-colors',
               'border-red-500/25 text-red-400 hover:bg-red-500/10 hover:border-red-500/35',

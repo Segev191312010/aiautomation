@@ -3,54 +3,52 @@
  * All domain modules import { get, post, put, del } from here.
  */
 
+import { useSessionStore } from '@/store/sessionStore'
+
+
 export const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
-// Auth token storage — persisted to localStorage so in-flight 401s can't strand it
-const AUTH_TOKEN_KEY = 'auth_token'
-export function setAuthToken(token: string | null) {
-  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token)
-  else localStorage.removeItem(AUTH_TOKEN_KEY)
-  if (token) _bootstrapResolve?.(token)
-}
-export function getAuthToken() { return localStorage.getItem(AUTH_TOKEN_KEY) }
-
-// Bootstrap gate — requests block here until a token is available on first load.
-// Prevents the initial store fetches from firing before AuthGuard's fetchAuthToken
-// completes, which was causing the cascade of 401s on /api/account, /api/positions,
-// /api/autopilot/*. Once bootstrap has completed once, subsequent empty storage
-// means we've been logged out — we must NOT re-use the resolved promise value.
-let _bootstrapResolve: ((token: string) => void) | null = null
-let _bootstrapDone = false
-const _bootstrapPromise: Promise<string> = new Promise(resolve => {
-  const existing = localStorage.getItem(AUTH_TOKEN_KEY)
-  if (existing) {
-    _bootstrapDone = true
-    resolve(existing)
-  } else {
-    _bootstrapResolve = (token: string) => { _bootstrapDone = true; resolve(token) }
+/** Compatibility helper for non-React transports such as WebSocket clients. */
+export function getAuthToken() {
+  const session = useSessionStore.getState()
+  const expiry = session.expiresAt ? Date.parse(session.expiresAt) : Number.NaN
+  if (session.status === 'authenticated' && session.token && expiry > Date.now()) {
+    return session.token
   }
-})
+  if (session.token) {
+    session.reset('Your session expired. Reconnect to continue.')
+    routeToSessionExpired()
+  }
+  return null
+}
 
-async function _waitForToken(): Promise<string | null> {
-  const existing = localStorage.getItem(AUTH_TOKEN_KEY)
-  if (existing) return existing
-  // Post-bootstrap with empty storage = logged-out state. Do not fall through
-  // to the already-resolved bootstrap promise, which still holds the stale
-  // initial token.
-  if (_bootstrapDone) return null
-  // Race the bootstrap promise against a 5s timeout so a missing bootstrap
-  // doesn't hang the app forever.
-  return Promise.race([
-    _bootstrapPromise,
-    new Promise<null>(resolve => setTimeout(() => resolve(null), 5000)),
-  ])
+const PUBLIC_API_PATHS = new Set(['/api/health', '/api/status', '/api/session/bootstrap'])
+
+function routeToSessionExpired() {
+  if (typeof window === 'undefined') return
+  if (window.location.pathname !== '/session-expired') {
+    window.history.replaceState(window.history.state, '', '/session-expired')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  }
+  window.dispatchEvent(new Event('api:unauthorized'))
 }
 
 export async function reqWithStatus<T>(method: string, path: string, body?: unknown, acceptedStatuses: number[] = []): Promise<{ status: number; data: T }> {
   const headers: Record<string, string> = {}
   if (body) headers['Content-Type'] = 'application/json'
-  const token = path === '/api/auth/token' ? null : await _waitForToken()
-  if (token) headers['Authorization'] = `Bearer ${token}`
+  const isPublic = PUBLIC_API_PATHS.has(path)
+  const session = useSessionStore.getState()
+  const requestGeneration = session.generation
+  const requestToken = session.token
+  if (!isPublic) {
+    const expiry = session.expiresAt ? Date.parse(session.expiresAt) : Number.NaN
+    if (session.status !== 'authenticated' || !session.token || expiry <= Date.now()) {
+      session.reset('Your session is unavailable or expired.')
+      routeToSessionExpired()
+      throw new Error(`${method} ${path} blocked: no active session`)
+    }
+    headers['Authorization'] = `Bearer ${session.token}`
+  }
 
   const resp = await fetch(`${BASE}${path}`, {
     method,
@@ -58,15 +56,32 @@ export async function reqWithStatus<T>(method: string, path: string, body?: unkn
     body: body ? JSON.stringify(body) : undefined,
   })
 
+  if (!isPublic) {
+    const current = useSessionStore.getState()
+    if (current.generation !== requestGeneration || current.token !== requestToken) {
+      throw new Error(`${method} ${path} ignored: session changed during request`)
+    }
+  }
+
   if (!resp.ok && !acceptedStatuses.includes(resp.status)) {
-    if (resp.status === 401) {
-      localStorage.removeItem(AUTH_TOKEN_KEY)
-      window.dispatchEvent(new Event('api:unauthorized'))
+    if (resp.status === 401 || resp.status === 403) {
+      useSessionStore.getState().reset(
+        resp.status === 401
+          ? 'The backend rejected this session.'
+          : 'This session is not authorized for the requested operation.',
+      )
+      routeToSessionExpired()
     }
     const text = await resp.text().catch(() => resp.statusText)
     throw new Error(`${method} ${path} → ${resp.status}: ${text}`)
   }
   const text = await resp.text()
+  if (!isPublic) {
+    const current = useSessionStore.getState()
+    if (current.generation !== requestGeneration || current.token !== requestToken) {
+      throw new Error(`${method} ${path} ignored: session changed while reading response`)
+    }
+  }
   const data = (text ? JSON.parse(text) : undefined) as T
   return { status: resp.status, data }
 }

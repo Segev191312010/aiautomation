@@ -52,5 +52,8 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - name: Frontend/OpenAPI contract
+        run: python scripts/check_contract_frontend_vs_openapi.py
+
       - name: Test
         run: python -m pytest tests/ -v --tb=short

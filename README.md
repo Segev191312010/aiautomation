@@ -4,7 +4,7 @@ TradeBot is a full-stack trading platform with a FastAPI backend, a React + Type
 
 This README describes the system that is actually in the repo today.
 
-> **Product status (2026-07-10):** The core platform is suitable for development,
+> **Product status (2026-07-12):** The core platform is suitable for development,
 > simulation, and controlled paper testing. It is not yet an installable desktop
 > application or approved for unattended live-money use. Docker is optional for
 > development/server-style deployment; it is not the target desktop launch path. See
@@ -13,12 +13,12 @@ This README describes the system that is actually in the repo today.
 
 ## Current baseline
 
-As of 2026-07-10:
+As of 2026-07-12:
 
-- Backend tests: `640/640` passing
+- Backend tests: `720/720` passing
 - Dashboard typecheck: passing
 - Dashboard build: passing
-- Dashboard Vitest: `372/372` passing
+- Dashboard Vitest: `389/389` passing in 31 files
 
 ## Tech stack
 

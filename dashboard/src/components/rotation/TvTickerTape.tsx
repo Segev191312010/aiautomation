@@ -1,34 +1,3 @@
-import { useEffect, useRef } from 'react'
-import { SECTOR_ETFS } from './constants'
-
 export function TvTickerTape() {
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    el.innerHTML = ''
-    const wrapper = document.createElement('div')
-    wrapper.className = 'tradingview-widget-container'
-    const widgetDiv = document.createElement('div')
-    widgetDiv.className = 'tradingview-widget-container__widget'
-    wrapper.appendChild(widgetDiv)
-    const script = document.createElement('script')
-    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-ticker-tape.js'
-    script.async = true
-    script.type = 'text/javascript'
-    script.textContent = JSON.stringify({
-      symbols: SECTOR_ETFS.map(s => ({ proName: `AMEX:${s.symbol}`, title: s.name })),
-      showSymbolLogo: true,
-      isTransparent: true,
-      displayMode: 'adaptive',
-      colorTheme: 'dark',
-      locale: 'en',
-    })
-    wrapper.appendChild(script)
-    el.appendChild(wrapper)
-    return () => { el.innerHTML = '' }
-  }, [])
-
-  return <div ref={containerRef} className="w-full overflow-hidden" />
+  return <div className="w-full rounded-lg border border-[var(--border)] px-4 py-3 text-xs text-[var(--text-muted)]" role="status">External TradingView ticker embeds are disabled by the local-only security policy.</div>
 }

@@ -1,34 +1,19 @@
-import React, { useEffect, useState } from 'react'
+import React from 'react'
 
-/**
- * Modal shown when a 401 response is received anywhere in the app.
- * Dispatches a custom event from api.ts; this component listens for it.
- */
-
-export const SESSION_EXPIRED_EVENT = 'session:expired'
-
-export function emitSessionExpired() {
-  window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT))
+interface Props {
+  bootstrapFailed: boolean
+  message: string
+  onRetry: () => void | Promise<void>
 }
 
-export default function SessionExpired() {
-  const [visible, setVisible] = useState(false)
-
-  useEffect(() => {
-    const handler = () => setVisible(true)
-    window.addEventListener(SESSION_EXPIRED_EVENT, handler)
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handler)
-  }, [])
-
-  if (!visible) return null
+export default function SessionExpired({ bootstrapFailed, message, onRetry }: Props) {
 
   return (
     <div
       className="fixed inset-0 z-[180] flex items-center justify-center p-4"
       style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)' }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Session expired"
+      role="alert"
+      aria-label={bootstrapFailed ? 'Session bootstrap failed' : 'Session expired'}
     >
       <div
         className="card rounded-2xl -lg w-full max-w-sm p-7 flex flex-col gap-5 animate-fade-in-up"
@@ -48,10 +33,10 @@ export default function SessionExpired() {
           </div>
           <div>
             <p className="text-sm font-sans font-semibold" style={{ color: 'var(--text-primary)' }}>
-              Session expired
+              {bootstrapFailed ? 'Session bootstrap failed' : 'Session expired'}
             </p>
             <p className="text-xs font-sans mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-              Your session has timed out. Please reload to continue.
+              {message}
             </p>
           </div>
         </div>
@@ -59,18 +44,11 @@ export default function SessionExpired() {
         {/* Actions */}
         <div className="flex gap-3">
           <button
-            onClick={() => window.location.reload()}
+            onClick={() => { void onRetry() }}
             className="flex-1 rounded-xl px-4 py-2.5 text-sm font-sans font-semibold text-white transition-all hover:opacity-90 active:scale-[0.98]"
             style={{ background: 'var(--accent)' }}
           >
-            Reload
-          </button>
-          <button
-            onClick={() => setVisible(false)}
-            className="rounded-xl border px-4 py-2.5 text-sm font-sans font-medium transition-all hover:opacity-80 active:scale-[0.98]"
-            style={{ borderColor: 'var(--border)', color: 'var(--text-secondary)', background: 'transparent' }}
-          >
-            Dismiss
+            Retry connection
           </button>
         </div>
       </div>

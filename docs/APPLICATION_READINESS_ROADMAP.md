@@ -81,16 +81,17 @@ This review covered both Git repositories in the workspace:
   scans. High-risk and product-boundary modules were read directly.
 
 Validation evidence spans the 2026-07-09 baseline, the 2026-07-10 Phase A
-closeout, and the 2026-07-10 regression re-verification. Canonical
+closeout and regression re-verification, and the 2026-07-12 Phase B
+implementation verification. Canonical
 backend/dashboard counts below are the latest local re-verification counts;
 nested-dashboard and dependency-audit rows preserve the baseline audit:
 
 | Area | Result |
 |---|---|
-| Backend pytest | 640 passed |
+| Backend pytest | 720 passed |
 | Main dashboard typecheck | Passed |
 | Main dashboard production build | Passed |
-| Main dashboard Vitest | 372 passed in 27 files |
+| Main dashboard Vitest | 389 passed in 31 files |
 | Nested dashboard typecheck | Passed |
 | Nested dashboard production build | Passed |
 | Nested dashboard Vitest | 11 passed in 5 files |
@@ -119,7 +120,7 @@ The project does not need to be rewritten.
 - AI decision ledger, replay, evaluation, and guardrails.
 - Retention-table SQL interpolation is now allowlisted and tested.
 - Health, CORS, WebSocket auth/origin, and route-auth regression coverage.
-- 640 passing backend tests.
+- 720 passing backend tests.
 
 ### Main Dashboard
 
@@ -130,7 +131,7 @@ The project does not need to be rewritten.
 - Typed API modules split by domain.
 - Error boundaries, confirmation modal, symbol validation, adaptive polling,
   WebSocket reconnect tests, and watchlist persistence.
-- 372 passing dashboard tests.
+- 389 passing dashboard tests.
 
 ### Delivery Foundation
 
@@ -256,7 +257,7 @@ Decision:
   `archive/aiautomation-v2-2026-07-a10`.
 - Keep duplicate UI folders out of the active workspace.
 
-#### API-P1-01: Verified Frontend/Backend Contract Mismatches
+#### API-P1-01: Historical Contract Mismatches (Phase B Resolved)
 
 The main dashboard references backend routes that do not exist:
 
@@ -285,7 +286,12 @@ Required resolution:
 
 Do not preserve a button that silently falls back or always fails.
 
-#### AUTH-P1-01: Authentication UI and Runtime Flow Are Incomplete
+Phase B resolution: alert statistics is implemented; protected calls use the
+shared client; unsupported bracket editing, push persistence, and industry
+ranking calls were removed and labeled unavailable. The current OpenAPI/frontend
+checker is enforced in CI.
+
+#### AUTH-P1-01: Historical Authentication Gap (Phase B Resolved)
 
 `AuthGuard` is tested but never mounted by `main.tsx` or `App.tsx`.
 `App.tsx:75` attempts bootstrap auth, swallows failure, and renders the trading
@@ -308,7 +314,13 @@ Desktop resolution:
 - production has no fake login or registration UI;
 - all in-memory stores reset when the session ends.
 
-#### TRADE-P1-01: Manual Order Validation Is Not Complete
+Phase B resolution: `AuthGuard` now gates the complete workspace, the renderer
+uses a short-lived in-memory session from `POST /api/session/bootstrap`, fake
+login/register components were removed, and session loss resets all domain
+stores. The future Tauri shell will supply the per-launch capability through
+the native process/IPC boundary.
+
+#### TRADE-P1-01: Historical Manual-Order Gap (Phase B Resolved)
 
 `ManualOrderRequest` validates positive quantity but has no:
 
@@ -320,6 +332,11 @@ Desktop resolution:
 
 Frontend confirmation is useful but cannot be the safety boundary. The backend
 must reject malformed or excessive orders independently.
+
+Phase B resolution: the backend now enforces a strict symbol grammar, integer
+quantity ceiling, configurable absolute notional ceiling, positive limit-price
+rules, market-quote availability, unknown-field rejection, and stock-only
+manual orders until derivative multiplier validation exists.
 
 #### DATA-P1-01: Persistence Is Not Desktop-Grade
 
@@ -540,17 +557,20 @@ Acceptance:
 
 Goal: every visible workflow has a real, authenticated backend contract.
 
-- [ ] Resolve every missing route listed in API-P1-01.
-- [ ] Move all protected calls through the shared authenticated client.
-- [ ] Add OpenAPI-to-TypeScript generation or schema contract validation.
-- [ ] Add CI that fails when a frontend endpoint is absent from OpenAPI.
-- [ ] Remove fake login/register screens or implement a real supported flow.
-- [ ] Implement desktop-shell session bootstrap.
-- [ ] Add global store reset on session loss.
-- [ ] Add backend order symbol, quantity, notional, and limit-price validation.
-- [ ] Replace native `window.confirm`/`window.prompt` with application modals.
-- [ ] Decide and label O'Neil/leading-industries support honestly.
-- [ ] Add content-security policy and remove remote renderer navigation.
+Implementation status: locally verified on 2026-07-12; B12 owner sign-off is
+still required before Phase B is recorded as closed.
+
+- [x] Resolve every missing route listed in API-P1-01.
+- [x] Move all protected calls through the shared authenticated client.
+- [x] Add OpenAPI-to-TypeScript generation or schema contract validation.
+- [x] Add CI that fails when a frontend endpoint is absent from OpenAPI.
+- [x] Remove fake login/register screens or implement a real supported flow.
+- [x] Implement a desktop-compatible per-launch session bootstrap boundary.
+- [x] Add global store reset on session loss.
+- [x] Add backend order symbol, quantity, notional, and limit-price validation.
+- [x] Replace native `window.confirm`/`window.prompt` with application modals.
+- [x] Decide and label O'Neil/leading-industries support honestly.
+- [x] Add content-security policy and remove remote renderer navigation.
 
 Acceptance:
 

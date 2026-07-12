@@ -112,6 +112,7 @@ from rule_builder_api import router as rule_builder_router
 from advisor_api import router as advisor_router
 from risk_api import router as risk_router
 from health import router as health_router
+from session_api import router as session_router
 from notification_service import notification_service
 from runtime_state import initialize_runtime_state, reset_runtime_state
 
@@ -344,6 +345,7 @@ app.include_router(create_diagnostics_router(_diag_service))
 app.include_router(rule_builder_router)
 app.include_router(risk_router)
 app.include_router(health_router)
+app.include_router(session_router)
 app.include_router(advisor_router)
 from autopilot_api import router as autopilot_router
 app.include_router(autopilot_router)
@@ -417,10 +419,14 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def request_validation_handler(request: Request, exc: RequestValidationError):
-    log.warning("Validation error on %s %s: %s", request.method, request.url, exc.errors())
+    errors = [
+        {key: value for key, value in error.items() if key in {"type", "loc", "msg"}}
+        for error in exc.errors()
+    ]
+    log.warning("Validation error on %s %s: %s", request.method, request.url, errors)
     return JSONResponse(
         status_code=422,
-        content={"error": "ValidationError", "detail": exc.errors()},
+        content={"error": "ValidationError", "detail": errors},
     )
 
 

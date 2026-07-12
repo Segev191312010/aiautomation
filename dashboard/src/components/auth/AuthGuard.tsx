@@ -1,96 +1,61 @@
-import React, { useEffect, useState } from 'react'
-import { fetchAuthToken, setAuthToken, getAuthToken } from '@/services/api'
+import React, { useEffect } from 'react'
+import { useSessionStore } from '@/store/sessionStore'
 import LoadingScreen from '@/components/ui/LoadingScreen'
-import LoginPage from './LoginPage'
-import RegisterPage from './RegisterPage'
+import SessionExpired from '@/components/ui/SessionExpired'
 
-type AuthView = 'loading' | 'login' | 'register' | 'authenticated'
+interface Props {
+  children: React.ReactNode
+  onRetry: () => void | Promise<void>
+}
 
-const TOKEN_KEY = 'auth_token'
-
-/**
- * AuthGuard wraps the entire application and gates access behind authentication.
- *
- * Flow:
- *  1. On mount, attempt to restore a persisted token (or fetch a demo token).
- *  2. If restoration fails → show login page.
- *  3. On login/register success → show the main app (children).
- *  4. Listens for 401 events from the API layer to reset auth state.
- *
- * NOTE: The current backend uses a simple demo token. This guard is forward-
- * compatible with a real JWT login endpoint — just update handleLogin to call
- * POST /api/auth/token.
- */
-export default function AuthGuard({ children }: { children: React.ReactNode }) {
-  const [view, setView] = useState<AuthView>('loading')
-
-  const bootstrap = async () => {
-    // 1. Check for a stored token from a previous session
-    const stored = localStorage.getItem(TOKEN_KEY)
-    if (stored) {
-      setAuthToken(stored)
-      setView('authenticated')
-      return
-    }
-
-    // 2. Try to fetch a demo token (works when backend is up)
-    try {
-      const { access_token } = await fetchAuthToken()
-      setAuthToken(access_token)
-      // Store only if "remember me" was previously set
-      if (localStorage.getItem('remember_me')) {
-        localStorage.setItem(TOKEN_KEY, access_token)
-      }
-      setView('authenticated')
-    } catch {
-      // Backend offline or real auth required → show login
-      setView('login')
-    }
-  }
+/** Mount the trading workspace only while an in-memory session is current. */
+export default function AuthGuard({ children, onRetry }: Props) {
+  const status = useSessionStore((s) => s.status)
+  const token = useSessionStore((s) => s.token)
+  const expiresAt = useSessionStore((s) => s.expiresAt)
+  const error = useSessionStore((s) => s.error)
+  const reset = useSessionStore((s) => s.reset)
 
   useEffect(() => {
-    bootstrap()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Listen for 401 events emitted by the API layer
-  useEffect(() => {
-    const handle401 = () => {
-      setAuthToken(null)
-      localStorage.removeItem(TOKEN_KEY)
-      setView('login')
+    if (status !== 'authenticated' || !expiresAt) return undefined
+    const remaining = Date.parse(expiresAt) - Date.now()
+    const expire = () => {
+      reset('Your session expired. Reconnect to continue.')
+      window.history.replaceState(window.history.state, '', '/session-expired')
+      window.dispatchEvent(new PopStateEvent('popstate'))
     }
-    window.addEventListener('api:unauthorized', handle401)
-    return () => window.removeEventListener('api:unauthorized', handle401)
-  }, [])
-
-  const handleLogin = (token: string) => {
-    if (localStorage.getItem('remember_me')) {
-      localStorage.setItem(TOKEN_KEY, token)
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      expire()
+      return undefined
     }
-    setView('authenticated')
-  }
+    const timer = window.setTimeout(expire, remaining)
+    return () => window.clearTimeout(timer)
+  }, [expiresAt, reset, status])
 
-  if (view === 'loading') {
-    return <LoadingScreen message="Authenticating…" />
-  }
-
-  if (view === 'login') {
+  const sessionCurrent = Boolean(
+    status === 'authenticated' &&
+    token &&
+    expiresAt &&
+    Date.parse(expiresAt) > Date.now(),
+  )
+  if (sessionCurrent) return <>{children}</>
+  if (status === 'authenticated') {
     return (
-      <LoginPage
-        onLogin={handleLogin}
-        onShowRegister={() => setView('register')}
+      <SessionExpired
+        bootstrapFailed={false}
+        message="Your session is invalid or expired. Reconnect to continue."
+        onRetry={onRetry}
       />
     )
   }
-
-  if (view === 'register') {
+  if (status === 'expired' || status === 'failed') {
     return (
-      <RegisterPage
-        onShowLogin={() => setView('login')}
+      <SessionExpired
+        bootstrapFailed={status === 'failed'}
+        message={error ?? 'No active session is available.'}
+        onRetry={onRetry}
       />
     )
   }
-
-  return <>{children}</>
+  return <LoadingScreen message="Establishing secure session…" />
 }

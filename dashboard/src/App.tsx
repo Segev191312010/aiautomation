@@ -1,10 +1,11 @@
-import React, { Suspense, lazy, useEffect } from 'react'
+import React, { Suspense, lazy, useCallback, useEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Layout from '@/components/layout/Layout'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import Dashboard from '@/pages/Dashboard'
-import { useBotStore } from '@/store'
-import { fetchStatus, fetchAuthToken, setAuthToken } from '@/services/api'
+import { useBotStore, useSessionStore } from '@/store'
+import { bootstrapSession, fetchStatus } from '@/services/api'
+import AuthGuard from '@/components/auth/AuthGuard'
 import { APP_ROUTE_PATHS } from '@/utils/routes'
 
 const TradeBotPage = lazy(() => import('@/pages/TradeBotPage'))
@@ -68,42 +69,57 @@ function AppRoutes() {
 
 export default function App() {
   const setStatus = useBotStore((s) => s.setStatus)
+  const sessionStatus = useSessionStore((s) => s.status)
+  const beginBootstrap = useSessionStore((s) => s.beginBootstrap)
+  const setSession = useSessionStore((s) => s.setSession)
+  const failBootstrap = useSessionStore((s) => s.failBootstrap)
+
+  const startBootstrap = useCallback(async () => {
+    beginBootstrap()
+    try {
+      const session = await bootstrapSession()
+      setSession({ accessToken: session.access_token, expiresAt: session.expires_at })
+      if (window.location.pathname === '/session-expired') {
+        window.history.replaceState(window.history.state, '', APP_ROUTE_PATHS.dashboard)
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown bootstrap failure'
+      failBootstrap(`Session bootstrap failed: ${detail}`)
+    }
+  }, [beginBootstrap, failBootstrap, setSession])
 
   useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        const { access_token } = await fetchAuthToken()
-        setAuthToken(access_token)
-      } catch {
-        /* backend offline */
-      }
+    void startBootstrap()
+  }, [startBootstrap])
 
+  useEffect(() => {
+    if (sessionStatus !== 'authenticated') return undefined
+
+    const refreshStatus = async () => {
       try {
-        const status = await fetchStatus()
-        setStatus(status)
+        setStatus(await fetchStatus())
       } catch {
-        /* backend offline */
+        // The shared client owns session-loss handling. Transient backend
+        // failures leave the last known status visible until the next poll.
       }
     }
 
-    bootstrap()
+    void refreshStatus()
     const timer = setInterval(async () => {
-      try {
-        const status = await fetchStatus()
-        setStatus(status)
-      } catch {
-        /* ignore */
-      }
+      await refreshStatus()
     }, 30_000)
 
     return () => clearInterval(timer)
-  }, [setStatus])
+  }, [sessionStatus, setStatus])
 
   return (
     <BrowserRouter>
-      <Layout>
-        <AppRoutes />
-      </Layout>
+      <AuthGuard onRetry={startBootstrap}>
+        <Layout>
+          <AppRoutes />
+        </Layout>
+      </AuthGuard>
     </BrowserRouter>
   )
 }

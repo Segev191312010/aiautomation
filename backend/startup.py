@@ -54,12 +54,18 @@ def validate_autopilot_matrix(
         errors.append(f"AUTOPILOT_MODE='{mode}' is invalid. Must be OFF, PAPER, or LIVE.")
         return errors
 
+    if jwt_secret == DEFAULT_DEV_JWT_SECRET and not sim_mode:
+        errors.append(
+            "Broker-backed operation requires a non-default JWT_SECRET, even when "
+            "AUTOPILOT_MODE=OFF, because manual orders use authenticated routes."
+        )
+
     if mode == "OFF":
         # Inactive AI — nothing else to check.
         return errors
 
     # PAPER and LIVE both grant AI authority. Refuse the default JWT_SECRET.
-    if jwt_secret == DEFAULT_DEV_JWT_SECRET:
+    if jwt_secret == DEFAULT_DEV_JWT_SECRET and sim_mode:
         errors.append(
             f"AUTOPILOT_MODE={mode} requires a non-default JWT_SECRET. "
             "Set JWT_SECRET in .env to a strong random string before enabling AI authority."
@@ -122,7 +128,11 @@ async def validate_startup() -> StartupResult:
     # ------------------------------------------------------------------
     # 1. JWT secret + autopilot mode matrix (C6 + autopilot-matrix safety)
     # ------------------------------------------------------------------
-    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET and cfg.AUTOPILOT_MODE == "OFF":
+    if (
+        cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET
+        and cfg.AUTOPILOT_MODE == "OFF"
+        and cfg.SIM_MODE
+    ):
         warnings.append(
             "JWT_SECRET is the default development value. "
             "Set a strong random secret before going to production."

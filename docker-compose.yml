@@ -56,6 +56,9 @@ services:
 
       # Runtime logging. Worker count is intentionally pinned to 1 in Dockerfile.
       LOG_LEVEL: "${LOG_LEVEL:-info}"
+      # Nginx overwrites X-Forwarded-For with the actual browser peer. This is
+      # used only to preserve the loopback bootstrap boundary through Compose.
+      TRADEBOT_TRUST_PROXY_HEADERS: "true"
 
     # Persistent SQLite database volume
     volumes:
@@ -90,7 +93,7 @@ services:
     # Expose port 80 to localhost:3000
     # (Can adjust via PORT env var if needed)
     ports:
-      - "${DASHBOARD_PORT:-3000}:80"
+      - "127.0.0.1:${DASHBOARD_PORT:-3000}:80"
 
     # Wait for backend to be healthy before starting dashboard
     depends_on:

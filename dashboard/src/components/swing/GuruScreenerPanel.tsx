@@ -10,7 +10,7 @@ interface Props {
   onTabChange: (tab: GuruScreenerName) => void
 }
 
-const TABS: { key: GuruScreenerName; label: string; criteria: string }[] = [
+const TABS: { key: GuruScreenerName; label: string; criteria: string; available?: boolean }[] = [
   {
     key: 'qullamaggie',
     label: 'Qullamaggie',
@@ -23,8 +23,9 @@ const TABS: { key: GuruScreenerName; label: string; criteria: string }[] = [
   },
   {
     key: 'oneil',
-    label: "O'Neil",
-    criteria: 'Positive TTM EPS + Forecast earnings growth 25%+ + Positive ROE + Positive profit margin + ROE + NOPM >= 25%',
+    label: "O'Neil (planned)",
+    criteria: "Unavailable in this build. O'Neil/CANSLIM screening requires fundamental data that is not integrated.",
+    available: false,
   },
 ]
 
@@ -77,9 +78,11 @@ export default function GuruScreenerPanel({ results, activeTab, onTabChange }: P
             key={t.key}
             role="tab"
             aria-selected={activeTab === t.key}
+            aria-disabled={t.available === false}
+            disabled={t.available === false}
             onClick={() => onTabChange(t.key)}
             className={clsx(
-              'px-3 py-1.5 rounded-full text-xs font-medium transition-colors',
+              'px-3 py-1.5 rounded-full text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
               activeTab === t.key
                 ? 'bg-[var(--accent)] text-white'
                 : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]',
@@ -98,6 +101,11 @@ export default function GuruScreenerPanel({ results, activeTab, onTabChange }: P
       )}
 
       {/* Table */}
+      {activeTab === 'oneil' ? (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-5 text-sm text-[var(--text-secondary)]" role="tabpanel" aria-live="polite">
+          O'Neil/CANSLIM screening is unavailable in this build because the required fundamental-data feed is not integrated.
+        </div>
+      ) : (
       <div className="overflow-x-auto" role="tabpanel">
         <table className="w-full text-sm font-mono">
           <thead>
@@ -155,6 +163,7 @@ export default function GuruScreenerPanel({ results, activeTab, onTabChange }: P
           </tbody>
         </table>
       </div>
+      )}
     </div>
   )
 }

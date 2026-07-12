@@ -344,14 +344,13 @@ export default function ScreenerPage() {
               meta={(
                 <div className="flex items-center gap-2">
                   {results.length > 0 && (
-                    <a
-                      href={`http://127.0.0.1:5001/ib_multichart.html?symbols=${results.slice(0, 9).map(r => r.symbol).join(',')}&tf=D`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-semibold text-white transition-colors hover:bg-[color:rgba(245,158,11,0.24)]"
+                    <span
+                      className="cursor-not-allowed rounded-lg border border-[var(--border)] px-3 py-2 text-[11px] font-semibold text-[var(--text-muted)]"
+                      title="Multi-chart pop-out is unavailable in the local-only build"
+                      aria-disabled="true"
                     >
-                      Multi-Chart ({Math.min(results.length, 9)})
-                    </a>
+                      Multi-Chart unavailable
+                    </span>
                   )}
                 </div>
               )}
