@@ -57,3 +57,67 @@ jobs:
 
       - name: Test
         run: python -m pytest tests/ -v --tb=short
+
+  phase-c-c0-ubuntu:
+    name: Phase C C0 (Python 3.12 / Ubuntu)
+    runs-on: ubuntu-latest
+    env:
+      SIM_MODE: 'true'
+      AUTOPILOT_MODE: 'OFF'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install verifier dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Test Phase C verifier
+        run: python -m pytest scripts/tests/test_verify_phase_c.py -v
+
+      - name: Verify C0 safe root and inventories
+        run: >-
+          python scripts/verify_phase_c.py c0 --repo-root .
+          --expected-source-commit "${{ github.event.pull_request.head.sha || github.sha }}"
+          --json
+
+  phase-c-c0-windows:
+    name: Phase C C0 (Python 3.12 / Windows)
+    runs-on: windows-latest
+    env:
+      SIM_MODE: 'true'
+      AUTOPILOT_MODE: 'OFF'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install verifier dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Test Phase C verifier
+        run: python -m pytest scripts/tests/test_verify_phase_c.py -v
+
+      - name: Verify C0 safe root and inventories
+        run: >-
+          python scripts/verify_phase_c.py c0 --repo-root .
+          --expected-source-commit "${{ github.event.pull_request.head.sha || github.sha }}"
+          --json

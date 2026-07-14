@@ -1,0 +1,2537 @@
+{
+  "baseline_census": {
+    "aggregate_site_sets_sha256": "c620bbfad06d9d8a839c20fedfe23b96262c4fbf32f4491fbc660f5858c886f4",
+    "bare_catch_count": 0,
+    "baseline_files": [
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "773779241e2facd53bb9c663749b19e6b4efbde4fd5312f94bbc1809e4d1fd69",
+        "path": "backend/advisor_api.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 3,
+        "combined_site_count": 5,
+        "normalized_lf_source_sha256": "50f5100b1a83f532e3530fe943b86dc83842da59c1b22e4d2e91ee878ed8af6b",
+        "path": "backend/ai_advisor.py",
+        "site_set_sha256": "175a2b815bb54bb6d5d634a0887e187c154540cc33ca9dd01e0567abe9a516f0",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0001",
+            "fingerprint_sha256": "7497f08ee7c78ba06fbae64eb2f2c8c6924dbc654380774da00dd1f3a38613fc",
+            "kind": "broad_catch",
+            "line": 111,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0002",
+            "fingerprint_sha256": "e24fff898d49f850b9332bc69e7cabf0bb434fdf3aed21a4ae91b0856bb8c723",
+            "kind": "standalone_pass",
+            "line": 112,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0003",
+            "fingerprint_sha256": "eeae4fbd1aa4a91f151b3600b54268129d7e501d6e1876cdc7cbe6623fab5f3a",
+            "kind": "broad_catch",
+            "line": 173,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0004",
+            "fingerprint_sha256": "247ebc836b2da14a7526936981a38dfd5a290f5e25a3308bbc260ef7f4b768c6",
+            "kind": "broad_catch",
+            "line": 514,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0005",
+            "fingerprint_sha256": "e5efbe35ef88cf35e826259221e64f71628ac8a566aa854d91e7f9d094312e0a",
+            "kind": "standalone_pass",
+            "line": 766,
+            "normalized_source": "pass"
+          }
+        ],
+        "standalone_pass_count": 2
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "3606a8e243742158f8f47c3d41ed5156b8e212531e190dbff643742e473477e7",
+        "path": "backend/ai_capability.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "ae280999123c6f043f29e0caf7a3c0472f5d443388e45aa4b193e8ed9948332f",
+        "path": "backend/ai_decision_ledger.py",
+        "site_set_sha256": "4a00b43f9fbce451359379947e6f6cb40b3dad77e2565d6a51ff812adb47590d",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0006",
+            "fingerprint_sha256": "9c05a2c83caec4d067c26e251af0f9b3ef5a10b4e71249ad5ab6fae340660598",
+            "kind": "broad_catch",
+            "line": 314,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 10,
+        "combined_site_count": 10,
+        "normalized_lf_source_sha256": "21b9022160aeafc7fd6edc8c6bc221b08d680b2665025a585f27c7d846036260",
+        "path": "backend/ai_guardrails.py",
+        "site_set_sha256": "10b8e2291f19420bd6e7ca0cd81a1c70bcd8da9db2f1bad2fe0b47f7bc19878c",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0007",
+            "fingerprint_sha256": "314969e2fb0f9826f3567d3dbc367c8d1734e44ee18ba1441f94ef96c4766db3",
+            "kind": "broad_catch",
+            "line": 45,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0008",
+            "fingerprint_sha256": "9a7a104fbff9ad3aaea3034e2ff21fb19b38fed2094a00c77bd417c1b559948f",
+            "kind": "broad_catch",
+            "line": 75,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0009",
+            "fingerprint_sha256": "677a1e7c316c7d81eeab53c3e07bd90d054f33eff72d94f98432dfd3a2918688",
+            "kind": "broad_catch",
+            "line": 330,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0010",
+            "fingerprint_sha256": "d05dfec30798b423071491ffdb016365c3ebe198899adf968784dcb0389a5eb1",
+            "kind": "broad_catch",
+            "line": 618,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0011",
+            "fingerprint_sha256": "25ae20b1fc6ed7918a9125c88fe1b365c3517664174ddc1a338ac636ce36fc91",
+            "kind": "broad_catch",
+            "line": 688,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0012",
+            "fingerprint_sha256": "265505c30947b57b6c9c6e5f69acb9609f021729a574563377bd6dbac2a35656",
+            "kind": "broad_catch",
+            "line": 735,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0013",
+            "fingerprint_sha256": "22e5ada0086ba2d42dab6cb06400c7302bbe5a4f68801e9e015aa68464786530",
+            "kind": "broad_catch",
+            "line": 771,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0014",
+            "fingerprint_sha256": "fef897f89636e864362ee2115cff444a89aee2f3b24d0f6e079c62ffad720568",
+            "kind": "broad_catch",
+            "line": 786,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0015",
+            "fingerprint_sha256": "f9852ae9044a901cd66c6df044c4777dd7829160055d079cf2eb140c4f91fe70",
+            "kind": "broad_catch",
+            "line": 796,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0016",
+            "fingerprint_sha256": "bfa5691a54e2ef290c6c3cd5ebda86c1cad2b0dabbabf394337e25dd381d9a00",
+            "kind": "broad_catch",
+            "line": 810,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 4,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "c02a66054f3778c93988446068532c620639d6e26b3b80f74cb8b87435bbe689",
+        "path": "backend/ai_learning.py",
+        "site_set_sha256": "743d7e1e28c9bbe9afc87f31982cd8a9d08b2a314269ad6e343fc138542357a1",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0017",
+            "fingerprint_sha256": "8e495b6685ecabb820f9c4e45c26eafaa3ef5e9bbe89d3378a4b16ab0e41cb0a",
+            "kind": "broad_catch",
+            "line": 57,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0018",
+            "fingerprint_sha256": "d37c7c04ac8280d7999aae0023d29ac0cadec43a0dfa355a0c9b3030b322699d",
+            "kind": "broad_catch",
+            "line": 156,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0019",
+            "fingerprint_sha256": "040456f228b7c51b5d2fee199e54dbbaac8a371413a5459b6d52f219084ec450",
+            "kind": "broad_catch",
+            "line": 321,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0020",
+            "fingerprint_sha256": "d555ec4d4650ff7b96766f994cda124039ffe8ebcdff8c01b44bddf37e8068df",
+            "kind": "broad_catch",
+            "line": 540,
+            "normalized_source": "except Exception as e:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "75c4ee286ff4e1d0664ee56e95768c5d99c363950f13e97b1594cb381f63919e",
+        "path": "backend/ai_model_router.py",
+        "site_set_sha256": "af70005e0df8b57ce518b524892653742af4696f1b6cf6801a20dd2031591bbb",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0021",
+            "fingerprint_sha256": "da65987f30d077907bced9de6473f32c3d3f0380af613999aa1d8612e02607d5",
+            "kind": "broad_catch",
+            "line": 123,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0022",
+            "fingerprint_sha256": "2db16c186b718061209c85ab81468484123b1cc8b80b5d174f9bef3399000d7d",
+            "kind": "broad_catch",
+            "line": 137,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 10,
+        "combined_site_count": 10,
+        "normalized_lf_source_sha256": "b20d8acd61602fc7930eac86b6d91669ea04ac84f1abb9a4186fb18b917fde8b",
+        "path": "backend/ai_optimizer.py",
+        "site_set_sha256": "c91402a12e36628c13cf757bf671be09fead91ef056a64969fb9d4c80a8b7970",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0023",
+            "fingerprint_sha256": "3eb5d7453ebe0d76f56de7b860bda4e1871883148b35b9ee0f3967566a42034a",
+            "kind": "broad_catch",
+            "line": 50,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0024",
+            "fingerprint_sha256": "e8bb6a4eebea653da96340619b9207f89184479066937b8fd77e88fcd858c9e3",
+            "kind": "broad_catch",
+            "line": 363,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0025",
+            "fingerprint_sha256": "404126aeabded1dc64d7d84a9f4e0397625c5c58953632b6d7790bc8bd6dab04",
+            "kind": "broad_catch",
+            "line": 397,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0026",
+            "fingerprint_sha256": "cbab92a7afcf12c2e5557d448ef4a3e492faafbdc5cbdf491b38637d643f3f48",
+            "kind": "broad_catch",
+            "line": 441,
+            "normalized_source": "except Exception as cfg_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0027",
+            "fingerprint_sha256": "e85849c155c9c320ad81a560305e3baf82f314e9f02ed9678a8e6cc13ed8ac68",
+            "kind": "broad_catch",
+            "line": 495,
+            "normalized_source": "except Exception as ledger_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0028",
+            "fingerprint_sha256": "78ddb9c0534ba4fca4bf5b1a645cf3af13bb1ab332167ef469c59473f04e3777",
+            "kind": "broad_catch",
+            "line": 505,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0029",
+            "fingerprint_sha256": "55e97c68363125b9b3f6bff8c884092b6db9358610052e525b723443a75fa9fb",
+            "kind": "broad_catch",
+            "line": 517,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0030",
+            "fingerprint_sha256": "ae6ca05ba00dcbc5d2e055e2efaaa21b68a63a22d92ecb9ea6c572c771e9b2f0",
+            "kind": "broad_catch",
+            "line": 526,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0031",
+            "fingerprint_sha256": "9a61dafc8f663a2591c3291f2436cc6120fa89544c60b97ccd1fe93ff56279f9",
+            "kind": "broad_catch",
+            "line": 543,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0032",
+            "fingerprint_sha256": "617a552bfa1486b355c95d4eefdbeb7a5e014619e29a2b14b97e2d485493b69c",
+            "kind": "broad_catch",
+            "line": 576,
+            "normalized_source": "except Exception as e:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "e0c6e4c941ea8609bbd57ca65b37d5aa6cd5beff8ff6ac92cbd67bb5c1411f5d",
+        "path": "backend/ai_params.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "4ca68acb4f273cd651260af5bf3e4cc88cead556914ad9b0f62ab6a90fb80832",
+        "path": "backend/ai_rule_lab.py",
+        "site_set_sha256": "7ddbcc0be190e8ef922149231a1d76c122e370c47e5b900b4638e535defcfe4c",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0033",
+            "fingerprint_sha256": "3b1289308059aba44b78d96a81bbdf77d91ff08fb22659840ad04215d9d89068",
+            "kind": "broad_catch",
+            "line": 57,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 3,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "6b9aba8541c4241f791e81324961edf68c781926b28c987f8cfc7ebb890a047f",
+        "path": "backend/alert_engine.py",
+        "site_set_sha256": "939c3851de03ed245e1c3022bb65add93e462b159e878c6a160114b18a60acfd",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0034",
+            "fingerprint_sha256": "e0cf9ce5496b14bc9e2a666bfce279d62c2c268f332200b297ef7e2079a850ca",
+            "kind": "standalone_pass",
+            "line": 76,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0035",
+            "fingerprint_sha256": "a00e2ab507e208e5ac0f9d07f0b34a69cd6380086f302dd5f0ecc8b95c64dfa3",
+            "kind": "broad_catch",
+            "line": 88,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0036",
+            "fingerprint_sha256": "c825a348e814a938b012098d0cca97e4dc4c264b7be81ffe11cf0f12933df71c",
+            "kind": "broad_catch",
+            "line": 130,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0037",
+            "fingerprint_sha256": "e55a80646b76af0a26409851b3f22249e2895092ea498678cf3546a8eb6c6879",
+            "kind": "broad_catch",
+            "line": 179,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "5c6a4c0a3e4b82113f00814633dce737d31522b0afe2a123c7d88e11e53404b9",
+        "path": "backend/api_contracts.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "d772477ae3813763032cc13314fc9b2748bb15513dec73aa53aa29d5a941118d",
+        "path": "backend/auth.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "d257bbc079f75e4c2f56b872463266a15be8e4d4cafbca8444728b7811c45528",
+        "path": "backend/auto_rule_manager.py",
+        "site_set_sha256": "317dfba846adad75a6c105bd9747b08bed9297b991e829d65df3e330fb3a0c95",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0038",
+            "fingerprint_sha256": "18c49bcfedf7612c3c05c073187636de5fc170c2de71b3c8702f5d8492708836",
+            "kind": "broad_catch",
+            "line": 128,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 4,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "308307b60c53ef81b85e6a8734c3816dd701e66d63f7a72323ba78a30641a404",
+        "path": "backend/autopilot_api.py",
+        "site_set_sha256": "5d2ba5234f82877ecf7126b93ed61681d43a0480d98fb73c5a2e967a89809557",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0039",
+            "fingerprint_sha256": "2d670ac0738fda23ab46e895d3a7a5b42b1a0d5066225373c262775e0550aa3c",
+            "kind": "broad_catch",
+            "line": 516,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0040",
+            "fingerprint_sha256": "4ddc38c07d77a19f687bd51b62cebb4e0ed4f39070d991960c759abfa14a3963",
+            "kind": "broad_catch",
+            "line": 527,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0041",
+            "fingerprint_sha256": "dd8a294db48948182c70ff6be0228c25cd8bc20ca7a4176ca4cdcd3b0e42a764",
+            "kind": "broad_catch",
+            "line": 538,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0042",
+            "fingerprint_sha256": "b9de9da725105e9d750b46ad948d49c6bc33a58ffc756437c2eebfcba59dceee",
+            "kind": "broad_catch",
+            "line": 662,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 5,
+        "combined_site_count": 5,
+        "normalized_lf_source_sha256": "82a334541de7110e076a6f1d9bdbf85745b3a243dac5ddbb4695e26f2d72dde1",
+        "path": "backend/bot_exits.py",
+        "site_set_sha256": "bde760af1cb1efcc1fb46516729ba68f46246e83123ec7d7c0840be8ac76f1a3",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0043",
+            "fingerprint_sha256": "8d842da8354f6861ce53741d76346a6db450a5552345089d564a70236492c3ec",
+            "kind": "broad_catch",
+            "line": 86,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0044",
+            "fingerprint_sha256": "627a4398b80a8d806879a0fa0ef1a93c3a5e6f4c63c12b887bb38d0f51b92b42",
+            "kind": "broad_catch",
+            "line": 154,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0045",
+            "fingerprint_sha256": "5c3ce26191a0a716f3f89438a1397d616e43ccdcc5b1a672ac1a72560b34901d",
+            "kind": "broad_catch",
+            "line": 212,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0046",
+            "fingerprint_sha256": "86daf1228d8eceb003d026a3f12e20d6ba863703dd414d378f68712906ca54f8",
+            "kind": "broad_catch",
+            "line": 272,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0047",
+            "fingerprint_sha256": "eb3a5cf2a8b90bf708692e72b3c9ae49ce007a8be0b1b952fe7d2867e45fd5c1",
+            "kind": "broad_catch",
+            "line": 355,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "c30193b5ba3c1ddecbffd13254778d353827992771e9bb93e3cfd23f93e2e97c",
+        "path": "backend/bot_health.py",
+        "site_set_sha256": "ddeb3bd19c29063394b8b1a79c23e772135fc6c1b579c039b7a2212aa868a05d",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0048",
+            "fingerprint_sha256": "ab618eb46df825e4aa02097525501ee2de34ce557fdd28a37a159464686694c4",
+            "kind": "broad_catch",
+            "line": 126,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0049",
+            "fingerprint_sha256": "ca24ddc8275f465bb60fb3e8c2408e9a30729ed70bdea91d6384e29ea56fe132",
+            "kind": "broad_catch",
+            "line": 135,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 34,
+        "combined_site_count": 35,
+        "normalized_lf_source_sha256": "c8c57352aa4ee500cf1d5d43a9b6b8f650de807077b9ab55487e6a7c11bf8f8a",
+        "path": "backend/bot_runner.py",
+        "site_set_sha256": "4b52ca7976245bd512b57e0de5f34a3ae8d8820ff74551c01dd1161ecf34bf37",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0050",
+            "fingerprint_sha256": "c646fd59f0860a12b79e57e71c4f9ed7096bb4ff6356f7ac50222fdf0ff63656",
+            "kind": "standalone_pass",
+            "line": 129,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0051",
+            "fingerprint_sha256": "ff0de670286380de1655851bc3ecd53ef25b4fca11fc72d540f053e356ad7e9b",
+            "kind": "broad_catch",
+            "line": 152,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0052",
+            "fingerprint_sha256": "d87db90dc48186a5bb4b47c0232d24d8fbfb3b1a54f7a487400869ee989111c0",
+            "kind": "broad_catch",
+            "line": 158,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0053",
+            "fingerprint_sha256": "5dbb4149c1d9b9e2798ae153e0efcd3c0a35d8b9c29dbc025f544a8b55bfd821",
+            "kind": "broad_catch",
+            "line": 213,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0054",
+            "fingerprint_sha256": "e67dd3e2a5d5d485f38ff438515753399e71f1e2d0d7109f01e4b6e4ca4d9dbf",
+            "kind": "broad_catch",
+            "line": 261,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0055",
+            "fingerprint_sha256": "c04a60e56600d858c416bf71baf0c5eda1a5f101a040ae2267236c48870baa4d",
+            "kind": "broad_catch",
+            "line": 273,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0056",
+            "fingerprint_sha256": "4a97623c81f07c5a4529a83cdd9d4e7907bcd07bd4cc32a60908e98683835d9c",
+            "kind": "broad_catch",
+            "line": 312,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0057",
+            "fingerprint_sha256": "69f542cc185764641a96b55c2c8369a7abde6f1d9ea86afe34641a95ab42fe80",
+            "kind": "broad_catch",
+            "line": 324,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0058",
+            "fingerprint_sha256": "a724d1764fd56a0945dff1403fb150fd0785441b2b12b6c506a808b70d31a4c0",
+            "kind": "broad_catch",
+            "line": 326,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0059",
+            "fingerprint_sha256": "f3db54165f00b77dfffa57cd8d68f23198a55fb70bf3c0bef3b39980e77c02a6",
+            "kind": "broad_catch",
+            "line": 336,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0060",
+            "fingerprint_sha256": "7aec50d781668a55482356307a23a6ca3b5d6cb4ec28994af58dad1c2c1fb1a3",
+            "kind": "broad_catch",
+            "line": 351,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0061",
+            "fingerprint_sha256": "30e38e334e170b74cb5593ccb23d1b5c1a9035fbca31c9402329e42194400817",
+            "kind": "broad_catch",
+            "line": 360,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0062",
+            "fingerprint_sha256": "1cc4f55a353d2bc31c50c3faf5ef5578ed39e48ae3635cc89580c6b98f3b55c4",
+            "kind": "broad_catch",
+            "line": 430,
+            "normalized_source": "except Exception as snap_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0063",
+            "fingerprint_sha256": "835e8d24073703e5d638a8eddfebb9245eb7eab54ef32b65e2f897e7c06eda61",
+            "kind": "broad_catch",
+            "line": 434,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0064",
+            "fingerprint_sha256": "513067e06930f6743700d18ad8c7b76de367472615f1fbf4a6c9e72abe84a9ae",
+            "kind": "broad_catch",
+            "line": 488,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0065",
+            "fingerprint_sha256": "eff5c84ede579a3f28bd07eb5e876c5f5cfdf15699f36fba50fe9710f26a8c3a",
+            "kind": "broad_catch",
+            "line": 514,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0066",
+            "fingerprint_sha256": "be9bea93aa13f726947b4b4836a12a3832df43b1b182aa4aa6bafbe06e0483f9",
+            "kind": "broad_catch",
+            "line": 527,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0067",
+            "fingerprint_sha256": "834211dab5393f103aa5e420392a271ee860bfa69be01c30a9a89be11ab927ad",
+            "kind": "broad_catch",
+            "line": 547,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0068",
+            "fingerprint_sha256": "3bfc116e637ce99180df4ee103862e5f5e41a788227bcd7a4fc3ccf3eaa62a07",
+            "kind": "broad_catch",
+            "line": 565,
+            "normalized_source": "except Exception as pending_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0069",
+            "fingerprint_sha256": "ce69ab0a5a9307646c12352c91987378f60d8b91ba37697486cae6a2572b6e05",
+            "kind": "broad_catch",
+            "line": 568,
+            "normalized_source": "except Exception as pos_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0070",
+            "fingerprint_sha256": "c423b71acc1bc4dd827d3aa5815465623d7e456684059d655ffa7bdf6046ce25",
+            "kind": "broad_catch",
+            "line": 594,
+            "normalized_source": "except Exception as corr_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0071",
+            "fingerprint_sha256": "5c7f2c2be90dbfdaece214d862bb6e9452b377d62c480c22ddcfa2834f641401",
+            "kind": "broad_catch",
+            "line": 643,
+            "normalized_source": "except Exception as status_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0072",
+            "fingerprint_sha256": "199dc4c1f2c1097cc8da8f7fb502cdbd82d98d950e63e91704fd86e8d12d88dd",
+            "kind": "broad_catch",
+            "line": 646,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0073",
+            "fingerprint_sha256": "0bbd8420c8b7fe79aae11d19ac9b2d7563db278d8a680debb5e331d66721d423",
+            "kind": "broad_catch",
+            "line": 654,
+            "normalized_source": "except Exception as status_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0074",
+            "fingerprint_sha256": "ff3569ee8c47adac60d1fff628ed0555603a0271f3dbd99115b6c4e0323b341c",
+            "kind": "broad_catch",
+            "line": 674,
+            "normalized_source": "except Exception as status_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0075",
+            "fingerprint_sha256": "54d0e5e97b467150045b78385656dea98f08e429a5eb1442f9506070fc482237",
+            "kind": "broad_catch",
+            "line": 682,
+            "normalized_source": "except Exception as status_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0076",
+            "fingerprint_sha256": "2db22e5166edc8e836d166be27e48d30306ea1f14d1ef16edf2579b873b0e840",
+            "kind": "broad_catch",
+            "line": 737,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0077",
+            "fingerprint_sha256": "9d0253d4101f33674095638bc1eab2026504ec6a2f7676db7e25f0f1f8c66b6a",
+            "kind": "broad_catch",
+            "line": 744,
+            "normalized_source": "except Exception as status_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0078",
+            "fingerprint_sha256": "abc74e4f80d27094e34e5bbe5fbdaad47f118ba198defb16826897b4328757f9",
+            "kind": "broad_catch",
+            "line": 776,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0079",
+            "fingerprint_sha256": "84e7f87a59192153b8be9820916ad669e798dd5a5ac461abef8f1797dadd8cbf",
+            "kind": "broad_catch",
+            "line": 813,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0080",
+            "fingerprint_sha256": "388f1791bbf8c170f67e949c34b03be296d0cbb9b4474976136145d237a68727",
+            "kind": "broad_catch",
+            "line": 820,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0081",
+            "fingerprint_sha256": "05c020afda1f39c785fb15d8f58af6f6a50b01d9f00fbc6c10c9f8f7d02d7300",
+            "kind": "broad_catch",
+            "line": 830,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0082",
+            "fingerprint_sha256": "8e7e128886b0df6cee4d9bc57bc3399c72100a174417c00436cacd74f72e94e3",
+            "kind": "broad_catch",
+            "line": 840,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0083",
+            "fingerprint_sha256": "a123e3adb66c009d360dbab531d192e130582a502337274c6dd7ab867457db3c",
+            "kind": "broad_catch",
+            "line": 880,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0084",
+            "fingerprint_sha256": "454f4c80ba2b136e139acad2e92aa38b49b46f60f9815539ea363d74cbb534cf",
+            "kind": "broad_catch",
+            "line": 979,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "2a118f750accf665a9c24300db1f9cb00bda3ae647c78f264f9eb05a5e3ad1eb",
+        "path": "backend/config.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 3,
+        "combined_site_count": 3,
+        "normalized_lf_source_sha256": "6246587cb94d5fa6b07d395b2e20cccc059e2595fb96e3569586e24e7eed583c",
+        "path": "backend/data_handler.py",
+        "site_set_sha256": "61fd71b863b16382a9044e16b45151ea2b6cd81d4a06925cb50557bdc4925fb7",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0085",
+            "fingerprint_sha256": "ceacbac728317200ab1995660fe9d0bd7f89658b3da4d3b2baa5f4d1ae7506f3",
+            "kind": "broad_catch",
+            "line": 42,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0086",
+            "fingerprint_sha256": "5fb44514c08ba106d87ff619ce5705638146b819784f17f1d9c2aca08927fa07",
+            "kind": "broad_catch",
+            "line": 81,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0087",
+            "fingerprint_sha256": "b0aeffb62586f052760cd443d612eec6e80f43b49587f200566fd5a48e3a31ed",
+            "kind": "broad_catch",
+            "line": 112,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "7f7a47ef7f998f42cd1c1b5be300bcfd853a6810c21ef89b422dd31067e5d1e9",
+        "path": "backend/database.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "a28b319563ccdb8ef24d7b2cffffa1d097dd653af9a532226950d0d2bb30dc44",
+        "path": "backend/db/__init__.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "583491ea9133cab5c1f3773298b224d1fb0e04bc4e90a24a31d52046d7f9d78d",
+        "path": "backend/db/core.py",
+        "site_set_sha256": "929307847e93d8837b15060218d76add8be34b11f99bf37f93ce827b00de2604",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0088",
+            "fingerprint_sha256": "ac4e7c623ffbad2c61f963740dcc4fb1cafb8419aef161abdb9559a7aa2968e5",
+            "kind": "broad_catch",
+            "line": 42,
+            "normalized_source": "except BaseException:"
+          },
+          {
+            "baseline_id": "D14-BASE-0089",
+            "fingerprint_sha256": "da9ead2099cba470f3a432e31ab796ff02dbaccaffc892cf14905682f4f5697f",
+            "kind": "broad_catch",
+            "line": 512,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "0aefafe2a2cd3d290e29e49986fc1c0b3bf563b82dbce47924a451976d06066f",
+        "path": "backend/db/direct_candidates.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "65a5dd812dcb843fcf113817f06ef92d2581984388b491c1867bdc008ba31011",
+        "path": "backend/db/positions.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 8,
+        "combined_site_count": 9,
+        "normalized_lf_source_sha256": "e536e900447a7a730a7054d8d6de055192c61be031e45c83d30a6826b5def4e3",
+        "path": "backend/db/retention.py",
+        "site_set_sha256": "0192316643046cd8f2d3b0be1556fde96f8c14569271c6b6e5598b59272044b0",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0090",
+            "fingerprint_sha256": "6d608273e351a769eb5647b2f73986073cdbba9088dc62cd8c8c2f67fa46e85e",
+            "kind": "broad_catch",
+            "line": 298,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0091",
+            "fingerprint_sha256": "03524f7461c3284b17a8f8c1fdf3d16e3a390e228ef1fcfe8614453ee10c2cbb",
+            "kind": "standalone_pass",
+            "line": 353,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0092",
+            "fingerprint_sha256": "6668e4bfe3d083d8c4d6b67b2449e76cc05511659131794b1026802c605cd55c",
+            "kind": "broad_catch",
+            "line": 364,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0093",
+            "fingerprint_sha256": "8d07eb0c8b5ee322a6e49cc333353d56aa00df0a5a64950b1bd7a2687f83859c",
+            "kind": "broad_catch",
+            "line": 377,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0094",
+            "fingerprint_sha256": "dc0c85cc8fc1fd435ed10b7b8f048d6d774a3754c10b788f043c79b8a2cefb26",
+            "kind": "broad_catch",
+            "line": 453,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0095",
+            "fingerprint_sha256": "6d60245d9cc8aaca8b2a326b7092545c5ddd84a0a7d787853c43d73f796ff728",
+            "kind": "broad_catch",
+            "line": 495,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0096",
+            "fingerprint_sha256": "81cdf65be9f7870b0d7934bedf2444c509ad78871693f635d3e31f850139a2d1",
+            "kind": "broad_catch",
+            "line": 499,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0097",
+            "fingerprint_sha256": "4c13e4c3efeec739807d57f528672eeee3cdb8b8015d953d29165b1d999f7c7c",
+            "kind": "broad_catch",
+            "line": 513,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0098",
+            "fingerprint_sha256": "9f4a906def5cc0e5c0f9f850c4070691a61c0aa0b03826141e89af7637a0f1f1",
+            "kind": "broad_catch",
+            "line": 613,
+            "normalized_source": "except Exception as e:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "a907d1513b03327fe34503a0b623bd3453a6c2fb28b30cc52727f9ea31531252",
+        "path": "backend/db/rules.py",
+        "site_set_sha256": "7fd367c9013ae37a986bcccf6ef47ceed676eed936647a6043b491943f7a8115",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0099",
+            "fingerprint_sha256": "bbbf0a2884faf0c5552cc332309bfb0df59a2d7b7606050960cb1f53af24c608",
+            "kind": "broad_catch",
+            "line": 77,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "7633ea1a108f930370bebfb07a70bec70d0000496a0dc02d7acfe0cf2649110f",
+        "path": "backend/db/trades.py",
+        "site_set_sha256": "e5972b1e36c7a1575214ae17427c35ace4c6783d6ba45fa46a976ab741841a27",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0100",
+            "fingerprint_sha256": "8a0e72b475f322f757009d055140a17b715385cf601b63433e35c86f6ac007bc",
+            "kind": "broad_catch",
+            "line": 69,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0101",
+            "fingerprint_sha256": "98b26dae4ba1b2efd930c48b224a445d03fcbee2cdb1e97b0d9c498390e2fc44",
+            "kind": "broad_catch",
+            "line": 171,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "83580ea41d7f0b66b1be7577d56d7592a315a7dc797c5730d3a0462aadfa6e7d",
+        "path": "backend/db/validation.py",
+        "site_set_sha256": "2dc2363b4b8b48bf2684ecbc5f7b4cd5c244cdef9a92aa53bae75093bdc2d995",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0102",
+            "fingerprint_sha256": "e93455a7070ed0291cab44cfa75b506adc3bdb4cd38c98779c9d55a060ae907f",
+            "kind": "broad_catch",
+            "line": 86,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0103",
+            "fingerprint_sha256": "548a354fae4af3baa43dfff6711584031a3f4cfc035a4ee4c8b81fb190b68eb7",
+            "kind": "standalone_pass",
+            "line": 87,
+            "normalized_source": "pass"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "ccd8ca716ee61ad61ba3e1bd86e718d9c0fe32d837032b5ccc76a51c53b6238b",
+        "path": "backend/decision_item_factory.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "4f75ef82651a773497b25d3bddb3a49096a817139f09153fccb8dc83848b28ce",
+        "path": "backend/diagnostics_api.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "6cd0d691f721f1392233ea0e5be318a3810eefa0ae390e553a1f82287b92aae8",
+        "path": "backend/diagnostics_scheduler.py",
+        "site_set_sha256": "9e12b778accbff7fcb03dc9fd80f1ef9a260cf0a0536be59813fec241ef37b76",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0104",
+            "fingerprint_sha256": "05500c934a3f901b95b0ff4b203e1c0cb091a8895d31813855656045774b58f1",
+            "kind": "standalone_pass",
+            "line": 39,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0105",
+            "fingerprint_sha256": "8de5d5c0eea0774600adba1313bf573eafdd280fffd4cc43c099635102ad36d2",
+            "kind": "broad_catch",
+            "line": 47,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 7,
+        "combined_site_count": 7,
+        "normalized_lf_source_sha256": "ac01b6722465e75a106894e21f30a5b9dda936d8f6cef8d9f5fa40e8dd3514c4",
+        "path": "backend/diagnostics_service.py",
+        "site_set_sha256": "92c345db2aacfd40d3982abe25b5ce6edd2f464c32673ee8fb239f995dd7a3c5",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0106",
+            "fingerprint_sha256": "fd1300298a4cb3e949f305fe041f829cbc3e622b5a0fb4cbc820c471c9310762",
+            "kind": "broad_catch",
+            "line": 317,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0107",
+            "fingerprint_sha256": "34e828efec959215851b45dc0726a1a258a3370be4556da3a0e7b68302944a9e",
+            "kind": "broad_catch",
+            "line": 500,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0108",
+            "fingerprint_sha256": "a8b3fd3738bc4000b3ef4fd5c06a6fe2b190f0aeea819ed6dc245432098c7f7d",
+            "kind": "broad_catch",
+            "line": 530,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0109",
+            "fingerprint_sha256": "02fe5cf7f1b0319cfdd11f42dc8ad972d8c917554a12b67525b7156e2daea2c7",
+            "kind": "broad_catch",
+            "line": 601,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0110",
+            "fingerprint_sha256": "3eacec07b05cda8605da47f3ad80ca63398be1671d962d9df911aaec6ff8679c",
+            "kind": "broad_catch",
+            "line": 1041,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0111",
+            "fingerprint_sha256": "a4574a8a9f621965d029deb6c71fed101f6e9d400eb8164bf24dc58c18a86b6e",
+            "kind": "broad_catch",
+            "line": 1050,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0112",
+            "fingerprint_sha256": "e91145cec8ddbc74d448efd54c132aa182a5e98b29572d8955c50b8461c68450",
+            "kind": "broad_catch",
+            "line": 1102,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "9436b77d4864f2cef50e3d08e18a065b8e9ea018615b074ef1e0d88c39b471c7",
+        "path": "backend/direct_ai_trader.py",
+        "site_set_sha256": "a939fa1f0fd28052651957f219c2ce1d3fed108418b0cdb3ed8c7ab5564f0f97",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0113",
+            "fingerprint_sha256": "eed8b620633bda5e139200bb193090dec5f43eb98e35fb018af6ba69cc6b2e9a",
+            "kind": "broad_catch",
+            "line": 181,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0114",
+            "fingerprint_sha256": "bf98fa8dafec8d2218b77b601c0b5f6d980046c651967374cc5b40c3a44e6e9b",
+            "kind": "broad_catch",
+            "line": 267,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "fecefcd99affc627b4ad0abf2370d62f31ee5824debe0fe8ad9de4e03cc44143",
+        "path": "backend/event_logger.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 3,
+        "combined_site_count": 3,
+        "normalized_lf_source_sha256": "ef050b1c772cc27ed54ff83eb52ca2021c329b7c1923df74121b1a8376276ff0",
+        "path": "backend/events.py",
+        "site_set_sha256": "f4ec455841202c2271c2915381748fdc68250ba881de95e75753e2f421844627",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0115",
+            "fingerprint_sha256": "eb741da57c8a8a4fdef42fd4ca33bf4b9862059156b5fcbed4b6dbb67d73de6d",
+            "kind": "broad_catch",
+            "line": 309,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0116",
+            "fingerprint_sha256": "7dd585d2e6317904cbb0c29eea37dba717af440e08578e0a3d39b2c865db552f",
+            "kind": "broad_catch",
+            "line": 315,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0117",
+            "fingerprint_sha256": "aee5ec07e55a6da18df8cde5e8044b5f83c8dfb333fded68f13463126b93d7dc",
+            "kind": "broad_catch",
+            "line": 372,
+            "normalized_source": "except Exception as e:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "bfb3ac607371e8c10413604a81094886728af4f47875f20a6963d236803a1861",
+        "path": "backend/execution_brain.py",
+        "site_set_sha256": "7c79ba3e5076aed9be76909ab4d3d5467e6c0d7df66ca70c45268bf979363373",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0118",
+            "fingerprint_sha256": "f6fd53538ea27425ef1ee4427eb35358c365f5087414257498ea78ac9f58ed46",
+            "kind": "broad_catch",
+            "line": 77,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "7ca56c0b52e5c1cdf57a33283a2c5056c1605449f6fb3c5baf2fef2a475a03f7",
+        "path": "backend/health.py",
+        "site_set_sha256": "ca0935fa7a331e48792ccef945275ed216278eb71ffd0eebb439a9dbb3fa2b73",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0119",
+            "fingerprint_sha256": "26ef955e719ee9e3e14ed3e83bd10db56903f2cd6521f53e4054052df1a0d10d",
+            "kind": "standalone_pass",
+            "line": 44,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0120",
+            "fingerprint_sha256": "2875c8aef113009097bafcbaab6e0a37f2f03d44687ede2c3e890a3245e5595d",
+            "kind": "broad_catch",
+            "line": 73,
+            "normalized_source": "except Exception:  # noqa: BLE001"
+          },
+          {
+            "baseline_id": "D14-BASE-0121",
+            "fingerprint_sha256": "0130ad83037aaf5749e0f954543aa592d7ec41b141ac3990abaecb681b0d50ff",
+            "kind": "standalone_pass",
+            "line": 74,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0122",
+            "fingerprint_sha256": "4f5eff0e20a07ffa1e50c616252fd12a2d4d7968637ca70884f4f45b25bef71b",
+            "kind": "broad_catch",
+            "line": 89,
+            "normalized_source": "except Exception as exc:  # noqa: BLE001"
+          }
+        ],
+        "standalone_pass_count": 2
+      },
+      {
+        "broad_or_bare_catch_count": 7,
+        "combined_site_count": 10,
+        "normalized_lf_source_sha256": "026176c47686a5dce6e673cb8deda6852fca473796bb0358e34e1698fe83e2e3",
+        "path": "backend/ibkr_client.py",
+        "site_set_sha256": "2d776f4d1b9d1e964e7465f7df781720012ae50ffe4db92a73df07263404a7e0",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0123",
+            "fingerprint_sha256": "c1bd11b79cc30ddc13af919a63d5dc4a991bcc0f3277f29c4f4df0cca78e6577",
+            "kind": "broad_catch",
+            "line": 57,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0124",
+            "fingerprint_sha256": "cd596d40846839be0558c8d09419ba3254e3c94594d848e3355f30d08b73c58c",
+            "kind": "standalone_pass",
+            "line": 58,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0125",
+            "fingerprint_sha256": "c8926e8c01cb99569d1195c9163f95c8f2244de89ddef090ff70309d6b20cfd6",
+            "kind": "broad_catch",
+            "line": 202,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0126",
+            "fingerprint_sha256": "dc9ca98ef02ed65502316e9d1df917aaed39a9fdbdadd84ed11de0c5bbaa1a90",
+            "kind": "broad_catch",
+            "line": 225,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0127",
+            "fingerprint_sha256": "0f861be3c0a8413f7738eb2126a788b32ebca453a2930f5d95366e11e07bee6a",
+            "kind": "standalone_pass",
+            "line": 226,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0128",
+            "fingerprint_sha256": "735449ed16718975967a00961a94bd54b2358b0d5a089f89bb101c27bc7e5b0f",
+            "kind": "standalone_pass",
+            "line": 272,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0129",
+            "fingerprint_sha256": "6bfc0869f545dada83b8d871b1bfbae439bfbec6427439ab79dad6756def8d0a",
+            "kind": "broad_catch",
+            "line": 289,
+            "normalized_source": "except Exception as recon_exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0130",
+            "fingerprint_sha256": "5c402b2034cb2c1f9b148f3c74c251d911335827f83a7d18a2c926d561c3b0c5",
+            "kind": "broad_catch",
+            "line": 293,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0131",
+            "fingerprint_sha256": "d222b8ce6e570f1fd09eb116611b79f35fe3fe8e3bae44325e038be77f238da9",
+            "kind": "broad_catch",
+            "line": 380,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0132",
+            "fingerprint_sha256": "9972cafd985ca2038b70bf34316d6afed55fb1e7eb522e3bf3f31c19b4ad50fe",
+            "kind": "broad_catch",
+            "line": 400,
+            "normalized_source": "except Exception as e:"
+          }
+        ],
+        "standalone_pass_count": 3
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "4654710aa4242a0580b134d3057760e585e80ce129fbb6373267287bdb79fff9",
+        "path": "backend/install_smart_rules.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "c2cb2de0edf6b0380b02128d86dbd9f8485a401bc8439e73654e4e50a3d2324c",
+        "path": "backend/log_config.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 12,
+        "combined_site_count": 14,
+        "normalized_lf_source_sha256": "b859a1c5daaca9f429e61f69e86adc6030c973b8879c0db0a2adbda7d2a47b8f",
+        "path": "backend/main.py",
+        "site_set_sha256": "6c54fc8837a7f207e52d61ec252fc739f94ba8655ad110005c49e759e661d978",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0133",
+            "fingerprint_sha256": "4187bb34e7d0a6637345bdad852210629952749ea1c3cd67b9c715f4eaeb1804",
+            "kind": "broad_catch",
+            "line": 245,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0134",
+            "fingerprint_sha256": "a43c4c2d26dd1f5e6d3f9120134b8361f62b81675cbd5828d5502092f6dfb615",
+            "kind": "broad_catch",
+            "line": 279,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0135",
+            "fingerprint_sha256": "ea8194042671c89986f321c7adb2efb75fdb78a9f044df14795981d1fea67715",
+            "kind": "broad_catch",
+            "line": 287,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0136",
+            "fingerprint_sha256": "fe552afd4fdd83af01831b920119943de9a4d6f363d7a0067ec42d600647b41f",
+            "kind": "broad_catch",
+            "line": 602,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0137",
+            "fingerprint_sha256": "d2b2f1c511140f49c0703839730bb4e71f084e1f9987f38d0ae4df1059ed95bf",
+            "kind": "standalone_pass",
+            "line": 690,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0138",
+            "fingerprint_sha256": "56b35e23a7aba271984bb2d7c3085300eda05ad1faea44c1b2d8dbd3ed7ae3e3",
+            "kind": "broad_catch",
+            "line": 692,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0139",
+            "fingerprint_sha256": "18525fdd94d0175558c9f7650ef9ef49cbc065845183c277a0bdf5d1e9722b2a",
+            "kind": "broad_catch",
+            "line": 707,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0140",
+            "fingerprint_sha256": "1da758ccd6ff3b5ce0bf2dc95e32895ad5208a48b752b4a7a95bf96af5853df3",
+            "kind": "broad_catch",
+            "line": 747,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0141",
+            "fingerprint_sha256": "58355bbc5b1ccb1608bb1b07136a547e7cd5071c80e74d664e797c978d33c8f7",
+            "kind": "broad_catch",
+            "line": 832,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0142",
+            "fingerprint_sha256": "2133965c5977b7ce41beb9836b723fe1cadfb7c32bbdf6ea59154a9a634c815c",
+            "kind": "broad_catch",
+            "line": 845,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0143",
+            "fingerprint_sha256": "3624578fef241d63521da380cf0cd391dc09c56fe171a8f07931e1d69ad4cf3a",
+            "kind": "broad_catch",
+            "line": 935,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0144",
+            "fingerprint_sha256": "513490eb88bff9eb08b8901b00993b064bec794d7a42d11dfe36574fb052a48e",
+            "kind": "broad_catch",
+            "line": 946,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0145",
+            "fingerprint_sha256": "3aa931fed6a29c3b7e6fd4c2373622049395b8f15e110051a3af14f9011aeaf5",
+            "kind": "standalone_pass",
+            "line": 972,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0146",
+            "fingerprint_sha256": "e602f716fa99f7ac2d6dcf2427dbf802091f4492223cbe8120435182d10696ec",
+            "kind": "broad_catch",
+            "line": 973,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 2
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "ce9aaab57048f1467224b6fb53e3cc9fd7d2b93abcb8cf16afb98793f1c052a6",
+        "path": "backend/manual_intervention.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "5bc148e9cadf0a92d41b21f8fb86527774bbe4455282cc3454c2fe122bff1f89",
+        "path": "backend/manual_order_validation.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 7,
+        "combined_site_count": 10,
+        "normalized_lf_source_sha256": "b8c6c59f8a7bd1f36a8ce7466181faacd7d6ad4a5d4baa3372f24ca3e53dd89f",
+        "path": "backend/market_data.py",
+        "site_set_sha256": "bb3ba4a5f73db3c84053dae3082f4aff8f52c97ae37dc03cd7a66c2d9fffe1dd",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0147",
+            "fingerprint_sha256": "fab86ae1725a8c767d31140d444557ebcb3e720d6f846db84905388b9a886559",
+            "kind": "broad_catch",
+            "line": 93,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0148",
+            "fingerprint_sha256": "d907af709c60233b50d227d59bbebd23d4863238f304566f381d56fa2ac3179a",
+            "kind": "broad_catch",
+            "line": 127,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0149",
+            "fingerprint_sha256": "be04a34d2e82d5b743b6f63b160ee8a5b64dc8572b148f587da95f76a209d489",
+            "kind": "broad_catch",
+            "line": 152,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0150",
+            "fingerprint_sha256": "f5dab3c67445decaaf91bd82f531fc85910d2510108317ff1ada4d47a835d511",
+            "kind": "broad_catch",
+            "line": 166,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0151",
+            "fingerprint_sha256": "2002c750c5bd0f317551c29a0156071bc7181651ea867f71b8bd54864d741360",
+            "kind": "broad_catch",
+            "line": 210,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0152",
+            "fingerprint_sha256": "f6f0e25eb07197bba0c0cc2163b33f8ae7c54a7edeac72c7ef3ecbf02bd99982",
+            "kind": "standalone_pass",
+            "line": 211,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0153",
+            "fingerprint_sha256": "96a0140cd80bcd8d4e768d861c27f5647958d4c97a0001169034b235109542d3",
+            "kind": "broad_catch",
+            "line": 216,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0154",
+            "fingerprint_sha256": "6174aabb636e77557d68ff80795ddb666bcd1e76a0f7048c1e9c97e231959ba5",
+            "kind": "standalone_pass",
+            "line": 217,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0155",
+            "fingerprint_sha256": "9aeb1e61670c019e1846a52b7c91192ec66aad274dd3e4a3c643b99bc41bb3da",
+            "kind": "broad_catch",
+            "line": 270,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0156",
+            "fingerprint_sha256": "c60cca56f7d22708efdedb5271dc85fd451ba7aa1b94f835ee38c02d6bcaa5fb",
+            "kind": "standalone_pass",
+            "line": 271,
+            "normalized_source": "pass"
+          }
+        ],
+        "standalone_pass_count": 3
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 3,
+        "normalized_lf_source_sha256": "ab6641237ccdb2bfcb7cbefaafdf07759674ce358c34da1507f5ee479206575d",
+        "path": "backend/market_heartbeat.py",
+        "site_set_sha256": "cea2c042a651e4688f4f16fce7367b2f510bfce5a37c0647c43da44bb9091393",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0157",
+            "fingerprint_sha256": "bc378c906dccb84df06caa0afd401ffe77ec808c447127685a3eaac8a77cde9a",
+            "kind": "broad_catch",
+            "line": 106,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0158",
+            "fingerprint_sha256": "4456aaaa62397092cbdf717892bb6662fcdb70fac9b3dff070bcfbd0642d1875",
+            "kind": "broad_catch",
+            "line": 119,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0159",
+            "fingerprint_sha256": "b58a548da255b168170e82dc281e190e2744b9e03efbb09ea19fa3059c50c21a",
+            "kind": "standalone_pass",
+            "line": 146,
+            "normalized_source": "pass"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "610549e782692d36ea55a7d31aad2d4d3a504583b54629135916ab1db054fc86",
+        "path": "backend/middleware.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "635b6a5505506b6dca9eb7d85a3e4886da5d74fd69c35bcea93156e8559d7636",
+        "path": "backend/models.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "4c19a0baf224752ad2e4b77255dee010a6e4a82eacfaed9d7594e3defef1784c",
+        "path": "backend/notification_service.py",
+        "site_set_sha256": "3989312233d35fbf6d6d39d2d9bc5ba276e1a6aa3451f21bc5edf4b0990010a4",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0160",
+            "fingerprint_sha256": "d8e183fd50d34dee1c80a9f62a0c9d36aec38e31e28dfbb9c0a2011c81125816",
+            "kind": "broad_catch",
+            "line": 130,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 7,
+        "combined_site_count": 10,
+        "normalized_lf_source_sha256": "8b1c60a9390c276af1962c2713f36bbf4cd68ccd6d12f1c8945f73d3a675d1ab",
+        "path": "backend/order_executor.py",
+        "site_set_sha256": "fc9f8533243b427393eb6b9cb7bdf69ddb309661a64b3066e2f34d0a5136cfd7",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0161",
+            "fingerprint_sha256": "c5fc56808da0fb240a0096f24645a15b5aef69e84c6249b1987d2ff0461be338",
+            "kind": "broad_catch",
+            "line": 62,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0162",
+            "fingerprint_sha256": "758a12cba172eceaca7bd348528be060ad7c8810f233fb43760202fa336902f8",
+            "kind": "standalone_pass",
+            "line": 63,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0163",
+            "fingerprint_sha256": "9e018f4d971f0705260a06009fc3e9aa8d6c0509c5521da7566325531c9ec954",
+            "kind": "broad_catch",
+            "line": 75,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0164",
+            "fingerprint_sha256": "55c50de69246c84edd446f304b9961333acf255b262d2327582810b0eef925b8",
+            "kind": "standalone_pass",
+            "line": 76,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0165",
+            "fingerprint_sha256": "2599af7f443e3a9be56defa721420e9598f90a07804a72940aab4234f3656918",
+            "kind": "broad_catch",
+            "line": 161,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0166",
+            "fingerprint_sha256": "c62ea574096092752ddcf854ce527a97cfe4ed421fd8d46bd1b539797527a7c9",
+            "kind": "broad_catch",
+            "line": 168,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0167",
+            "fingerprint_sha256": "f0299797facb9a7a57b1496c309488ff62069768e2b348ce40f17339f6013fed",
+            "kind": "broad_catch",
+            "line": 263,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0168",
+            "fingerprint_sha256": "be5307ffa8b565a0e3f85d60a345042a0819ca2da09acee2738c226f3e82ba69",
+            "kind": "broad_catch",
+            "line": 318,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0169",
+            "fingerprint_sha256": "3737fe2e8bf1f4b19f30d0c212b4021456436efb4fa3196c20bb1a78f57a0f1b",
+            "kind": "standalone_pass",
+            "line": 319,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0170",
+            "fingerprint_sha256": "d4505d06b6c61191c7933f8da508d515285685ba8a67660aeb10234381538c36",
+            "kind": "broad_catch",
+            "line": 353,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 3
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "7cd704330d987871bf5e2f4e2f192b8b4e22b895222b4bc6c81d66d3c12f4bc6",
+        "path": "backend/portfolio_allocator.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "e66f675b04ca7bcf7b6662579b3ccbe38aa4abbed68d23a8f1b316bc147f3757",
+        "path": "backend/position_tracker.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "43d9e5b3a189be8418f1e5c6b22e366fdfd51773e2ae8886b410da5925afbd4b",
+        "path": "backend/risk_api.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "033bfe4c42a64705559dafdc874fca99c1fb369d0c75a1e6d42a4b5304e5d0df",
+        "path": "backend/risk_config.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 5,
+        "combined_site_count": 6,
+        "normalized_lf_source_sha256": "728c678d5b7da2dbaff0ab5ccac8e438ed17ef90aebe53e62239cd70c43bda0d",
+        "path": "backend/risk_manager.py",
+        "site_set_sha256": "3be1f6b2f0b41a56af9aee41b48cac43ed3fa4f6008fb6feb81f3746ee478e83",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0171",
+            "fingerprint_sha256": "6f85b44c9ef4146308210b55c841778313aefbb0178e24395875b474d39ca57f",
+            "kind": "broad_catch",
+            "line": 58,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0172",
+            "fingerprint_sha256": "2e632efc9d185f126b746cea03d0912bfc752fb4b56f604089605bab15f3573d",
+            "kind": "standalone_pass",
+            "line": 59,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0173",
+            "fingerprint_sha256": "13dfdb528fe515ec438762dc213ae70c85227ad3567c0f804993d2882afafa44",
+            "kind": "broad_catch",
+            "line": 86,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0174",
+            "fingerprint_sha256": "4a91e280c15ba61ad033679618c36e92979c8d73095b77cee4c32a35b797127a",
+            "kind": "broad_catch",
+            "line": 115,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0175",
+            "fingerprint_sha256": "e47cc8f73f61262c2f82c20792d6651845f6cde4f3584ee711c1842a363a91a3",
+            "kind": "broad_catch",
+            "line": 140,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0176",
+            "fingerprint_sha256": "c30e4a34447a1f7167b149600926f111ee450805840c4f468ddfd938061ab6d7",
+            "kind": "broad_catch",
+            "line": 451,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "f226c3e59f0bcc656f1d410928ca298a7ca84108c1616518d19d0d9d8e0c71e6",
+        "path": "backend/routers/admin_routes.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "e74a8a9dd8092bebecf3fb4f5905fb9fff47c036ebaef1692441ed5506cbec1c",
+        "path": "backend/routers/auth.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "53717e97e31061b901dd20cba85507933147c80d2d6d0b917de61407b9baac78",
+        "path": "backend/routers/bot_routes.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 4,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "0e725d076188fe454efdca5c63b2e5b91e967d8bfed30d1817c2ebc7d30bb6e2",
+        "path": "backend/routers/market_routes.py",
+        "site_set_sha256": "fe0f90caecb7651aee4a66dc1b2efc7642bed518fc6d2e88697a1030d3be05de",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0177",
+            "fingerprint_sha256": "a86d665d61a217288e26466995ef69f9c216685627aecf9425817e7a93e045dd",
+            "kind": "broad_catch",
+            "line": 68,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0178",
+            "fingerprint_sha256": "80768ad6770a0fb6193ee4f2f5243b54cfb5bd36915476fc9d51a5f58e1faa2c",
+            "kind": "broad_catch",
+            "line": 111,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0179",
+            "fingerprint_sha256": "f4f9a767326a60a482fb744b7db95f3251c35463f7921d784980b962b0e71474",
+            "kind": "broad_catch",
+            "line": 131,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0180",
+            "fingerprint_sha256": "daa2cdc7493f852e77572df5e360d8a58d05b055ec9683d344aa9e59c71c750c",
+            "kind": "broad_catch",
+            "line": 144,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 3,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "166f9363cb24e8e03b6af228147e234fe6b67227a0919023591ac736798b519d",
+        "path": "backend/routers/orders.py",
+        "site_set_sha256": "9b6ed9576cada2f4525d3ff359523634f0fb4561046fe7f617871a4e837c1210",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0181",
+            "fingerprint_sha256": "4533ff754bc6c4fac6c0be263b0eac7d3e0bc27f8fc9713617bbedb3dca53b4d",
+            "kind": "broad_catch",
+            "line": 38,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0182",
+            "fingerprint_sha256": "1a44a91869a6e6f2e425d839031f5e533e5c2e38c985713713ef216d9a5f4da0",
+            "kind": "broad_catch",
+            "line": 49,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0183",
+            "fingerprint_sha256": "8abe9afc01ce40757ceb2425c42c64dc4054f950476a361a4c88eb413b7229b0",
+            "kind": "standalone_pass",
+            "line": 50,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0184",
+            "fingerprint_sha256": "382761910a8ed0756509724c38b702e371751b502b6cba0c7de2a2fa3e259c26",
+            "kind": "broad_catch",
+            "line": 88,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 3,
+        "combined_site_count": 4,
+        "normalized_lf_source_sha256": "38fc0be7b495d6d5150f4fc393d6eabf7fa7924c66ab93379c6c80bf8c7f9287",
+        "path": "backend/routers/positions.py",
+        "site_set_sha256": "27af7ead3609518525e716df7aed5381d0138593bf8d0b424848afc27d2aef06",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0185",
+            "fingerprint_sha256": "14a1b33736d5c4ec4fc2c1adf861489bed362f058d7aa552442941dd57155c81",
+            "kind": "broad_catch",
+            "line": 27,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0186",
+            "fingerprint_sha256": "b4c91c76e75cd3526d4418005931efc820c2a69b3e44bd44fb282b930159e15c",
+            "kind": "broad_catch",
+            "line": 87,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0187",
+            "fingerprint_sha256": "ac123d0b4cdaf42f7a3c91c61679d9e6e85cfb999636b4fcddbe999a09071603",
+            "kind": "standalone_pass",
+            "line": 88,
+            "normalized_source": "pass"
+          },
+          {
+            "baseline_id": "D14-BASE-0188",
+            "fingerprint_sha256": "e7a5119d217335f855203fe5c40ee5e7d15422dd4f46d841407f77c079bc34b9",
+            "kind": "broad_catch",
+            "line": 127,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "026190a6f9e94afaddfcf88ab673a914966d24a90f32a9b03d79f094d8588264",
+        "path": "backend/routers/rules_routes.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "2c3c0d77b108669df3536acbec87ebfd5c349806b2f78e3d950c66e94a7eaf8a",
+        "path": "backend/routers/simulation_routes.py",
+        "site_set_sha256": "6e818213f2bef1c61feb601c503f2989419136e4ce4afa1f85feb563b183b5c1",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0189",
+            "fingerprint_sha256": "d28d0d64839aadb99febb12e0a490f2f2c8f4b0786bece1dde9afdd09a7e659f",
+            "kind": "broad_catch",
+            "line": 81,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "c1773d250844a854e07663cc0047399e40d092857a32c7a6cdf7d4d0015ae021",
+        "path": "backend/routers/status.py",
+        "site_set_sha256": "c5e9ba4d263cae41f538bb1a5393cfc0470b6983b7c9553bb1d552373f86e00a",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0190",
+            "fingerprint_sha256": "b7aaff15cdb1b22db7ff7ca87128ba808c42b65fcbfb4646218f70d623a5e3b3",
+            "kind": "broad_catch",
+            "line": 36,
+            "normalized_source": "except Exception as e:"
+          },
+          {
+            "baseline_id": "D14-BASE-0191",
+            "fingerprint_sha256": "aba40cb530696e2c1a3901c04cd4859245298b9317c479a4c6c87340b8bfe1bb",
+            "kind": "broad_catch",
+            "line": 130,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "11d9b3dee7bde1dbec43b3687e3ba69cb2c090eb17c9e969011159bc41ce4aa5",
+        "path": "backend/rule_builder_api.py",
+        "site_set_sha256": "e9eaa0ea3676eb5fb3f191bcd8def6b891b833b774b79f6b7267be339dbdd06b",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0192",
+            "fingerprint_sha256": "cb00aa52bbb97ce8e03fc73278b82d4ceece05d41d52676431085cda51723a36",
+            "kind": "broad_catch",
+            "line": 128,
+            "normalized_source": "except Exception as e:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "57200593800d388861ab95fa19427bbe399fdb310591a101a5264f982b7e04e4",
+        "path": "backend/rule_engine.py",
+        "site_set_sha256": "c2e8decf11cd9571b249d5f23b1af9341f4460bf8518d2e370b30bd601347a8d",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0193",
+            "fingerprint_sha256": "bb0dd70016d73927054aabd52b8306a2aff52f14d52ad4d2f331df9cc33b2081",
+            "kind": "broad_catch",
+            "line": 93,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "5551e7308186d158f21479cc6ae5ec14fbe532e17d7cf243715fd1705c4b1b78",
+        "path": "backend/rule_validation.py",
+        "site_set_sha256": "ec4f50286d69512461d6ed9ee7fe52001ed6fa649ac8efddaab3a5c6b80f4d66",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0194",
+            "fingerprint_sha256": "70479b66272c06bc66f1ef9552239649d959087984c41691d6c9909a36382dcc",
+            "kind": "broad_catch",
+            "line": 139,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 8,
+        "combined_site_count": 8,
+        "normalized_lf_source_sha256": "7bf56f5a4d00492c5a77571170bc13b123cbc5b36192ad06a9e318b33c8cf800",
+        "path": "backend/runtime_lock.py",
+        "site_set_sha256": "254ec5aba50a5fa0117a649447125e01fb2840df3b6c5f7afbcb7a627fdc8087",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0195",
+            "fingerprint_sha256": "165a3d9b8f0ecf916464b38d7fda25adcc77c788f589a244c287400ee8aad506",
+            "kind": "broad_catch",
+            "line": 159,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0196",
+            "fingerprint_sha256": "f3069540e81b329db90bb6307eaab5720820a8309c860053840dba0655233961",
+            "kind": "broad_catch",
+            "line": 180,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0197",
+            "fingerprint_sha256": "44fd7c0e84d3b2639fa26b9038598516f0e1e0e6e96c96d54c8a5ef0741fc9ef",
+            "kind": "broad_catch",
+            "line": 198,
+            "normalized_source": "except Exception:"
+          },
+          {
+            "baseline_id": "D14-BASE-0198",
+            "fingerprint_sha256": "c24dfc27b5d05c990099eb72228c043a1958acdf2e3b6392370fdcf9b8cc425d",
+            "kind": "broad_catch",
+            "line": 231,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0199",
+            "fingerprint_sha256": "6c3233039af8c8a85f079fcee8fcf35c3b8946d2c16d29abc720ed8814283eb9",
+            "kind": "broad_catch",
+            "line": 273,
+            "normalized_source": "except Exception:  # noqa: BLE001"
+          },
+          {
+            "baseline_id": "D14-BASE-0200",
+            "fingerprint_sha256": "56a8dfd7e80fa60e97c12fbf8f184344a4d70a6e073798f358ea53d79326695e",
+            "kind": "broad_catch",
+            "line": 281,
+            "normalized_source": "except Exception:  # noqa: BLE001"
+          },
+          {
+            "baseline_id": "D14-BASE-0201",
+            "fingerprint_sha256": "cdbbe1582e1199c88a92c230a9993092405dd60e44edf9f6d57c765c8ab54c38",
+            "kind": "broad_catch",
+            "line": 285,
+            "normalized_source": "except Exception:  # noqa: BLE001"
+          },
+          {
+            "baseline_id": "D14-BASE-0202",
+            "fingerprint_sha256": "4941bd348c899b9e7e201bc599acea98efd4328581e1fbdc2ad361dd319848e8",
+            "kind": "broad_catch",
+            "line": 325,
+            "normalized_source": "except Exception as exc:  # noqa: BLE001"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "ce7f0662716ec9cc7fe262c648414f76f7c57a0d60c53b585bcdf5e0fe1f5983",
+        "path": "backend/runtime_state.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 6,
+        "combined_site_count": 6,
+        "normalized_lf_source_sha256": "60306084f2226d778f3fbba2e3b5398335880e3247e2ba6c6c9d1161ae0f1a16",
+        "path": "backend/safety_kernel.py",
+        "site_set_sha256": "db41c22b2aef4d4176ff0350cb07857698a69f381977402b841f04519a05b2fd",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0203",
+            "fingerprint_sha256": "c67f7392ddffbad8555441e17d4d09a5464dfa8a6abf548c4445e42d14fb025d",
+            "kind": "broad_catch",
+            "line": 109,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0204",
+            "fingerprint_sha256": "c063c9b429757527933eeab08e5dd521e171c646292c6b8850a60e294eb88334",
+            "kind": "broad_catch",
+            "line": 141,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0205",
+            "fingerprint_sha256": "0d9d074469e983dcc327c4a82f531424c0a2469044b24d58fe534c2079226127",
+            "kind": "broad_catch",
+            "line": 143,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0206",
+            "fingerprint_sha256": "3bd97f7083793c8ed8b65d8ccdaf4bcc1b4943f4d9f891ab9da12f54beb91da5",
+            "kind": "broad_catch",
+            "line": 234,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0207",
+            "fingerprint_sha256": "711dcddabd429fc6f199830b20bd2b8169fb524f2dcc1d1366f4a77ab4953508",
+            "kind": "broad_catch",
+            "line": 255,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0208",
+            "fingerprint_sha256": "bb0e06b105815718968cdf951e76faebbd48acbfa23ee75fe3e8dea4fcccd38a",
+            "kind": "broad_catch",
+            "line": 285,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 2,
+        "combined_site_count": 2,
+        "normalized_lf_source_sha256": "5bd48e318fab15e2e913b41f083b17f387f38980c2e8dcd14b62c73e33176690",
+        "path": "backend/services/order_lifecycle.py",
+        "site_set_sha256": "b2994662be1f46048c40c6a5ab9284fa715ddec31b12b2dc652b2ff358a01141",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0209",
+            "fingerprint_sha256": "6ca401138e6256c6af3b5496a57f690ca57af2bbc8d2ac5d283429cc435fb787",
+            "kind": "broad_catch",
+            "line": 51,
+            "normalized_source": "except Exception as exc:"
+          },
+          {
+            "baseline_id": "D14-BASE-0210",
+            "fingerprint_sha256": "ab6f66d59ed701e763fc6d9126ca6f3efffffe1f405ce788b4cc4b7bbaae3b49",
+            "kind": "broad_catch",
+            "line": 119,
+            "normalized_source": "except Exception as exc:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "58466751a7c3b288346321576eaaf75e7ea71ace86716161e10a0cdce131ff90",
+        "path": "backend/services/order_recovery.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "db19c7deedb69af473a545b75847560c35b52c73f522f3ed580c4e35272efd3b",
+        "path": "backend/services/safety_gate.py",
+        "site_set_sha256": "5584007ff98eb0166f56d4169f3ea19d82defc467becd6e5c99cbd3cf18d8487",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0211",
+            "fingerprint_sha256": "10031b732bde352dd98fa1fefabfed4b6fc58b7356a23df4e1cbc2601e65dcf9",
+            "kind": "broad_catch",
+            "line": 41,
+            "normalized_source": "except Exception:"
+          }
+        ],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "aa85caeb3d000ec4d8e575dfe22368b4036ce7a3ed8023a7db94b0f0cb7abd2d",
+        "path": "backend/session_api.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 0,
+        "normalized_lf_source_sha256": "b2daa39ee198328948eb2ed8f8c9c3ff5bfbdb74d57864d3fcff3d659f1ea123",
+        "path": "backend/settings.py",
+        "site_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "sites": [],
+        "standalone_pass_count": 0
+      },
+      {
+        "broad_or_bare_catch_count": 0,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "994757fa4126b498d4ce09214ef84f495bd154dbbc31522949ee6ff5e88ea619",
+        "path": "backend/simulation.py",
+        "site_set_sha256": "224cb2c6ba50486cd413060611228c57dc41066db682801456f5f71484adfc93",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0212",
+            "fingerprint_sha256": "29e837e81097427b0a4fa1b638d3ea04e18739dcac27612b14312f6814b2b242",
+            "kind": "standalone_pass",
+            "line": 413,
+            "normalized_source": "pass"
+          }
+        ],
+        "standalone_pass_count": 1
+      },
+      {
+        "broad_or_bare_catch_count": 1,
+        "combined_site_count": 1,
+        "normalized_lf_source_sha256": "da1f365d465e7cb31e0f64f422c27cba7806c64d25fe304a5547357e69a5913b",
+        "path": "backend/startup.py",
+        "site_set_sha256": "cd7f15018bec2581a2afb6edfcb42fc204c4fbce59934c934c5fc405d4b06d70",
+        "sites": [
+          {
+            "baseline_id": "D14-BASE-0213",
+            "fingerprint_sha256": "5c9464f1f4f47a985a842a0d344b0dd4197d5171b09f89c3309484c1b46d741a",
+            "kind": "broad_catch",
+            "line": 168,
+            "normalized_source": "except Exception as exc:  # noqa: BLE001"
+          }
+        ],
+        "standalone_pass_count": 0
+      }
+    ],
+    "broad_catch_count": 188,
+    "broad_or_bare_catch_count": 188,
+    "combined_site_count": 213,
+    "documented_patterns": {
+      "bare_catch": "^\\s*except\\s*:\\s*$",
+      "broad_catch": "^\\s*except\\s+(Exception|BaseException)(\\s+as\\s+\\w+)?\\s*:\\s*$",
+      "standalone_pass": "^\\s*pass\\s*$"
+    },
+    "fingerprint_algorithm": "Site SHA-256 input is UTF-8 repo-relative path, NUL, decimal line, NUL, site kind, NUL, stripped matched source. Per-file site-set SHA-256 input is compact sorted-key JSON of ordered objects containing kind, line, and normalized_source. Aggregate SHA-256 input is compact sorted-key JSON of path and site_set_sha256 objects ordered by path. Line positions are intentional so new or moved sites change the baseline.",
+    "inventory_file_count": 77,
+    "matched_file_count": 46,
+    "operational_patterns": {
+      "bare_catch": "^\\s*except\\s*:\\s*(?:#.*)?$",
+      "broad_catch": "^\\s*except\\s+(Exception|BaseException)(\\s+as\\s+\\w+)?\\s*:\\s*(?:#.*)?$",
+      "standalone_pass": "^\\s*pass\\s*$"
+    },
+    "pattern_note": "The accepted 188-catch census includes seven broad catches with trailing noqa comments. Operational patterns preserve the accepted baseline; displayed document patterns remain separately recorded.",
+    "site_classification_status": "Baseline IDs and fingerprints only; C10 classification remains pending and is not authorized by this manifest.",
+    "standalone_pass_count": 25
+  },
+  "baseline_source": {
+    "accepted_inventory_document": "docs/release-evidence/2026-07-phase-c-critical-module-inventory.md",
+    "accepted_inventory_document_normalized_lf_sha256": "0935b532bc9ac03b59a4a9b5217dc312a8c463346b02be3574f2859e0f597bb3",
+    "code_evidence_commit": "1744bdb94e0ff8fcf55ffa427e563444af16f002",
+    "manifest_parent_commit": "92fc9713d1838f8de601d4f26634ecd35eab85a1",
+    "note": "The manifest parent changes documentation only; its backend tree is identical to the C1A evidence source."
+  },
+  "capability_trigger_patterns": [
+    {
+      "id": "lifecycle_authority_or_risk_state_mutation",
+      "regex": "(?:\\b(?:lifecycle|authority|risk)_state\\b\\s*=|\\.\\s*(?:set_lifecycle_state|transition_lifecycle|set_authority|set_risk_state)\\s*\\()"
+    },
+    {
+      "id": "production_process_termination",
+      "regex": "\\bos\\s*\\.\\s*_exit\\s*\\("
+    },
+    {
+      "id": "raw_broker_order_placement_or_cancellation",
+      "regex": "\\.\\s*(?:placeOrder|cancelOrder)\\s*\\("
+    },
+    {
+      "id": "runtime_lock_acquisition_or_release",
+      "regex": "(?:\\bRuntimeLock\\b|\\bruntime_lock\\s*\\.\\s*(?:acquire|release)\\s*\\()"
+    },
+    {
+      "id": "schema_or_wal_maintenance",
+      "regex": "(?i)\\b(?:BEGIN\\s+IMMEDIATE|PRAGMA\\s+(?:application_id|user_version|wal_checkpoint)|VACUUM|CREATE\\s+(?:TABLE|INDEX|TRIGGER|VIEW)|ALTER\\s+TABLE|DROP\\s+(?:TABLE|INDEX|TRIGGER|VIEW))\\b"
+    },
+    {
+      "id": "sqlite_backup_or_database_file_publication",
+      "regex": "(?i)(?:\\.\\s*backup\\s*\\(|\\bos\\s*\\.\\s*(?:replace|rename)\\s*\\(|\\bPath\\s*\\([^\\n]*\\)\\s*\\.\\s*replace\\s*\\()"
+    },
+    {
+      "id": "writable_app_paths_root_creation",
+      "regex": "(?:\\bAppPaths\\b[^\\n]*(?:mkdir|makedirs)\\s*\\(|(?:mkdir|makedirs)\\s*\\([^\\n]*\\bAppPaths\\b)"
+    }
+  ],
+  "capability_triggers": [
+    {
+      "ast_detection": {
+        "call_names": [
+          "set_authority",
+          "set_lifecycle_state",
+          "set_risk_state",
+          "transition_lifecycle"
+        ],
+        "mutation_target_regex": "(?i)(?:^|_)(?:authority|lifecycle|risk)_state$",
+        "node_types": [
+          "AnnAssign",
+          "Assign",
+          "AugAssign",
+          "Call"
+        ]
+      },
+      "description": "Lifecycle, authority, or risk-state mutation.",
+      "id": "lifecycle_authority_or_risk_state_mutation"
+    },
+    {
+      "ast_detection": {
+        "node_types": [
+          "Call"
+        ],
+        "qualified_call_names": [
+          "os._exit"
+        ]
+      },
+      "description": "Production process termination, including os._exit.",
+      "id": "production_process_termination"
+    },
+    {
+      "ast_detection": {
+        "attribute_call_names": [
+          "cancelOrder",
+          "placeOrder"
+        ],
+        "node_types": [
+          "Call"
+        ]
+      },
+      "description": "Raw broker order placement or cancellation.",
+      "id": "raw_broker_order_placement_or_cancellation"
+    },
+    {
+      "ast_detection": {
+        "attribute_call_names": [
+          "acquire",
+          "release"
+        ],
+        "class_names": [
+          "RuntimeLock"
+        ],
+        "node_types": [
+          "Call",
+          "ClassDef"
+        ],
+        "receiver_regex": "(?i)(?:runtime_?lock|RuntimeLock)"
+      },
+      "description": "Runtime-lock acquisition or release.",
+      "id": "runtime_lock_acquisition_or_release"
+    },
+    {
+      "ast_detection": {
+        "node_types": [
+          "Constant"
+        ],
+        "string_regex": "(?i)\\b(?:BEGIN\\s+IMMEDIATE|PRAGMA\\s+(?:application_id|user_version|wal_checkpoint)|VACUUM|CREATE\\s+(?:TABLE|INDEX|TRIGGER|VIEW)|ALTER\\s+TABLE|DROP\\s+(?:TABLE|INDEX|TRIGGER|VIEW))\\b"
+      },
+      "description": "Schema DDL, BEGIN IMMEDIATE, application_id, user_version, VACUUM, or WAL checkpoint operation.",
+      "id": "schema_or_wal_maintenance"
+    },
+    {
+      "ast_detection": {
+        "attribute_call_names": [
+          "backup",
+          "replace"
+        ],
+        "node_types": [
+          "Call"
+        ],
+        "path_context_regex": "(?i)(?:sqlite|database|\\.db\\b)",
+        "qualified_call_names": [
+          "os.rename",
+          "os.replace"
+        ]
+      },
+      "description": "SQLite backup or database-file publication/replacement.",
+      "id": "sqlite_backup_or_database_file_publication"
+    },
+    {
+      "ast_detection": {
+        "argument_or_receiver_root_type": "AppPaths",
+        "attribute_call_names": [
+          "mkdir"
+        ],
+        "node_types": [
+          "Call"
+        ],
+        "qualified_call_names": [
+          "os.makedirs"
+        ]
+      },
+      "description": "Writable AppPaths root creation.",
+      "id": "writable_app_paths_root_creation"
+    }
+  ],
+  "classification_categories": [
+    "best_effort_observability",
+    "containment_with_telemetry_or_degraded_state",
+    "prohibited_trading_or_persistence_swallow",
+    "typed_fail_closed_boundary"
+  ],
+  "current_exclusion_categories": [
+    "alert CRUD",
+    "backtests",
+    "context/replay evaluation",
+    "derived analytics",
+    "indicators",
+    "ordinary UI settings routes",
+    "screeners",
+    "stock profile",
+    "WebSocket presentation",
+    "Yahoo"
+  ],
+  "current_exclusions": [
+    "backend/db/alerts.py",
+    "backend/db/backtests.py",
+    "backend/db/screener.py"
+  ],
+  "current_paths": [
+    "backend/advisor_api.py",
+    "backend/ai_advisor.py",
+    "backend/ai_capability.py",
+    "backend/ai_decision_ledger.py",
+    "backend/ai_guardrails.py",
+    "backend/ai_learning.py",
+    "backend/ai_model_router.py",
+    "backend/ai_optimizer.py",
+    "backend/ai_params.py",
+    "backend/ai_rule_lab.py",
+    "backend/alert_engine.py",
+    "backend/api_contracts.py",
+    "backend/auth.py",
+    "backend/auto_rule_manager.py",
+    "backend/autopilot_api.py",
+    "backend/bot_exits.py",
+    "backend/bot_health.py",
+    "backend/bot_runner.py",
+    "backend/config.py",
+    "backend/data_handler.py",
+    "backend/database.py",
+    "backend/db/__init__.py",
+    "backend/db/core.py",
+    "backend/db/direct_candidates.py",
+    "backend/db/positions.py",
+    "backend/db/retention.py",
+    "backend/db/rules.py",
+    "backend/db/trades.py",
+    "backend/db/validation.py",
+    "backend/decision_item_factory.py",
+    "backend/diagnostics_api.py",
+    "backend/diagnostics_scheduler.py",
+    "backend/diagnostics_service.py",
+    "backend/direct_ai_trader.py",
+    "backend/event_logger.py",
+    "backend/events.py",
+    "backend/execution_brain.py",
+    "backend/health.py",
+    "backend/ibkr_client.py",
+    "backend/install_smart_rules.py",
+    "backend/log_config.py",
+    "backend/main.py",
+    "backend/manual_intervention.py",
+    "backend/manual_order_validation.py",
+    "backend/market_data.py",
+    "backend/market_heartbeat.py",
+    "backend/middleware.py",
+    "backend/models.py",
+    "backend/notification_service.py",
+    "backend/order_executor.py",
+    "backend/portfolio_allocator.py",
+    "backend/position_tracker.py",
+    "backend/risk_api.py",
+    "backend/risk_config.py",
+    "backend/risk_manager.py",
+    "backend/routers/admin_routes.py",
+    "backend/routers/auth.py",
+    "backend/routers/bot_routes.py",
+    "backend/routers/market_routes.py",
+    "backend/routers/orders.py",
+    "backend/routers/positions.py",
+    "backend/routers/rules_routes.py",
+    "backend/routers/simulation_routes.py",
+    "backend/routers/status.py",
+    "backend/rule_builder_api.py",
+    "backend/rule_engine.py",
+    "backend/rule_validation.py",
+    "backend/runtime_lock.py",
+    "backend/runtime_state.py",
+    "backend/safety_kernel.py",
+    "backend/services/order_lifecycle.py",
+    "backend/services/order_recovery.py",
+    "backend/services/safety_gate.py",
+    "backend/session_api.py",
+    "backend/settings.py",
+    "backend/simulation.py",
+    "backend/startup.py"
+  ],
+  "exclusion_override_rule": "Any excluded file enters D14 immediately if it gains a capability trigger.",
+  "future_equivalents": [
+    "Any admin router or CLI.",
+    "Any backup router or CLI.",
+    "Any maintenance router or CLI.",
+    "Any order router or CLI.",
+    "Any position router or CLI.",
+    "Any renamed equivalent of a listed future module.",
+    "Any restore router or CLI.",
+    "Any runtime router or CLI."
+  ],
+  "future_path_patterns": [
+    "backend/app_paths.py",
+    "backend/db/backup.py",
+    "backend/db/integrity.py",
+    "backend/db/maintenance.py",
+    "backend/db/migration_manifest.py",
+    "backend/db/migration_runner.py",
+    "backend/db/migrations/**/*.py",
+    "backend/db/restore.py",
+    "backend/db/schema_classifier.py",
+    "backend/process_terminator.py",
+    "backend/services/broker_adapter.py",
+    "backend/services/operation_gate.py",
+    "backend/services/order_intents.py",
+    "backend/services/reconciliation.py",
+    "backend/services/runtime_lifecycle.py",
+    "backend/services/shutdown.py",
+    "backend/services/task_registry.py"
+  ],
+  "product": "TradeBot",
+  "purpose": "Machine-readable Phase C D14 critical-module boundary, capability-trigger union, and pre-C1 exception-site baseline.",
+  "schema_version": 1
+}
