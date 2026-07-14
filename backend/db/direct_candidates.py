@@ -128,7 +128,7 @@ async def mark_candidate_status(
 
 async def purge_expired_candidates(*, user_id: str | None = None) -> int:
     """One-shot purge at startup — mark all 'queued'/'draining' rows older than
-    their TTL as expired, and delete rows in a terminal state older than 7 days.
+    their TTL as expired without deleting terminal history.
 
     Returns number of rows expired.
     """
@@ -168,14 +168,8 @@ async def purge_expired_candidates(*, user_id: str | None = None) -> int:
                 expired_ids,
             )
 
-        # Garbage-collect terminal rows older than 7 days
-        stale_cutoff = (now - timedelta(days=7)).isoformat()
-        await db.execute(
-            "DELETE FROM direct_candidates "
-            "WHERE status IN ('applied','failed','expired') AND queued_at < ?",
-            (stale_cutoff,),
-        )
         await db.commit()
+    log.info("C1A: automatic direct-candidate terminal deletion disabled")
     if expired_ids:
         log.info("purge_expired_candidates: expired %d stale direct candidate(s)", len(expired_ids))
     return len(expired_ids)

@@ -264,15 +264,20 @@ async def _run_lifespan(app: FastAPI):
     _apply_startup_autopilot_mode(cfg.AUTOPILOT_MODE, source="environment")
     await init_db()
     await _sync_persisted_autopilot_mode()
-    # Purge stale direct AI candidates left over from a previous process.
+    # Expire stale queued/draining AI candidates left by a previous process.
+    # C1A preserves terminal candidate history until verified retention lands.
     # Always log the count (even when zero) so the paper-soak runbook can use
     # this log line as proof the hook ran on startup.
     try:
         from db.direct_candidates import purge_expired_candidates
         expired = await purge_expired_candidates()
-        log.info("Startup: purged %d stale direct AI candidate(s)", expired)
+        log.info(
+            "Startup: expired %d stale direct AI candidate(s); terminal deletion "
+            "disabled by C1A",
+            expired,
+        )
     except Exception as exc:
-        log.warning("Startup purge of direct candidates failed: %s", exc)
+        log.warning("Startup expiration of direct candidates failed: %s", exc)
     # Restore AI-optimized parameters from last snapshot (AI-5 fix)
     try:
         from ai_params import ai_params

@@ -1,13 +1,7 @@
-"""Data retention policy — automated cleanup for old database records and files.
+"""Retention policy definitions with emergency C1A containment.
 
-Usage:
-    # Run from CLI
-    python -m db.retention --dry-run
-    python -m db.retention --execute
-
-    # Run from code
-    from db.retention import run_retention_cleanup
-    await run_retention_cleanup(dry_run=False)
+Every operational entry point is unavailable until the typed, fail-closed
+Phase C retention implementation is complete and verified.
 """
 from __future__ import annotations
 
@@ -20,7 +14,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NoReturn
 
 import aiosqlite
 
@@ -28,6 +22,26 @@ from config import cfg
 from db.core import get_db, transaction
 
 log = logging.getLogger(__name__)
+
+RETENTION_DISABLED_CODE = "RETENTION_DISABLED_C1A"
+RETENTION_DISABLED_DETAIL = (
+    "Retention operations are temporarily unavailable pending verified "
+    "retention implementation."
+)
+
+
+class RetentionUnavailableError(RuntimeError):
+    """Raised when an operational retention entry point is invoked during C1A."""
+
+    code = RETENTION_DISABLED_CODE
+
+    def __init__(self) -> None:
+        super().__init__(f"{RETENTION_DISABLED_CODE}: {RETENTION_DISABLED_DETAIL}")
+
+
+def _raise_retention_unavailable() -> NoReturn:
+    """Fail closed before any database, directory, or file access."""
+    raise RetentionUnavailableError
 
 # Default retention periods (in days)
 DEFAULT_RETENTION_DAYS = {
@@ -294,6 +308,7 @@ async def _backup_records(
     backup_dir: Path,
 ) -> Path | None:
     """Backup records to JSONL file before deletion."""
+    _raise_retention_unavailable()
     try:
         table = _safe_table_name(table)
         timestamp_column = _safe_identifier(timestamp_column, kind="column")
@@ -370,6 +385,7 @@ async def _cleanup_table(
     dry_run: bool = False,
 ) -> CleanupResult:
     """Clean up old records from a single table."""
+    _raise_retention_unavailable()
     result = CleanupResult(
         table=policy.table,
         rows_deleted=0,
@@ -448,6 +464,7 @@ async def _cleanup_parquet_files(
     dry_run: bool = False,
 ) -> dict:
     """Clean up old Parquet files from data directory."""
+    _raise_retention_unavailable()
     result = {
         "files_deleted": 0,
         "bytes_freed": 0,
@@ -488,6 +505,7 @@ async def _cleanup_parquet_files(
 
 async def _vacuum_database(db: aiosqlite.Connection) -> None:
     """Run VACUUM to reclaim disk space after deletions."""
+    _raise_retention_unavailable()
     try:
         log.info("Running VACUUM to reclaim disk space...")
         await db.execute("VACUUM")
@@ -513,6 +531,7 @@ async def run_retention_cleanup(
     Returns:
         Dict with cleanup statistics and results
     """
+    _raise_retention_unavailable()
     config = RetentionConfig(custom_policies)
     results: list[CleanupResult] = []
     
@@ -571,6 +590,7 @@ async def run_retention_cleanup(
 
 async def get_retention_stats() -> dict:
     """Get current database size and record counts for retention planning."""
+    _raise_retention_unavailable()
     db_path = Path(cfg.DB_PATH)
     
     stats = {
@@ -597,36 +617,42 @@ async def get_retention_stats() -> dict:
 
 
 def main() -> None:
-    """CLI entry point for retention cleanup."""
-    parser = argparse.ArgumentParser(description="Database retention cleanup")
+    """CLI entry point that reports the emergency retention lockout."""
+    parser = argparse.ArgumentParser(
+        description="Database retention operations (disabled by C1A)"
+    )
     parser.add_argument(
         "--execute", "-e",
         action="store_true",
-        help="Actually delete records (default is dry-run)"
+        help="Disabled by C1A"
     )
     parser.add_argument(
         "--vacuum", "-v",
         action="store_true",
-        help="Run VACUUM after cleanup"
+        help="Disabled by C1A"
     )
     parser.add_argument(
         "--stats", "-s",
         action="store_true",
-        help="Show current stats and exit"
+        help="Disabled by C1A"
     )
     parser.add_argument(
         "--retention-days", "-r",
         type=int,
         metavar="DAYS",
-        help="Override all retention periods (use with caution)"
+        help="Disabled by C1A"
     )
     parser.add_argument(
         "--table",
         action="append",
-        help="Specific table to clean (can be used multiple times)"
+        help="Disabled by C1A"
     )
     
     args = parser.parse_args()
+    parser.exit(
+        status=2,
+        message=f"{RETENTION_DISABLED_CODE}: {RETENTION_DISABLED_DETAIL}\n",
+    )
     
     async def run():
         if args.stats:

@@ -2,7 +2,7 @@
 
 Date: 2026-07-12
 
-Status: TECHNICAL PASS - OWNER SIGN-OFF PENDING
+Status: TECHNICAL PASS - BOUNDARIES ACCEPTED; CLOSEOUT AUTHORIZATION PENDING
 
 Tested source commit:
 `456330e95b6401bdb1ab2bf01824a91ade815816`
@@ -18,9 +18,10 @@ Remote: public `Segev191312010/aiautomation`, branch `master`.
 ## Decision
 
 Phase B implementation checkpoints B0-B11 are complete, and the B12 technical
-gate passes locally and in same-source Ubuntu CI. Phase B remains
-administratively open until the owner explicitly accepts the policy boundaries
-in this report and authorizes recording B12 as PASS.
+gate passed locally and in same-source Ubuntu CI. On 2026-07-14, the owner
+explicitly accepted all seven policy boundaries in this report. The report's
+separate requirement for explicit authorization to record B12 as PASS has not
+yet been satisfied, so administrative closeout remains pending.
 
 This is not approval for an installable desktop release, unattended operation,
 or live-money authority. The desktop shell remains Phase D, and the packaged
@@ -213,9 +214,11 @@ entry. Neither ignored file was changed during Phase B.
 Docker was not installed locally, so a live Compose/Nginx container smoke was
 not performed. Static Compose/Nginx regression tests and Ubuntu CI passed.
 
-## Owner Sign-off Required
+## Owner Boundary Acceptance
 
-Phase B must remain `TECHNICAL PASS - OWNER SIGN-OFF PENDING` until the owner
-explicitly accepts the seven policy boundaries above and authorizes B12 as
-PASS. After that approval, a later evidence-only commit may record Phase B as
-closed. Phase C must not begin automatically; plan it with the owner first.
+On 2026-07-14, the owner explicitly accepted the seven policy boundaries above.
+The owner did not separately authorize recording B12 as PASS in that message,
+so Phase B remains `TECHNICAL PASS - BOUNDARIES ACCEPTED; CLOSEOUT AUTHORIZATION
+PENDING`. The same message accepted the Phase C planning package but limited
+implementation authority to emergency C1A; no other C0-C12 implementation was
+authorized.

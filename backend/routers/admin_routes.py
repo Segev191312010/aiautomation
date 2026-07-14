@@ -10,15 +10,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from auth import get_current_user
 from db.retention import (
-    run_retention_cleanup,
-    get_retention_stats,
     DEFAULT_RETENTION_DAYS,
-    CleanupResult,
+    RETENTION_DISABLED_CODE,
+    RETENTION_DISABLED_DETAIL,
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -94,6 +94,17 @@ def _format_bytes(bytes_val: int) -> str:
     return f"{bytes_val:.2f} TB"
 
 
+def _retention_disabled_response() -> JSONResponse:
+    """Return the stable C1A fail-closed response without touching storage."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": RETENTION_DISABLED_CODE,
+            "detail": RETENTION_DISABLED_DETAIL,
+        },
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Routes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,16 +146,8 @@ async def get_retention_policies(user=Depends(get_current_user)):
 
 @router.get("/retention/stats", response_model=RetentionStatsResponse)
 async def get_retention_statistics(user=Depends(get_current_user)):
-    """Get current database statistics for retention planning."""
-    stats = await get_retention_stats()
-    
-    return RetentionStatsResponse(
-        db_path=stats["db_path"],
-        db_size_bytes=stats["db_size_bytes"],
-        db_size_human=_format_bytes(stats["db_size_bytes"]),
-        table_counts=stats["table_counts"],
-        retention_policies=stats["retention_policies"],
-    )
+    """Reject stats until a verified query-only implementation exists."""
+    return _retention_disabled_response()
 
 
 @router.post("/retention/cleanup", response_model=RetentionCleanupResponse)
@@ -152,61 +155,14 @@ async def run_retention_cleanup_endpoint(
     request: RetentionCleanupRequest,
     user=Depends(get_current_user),
 ):
-    """Run data retention cleanup.
-    
-    Use dry_run=True to preview what would be deleted.
-    Use dry_run=False to actually perform deletions.
-    """
-    try:
-        summary = await run_retention_cleanup(
-            custom_policies=request.custom_policies,
-            dry_run=request.dry_run,
-            vacuum=request.vacuum,
-        )
-        
-        # Convert details to Pydantic models
-        details = [
-            TableCleanupDetail(
-                table=d["table"],
-                rows_deleted=d["rows_deleted"],
-                backed_up=d["backed_up"],
-                backup_path=d["backup_path"],
-            )
-            for d in summary["details"]
-        ]
-        
-        return RetentionCleanupResponse(
-            dry_run=summary["dry_run"],
-            tables_processed=summary["tables_processed"],
-            total_rows_deleted=summary["total_rows_deleted"],
-            tables_backed_up=summary["tables_backed_up"],
-            backup_directory=summary["backup_directory"],
-            parquet_files_deleted=summary["parquet_cleanup"]["files_deleted"],
-            parquet_bytes_freed=summary["parquet_cleanup"]["bytes_freed"],
-            errors=summary["errors"],
-            details=details,
-            timestamp=datetime.utcnow(),
-        )
-        
-    except ValueError as e:
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Retention cleanup failed: {str(e)}"
-        )
+    """Reject cleanup before request data can reach retention services."""
+    return _retention_disabled_response()
 
 
 @router.post("/retention/cleanup-preview")
 async def preview_retention_cleanup(user=Depends(get_current_user)):
-    """Preview what would be deleted in a retention cleanup (dry run)."""
-    return await run_retention_cleanup_endpoint(
-        RetentionCleanupRequest(dry_run=True),
-        user
-    )
+    """Reject preview until it is proven query-only and zero-artifact."""
+    return _retention_disabled_response()
 
 
 @router.get("/retention/backup-list")
@@ -251,27 +207,5 @@ async def delete_retention_backup(
     filename: str,
     user=Depends(get_current_user),
 ):
-    """Delete a specific retention backup file."""
-    from config import cfg
-    from pathlib import Path
-    
-    backup_dir = Path(cfg.DB_PATH).parent / "backups"
-    file_path = backup_dir / filename
-    
-    # Security check: ensure file is within backup directory
-    try:
-        file_path.resolve().relative_to(backup_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Backup file not found")
-    
-    try:
-        file_path.unlink()
-        return {"message": f"Deleted {filename}"}
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to delete backup: {str(e)}"
-        )
+    """Reject archive deletion before resolving or inspecting the path."""
+    return _retention_disabled_response()

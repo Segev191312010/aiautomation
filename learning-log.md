@@ -104,3 +104,13 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: A generic dependency source-map identifier is not equivalent to an executable application storage key, so release scans must keep project-specific secret identifiers global while excluding vendor maps only for the generic token name.
 - Verified: Backend 720 tests, dashboard 389 tests plus typecheck/build, contract 147/145/190, hygiene/artifact scans, and same-source Ubuntu CI all passed at `456330e95b6401bdb1ab2bf01824a91ade815816`.
 - Next: Obtain B12 owner policy acceptance, record the evidence-only closeout, and jointly plan Phase C before any Phase C implementation.
+
+### 2026-07-14 - C1A Emergency Retention Containment
+- Completed: Fail-closed every retention service, CLI, table, Parquet, vacuum, stats, and archive-deletion entry point behind the stable `RETENTION_DISABLED_C1A` contract.
+- Completed: Suspended automatic diagnostics-news and terminal-candidate deletion while preserving queued/draining candidate TTL expiration.
+- Completed: Recorded the owner's Phase B B12 acceptance and added 23 focused zero-mutation retention tests.
+- Learned: A nominal dry run or stats endpoint is not read-only proof when its connection factory enables WAL or begins a transaction; containment must happen before any connection or path operation.
+- Learned: Startup candidate expiration is an execution-safety control distinct from age-based terminal-row retention and must remain active during the retention lockout.
+- Gotchas: A fresh clean worktree has no dashboard dependencies; record that environment failure, use exact `npm ci`, and verify the lockfile and tracked build output remain unchanged.
+- Verified: Focused 23/23 and 46/46 passed; backend 739 passed; dashboard typecheck/build and 31-file/389-test Vitest passed; internal review found no CRITICAL/HIGH issue.
+- Next: Push the clean C1A candidate, require same-source public CI, record immutable PASS evidence, then perform only the separately authorized GitHub branch-governance/PR-triage work.

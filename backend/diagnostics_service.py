@@ -1067,9 +1067,8 @@ class DiagnosticsService:
                         now_ts,
                     ),
                 )
-            prune_before = now_ts - (72 * 3600)
-            await db.execute("DELETE FROM diag_news_cache WHERE published_at<?", (prune_before,))
             await db.commit()
+        log.info("C1A: automatic diag_news_cache retention deletion disabled")
         self._record_success("diag_news_cache")
 
     def _indicator_row_to_dict(self, row: tuple[Any, ...]) -> dict[str, Any]:
