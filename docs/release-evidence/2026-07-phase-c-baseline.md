@@ -4,7 +4,7 @@ Date: 2026-07-12
 
 Last revised: 2026-07-14
 
-Status: HISTORICAL PRE-C1A PLANNING BASELINE - PLAN ACCEPTED; C0 AUTHORIZED
+Status: HISTORICAL PRE-C1A PLANNING BASELINE - C0 PASS RECORDED SEPARATELY
 
 Authoritative phase: Roadmap Phase C - Data Durability and Runtime Hardening.
 
@@ -19,6 +19,28 @@ Later evidence records C1A PASS at `6093f0f`/`1744bdb`, Phase B closeout,
 accepted ADRs 0007-0009 and D1-D21, and completed repository governance. C0 must
 re-run every current-source count, live setting, and inventory rather than
 treating this baseline as current proof.
+
+### 2026-07-14 C0 Addendum
+
+C0 re-ran the current-source requirements and passed at merged technical source
+`3fff9846300beceacd77caf33834dc44d8fa69c7`. The exact machine and human
+records are `2026-07-14-phase-c-c0.json` and `2026-07-14-phase-c-c0.md`.
+
+The current clean-source proof records 739 backend tests, dashboard
+typecheck/build with 617 modules, 31 files/389 Vitest tests, a
+147-call-site/145-operation frontend contract against 190 OpenAPI operations,
+36 verifier tests, workspace hygiene, the seven mandatory C0 cases, and green
+Windows/Ubuntu post-merge CI run `29338942043`.
+
+C0 inspected the preserved owner worktree through metadata only. It confirmed a
+14,880,768-byte `backend/trading_bot.db`, five files totaling 644,946,524 bytes
+under `backend/data/event_logs`, and small `backend/.env` and
+`dashboard/.env.local` files. No content was opened, hashed, copied, or mutated.
+The clean C0 worktree contained no allowlisted database candidate. These facts
+identify future import/path decisions; they are not schema or data proof.
+
+C0 changed verification tooling, tests, machine policy, workflow configuration,
+and evidence only. It did not implement or authorize C1-C12.
 
 ## 1. Entry Conditions
 
@@ -327,8 +349,7 @@ Out of scope:
 
 ## 9. Planning Disposition
 
-Phase C is required. Phase B, policy acceptance, C1A containment, and branch
-governance are complete. The owner authorizes this planning record and C0
-verification only; clean immutable C0 source and same-source proof remain open.
+Phase C is required. Phase B, policy acceptance, C1A containment, branch
+governance, the durable planning record, and C0 verification are complete.
 C1-C12 are planned but not authorized. C1 must preserve the C1A lockout while
 building typed retention foundations, and Phase D does not begin automatically.

@@ -2,8 +2,8 @@
 
 Date created: 2026-07-12
 
-Status: ACCEPTED VERIFICATION PLAN - C0 AUTHORIZED; PLANNED COMMANDS FOR
-C1-C12 ARE NOT IMPLEMENTED OR AUTHORIZED
+Status: C0 PASS; PLANNED COMMANDS FOR C1-C12 ARE NOT IMPLEMENTED OR
+AUTHORIZED
 
 Master plan: `docs/PHASE_C_ULTRAPLAN.md` (owner accepted 2026-07-14).
 The Phase C tracker is the single table of truth.
@@ -123,6 +123,22 @@ record exact merged-`master` identity and same-source CI after protected merge.
 
 Record OS, SQLite runtime version, FastAPI, Pydantic, aiosqlite, pytest, React,
 TypeScript, Vite, and Vitest versions.
+
+### 2.1 Completed C0 Proof
+
+C0 passed at merged technical source
+`3fff9846300beceacd77caf33834dc44d8fa69c7`. The seven mandatory cases
+`C0-ENV-001`, `C0-CHECKOUT-001`, `C0-SOURCE-001`, `C0-VERSION-001`,
+`C0-SQLITE-001`, `C0-D14-001`, and `C0-LEGACY-001` passed locally with no
+errors/open gates and successful owned-root cleanup. The tree-identical
+candidate passed 739 backend tests, dashboard typecheck/build, 31 files/389
+Vitest tests, the 147/145/190 contract gate, 36 verifier tests, and hygiene.
+
+Protected post-merge run `29338942043` passed backend, dashboard, Windows C0,
+and Ubuntu C0 jobs on the exact merged source. Full evidence is in
+`docs/release-evidence/2026-07-14-phase-c-c0.md` and `.json`. C0 PASS does not
+authorize C1-C12 or weaken the requirement to re-prove safe environment and
+exact source at every future checkpoint.
 
 ## 3. Baseline Gate
 

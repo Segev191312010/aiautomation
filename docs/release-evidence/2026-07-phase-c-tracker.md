@@ -2,7 +2,7 @@
 
 Date opened: 2026-07-12
 
-Status: ACCEPTED PLAN - C0 VERIFICATION AUTHORIZED; C1-C12 NOT AUTHORIZED
+Status: C0 PASS; C1-C12 PLANNED - NOT AUTHORIZED
 
 Authoritative brief: `sessions/phase-c-data-durability-prompt.md`
 
@@ -15,6 +15,8 @@ Verification manual: `docs/PHASE_C_VERIFICATION.md`
 Accepted D14 inventory:
 `docs/release-evidence/2026-07-phase-c-critical-module-inventory.md`
 
+C0 evidence: `docs/release-evidence/2026-07-14-phase-c-c0.md`
+
 ## Entry Gates
 
 | Gate | Required evidence | Current status |
@@ -23,22 +25,22 @@ Accepted D14 inventory:
 | Emergency C1A choice | Explicit owner authorization or explicit decline; no implied authority | PASS - separately authorized and verified |
 | Phase C policy approval | Accepted ADRs 0007-0009 and owner decision register | PASS - accepted 2026-07-14 |
 | Repository governance | Live default/protected `master`, required CI, archived disconnected `main`, three PRs triaged without history merge | PASS |
-| Durable planning record | Owner-approved Phase C plan committed before implementation | PENDING - protected documentation PR must merge; C0 rechecks |
-| Clean source | Clean worktree/clone, local HEAD equals intended remote commit | C0 VERIFICATION PENDING |
-| Safe mode | Simulation, Autopilot OFF, synthetic DB/fake broker | REQUIRED |
-| Baseline gates | Backend, dashboard, contract, hygiene, versions, CI | Technical baseline available; clean C0 rerun required |
+| Durable planning record | Owner-approved Phase C plan committed before implementation | PASS - PR #5 merged as `92fc971` |
+| Clean source | Clean worktree/clone, local HEAD equals intended remote commit | PASS - exact merged technical source `3fff984` |
+| Safe mode | Simulation, Autopilot OFF, synthetic DB/fake broker | PASS FOR C0 - verifier-owned temporary root; future checkpoints must re-prove |
+| Baseline gates | Backend, dashboard, contract, hygiene, versions, CI | PASS - 739 backend; 31 files/389 dashboard; 147/145/190 contract; run `29338942043` |
 
 The entry gates are necessary but not sufficient authorization. The owner has
-authorized C0 verification only. No C1-C12 row may move to `IN PROGRESS` without
-a later explicit instruction. C1A is completed historical emergency containment
-and did not open C0-C12.
+authorized C0 verification only, and C0 is now complete. No C1-C12 row may move
+to `IN PROGRESS` without a later explicit instruction. C1A is completed
+historical emergency containment and did not open C0-C12.
 
 ## Checkpoint Tracker
 
 | ID | Outcome | Primary artifacts | Required focused proof | Lead agents | Depends on | Status |
 |---|---|---|---|---|---|---|
 | C1A | Pre-C0 emergency retention lockout | API/service/CLI/helpers/stats/backup DELETE/two automatic delete paths; focused tests; dated hotfix evidence | all mutation paths disabled; no DB/WAL/SHM/directory/row/Parquet/JSONL/non-JSONL sentinel mutation; full four gates | Database, Security, Test Automator, Code Reviewer | explicit owner authorization only | PASS - `6093f0f`; evidence `1744bdb` |
-| C0 | Authorization, governance, clean baseline, ADR acceptance | baseline, brief, tracker, verification driver, ADRs 0007-0009, exact D14 inventory, early Windows/Ubuntu jobs | live remote default/protection/SHA/archive/PR state; clean source; full gates; metadata-only inventories | Explorer, Git Historian, Database Expert, Code Reviewer | Phase B closeout | AUTHORIZED - VERIFICATION PENDING |
+| C0 | Authorization, governance, clean baseline, ADR acceptance | baseline, brief, tracker, verification driver, ADRs 0007-0009, exact D14 inventory, early Windows/Ubuntu jobs | live remote default/protection/SHA/archive/PR state; clean source; full gates; metadata-only inventories | Explorer, Git Historian, Database Expert, Code Reviewer | Phase B closeout | PASS - technical source `3fff984`; evidence `2026-07-14-phase-c-c0.md` |
 | C1 | Typed retention foundations behind C1A lockout | service/CLI/admin/Parquet/archive guards, query-only preview, retention tests, C1 evidence | preserve every guard; epoch/ISO boundaries; preview creates no artifact; archive failure means zero delete | Database, Data Migration, Security, Test Automator | C0 | PLANNED - NOT AUTHORIZED |
 | C2 | Canonical AppPaths behind existing locations | frozen resolver, connection factory, deferred writable singletons, Compose/env docs, path tests | pure resolution; secure lock-parent sole exception then immediate lock; under-lock prep; no import/CWD/legacy mutation | Database, Deployment, Python, Test Automator | C1 | PLANNED - NOT AUTHORIZED |
 | C3 | Read-only classifier, checkpoint, verified full backup | structural registry, maintenance service, strict `BackupManifestV1`, manifest-last publication, ACL evidence | unknown DB source untouched with only lock/marker/approved directories; checkpoint sole supported pre-backup mutation; WAL-only online row; integrity/FK; publication/DACL failures | Database, Data Migration, Security, Test Automator | C2 | PLANNED - NOT AUTHORIZED |
@@ -106,6 +108,9 @@ the complete supporting-agent list for each checkpoint.
   local proof, CI run, and dated evidence. Its PASS changes no C0-C12 status and
   grants no broader implementation authority.
 - Every status transition needs a dated evidence document and exact source commit.
+- C0 PASS is bound to merged technical source
+  `3fff9846300beceacd77caf33834dc44d8fa69c7`, public post-merge run
+  `29338942043`, and `2026-07-14-phase-c-c0.md`/`.json`.
 - Evidence records live remote default/protection/master SHA, dependency versions,
   exact test/case IDs, unexpected skips/xfails, artifacts/hashes, failed runs,
   and owner-approval references in both machine-readable and short Markdown form.
@@ -128,6 +133,7 @@ the complete supporting-agent list for each checkpoint.
 
 - [x] Phase B B12 owner closeout recorded.
 - [x] Phase C ADRs and D1-D21 accepted.
+- [x] C0 PASS recorded from clean exact source on Windows and Ubuntu.
 - [ ] C0-C12 all PASS.
 - [ ] Every C-F01-C-F14 close condition met.
 - [ ] Full local Windows gates pass from clean source.

@@ -4,7 +4,7 @@ Topic: Data Durability and Runtime Hardening
 
 Date: 2026-07-12
 
-Status: ACCEPTED IMPLEMENTATION DESIGN - C0 VERIFICATION ONLY AUTHORIZED
+Status: ACCEPTED IMPLEMENTATION DESIGN - C0 PASS; C1-C12 NOT AUTHORIZED
 
 Master plan: `docs/PHASE_C_ULTRAPLAN.md`, owner accepted 2026-07-14. The Phase C
 tracker is the single table of truth. This brief defines implementation detail;
@@ -60,8 +60,9 @@ Before C1-C12 code begins:
 Current disposition: Phase B is closed; protected `master` is default;
 disconnected `main` and its archive tag remain preserved; PRs #1, #3, and #4
 were closed unmerged; ADRs 0007-0009 and D1-D21 are accepted; and C1A passed at
-`6093f0f` with evidence `1744bdb`. The planning record and C0 are authorized.
-Clean C0 exact-source proof remains open. C1-C12 are not authorized.
+`6093f0f` with evidence `1744bdb`. The planning record merged as `92fc971` and
+C0 passed at merged technical source `3fff984` with post-merge CI run
+`29338942043`. C1-C12 are not authorized.
 
 ## 3. Non-Negotiable Invariants
 

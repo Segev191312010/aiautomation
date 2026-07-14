@@ -123,3 +123,12 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: C0's no-product-change boundary still permits the explicitly required verification driver, policy manifest, tests, focused Windows/Ubuntu jobs, and evidence.
 - Verified: Documentation checkpoints repeatedly passed backend 739, dashboard typecheck/build, and 31-file/389-test Vitest in a synthetic simulation/AI-OFF environment.
 - Next: Merge the documentation-only planning PR, execute C0 verification from clean exact source, record same-source Windows/Ubuntu evidence, and stop before C1-C12.
+
+### 2026-07-14 - Phase C C0 Verification
+- Completed: Merged the accepted Phase C planning record through PR #5, then merged the verifier, 36 focused tests, exact D14 manifest, and Windows/Ubuntu C0 jobs through PR #6 without changing product/runtime code.
+- Completed: Recorded the clean metadata-only legacy inventory, live protected-branch/archive/PR governance, seven stable mandatory cases, and exact merged-source C0 evidence.
+- Learned: A formal case registry must fail when only a diagnostic subset runs; partial success cannot become a checkpoint PASS.
+- Learned: Clean Git state alone is not immutable-source proof; C0 binds HEAD to an explicit expected SHA and a live remote ref, then repeats proof after the protected merge.
+- Learned: Temporary-root cleanup is an acceptance property, not best effort; a verifier must fail if the owned root remains or its identity changes.
+- Verified: Technical source `3fff9846300beceacd77caf33834dc44d8fa69c7` passed all seven C0 cases locally and backend/dashboard/Windows C0/Ubuntu C0 post-merge run `29338942043`; the tree-identical candidate passed backend 739, dashboard typecheck/build and 31 files/389 tests, contract 147/145/190, 36 verifier tests, and hygiene.
+- Next: Stop. C1-C12 remain planned but unauthorized until the owner gives a later explicit instruction.
