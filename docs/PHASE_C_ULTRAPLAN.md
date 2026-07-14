@@ -4,15 +4,16 @@ Revision: 4
 
 Date: 2026-07-14
 
-Status: **ACCEPTED PLAN OF RECORD - C0 AUTHORIZED**
+Status: **ACCEPTED PLAN OF RECORD - C0 PASS**
 
-Implementation authority: **C0 VERIFICATION ONLY; C1-C12 NOT AUTHORIZED**
+Implementation authority: **C0 COMPLETE; C1-C12 NOT AUTHORIZED**
 
 This document incorporates the attached Phase C Ultraplan v2, the Phase C
 brief/tracker/manual, accepted ADRs 0007-0009, the verified retention audit, and
 the final internal consistency reviews. It corrects the v2 issues identified
-during reconciliation. The owner accepted it on 2026-07-14. This protected
-documentation pull request becomes its durable planning record only when merged.
+during reconciliation. The owner accepted it on 2026-07-14. Protected planning
+PR #5 merged as `92fc9713d1838f8de601d4f26634ecd35eab85a1` and is the
+durable planning record.
 
 ## 1. Normative hierarchy
 
@@ -49,11 +50,15 @@ Verified current facts:
   `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`; evidence commit
   `1744bdb94e0ff8fcf55ffa427e563444af16f002` and CI run `29324523583`
   preserve its proof.
-- The pre-C1A planning gate passed 720 backend tests, dashboard typecheck/build,
-  and 389 tests in 31 files. The current C1A source passes 739 backend tests and
-  the same dashboard gates. C0 still requires its own clean exact-source proof.
-- The owner authorizes this documentation-only planning pull request and C0
-  verification. C1-C12 implementation remains unauthorized.
+- C0 passed at merged technical source
+  `3fff9846300beceacd77caf33834dc44d8fa69c7`; the tree-identical candidate
+  passed 739 backend tests, dashboard typecheck/build, 389 tests in 31 files,
+  the 147/145/190 contract gate, 36 verifier tests, and hygiene.
+- Post-merge run `29338942043` passed backend, dashboard, Windows C0, and Ubuntu
+  C0 jobs on that exact source. The dated record is
+  `docs/release-evidence/2026-07-14-phase-c-c0.md`.
+- The owner authorized the completed planning and C0 work. C1-C12
+  implementation remains unauthorized.
 
 ## 3. Latent retention defects contained by C1A
 
@@ -151,14 +156,14 @@ C1A passed at `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`, with evidence at
 | Phase B B12 | Owner accepts seven boundaries; evidence-only closeout lands | PASS - closed 2026-07-14 |
 | Emergency containment | Explicit owner choice on C1A | PASS - separately authorized and verified |
 | Repository governance | Protected `master` default; required CI; legacy `main` archived; PRs triaged without history merge | PASS |
-| Planning record | Owner accepts this plan and a planning commit records it | PENDING - protected documentation PR must merge; C0 rechecks |
+| Planning record | Owner accepts this plan and a planning commit records it | PASS - PR #5 merged as `92fc971` |
 | ADRs | ADRs 0007-0009 accepted or revised | PASS - accepted 2026-07-14 |
 | Decisions | D1-D21 accepted before dependent work | PASS - accepted 2026-07-14 |
-| Clean source | Immutable clean worktree/clone; live remote SHA checked | C0 VERIFICATION PENDING |
-| Safe verification | Simulation/AI OFF/temp paths, except isolated fake-broker C9 harness | REQUIRED |
+| Clean source | Immutable clean worktree/clone; live remote SHA checked | PASS - C0 source `3fff984` |
+| Safe verification | Simulation/AI OFF/temp paths, except isolated fake-broker C9 harness | PASS FOR C0 - future checkpoints re-prove |
 
-C0 verification is authorized. Entry-gate completion is necessary but does not
-authorize C1-C12; each remains blocked until a later explicit owner instruction.
+C0 verification is complete. Entry-gate completion does not authorize C1-C12;
+each remains blocked until a later explicit owner instruction.
 
 ## 5. Canonical C0-C12 execution plan
 
@@ -573,9 +578,9 @@ The canonical closeout is
 
 ### 13.3 Current authority
 
-- The documentation-only planning/Phase B closeout PR is authorized.
-- C0 verification, verification tooling, focused Windows/Ubuntu workflow work,
-  and C0 evidence are authorized.
+- The documentation-only planning/Phase B closeout PR is merged.
+- C0 verification, tooling, focused Windows/Ubuntu workflow work, and technical
+  merge are complete; dated evidence records PASS.
 - C1A is completed historical emergency containment.
 - C1-C12 product/runtime implementation is not authorized.
 - C9 still requires genuine external design approval before implementation and
@@ -594,6 +599,6 @@ The canonical closeout is
 - SQLite Online Backup API: https://www.sqlite.org/backup.html
 - SQLite PRAGMAs: https://www.sqlite.org/pragma.html
 
-This plan authorizes only its documentation pull request and C0 verification.
-It does not authorize live-money trading, destructive retention, C1-C12
-implementation, unrelated GitHub changes, or Phase D.
+The completed planning record and C0 PASS do not authorize live-money trading,
+destructive retention, C1-C12 implementation, unrelated GitHub changes, or
+Phase D.

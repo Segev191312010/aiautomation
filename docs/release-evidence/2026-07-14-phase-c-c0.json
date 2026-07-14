@@ -1,0 +1,395 @@
+{
+  "schema_version": 1,
+  "record_type": "phase_c_checkpoint_evidence",
+  "date": "2026-07-14",
+  "phase": "C",
+  "checkpoint": "C0",
+  "status": "PASS",
+  "authority": {
+    "phase_b_b12": "PASS - PHASE B CLOSED",
+    "authorized": [
+      "documentation-only Phase C planning pull request",
+      "C0 verification, verification tooling, workflow jobs, and evidence"
+    ],
+    "not_authorized": [
+      "C1-C12 product or runtime implementation",
+      "destructive retention",
+      "live-money trading",
+      "Phase D"
+    ]
+  },
+  "source_chain": {
+    "planning_candidate": "85be0e2061d0940925554643b0b70c483e68434f",
+    "planning_pull_request": 5,
+    "planning_merge": "92fc9713d1838f8de601d4f26634ecd35eab85a1",
+    "technical_candidate": "1f867c380630985f4feea83203d73fd4685454fa",
+    "technical_pull_request": 6,
+    "technical_merge": "3fff9846300beceacd77caf33834dc44d8fa69c7",
+    "candidate_and_merge_tree": "083090c55f5c092945ca9e2be32a91011db7c70d",
+    "candidate_merge_trees_equal": true,
+    "technical_scope_paths": [
+      ".github/workflows/ci.yml",
+      "scripts/phase_c_d14_manifest.json",
+      "scripts/tests/test_verify_phase_c.py",
+      "scripts/verify_phase_c.py"
+    ],
+    "production_runtime_paths_changed": false
+  },
+  "local_quality_gates": {
+    "source": "tree-identical technical candidate",
+    "backend_pytest": {
+      "status": "PASS",
+      "passed": 739
+    },
+    "dashboard_typecheck": {
+      "status": "PASS"
+    },
+    "dashboard_build": {
+      "status": "PASS",
+      "modules_transformed": 617
+    },
+    "dashboard_vitest": {
+      "status": "PASS",
+      "files": 31,
+      "tests": 389
+    },
+    "frontend_openapi_contract": {
+      "status": "PASS",
+      "frontend_call_sites": 147,
+      "unique_frontend_operations": 145,
+      "openapi_operations": 190
+    },
+    "c0_verifier_tests": {
+      "status": "PASS",
+      "tests": 36
+    },
+    "workspace_hygiene": "PASS",
+    "json_yaml_compile_diff": "PASS"
+  },
+  "verifier_report": {
+    "schema_version": 1,
+    "phase": "C0",
+    "overall": "PASS",
+    "started_at_utc": "2026-07-14T14:03:55.748458+00:00",
+    "finished_at_utc": "2026-07-14T14:03:57.169567+00:00",
+    "selected_case_ids": [
+      "C0-ENV-001",
+      "C0-CHECKOUT-001",
+      "C0-SOURCE-001",
+      "C0-VERSION-001",
+      "C0-SQLITE-001",
+      "C0-D14-001",
+      "C0-LEGACY-001"
+    ],
+    "cases": [
+      {
+        "case_id": "C0-ENV-001",
+        "status": "pass",
+        "duration_ms": 5,
+        "details": {
+          "sim_mode": "true",
+          "autopilot_mode": "OFF",
+          "paths_absolute": true
+        }
+      },
+      {
+        "case_id": "C0-CHECKOUT-001",
+        "status": "pass",
+        "duration_ms": 20,
+        "details": {
+          "artifact_count": 0,
+          "scan_mode": "metadata-only"
+        }
+      },
+      {
+        "case_id": "C0-SOURCE-001",
+        "status": "pass",
+        "duration_ms": 931,
+        "details": {
+          "branch": "docs/phase-c-c0-evidence",
+          "clean": true,
+          "dirty_entry_count": 0,
+          "head": "3fff9846300beceacd77caf33834dc44d8fa69c7",
+          "expected_source_commit": "3fff9846300beceacd77caf33834dc44d8fa69c7",
+          "expected_remote_ref": "refs/heads/master",
+          "live_origin_master": "3fff9846300beceacd77caf33834dc44d8fa69c7",
+          "head_matches_expected_source": true,
+          "head_matches_live_origin_master": true
+        }
+      },
+      {
+        "case_id": "C0-VERSION-001",
+        "status": "pass",
+        "duration_ms": 271,
+        "details": {
+          "os": "Windows-11-10.0.26200-SP0",
+          "python": "3.12.10",
+          "sqlite": "3.49.1",
+          "commands": {
+            "git": "git version 2.53.0.windows.1",
+            "node": "v24.13.1",
+            "npm": "11.8.0"
+          },
+          "python_packages": {
+            "fastapi": "0.129.0",
+            "pydantic": "2.12.5",
+            "aiosqlite": "0.22.1",
+            "pytest": "9.0.2"
+          },
+          "dashboard_lock": {
+            "react": "18.3.1",
+            "typescript": "5.9.3",
+            "vite": "5.4.21",
+            "vitest": "4.0.18"
+          }
+        }
+      },
+      {
+        "case_id": "C0-SQLITE-001",
+        "status": "pass",
+        "duration_ms": 15,
+        "details": {
+          "journal_mode": "wal",
+          "integrity_check": "ok",
+          "row_count": 1,
+          "checkpoint": [
+            0,
+            0,
+            0
+          ],
+          "artifacts": [
+            {
+              "name": "tradebot.db",
+              "size": 8192
+            }
+          ]
+        }
+      },
+      {
+        "case_id": "C0-D14-001",
+        "status": "pass",
+        "duration_ms": 172,
+        "details": {
+          "schema_version": 1,
+          "current_path_count": 77,
+          "current_exclusion_count": 3,
+          "future_pattern_count": 17,
+          "first_path": "backend/advisor_api.py",
+          "last_path": "backend/startup.py",
+          "matched_file_count": 46,
+          "broad_catch_count": 188,
+          "bare_catch_count": 0,
+          "broad_or_bare_catch_count": 188,
+          "standalone_pass_count": 25,
+          "combined_site_count": 213,
+          "capability_pattern_count": 7,
+          "triggered_path_count": 10,
+          "per_trigger_match_counts": {
+            "lifecycle_authority_or_risk_state_mutation": 0,
+            "production_process_termination": 0,
+            "raw_broker_order_placement_or_cancellation": 2,
+            "runtime_lock_acquisition_or_release": 2,
+            "schema_or_wal_maintenance": 6,
+            "sqlite_backup_or_database_file_publication": 0,
+            "writable_app_paths_root_creation": 0
+          },
+          "aggregate_site_sets_sha256": "c620bbfad06d9d8a839c20fedfe23b96262c4fbf32f4491fbc660f5858c886f4",
+          "accepted_inventory_normalized_lf_sha256": "0935b532bc9ac03b59a4a9b5217dc312a8c463346b02be3574f2859e0f597bb3",
+          "manifest_sha256": "c459616d17439a2a70deadb27d5044009aa131adc0618d29849d5ce0765564e8"
+        }
+      },
+      {
+        "case_id": "C0-LEGACY-001",
+        "status": "pass",
+        "duration_ms": 0,
+        "details": {
+          "scan_mode": "allowlisted-lstat-only",
+          "candidates": [
+            {
+              "scope": "repository",
+              "label": "trading_bot.db",
+              "exists": false,
+              "kind": "absent"
+            },
+            {
+              "scope": "repository",
+              "label": "backend/trading_bot.db",
+              "exists": false,
+              "kind": "absent"
+            }
+          ]
+        }
+      }
+    ],
+    "errors": [],
+    "open_gates": [],
+    "cleanup": {
+      "status": "pass",
+      "root_removed": true
+    }
+  },
+  "ci": {
+    "planning_pull_request_run": {
+      "id": 29330576621,
+      "head_sha": "85be0e2061d0940925554643b0b70c483e68434f",
+      "conclusion": "success",
+      "url": "https://github.com/Segev191312010/aiautomation/actions/runs/29330576621"
+    },
+    "planning_post_merge_run": {
+      "id": 29330686850,
+      "head_sha": "92fc9713d1838f8de601d4f26634ecd35eab85a1",
+      "conclusion": "success",
+      "url": "https://github.com/Segev191312010/aiautomation/actions/runs/29330686850"
+    },
+    "technical_pull_request_run": {
+      "id": 29338785699,
+      "head_sha": "1f867c380630985f4feea83203d73fd4685454fa",
+      "conclusion": "success",
+      "url": "https://github.com/Segev191312010/aiautomation/actions/runs/29338785699"
+    },
+    "technical_post_merge_run": {
+      "id": 29338942043,
+      "head_sha": "3fff9846300beceacd77caf33834dc44d8fa69c7",
+      "conclusion": "success",
+      "completed_at_utc": "2026-07-14T14:02:30Z",
+      "url": "https://github.com/Segev191312010/aiautomation/actions/runs/29338942043",
+      "jobs": [
+        {
+          "id": 87105295259,
+          "name": "Backend (Python + pytest)",
+          "conclusion": "success"
+        },
+        {
+          "id": 87105295302,
+          "name": "Dashboard (TypeScript + Vite + Vitest)",
+          "conclusion": "success"
+        },
+        {
+          "id": 87105295320,
+          "name": "Phase C C0 (Python 3.12 / Ubuntu)",
+          "conclusion": "success"
+        },
+        {
+          "id": 87105295257,
+          "name": "Phase C C0 (Python 3.12 / Windows)",
+          "conclusion": "success"
+        }
+      ]
+    }
+  },
+  "governance_snapshot": {
+    "default_branch": "master",
+    "visibility": "public",
+    "master_sha": "3fff9846300beceacd77caf33834dc44d8fa69c7",
+    "main_sha": "16280057ab04bee97904e9c59b9a5143a58bb673",
+    "archive_tag": "archive/aiautomation-v2-2026-07-a10",
+    "archive_sha": "16280057ab04bee97904e9c59b9a5143a58bb673",
+    "required_status_checks": [
+      "Backend (Python + pytest)",
+      "Dashboard (TypeScript + Vite + Vitest)"
+    ],
+    "strict_required_status_checks": true,
+    "enforce_admins": true,
+    "allow_force_pushes": false,
+    "allow_deletions": false,
+    "legacy_pull_requests": [
+      {
+        "number": 1,
+        "state": "closed",
+        "merged": false,
+        "base": "main"
+      },
+      {
+        "number": 3,
+        "state": "closed",
+        "merged": false,
+        "base": "main"
+      },
+      {
+        "number": 4,
+        "state": "closed",
+        "merged": false,
+        "base": "main"
+      }
+    ]
+  },
+  "metadata_only_inventory": {
+    "content_opened": false,
+    "content_hashed": false,
+    "content_copied": false,
+    "content_mutated": false,
+    "owner_worktree": [
+      {
+        "label": "trading_bot.db",
+        "exists": false
+      },
+      {
+        "label": "backend/trading_bot.db",
+        "exists": true,
+        "kind": "file",
+        "size_bytes": 14880768,
+        "modified_utc": "2026-06-08T16:02:01.6524061Z"
+      },
+      {
+        "label": "data/event_logs",
+        "exists": true,
+        "kind": "directory",
+        "file_count": 0
+      },
+      {
+        "label": "backend/data/event_logs",
+        "exists": true,
+        "kind": "directory",
+        "file_count": 5,
+        "aggregate_size_bytes": 644946524
+      },
+      {
+        "label": "data/bars",
+        "exists": false
+      },
+      {
+        "label": "backend/data/bars",
+        "exists": false
+      },
+      {
+        "label": ".env",
+        "exists": false
+      },
+      {
+        "label": "backend/.env",
+        "exists": true,
+        "kind": "file",
+        "size_bytes": 2321
+      },
+      {
+        "label": "dashboard/.env.local",
+        "exists": true,
+        "kind": "file",
+        "size_bytes": 70
+      }
+    ]
+  },
+  "review": {
+    "assurance_label": "parallel internal Codex review; not independent external assurance",
+    "corrected_high_risk_findings": [
+      "CI dependency installation incomplete for the version case",
+      "partial case selection could report formal PASS",
+      "D14 validation was too shallow",
+      "legacy output could expose private paths",
+      "source identity allowed a stale or unpushed clean commit",
+      "manifest access could follow a symlink or reparse escape",
+      "cleanup could report success while the owned root remained"
+    ],
+    "residual_low_risk_limitations": [
+      "narrow same-user time-of-check/time-of-use windows remain around cleanup and SQLite connect",
+      "an exceptional raw tool error could include a local path"
+    ]
+  },
+  "known_open_items": [
+    "C-F01 and C-F02 remain latent behind C1A fail-closed containment",
+    "schema, paths, migration, backup, restore, lifecycle, reconciliation, and redaction findings remain future unauthorized checkpoints",
+    "npm audit remains 10 findings: 1 critical, 4 high, 4 moderate, 1 low",
+    "C1-C12 remain PLANNED - NOT AUTHORIZED"
+  ],
+  "decision": "C0 PASS; stop before C1-C12 pending later explicit owner authorization"
+}
