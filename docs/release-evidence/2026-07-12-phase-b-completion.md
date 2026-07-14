@@ -2,7 +2,9 @@
 
 Date: 2026-07-12
 
-Status: TECHNICAL PASS - BOUNDARIES ACCEPTED; CLOSEOUT AUTHORIZATION PENDING
+Closeout date: 2026-07-14
+
+Status: **PASS - PHASE B CLOSED**
 
 Tested source commit:
 `456330e95b6401bdb1ab2bf01824a91ade815816`
@@ -18,10 +20,10 @@ Remote: public `Segev191312010/aiautomation`, branch `master`.
 ## Decision
 
 Phase B implementation checkpoints B0-B11 are complete, and the B12 technical
-gate passed locally and in same-source Ubuntu CI. On 2026-07-14, the owner
-explicitly accepted all seven policy boundaries in this report. The report's
-separate requirement for explicit authorization to record B12 as PASS has not
-yet been satisfied, so administrative closeout remains pending.
+gate passed locally and in same-source Ubuntu CI. On 2026-07-14, the owner first
+accepted all seven policy boundaries in this report and later explicitly
+authorized recording B12 as PASS and closing Phase B. Both technical and
+administrative closeout requirements are satisfied.
 
 This is not approval for an installable desktop release, unattended operation,
 or live-money authority. The desktop shell remains Phase D, and the packaged
@@ -163,7 +165,7 @@ failure.
 - Remote TradingView scripts, loopback iframe navigation, remote fonts, and
   data-supplied external navigation were removed from supported runtime paths.
 
-## Owner Policy Boundaries Requiring Acceptance
+## Accepted Owner Policy Boundaries
 
 1. Manual orders are stock-only. Options and futures remain unavailable until
    multiplier-aware quantity and notional validation exists.
@@ -214,11 +216,12 @@ entry. Neither ignored file was changed during Phase B.
 Docker was not installed locally, so a live Compose/Nginx container smoke was
 not performed. Static Compose/Nginx regression tests and Ubuntu CI passed.
 
-## Owner Boundary Acceptance
+## Phase B Closeout
 
 On 2026-07-14, the owner explicitly accepted the seven policy boundaries above.
-The owner did not separately authorize recording B12 as PASS in that message,
-so Phase B remains `TECHNICAL PASS - BOUNDARIES ACCEPTED; CLOSEOUT AUTHORIZATION
-PENDING`. The same message accepted the Phase C planning package but limited
-implementation authority to emergency C1A; no other C0-C12 implementation was
-authorized.
+In a later explicit instruction on the same date, the owner authorized recording
+Phase B B12 as PASS and closing Phase B. This document records that closeout.
+
+The same instruction authorizes a documentation-only Phase C planning pull
+request and C0 verification. It does not authorize C1-C12 implementation, a
+desktop or live-money release, destructive retention, or the start of Phase D.

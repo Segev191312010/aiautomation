@@ -81,14 +81,14 @@ This review covered both Git repositories in the workspace:
   scans. High-risk and product-boundary modules were read directly.
 
 Validation evidence spans the 2026-07-09 baseline, the 2026-07-10 Phase A
-closeout and regression re-verification, and the 2026-07-12 Phase B
-implementation verification. Canonical
+closeout and regression re-verification, the 2026-07-12 Phase B implementation
+verification, and the 2026-07-14 C1A emergency containment. Canonical
 backend/dashboard counts below are the latest local re-verification counts;
 nested-dashboard and dependency-audit rows preserve the baseline audit:
 
 | Area | Result |
 |---|---|
-| Backend pytest | 720 passed |
+| Backend pytest | 739 passed |
 | Main dashboard typecheck | Passed |
 | Main dashboard production build | Passed |
 | Main dashboard Vitest | 389 passed in 31 files |
@@ -557,9 +557,10 @@ Acceptance:
 
 Goal: every visible workflow has a real, authenticated backend contract.
 
-Implementation status: locally and CI verified on 2026-07-12 at source commit
-`456330e95b6401bdb1ab2bf01824a91ade815816`; B12 owner sign-off is still
-required before Phase B is recorded as closed.
+Implementation status: **PASS - CLOSED 2026-07-14**. The technical source
+`456330e95b6401bdb1ab2bf01824a91ade815816` passed local and same-source CI
+verification; the owner accepted all seven B12 boundaries and explicitly
+authorized recording B12 PASS and closing Phase B.
 
 - [x] Resolve every missing route listed in API-P1-01.
 - [x] Move all protected calls through the shared authenticated client.
@@ -584,23 +585,56 @@ Acceptance:
 
 Goal: crashes, updates, and migrations do not lose or corrupt trading state.
 
-- [ ] Introduce versioned SQLite migrations.
-- [ ] Add pre-migration backup and post-migration integrity checks.
+Planning status (accepted 2026-07-14): the Ultraplan, ADRs 0007-0009, and
+decisions D1-D21 are accepted. Protected `master` is the GitHub default;
+disconnected `main` remains archived and its three PRs were triaged without a
+history merge. C0 verification is authorized. C1-C12 implementation is not.
+Planning sources:
+
+- `docs/PHASE_C_ULTRAPLAN.md`;
+- `sessions/phase-c-data-durability-prompt.md`;
+- `docs/release-evidence/2026-07-phase-c-baseline.md`;
+- `docs/release-evidence/2026-07-phase-c-tracker.md`;
+- `docs/release-evidence/2026-07-phase-c-critical-module-inventory.md`;
+- `docs/PHASE_C_VERIFICATION.md`;
+- ADRs 0007-0009.
+
+C1A is PASS at implementation `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`,
+evidence `1744bdb94e0ff8fcf55ffa427e563444af16f002`, and CI run
+`29324523583`. Supported destructive-retention surfaces now fail closed before
+storage mutation. The incompatible timestamp comparison and archive-failure
+fallthrough remain latent, contained defects requiring the C1/C7 rewrite.
+
+- [x] Emergency C1A: disable unsafe retention mutation and out-of-band
+      terminal-row deletion with zero-mutation proof.
+- [ ] Introduce a read-only multi-variant schema classifier and atomic,
+      self-contained versioned SQLite migrations.
+- [ ] Require a blocking pre-migration checkpoint, verified manifested backup,
+      and post-migration integrity/foreign-key checks.
 - [ ] Move database, logs, caches, and backups to per-user app-data paths.
-- [ ] Implement full database backup and restore.
+- [ ] Implement full database backup and journaled offline restore.
 - [ ] Test backup restore against representative historical databases.
 - [ ] Schedule retention and expose failures in diagnostics.
 - [ ] Inventory broad exceptions in trading-critical modules.
 - [ ] Replace silent migration catches with explicit known-error handling.
-- [ ] Add clean shutdown and crash-restart reconciliation tests.
+- [ ] Add certificate-gated clean shutdown, forced-termination fallback, durable
+      order intent, exact reconciliation, and 17 stable crash families.
 - [ ] Add log redaction and diagnostic-bundle export.
 
 Acceptance:
 
 - upgrade from each supported schema version succeeds;
 - rollback/restore drill succeeds;
-- forced sidecar termination does not create duplicate orders;
-- restart reconciles DB and broker state.
+- forced backend-process termination against the persistent fake broker does not
+  create duplicate orders;
+- restart reconciles DB and broker state;
+- genuine external C9 design and result reviews are recorded;
+- closeout follows candidate `T`, exact-source proof, evidence `E`, owner
+  approval naming T/E, closeout `C`, and CI on C.
+
+The actual packaged sidecar does not exist until Phase D. Repeat the forced
+termination drill against that sidecar in Phase D and the IBKR paper environment
+in Phase F; Phase C backend-process evidence does not satisfy those later gates.
 
 ### Phase D - Desktop Shell and First-Run Experience
 

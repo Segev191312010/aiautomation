@@ -114,3 +114,12 @@ Chronological record of sessions, discoveries, and decisions.
 - Gotchas: A fresh clean worktree has no dashboard dependencies; record that environment failure, use exact `npm ci`, and verify the lockfile and tracked build output remain unchanged.
 - Verified: Focused 23/23 and 46/46 passed; backend 739 passed; dashboard typecheck/build and 31-file/389-test Vitest passed; internal review found no CRITICAL/HIGH issue; both jobs in same-source public CI run `29324523583` passed on `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`.
 - Next: Publish the C1A evidence addendum, then perform only the separately authorized GitHub branch-governance/PR-triage work.
+
+### 2026-07-14 - Phase B Closeout and Phase C Plan Acceptance
+- Completed: Recorded the owner's explicit authorization to mark Phase B B12 PASS and close Phase B after the seven policy boundaries had been accepted.
+- Completed: Accepted the Phase C Ultraplan, ADRs 0007-0009, and decisions D1-D21, including the exact D14 critical-module inventory and the Windows/XDG permission policies.
+- Completed: Confirmed protected `master` is the GitHub default, disconnected `main` remains preserved at its archive-tag tip, and PRs #1, #3, and #4 are closed unmerged.
+- Learned: C1A contains the retention hazard but does not correct the incompatible timestamp or archive-failure algorithms; those defects remain latent behind fail-closed guards.
+- Learned: C0's no-product-change boundary still permits the explicitly required verification driver, policy manifest, tests, focused Windows/Ubuntu jobs, and evidence.
+- Verified: Documentation checkpoints repeatedly passed backend 739, dashboard typecheck/build, and 31-file/389-test Vitest in a synthetic simulation/AI-OFF environment.
+- Next: Merge the documentation-only planning PR, execute C0 verification from clean exact source, record same-source Windows/Ubuntu evidence, and stop before C1-C12.
