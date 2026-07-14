@@ -2,15 +2,15 @@
 
 Date: 2026-07-14
 
-Status: local candidate complete; same-source public CI required
+Status: PASS on implementation source `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`
 
 ## Scope and Authority
 
 The owner authorized emergency C1A implementation/verification, a clean
 conventional commit, and push to public `origin/master`. No other C0-C12
 implementation is authorized. After C1A passes public CI, the owner separately
-authorized protected `master` as the GitHub default and read-only triage of PRs
-#1, #3, and #4 without merging disconnected histories.
+authorized protected `master` as the GitHub default and triage of PRs #1, #3,
+and #4 without merging disconnected histories.
 
 ## Completed
 
@@ -34,6 +34,8 @@ authorized protected `master` as the GitHub default and read-only triage of PRs
 - Dashboard build: pass, 617 modules transformed.
 - Dashboard Vitest: 31 files and 389 tests passed.
 - Internal source review: no CRITICAL or HIGH finding.
+- Public GitHub Actions run `29324523583`: backend and dashboard jobs passed on
+  the exact implementation source.
 
 The first backend checkpoint intentionally exposed four stale expectations; the
 other 716 tests passed. The first dashboard attempt was environment-blocked by
@@ -52,12 +54,11 @@ dashboard gate runs passed. Details are in the dated C1A evidence record.
 
 ## Next Authorized Actions
 
-1. Commit the clean candidate and push it to `origin/master`.
-2. Require both GitHub Actions jobs to pass on the exact C1A commit.
-3. Record exact CI identity and final C1A PASS in a documentation-only commit.
-4. After that commit's CI passes, protect `master`, require the backend and
+1. Commit this exact CI identity and final C1A PASS as a documentation-only
+   evidence addendum.
+2. After that addendum's CI passes, protect `master`, require the backend and
    dashboard checks, and set `master` as GitHub's default.
-5. Preserve disconnected `main` and its archive tag.
-6. Inspect and record a separate disposition for PRs #1, #3, and #4; do not
+3. Preserve disconnected `main` and its archive tag.
+4. Inspect and record a separate disposition for PRs #1, #3, and #4; do not
    merge the unrelated histories.
-7. Stop. Do not begin C0-C12 implementation without new owner authority.
+5. Stop. Do not begin C0-C12 implementation without new owner authority.

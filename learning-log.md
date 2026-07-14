@@ -112,5 +112,5 @@ Chronological record of sessions, discoveries, and decisions.
 - Learned: A nominal dry run or stats endpoint is not read-only proof when its connection factory enables WAL or begins a transaction; containment must happen before any connection or path operation.
 - Learned: Startup candidate expiration is an execution-safety control distinct from age-based terminal-row retention and must remain active during the retention lockout.
 - Gotchas: A fresh clean worktree has no dashboard dependencies; record that environment failure, use exact `npm ci`, and verify the lockfile and tracked build output remain unchanged.
-- Verified: Focused 23/23 and 46/46 passed; backend 739 passed; dashboard typecheck/build and 31-file/389-test Vitest passed; internal review found no CRITICAL/HIGH issue.
-- Next: Push the clean C1A candidate, require same-source public CI, record immutable PASS evidence, then perform only the separately authorized GitHub branch-governance/PR-triage work.
+- Verified: Focused 23/23 and 46/46 passed; backend 739 passed; dashboard typecheck/build and 31-file/389-test Vitest passed; internal review found no CRITICAL/HIGH issue; both jobs in same-source public CI run `29324523583` passed on `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`.
+- Next: Publish the C1A evidence addendum, then perform only the separately authorized GitHub branch-governance/PR-triage work.

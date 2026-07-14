@@ -2,7 +2,7 @@
 
 Date: 2026-07-14
 
-Status: **LOCAL CANDIDATE PASS - SAME-SOURCE CI PENDING**
+Status: **PASS**
 
 This record covers emergency Phase C checkpoint C1A only. It does not authorize
 or report implementation of C0-C12, live-money trading, desktop packaging, or
@@ -24,9 +24,12 @@ acceptances do not broaden this implementation record beyond C1A.
 - Clean starting source: `a410baeb712fbe11d4c8b1b838b2a49df70b54c3`
 - Starting remote: `origin/master` at the same commit after fetch
 - Implementation branch: `c1a-retention-containment`
-- C1A candidate commit: resolve with
+- C1A implementation source:
+  `6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`
+- Same-source GitHub Actions run:
+  https://github.com/Segev191312010/aiautomation/actions/runs/29324523583
+- Evidence addendum commit: resolve with
   `git log -1 --format=%H -- docs/release-evidence/2026-07-14-c1a-retention-emergency-containment.md`
-- Same-source GitHub Actions run: pending candidate push
 
 The owner's dirty primary worktree and its preserved instruction/planning files
 were not modified. C1A was implemented in a separate clean worktree.
@@ -111,6 +114,13 @@ two React Router future-flag warnings. Fresh `npm ci` repeated the known audit
 inventory: 10 findings (`1 critical`, `4 high`, `4 moderate`, `1 low`). These
 remain a later release blocker and were not introduced or remediated by C1A.
 
+Public Ubuntu CI run `29324523583` completed successfully on the exact
+implementation source from `2026-07-14T10:12:38Z` through
+`2026-07-14T10:13:57Z`:
+
+- Dashboard (TypeScript + Vite + Vitest): success, job `87057513246`;
+- Backend (Python + pytest): success, job `87057513270`.
+
 ## Failed/Interrupted Evidence Preserved
 
 The first backend checkpoint ran before the obsolete retention tests were
@@ -132,7 +142,8 @@ reviews, not independent external assurance.
 
 ## Decision
 
-Local C1A evidence is complete. Final C1A PASS requires the exact candidate
-commit to pass public GitHub Actions and a final clean-diff/security review.
-Until then, destructive retention remains unavailable and no broader Phase C
-checkpoint may begin.
+C1A is PASS for implementation source
+`6093f0f7d5f66489a2ed55e9f3998b2921b6cde5`. Focused proof, all four local
+gates, workspace hygiene, internal code/security review, and both same-source
+public CI jobs passed. Destructive retention remains unavailable. C1A grants no
+authority to begin any other C0-C12 implementation checkpoint.
