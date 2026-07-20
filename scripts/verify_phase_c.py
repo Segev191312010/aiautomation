@@ -909,7 +909,11 @@ def _backend_python_sources(repo_root: Path) -> Iterable[tuple[str, str]]:
     for current, directories, files in os.walk(backend, followlinks=False):
         safe_directories: list[str] = []
         for name in sorted(directories):
-            if name in {"tests", "__pycache__", ".pytest_cache"}:
+            # Environment-managed packages are not production source and must
+            # never participate in the D14 capability census.  In particular,
+            # provisioning the required Python 3.12 verifier environment under
+            # backend/.venv must not alter the accepted repository boundary.
+            if name in {"tests", "__pycache__", ".pytest_cache", ".venv", "venv"}:
                 continue
             info = (Path(current) / name).lstat()
             if stat.S_ISLNK(info.st_mode) or _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
