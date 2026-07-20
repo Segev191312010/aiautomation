@@ -41,7 +41,7 @@ services:
       # BusyBox wget in nginx:alpine does not implement every GNU --spider
       # variant consistently; fetching to /dev/null is portable and still
       # fails closed on a non-200 response.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/health"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health"]
       interval: 5s
       timeout: 3s
       start_period: 10s
