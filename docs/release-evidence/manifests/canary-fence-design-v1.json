@@ -1,0 +1,89 @@
+{
+  "schema": "canary-fence-design-v1",
+  "status": "DESIGN_ONLY_NO_RUNTIME_AUTHORITY",
+  "purpose": "Pre-T specification of the external at-most-once canary and restore-generation fence.",
+  "store": {
+    "engine": "PostgreSQL",
+    "version_floor": "16.0",
+    "deployment": "dedicated control-plane PostgreSQL cluster",
+    "separate_from_trading_db": true,
+    "independent_failure_domain": true,
+    "independent_storage_and_backup": true,
+    "credentials_and_operator_role_separate": true,
+    "tls": {"required": true, "server_identity_verification": true},
+    "consistency": "single-primary synchronous commit; reads for authorization use the primary",
+    "durability": "COMMIT_WAIT_FOR_FLUSH",
+    "availability_policy": "unavailable_is_fail_closed"
+  },
+  "tables": {
+    "canary_authorizations": {
+      "primary_key": ["release_id", "a_nonce"],
+      "columns": {
+        "release_id": "text NOT NULL",
+        "a_nonce": "uuid NOT NULL",
+        "state": "text NOT NULL CHECK (state IN ('UNUSED','CONSUMED_BY','REVOKED_BY'))",
+        "intent_uuid": "uuid NULL",
+        "payload_hash": "text NULL",
+        "restore_generation": "bigint NOT NULL",
+        "updated_at": "timestamptz NOT NULL"
+      },
+      "terminal_state_constraint": "state <> 'UNUSED' OR (intent_uuid IS NULL AND payload_hash IS NULL)",
+      "consumed_tuple_constraint": "state <> 'CONSUMED_BY' OR (intent_uuid IS NOT NULL AND payload_hash IS NOT NULL)",
+      "revoked_tuple_constraint": "state <> 'REVOKED_BY' OR (intent_uuid IS NOT NULL AND payload_hash IS NOT NULL)"
+    },
+    "restore_fence": {
+      "primary_key": ["singleton"],
+      "columns": {"singleton": "boolean NOT NULL CHECK (singleton)", "generation": "bigint NOT NULL CHECK (generation >= 0)", "updated_at": "timestamptz NOT NULL"},
+      "generation_rule": "generation may increase only; an UPDATE with generation <= current generation is rejected"
+    }
+  },
+  "operations": {
+    "consume": {
+      "isolation": "SERIALIZABLE",
+      "lock": "SELECT ... FOR UPDATE on (release_id,a_nonce)",
+      "preconditions": ["state = UNUSED", "row.restore_generation = supplied_generation", "payload_hash is non-empty", "intent_uuid is fresh"],
+      "transition": "UNUSED -> CONSUMED_BY",
+      "idempotency": "a second consume returns terminal conflict and never mutates the row",
+      "commit": "single transaction; COMMIT waits for WAL flush before success is returned"
+    },
+    "revoke": {
+      "isolation": "SERIALIZABLE",
+      "lock": "SELECT ... FOR UPDATE on (release_id,a_nonce)",
+      "preconditions": ["state = UNUSED", "row.restore_generation = supplied_generation"],
+      "transition": "UNUSED -> REVOKED_BY",
+      "race_rule": "consume and revoke serialize; exactly one terminal transition wins; loser observes terminal state"
+    },
+    "read": {
+      "source": "primary",
+      "snapshot": "READ COMMITTED",
+      "authorization_rule": "external tuple must exactly match intent_uuid, payload_hash, and restore_generation"
+    },
+    "bump_restore_generation": {
+      "isolation": "SERIALIZABLE",
+      "lock": "SELECT ... FOR UPDATE on restore_fence singleton",
+      "transition": "generation -> generation + 1",
+      "ordering": "must commit before any trading-DB replacement/open",
+      "result": "returns the new generation and immutable snapshot identity binding"
+    }
+  },
+  "restore_protocol": {
+    "interface": "scripts/restore_trading_db.py",
+    "required_order": ["verify_snapshot_manifest", "bump_restore_generation", "bind_snapshot_identity", "replace_or_open_trading_db", "startup_reconcile"],
+    "raw_db_restore_authority": false,
+    "generation_mismatch": "RECOVERY_ONLY; invalidate old authorizations; require a newly signed authorization",
+    "fence_unreachable": "RECOVERY_ONLY; no ARM, RESERVE, SUBMIT, consume, or revoke",
+    "snapshot_identity": "immutable manifest digest bound to the bumped generation"
+  },
+  "failure_rules": {
+    "no_network_retry_for_consume": true,
+    "unknown_commit_outcome": "re-read the primary by key; never retry with a new intent",
+    "terminal_states_never_revert": true,
+    "external_state_is_authoritative_over_db_mirror": true,
+    "live_trading_authority_granted": false
+  },
+  "review": {
+    "required_before": "T",
+    "required_evidence": ["schema migration hash", "primary configuration and synchronous-commit evidence", "CAS concurrency test report", "restore-generation conformance report", "access-control review"],
+    "owner": "C9 safety and database reviewers"
+  }
+}
