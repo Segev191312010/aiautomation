@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed verification of the repository's pinned build toolchain.
-
-The manifest is deliberately data-only.  This verifier does not install or
-resolve tools: every version must be an exact, already selected value and all
-repository declarations must agree with it.
-"""
+"""Fail-closed verification of the repository's pinned build toolchain."""
 from __future__ import annotations
 
 import argparse
@@ -44,6 +39,20 @@ def check_manifest(path: Path) -> dict[str, Any]:
         version = entry["version"]
         if not EXACT.fullmatch(version) or version.lower() in {"latest", "tbd", "todo"}:
             fail(f"{name}: version must be an exact numeric x.y.z value")
+        command = entry.get("version_command")
+        pattern = entry.get("version_regex")
+        if (
+            not isinstance(command, list)
+            or not command
+            or any(not isinstance(item, str) or not item for item in command)
+            or not isinstance(pattern, str)
+            or not pattern
+        ):
+            fail(f"{name}: version_command and version_regex are mandatory")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            fail(f"{name}: invalid version_regex: {exc}")
     return value
 
 
@@ -75,6 +84,20 @@ def check_repo(root: Path, manifest: dict[str, Any]) -> None:
             fail(f"required file missing or invalid: {rel!r}")
 
 
+def check_executables(manifest: dict[str, Any]) -> None:
+    """Prove the selected binaries actually report the pinned versions."""
+    for name, entry in manifest["tools"].items():
+        command = entry["version_command"]
+        try:
+            result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            fail(f"{name}: version command failed: {exc}")
+        output = (result.stdout + "\n" + result.stderr).strip()
+        match = re.search(entry["version_regex"], output, re.MULTILINE)
+        if not match or match.group(1) != entry["version"]:
+            fail(f"{name}: executable output does not prove pinned version {entry['version']!r}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
@@ -86,6 +109,7 @@ def main() -> int:
         manifest_path = root / manifest_path
     manifest = check_manifest(manifest_path)
     check_repo(root, manifest)
+    check_executables(manifest)
     print("toolchain verification: PASS")
     return 0
 
