@@ -6,6 +6,15 @@ Date: 2026-07-14
 
 Status: **ACCEPTED PLAN OF RECORD - C0 PASS**
 
+## Amendment v5.3.2.1 — scanner governance extension (proposed)
+
+The proposed scanner-only governance extension is defined in
+`docs/ULTRAPLAN_v5.3.2.1.md`. It preserves the C1–C12 definitions and does not
+authorize C1–C12 implementation, paper soak, or live trading. It adds a
+separate post-C12 scanner chain with explicit paper, rollback, one-intent
+canary, reconciliation, hold, and closeout gates. The amendment remains
+PROPOSED until separately reviewed and owner-authorized.
+
 Implementation authority: **C0 COMPLETE; C1-C12 NOT AUTHORIZED**
 
 This document incorporates the attached Phase C Ultraplan v2, the Phase C
