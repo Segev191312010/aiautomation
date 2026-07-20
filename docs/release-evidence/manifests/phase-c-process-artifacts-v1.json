@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "manifest_id": "phase-c-process-artifacts-v1",
+  "checkpoint": "C0",
+  "required_artifacts": [
+    {
+      "path": "AGENTS.md",
+      "required_commit": "9717bd02ce2203c3fa6b4e525e1463d2713790fa",
+      "required_markers": ["Read session prompt", "quality gates every 5 edits", "Generate handoff", "Run /wrap-up"],
+      "scan_placeholders": false
+    },
+    {
+      "path": "sessions/stage-c-scanner-governance-prompt.md",
+      "required_commit": "3a29a8519df2a52e57ba263160dbb37c2144f1b1",
+      "required_markers": ["Scope and authority", "Required validation", "Wrap-up", "Stop boundary"]
+    },
+    {
+      "path": "handoffs/2026-07-20-stage-c-scanner-governance.md",
+      "required_commit": "3a29a8519df2a52e57ba263160dbb37c2144f1b1",
+      "required_markers": ["Scope and Authority", "Validation", "Preserved Boundaries", "Wrap-up", "Stop Boundary"]
+    },
+    {
+      "path": "learning-log.md",
+      "required_commit": "3a29a8519df2a52e57ba263160dbb37c2144f1b1",
+      "required_markers": ["2026-07-20", "Completed:", "Learned:", "Verified:", "Next:"]
+    },
+    {
+      "path": "docs/release-evidence/2026-07-phase-c-tracker.md",
+      "required_commit": "3a29a8519df2a52e57ba263160dbb37c2144f1b1",
+      "required_markers": ["Status: C0 PASS", "C1-C12 PLANNED - NOT AUTHORIZED", "C0", "C12"]
+    }
+  ],
+  "tracker": {
+    "path": "docs/release-evidence/2026-07-phase-c-tracker.md",
+    "required_status": "C0 PASS",
+    "forbidden_statuses": ["C1-C12 PASS", "C1-C12 IN PROGRESS"]
+  },
+  "forbidden_placeholders": ["TODO", "TBD", "REPLACE_ME", "<SHA>", "YYYY-MM-DD"],
+  "required_sha_length": 40
+}
