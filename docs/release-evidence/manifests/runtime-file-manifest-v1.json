@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "hash_algorithm": "sha256-path-length-bytes-v1",
+  "runtime_roots": [
+    "backend",
+    "dashboard/src",
+    "dashboard/package.json",
+    "dashboard/package-lock.json",
+    "Dockerfile",
+    "backend/Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.test.yml",
+    ".python-version",
+    "scripts"
+  ],
+  "excluded_paths": [
+    "backend/tests/**",
+    "backend/**/tests/**",
+    "dashboard/src/**/*.test.*",
+    "dashboard/src/**/*.spec.*",
+    "scripts/tests/**",
+    "**/__pycache__/**"
+  ],
+  "ignored_runtime_patterns": [
+    "backend/*.db",
+    "backend/*.sqlite*",
+    "data/**",
+    "logs/**",
+    "sessions/**",
+    "*.env",
+    "**/*.env"
+  ],
+  "tree_sha256": "b1b5545201dcc0eea5a1ee67452135696672f71fa24f94825e7f91c7e537c962"
+}
