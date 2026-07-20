@@ -4,6 +4,18 @@ Date opened: 2026-07-12
 
 Status: C0 PASS; C1-C12 PLANNED - NOT AUTHORIZED
 
+## Proposed scanner-governance amendment
+
+`docs/ULTRAPLAN_v5.3.2.1.md` maps scanner governance to C1–C12 while keeping
+each checkpoint separately authorized. The registered post-C12 policy artifact
+paths are:
+
+- `docs/release-evidence/protocols/scanner-soak-v1.json`
+- `docs/release-evidence/protocols/scanner-canary-v1.json`
+
+These paths are registrations only; no scanner implementation, soak, or live
+authority is granted by this tracker entry.
+
 Authoritative brief: `sessions/phase-c-data-durability-prompt.md`
 
 Master plan: `docs/PHASE_C_ULTRAPLAN.md` (owner accepted 2026-07-14)

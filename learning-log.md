@@ -4,6 +4,16 @@ Chronological record of sessions, discoveries, and decisions.
 
 ---
 
+### 2026-07-20 — Proposed Stage C Scanner Governance Amendment
+- Prepared the v5.3.2.1 documentation amendment from the verified `origin/master`
+  baseline and registered separate scanner soak and canary policy paths.
+- Learned: the current v4 checkout is dirty and cannot serve as the docs or
+  implementation base; all later work requires clean, separately authorized
+  worktrees and pre-T gates.
+- Preserved: C1–C12 remain individually unauthorized; no implementation, paper,
+  broker, or live authority was granted.
+- Next: owner review and protected docs-only PR authorization.
+
 ### 2026-02-24 — Stage 1: Foundation, Auth Scaffold & Polish
 - Completed: Auth scaffold (JWT + bcrypt), settings system (JSON blob + deep merge), toast notifications, error boundaries, loading skeletons, 15 backend tests
 - Learned: bcrypt 5.x dropped passlib compatibility — use bcrypt directly, not passlib[bcrypt]
