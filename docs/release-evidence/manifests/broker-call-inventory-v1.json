@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "name": "broker-call-inventory-v1",
+  "description": "Reviewed direct IBKR broker API call sites. Any unlisted call fails closed.",
+  "calls": [
+    {
+      "path": "backend/ibkr_client.py",
+      "line": 176,
+      "method": "connectAsync",
+      "callee": "ib.connectAsync"
+    },
+    {
+      "path": "backend/ibkr_client.py",
+      "line": 224,
+      "method": "disconnect",
+      "callee": "ib.disconnect"
+    },
+    {
+      "path": "backend/ibkr_client.py",
+      "line": 236,
+      "method": "disconnect",
+      "callee": "self._ib.disconnect"
+    },
+    {
+      "path": "backend/ibkr_client.py",
+      "line": 369,
+      "method": "qualifyContractsAsync",
+      "callee": "self._ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/ibkr_client.py",
+      "line": 370,
+      "method": "reqTickersAsync",
+      "callee": "self._ib.reqTickersAsync"
+    },
+    {
+      "path": "backend/main.py",
+      "line": 337,
+      "method": "disconnect",
+      "callee": "ibkr.disconnect"
+    },
+    {
+      "path": "backend/market_data.py",
+      "line": 61,
+      "method": "qualifyContractsAsync",
+      "callee": "ibkr.ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/market_data.py",
+      "line": 145,
+      "method": "qualifyContractsAsync",
+      "callee": "ibkr.ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/market_data.py",
+      "line": 185,
+      "method": "qualifyContractsAsync",
+      "callee": "ibkr.ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/market_data.py",
+      "line": 236,
+      "method": "qualifyContractsAsync",
+      "callee": "ibkr.ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 56,
+      "method": "reqTickersAsync",
+      "callee": "ibkr.ib.reqTickersAsync"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 199,
+      "method": "qualifyContractsAsync",
+      "callee": "ibkr.ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 246,
+      "method": "placeOrder",
+      "callee": "ibkr.ib.placeOrder"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 345,
+      "method": "openTrades",
+      "callee": "ibkr.ib.openTrades"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 361,
+      "method": "openTrades",
+      "callee": "ibkr.ib.openTrades"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 363,
+      "method": "cancelOrder",
+      "callee": "ibkr.ib.cancelOrder"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 389,
+      "method": "openTrades",
+      "callee": "ibkr.ib.openTrades"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 451,
+      "method": "openTrades",
+      "callee": "ibkr.ib.openTrades"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 467,
+      "method": "cancelOrder",
+      "callee": "ibkr.ib.cancelOrder"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 497,
+      "method": "placeOrder",
+      "callee": "ibkr.ib.placeOrder"
+    },
+    {
+      "path": "backend/order_executor.py",
+      "line": 547,
+      "method": "openTrades",
+      "callee": "ibkr.ib.openTrades"
+    },
+    {
+      "path": "backend/routers/positions.py",
+      "line": 65,
+      "method": "openTrades",
+      "callee": "ibkr.ib.openTrades"
+    },
+    {
+      "path": "backend/routers/status.py",
+      "line": 151,
+      "method": "disconnect",
+      "callee": "ibkr.disconnect"
+    },
+    {
+      "path": "backend/safety_kernel.py",
+      "line": 134,
+      "method": "qualifyContractsAsync",
+      "callee": "ibkr.ib.qualifyContractsAsync"
+    },
+    {
+      "path": "backend/safety_kernel.py",
+      "line": 139,
+      "method": "placeOrder",
+      "callee": "ibkr.ib.placeOrder"
+    }
+  ]
+}
