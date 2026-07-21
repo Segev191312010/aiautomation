@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from verify_authority_inputs import AuthorityInputError, verify
+from scripts.verify_authority_inputs import AuthorityInputError, verify
 
 
 def _write(path: Path, value: dict) -> Path:
