@@ -17,6 +17,7 @@ CANARY = ROOT / "scanner-canary-v1.json"
 SOAK = ROOT / "scanner-soak-v1.json"
 SCHEMA = ROOT / "scanner-canary-policy-schema-v1.json"
 LIVE_PHASES = frozenset({"live", "submit", "paper-live"})
+ALLOWED_PHASES = frozenset({"pre-t", "paper-startup", "paper-soak", "canary-authorization", "live-canary", "release-closeout", *LIVE_PHASES})
 REQUIRED_ASSERTIONS = {
     "reserved_intents": 1, "entry_orders": 1, "entry_adapter_calls": 1,
     "unauthorized_orders": 0, "entry_authority": "OFF",
@@ -60,13 +61,16 @@ def _dt(value: Any, key: str) -> dt.datetime:
     return parsed
 
 
-def validate_canary(policy: dict[str, Any], *, schema: dict[str, Any] | None = None) -> str:
+def validate_canary(policy: dict[str, Any], *, schema: dict[str, Any] | None = None, require_simulation: bool = True) -> str:
     required = {"schema_version", "policy_id", "owner", "risk_operator", "limits", "runtime", "signed_at", "expires_at"}
     missing = required - policy.keys()
     if missing:
         raise ScannerChainError(f"canary policy missing fields: {sorted(missing)}")
-    if policy["schema_version"] != 1 or not str(policy["policy_id"]).startswith("scanner-canary-v1-"):
+    if policy["schema_version"] != 1 or not isinstance(policy["policy_id"], str) or not policy["policy_id"].startswith("scanner-canary-v1-"):
         raise ScannerChainError("unsupported canary policy schema/id")
+    for key in ("owner", "risk_operator"):
+        if not isinstance(policy[key], str) or not policy[key].strip():
+            raise ScannerChainError(f"{key} must be a non-empty identity")
     limits = policy["limits"]
     runtime = policy["runtime"]
     if not isinstance(limits, dict) or not isinstance(runtime, dict):
@@ -75,6 +79,10 @@ def validate_canary(policy: dict[str, Any], *, schema: dict[str, Any] | None = N
         raise ScannerChainError("entry limits must be exactly one")
     if limits.get("no_short") is not True or runtime.get("workers") != 1:
         raise ScannerChainError("non-overridable safety constants violated")
+    if not isinstance(runtime.get("sim_mode"), bool):
+        raise ScannerChainError("runtime sim_mode must be an explicit boolean")
+    if require_simulation and runtime["sim_mode"] is not True:
+        raise ScannerChainError("pre-T scanner policy must remain simulation-only")
     for key in ("claude_worker", "claude_live", "tv_write_route", "mcp_order_tool"):
         if runtime.get(key) is not False:
             raise ScannerChainError(f"runtime safety flag {key} must be false")
@@ -115,6 +123,8 @@ def validate_evidence(evidence: dict[str, Any]) -> None:
 
 
 def verify_chain(repo_root: Path, *, phase: str = "pre-t", evidence: dict[str, Any] | None = None) -> dict[str, str]:
+    if not isinstance(phase, str) or phase not in ALLOWED_PHASES:
+        raise ScannerChainError(f"unsupported scanner-chain phase: {phase!r}")
     if phase in LIVE_PHASES:
         raise ScannerChainError("live authority is never permitted by this pre-T verifier")
     root = repo_root / ROOT
@@ -123,7 +133,7 @@ def verify_chain(repo_root: Path, *, phase: str = "pre-t", evidence: dict[str, A
     policy = _load(repo_root / CANARY)
     if evidence is not None:
         validate_evidence(evidence)
-    return {"schema_hash": sha256_json(schema), "soak_hash": validate_soak(soak), "policy_hash": validate_canary(policy, schema=schema)}
+    return {"schema_hash": sha256_json(schema), "soak_hash": validate_soak(soak), "policy_hash": validate_canary(policy, schema=schema, require_simulation=phase == "pre-t")}
 
 
 def main() -> int:

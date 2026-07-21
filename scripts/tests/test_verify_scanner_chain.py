@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_scanner_chain import ScannerChainError, validate_canary, validate_evidence, validate_soak
+from scripts.verify_scanner_chain import ScannerChainError, validate_canary, validate_evidence, validate_soak, verify_chain
 
 
 def policy():
@@ -51,3 +51,23 @@ def test_evidence_requires_closed_single_entry():
     bad["entry_orders"] = 2
     with pytest.raises(ScannerChainError):
         validate_evidence(bad)
+
+
+@pytest.mark.parametrize("field", ["owner", "risk_operator"])
+def test_policy_identity_must_be_non_empty(field):
+    candidate = policy()
+    candidate[field] = "   "
+    with pytest.raises(ScannerChainError, match="non-empty identity"):
+        validate_canary(candidate)
+
+
+def test_policy_must_explicitly_remain_simulation_only():
+    candidate = policy()
+    candidate["runtime"]["sim_mode"] = False
+    with pytest.raises(ScannerChainError, match="simulation-only"):
+        validate_canary(candidate)
+
+
+def test_unknown_phase_fails_closed(tmp_path: Path):
+    with pytest.raises(ScannerChainError, match="unsupported scanner-chain phase"):
+        verify_chain(tmp_path, phase="not-a-phase")
