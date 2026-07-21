@@ -8,9 +8,11 @@ approve any broker call or grant live authority.
 ## Finding
 
 The current backend still contains direct calls to the `ib_insync` object.
-The inventory verifier reports **25 direct calls**.  The inventory is an
-exhaustive source-location list, not evidence that the calls satisfy the C9
-OperationGate contract.
+The inventory verifier reports **98 direct calls**: 5 broker-order side
+effects, 37 reads, 40 connection operations/checks, and 16 administrative
+client/subscription operations.  The inventory is an exhaustive
+source-location list, not evidence that the calls satisfy the C9 OperationGate
+contract.
 
 The following calls can create or mutate broker orders and therefore are C9
 **side-effect bypasses** until they are routed through the reviewed control
@@ -28,8 +30,10 @@ The `openTrades` calls at `order_executor.py:345,361,389,451,547` and
 `routers/positions.py:65` are broker-state reads.  They are not order
 submission by themselves, but they must eventually be account-scoped and
 covered by the C9 reconciliation evidence (including UNKNOWN and restore
-replay cases).  Contract qualification and market-data calls are also reads
-or preparation calls; they do not satisfy the C9 submit gate.
+replay cases).  Account/position reads, contract qualification, market-data
+requests/subscriptions, connection lifecycle operations, client construction,
+and local contract construction are now classified individually.  None
+satisfies the C9 submit gate.
 
 ## Required evidence before C9 PASS
 
@@ -61,9 +65,8 @@ backend/.venv/bin/python scripts/verify_broker_call_inventory.py
 Expected current result:
 
 ```text
-PASS: 25 direct broker calls inventoried
+PASS: 98 direct broker calls inventoried (admin=16, connection=40, read=37, side-effect=5)
 ```
 
 This PASS means only that the locations are listed.  It must not be reported
 as C9 conformance or authorization.
-

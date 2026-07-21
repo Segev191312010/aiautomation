@@ -1,157 +1,105 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "broker-call-inventory-v1",
-  "description": "Reviewed direct IBKR broker API call sites. Any unlisted call fails closed.",
+  "description": "Reviewed direct IBKR client and broker API call sites. Inventory completeness does not grant C9, paper, or live authority.",
   "calls": [
-    {
-      "path": "backend/ibkr_client.py",
-      "line": 176,
-      "method": "connectAsync",
-      "callee": "ib.connectAsync"
-    },
-    {
-      "path": "backend/ibkr_client.py",
-      "line": 224,
-      "method": "disconnect",
-      "callee": "ib.disconnect"
-    },
-    {
-      "path": "backend/ibkr_client.py",
-      "line": 236,
-      "method": "disconnect",
-      "callee": "self._ib.disconnect"
-    },
-    {
-      "path": "backend/ibkr_client.py",
-      "line": 369,
-      "method": "qualifyContractsAsync",
-      "callee": "self._ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/ibkr_client.py",
-      "line": 370,
-      "method": "reqTickersAsync",
-      "callee": "self._ib.reqTickersAsync"
-    },
-    {
-      "path": "backend/main.py",
-      "line": 337,
-      "method": "disconnect",
-      "callee": "ibkr.disconnect"
-    },
-    {
-      "path": "backend/market_data.py",
-      "line": 61,
-      "method": "qualifyContractsAsync",
-      "callee": "ibkr.ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/market_data.py",
-      "line": 145,
-      "method": "qualifyContractsAsync",
-      "callee": "ibkr.ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/market_data.py",
-      "line": 185,
-      "method": "qualifyContractsAsync",
-      "callee": "ibkr.ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/market_data.py",
-      "line": 236,
-      "method": "qualifyContractsAsync",
-      "callee": "ibkr.ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 56,
-      "method": "reqTickersAsync",
-      "callee": "ibkr.ib.reqTickersAsync"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 199,
-      "method": "qualifyContractsAsync",
-      "callee": "ibkr.ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 246,
-      "method": "placeOrder",
-      "callee": "ibkr.ib.placeOrder"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 345,
-      "method": "openTrades",
-      "callee": "ibkr.ib.openTrades"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 361,
-      "method": "openTrades",
-      "callee": "ibkr.ib.openTrades"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 363,
-      "method": "cancelOrder",
-      "callee": "ibkr.ib.cancelOrder"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 389,
-      "method": "openTrades",
-      "callee": "ibkr.ib.openTrades"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 451,
-      "method": "openTrades",
-      "callee": "ibkr.ib.openTrades"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 467,
-      "method": "cancelOrder",
-      "callee": "ibkr.ib.cancelOrder"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 497,
-      "method": "placeOrder",
-      "callee": "ibkr.ib.placeOrder"
-    },
-    {
-      "path": "backend/order_executor.py",
-      "line": 547,
-      "method": "openTrades",
-      "callee": "ibkr.ib.openTrades"
-    },
-    {
-      "path": "backend/routers/positions.py",
-      "line": 65,
-      "method": "openTrades",
-      "callee": "ibkr.ib.openTrades"
-    },
-    {
-      "path": "backend/routers/status.py",
-      "line": 151,
-      "method": "disconnect",
-      "callee": "ibkr.disconnect"
-    },
-    {
-      "path": "backend/safety_kernel.py",
-      "line": 134,
-      "method": "qualifyContractsAsync",
-      "callee": "ibkr.ib.qualifyContractsAsync"
-    },
-    {
-      "path": "backend/safety_kernel.py",
-      "line": 139,
-      "method": "placeOrder",
-      "callee": "ibkr.ib.placeOrder"
-    }
+    {"path": "backend/ai_guardrails.py", "line": 770, "column": 31, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/bot_runner.py", "line": 769, "column": 29, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/bot_runner.py", "line": 826, "column": 94, "method": "get_positions", "callee": "ibkr.get_positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/direct_ai_trader.py", "line": 279, "column": 20, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 83, "column": 23, "method": "IB", "callee": "IB", "classification": "admin", "disposition": "local-client-construction"},
+    {"path": "backend/ibkr_client.py", "line": 168, "column": 31, "method": "isConnected", "callee": "ib.isConnected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 176, "column": 22, "method": "connectAsync", "callee": "ib.connectAsync", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/ibkr_client.py", "line": 205, "column": 19, "method": "isConnected", "callee": "ib.isConnected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 224, "column": 20, "method": "disconnect", "callee": "ib.disconnect", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/ibkr_client.py", "line": 235, "column": 24, "method": "isConnected", "callee": "self._ib.isConnected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 236, "column": 12, "method": "disconnect", "callee": "self._ib.disconnect", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/ibkr_client.py", "line": 241, "column": 33, "method": "isConnected", "callee": "self._ib.isConnected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 303, "column": 27, "method": "accountSummaryAsync", "callee": "self._ib.accountSummaryAsync", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 334, "column": 19, "method": "managedAccounts", "callee": "self._ib.managedAccounts", "classification": "read", "disposition": "account-routing-read"},
+    {"path": "backend/ibkr_client.py", "line": 338, "column": 26, "method": "portfolio", "callee": "self._ib.portfolio", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 338, "column": 86, "method": "portfolio", "callee": "self._ib.portfolio", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 359, "column": 24, "method": "positions", "callee": "self._ib.positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 359, "column": 84, "method": "positions", "callee": "self._ib.positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/ibkr_client.py", "line": 369, "column": 18, "method": "qualifyContractsAsync", "callee": "self._ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/ibkr_client.py", "line": 370, "column": 28, "method": "reqTickersAsync", "callee": "self._ib.reqTickersAsync", "classification": "read", "disposition": "market-data-read"},
+    {"path": "backend/ibkr_client.py", "line": 456, "column": 7, "method": "IBKRClient", "callee": "IBKRClient", "classification": "admin", "disposition": "local-client-construction"},
+    {"path": "backend/ibkr_scanner.py", "line": 114, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/ibkr_scanner.py", "line": 134, "column": 26, "method": "reqScannerDataAsync", "callee": "ibkr.ib.reqScannerDataAsync", "classification": "read", "disposition": "market-data-read"},
+    {"path": "backend/main.py", "line": 295, "column": 4, "method": "set_broadcast", "callee": "ibkr.set_broadcast", "classification": "admin", "disposition": "local-callback-wiring"},
+    {"path": "backend/main.py", "line": 308, "column": 22, "method": "connect", "callee": "ibkr.connect", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/main.py", "line": 311, "column": 14, "method": "start_reconnect_loop", "callee": "ibkr.start_reconnect_loop", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/main.py", "line": 316, "column": 14, "method": "start_reconnect_loop", "callee": "ibkr.start_reconnect_loop", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/main.py", "line": 337, "column": 10, "method": "disconnect", "callee": "ibkr.disconnect", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/main.py", "line": 593, "column": 15, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/main.py", "line": 881, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/market_data.py", "line": 58, "column": 7, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/market_data.py", "line": 60, "column": 23, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/market_data.py", "line": 61, "column": 18, "method": "qualifyContractsAsync", "callee": "ibkr.ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/market_data.py", "line": 63, "column": 40, "method": "reqHistoricalDataAsync", "callee": "ibkr.ib.reqHistoricalDataAsync", "classification": "read", "disposition": "market-data-read"},
+    {"path": "backend/market_data.py", "line": 142, "column": 7, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/market_data.py", "line": 144, "column": 23, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/market_data.py", "line": 145, "column": 18, "method": "qualifyContractsAsync", "callee": "ibkr.ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/market_data.py", "line": 146, "column": 21, "method": "reqMktData", "callee": "ibkr.ib.reqMktData", "classification": "admin", "disposition": "market-data-subscription-lifecycle"},
+    {"path": "backend/market_data.py", "line": 149, "column": 12, "method": "cancelMktData", "callee": "ibkr.ib.cancelMktData", "classification": "admin", "disposition": "market-data-subscription-lifecycle"},
+    {"path": "backend/market_data.py", "line": 181, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/market_data.py", "line": 184, "column": 15, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/market_data.py", "line": 185, "column": 10, "method": "qualifyContractsAsync", "callee": "ibkr.ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/market_data.py", "line": 186, "column": 13, "method": "reqMktData", "callee": "ibkr.ib.reqMktData", "classification": "admin", "disposition": "market-data-subscription-lifecycle"},
+    {"path": "backend/market_data.py", "line": 215, "column": 12, "method": "cancelMktData", "callee": "ibkr.ib.cancelMktData", "classification": "admin", "disposition": "market-data-subscription-lifecycle"},
+    {"path": "backend/market_data.py", "line": 228, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/market_data.py", "line": 235, "column": 15, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/market_data.py", "line": 236, "column": 10, "method": "qualifyContractsAsync", "callee": "ibkr.ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/market_data.py", "line": 237, "column": 28, "method": "reqRealTimeBars", "callee": "ibkr.ib.reqRealTimeBars", "classification": "admin", "disposition": "market-data-subscription-lifecycle"},
+    {"path": "backend/market_data.py", "line": 269, "column": 12, "method": "cancelRealTimeBars", "callee": "ibkr.ib.cancelRealTimeBars", "classification": "admin", "disposition": "market-data-subscription-lifecycle"},
+    {"path": "backend/market_heartbeat.py", "line": 110, "column": 47, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/market_heartbeat.py", "line": 112, "column": 59, "method": "get_positions", "callee": "ibkr.get_positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/market_heartbeat.py", "line": 113, "column": 29, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/order_executor.py", "line": 54, "column": 24, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/order_executor.py", "line": 56, "column": 12, "method": "reqTickersAsync", "callee": "ibkr.ib.reqTickersAsync", "classification": "read", "disposition": "market-data-read"},
+    {"path": "backend/order_executor.py", "line": 166, "column": 21, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/order_executor.py", "line": 187, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/order_executor.py", "line": 194, "column": 19, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/order_executor.py", "line": 199, "column": 10, "method": "qualifyContractsAsync", "callee": "ibkr.ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/order_executor.py", "line": 246, "column": 28, "method": "placeOrder", "callee": "ibkr.ib.placeOrder", "classification": "side-effect", "disposition": "blocked-pending-c9-entry-gate"},
+    {"path": "backend/order_executor.py", "line": 345, "column": 26, "method": "openTrades", "callee": "ibkr.ib.openTrades", "classification": "read", "disposition": "account-scoped-reconciliation-read"},
+    {"path": "backend/order_executor.py", "line": 359, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/order_executor.py", "line": 361, "column": 20, "method": "openTrades", "callee": "ibkr.ib.openTrades", "classification": "read", "disposition": "account-scoped-reconciliation-read"},
+    {"path": "backend/order_executor.py", "line": 363, "column": 12, "method": "cancelOrder", "callee": "ibkr.ib.cancelOrder", "classification": "side-effect", "disposition": "blocked-pending-c9-account-scoped-cancel-reconcile"},
+    {"path": "backend/order_executor.py", "line": 378, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/order_executor.py", "line": 389, "column": 20, "method": "openTrades", "callee": "ibkr.ib.openTrades", "classification": "read", "disposition": "account-scoped-reconciliation-read"},
+    {"path": "backend/order_executor.py", "line": 444, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/order_executor.py", "line": 451, "column": 25, "method": "openTrades", "callee": "ibkr.ib.openTrades", "classification": "read", "disposition": "account-scoped-reconciliation-read"},
+    {"path": "backend/order_executor.py", "line": 467, "column": 8, "method": "cancelOrder", "callee": "ibkr.ib.cancelOrder", "classification": "side-effect", "disposition": "blocked-pending-c9-account-scoped-cancel-reconcile"},
+    {"path": "backend/order_executor.py", "line": 497, "column": 23, "method": "placeOrder", "callee": "ibkr.ib.placeOrder", "classification": "side-effect", "disposition": "blocked-pending-c9-replacement-state-machine"},
+    {"path": "backend/order_executor.py", "line": 535, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/order_executor.py", "line": 547, "column": 17, "method": "openTrades", "callee": "ibkr.ib.openTrades", "classification": "read", "disposition": "account-scoped-reconciliation-read"},
+    {"path": "backend/risk_manager.py", "line": 104, "column": 18, "method": "accountValues", "callee": "ib.accountValues", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/risk_manager.py", "line": 122, "column": 17, "method": "portfolio", "callee": "ib.portfolio", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/market_routes.py", "line": 40, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/market_routes.py", "line": 88, "column": 56, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/orders.py", "line": 76, "column": 26, "method": "get_positions", "callee": "ibkr.get_positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/orders.py", "line": 138, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/positions.py", "line": 23, "column": 7, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/positions.py", "line": 25, "column": 28, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/positions.py", "line": 34, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/positions.py", "line": 36, "column": 18, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/positions.py", "line": 44, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/positions.py", "line": 46, "column": 42, "method": "get_positions", "callee": "ibkr.get_positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/positions.py", "line": 52, "column": 11, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/positions.py", "line": 55, "column": 22, "method": "get_positions", "callee": "ibkr.get_positions", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/positions.py", "line": 57, "column": 17, "method": "get_account_summary", "callee": "ibkr.get_account_summary", "classification": "read", "disposition": "account-scoped-state-read"},
+    {"path": "backend/routers/positions.py", "line": 65, "column": 20, "method": "openTrades", "callee": "ibkr.ib.openTrades", "classification": "read", "disposition": "account-scoped-reconciliation-read"},
+    {"path": "backend/routers/status.py", "line": 41, "column": 16, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/status.py", "line": 82, "column": 26, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/status.py", "line": 126, "column": 30, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/routers/status.py", "line": 142, "column": 15, "method": "connect", "callee": "ibkr.connect", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/routers/status.py", "line": 145, "column": 10, "method": "start_reconnect_loop", "callee": "ibkr.start_reconnect_loop", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/routers/status.py", "line": 151, "column": 10, "method": "disconnect", "callee": "ibkr.disconnect", "classification": "connection", "disposition": "connection-lifecycle"},
+    {"path": "backend/safety_kernel.py", "line": 120, "column": 31, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/safety_kernel.py", "line": 122, "column": 38, "method": "is_connected", "callee": "ibkr.is_connected", "classification": "connection", "disposition": "connection-state-read"},
+    {"path": "backend/safety_kernel.py", "line": 133, "column": 27, "method": "make_stock_contract", "callee": "ibkr.make_stock_contract", "classification": "admin", "disposition": "local-contract-construction"},
+    {"path": "backend/safety_kernel.py", "line": 134, "column": 22, "method": "qualifyContractsAsync", "callee": "ibkr.ib.qualifyContractsAsync", "classification": "read", "disposition": "contract-qualification-read"},
+    {"path": "backend/safety_kernel.py", "line": 139, "column": 16, "method": "placeOrder", "callee": "ibkr.ib.placeOrder", "classification": "side-effect", "disposition": "blocked-pending-c9-uniform-stop-adapter"}
   ]
 }
