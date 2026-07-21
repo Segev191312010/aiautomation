@@ -61,6 +61,56 @@ def _dt(value: Any, key: str) -> dt.datetime:
     return parsed
 
 
+def validate_schema_contract(schema: dict[str, Any]) -> None:
+    """Validate the pre-T canary schema's immutable safety contract.
+
+    This is intentionally a structural check, not a JSON-Schema evaluator and
+    not an authorization check.  It makes the frozen controller envelope
+    reviewable offline and fails closed if a later edit weakens a required
+    constant or permits additional policy fields.
+    """
+    if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        raise ScannerChainError("canary schema must use JSON Schema 2020-12")
+    if schema.get("$id") != "tradebot://scanner-canary-policy-schema-v1":
+        raise ScannerChainError("unexpected schema identity")
+    if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+        raise ScannerChainError("canary schema must be a closed object")
+    required = schema.get("required")
+    expected_required = {
+        "schema_version", "policy_id", "owner", "risk_operator", "limits",
+        "runtime", "signed_at", "expires_at",
+    }
+    if not isinstance(required, list) or set(required) != expected_required:
+        raise ScannerChainError("canary schema required fields drifted")
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise ScannerChainError("canary schema properties must be an object")
+    if properties.get("schema_version", {}).get("const") != 1:
+        raise ScannerChainError("schema version is not immutable")
+    policy_id = properties.get("policy_id", {})
+    if policy_id.get("pattern") != r"^scanner-canary-v1-[a-z0-9-]+$":
+        raise ScannerChainError("policy id pattern drifted")
+    limits = properties.get("limits")
+    runtime = properties.get("runtime")
+    if not isinstance(limits, dict) or limits.get("additionalProperties") is not False:
+        raise ScannerChainError("limits must be a closed object")
+    if not isinstance(runtime, dict) or runtime.get("additionalProperties") is not False:
+        raise ScannerChainError("runtime must be a closed object")
+    limit_props = limits.get("properties", {})
+    runtime_props = runtime.get("properties", {})
+    if limit_props.get("max_entry_orders", {}).get("const") != 1:
+        raise ScannerChainError("max_entry_orders ceiling must be exactly one")
+    if limit_props.get("max_entry_adapter_calls", {}).get("const") != 1:
+        raise ScannerChainError("max_entry_adapter_calls ceiling must be exactly one")
+    if limit_props.get("no_short", {}).get("const") is not True:
+        raise ScannerChainError("no_short must be immutable true")
+    if runtime_props.get("workers", {}).get("const") != 1:
+        raise ScannerChainError("workers ceiling must be exactly one")
+    for key in ("claude_worker", "claude_live", "tv_write_route", "mcp_order_tool"):
+        if runtime_props.get(key, {}).get("const") is not False:
+            raise ScannerChainError(f"runtime safety constant {key} must be false")
+
+
 def validate_canary(policy: dict[str, Any], *, schema: dict[str, Any] | None = None, require_simulation: bool = True) -> str:
     required = {"schema_version", "policy_id", "owner", "risk_operator", "limits", "runtime", "signed_at", "expires_at"}
     missing = required - policy.keys()
@@ -90,8 +140,8 @@ def validate_canary(policy: dict[str, Any], *, schema: dict[str, Any] | None = N
     expires = _dt(policy["expires_at"], "expires_at")
     if expires <= signed:
         raise ScannerChainError("policy must expire after signing")
-    if schema is not None and schema.get("$id") != "tradebot://scanner-canary-policy-schema-v1":
-        raise ScannerChainError("unexpected schema identity")
+    if schema is not None:
+        validate_schema_contract(schema)
     return sha256_json(policy)
 
 
@@ -129,6 +179,7 @@ def verify_chain(repo_root: Path, *, phase: str = "pre-t", evidence: dict[str, A
         raise ScannerChainError("live authority is never permitted by this pre-T verifier")
     root = repo_root / ROOT
     schema = _load(repo_root / SCHEMA)
+    validate_schema_contract(schema)
     soak = _load(repo_root / SOAK)
     policy = _load(repo_root / CANARY)
     if evidence is not None:

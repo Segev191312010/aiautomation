@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from scripts.verify_scanner_chain import ScannerChainError, validate_canary, validate_evidence, validate_soak, verify_chain
+from scripts.verify_scanner_chain import (
+    ScannerChainError,
+    validate_canary,
+    validate_evidence,
+    validate_schema_contract,
+    validate_soak,
+    verify_chain,
+)
 
 
 def policy():
@@ -25,6 +32,30 @@ def soak():
     return {"schema_version": 1, "protocol_id": "scanner-soak-v1", "eligible_sessions": 15,
             "minimum_eligible_decisions": 100, "max_failures": 0, "max_duplicates": 0,
             "max_expiries": 0, "max_orphans": 0, "max_reconciliation_mismatches": 0, "signed": True}
+
+
+def schema():
+    return json.loads(Path("docs/release-evidence/protocols/scanner-canary-policy-schema-v1.json").read_text())
+
+
+def test_schema_contract_preserves_immutable_safety_envelope():
+    validate_schema_contract(schema())
+
+
+@pytest.mark.parametrize(
+    "mutator,match",
+    [
+        (lambda value: value["properties"]["limits"]["properties"]["max_entry_orders"].update(const=2), "max_entry_orders"),
+        (lambda value: value["properties"]["runtime"]["properties"]["workers"].update(const=2), "workers"),
+        (lambda value: value["properties"]["runtime"]["properties"]["claude_live"].update(const=True), "claude_live"),
+        (lambda value: value.update(additionalProperties=True), "closed object"),
+    ],
+)
+def test_schema_contract_rejects_safety_weakening(mutator, match):
+    candidate = schema()
+    mutator(candidate)
+    with pytest.raises(ScannerChainError, match=match):
+        validate_schema_contract(candidate)
 
 
 def test_valid_artifacts_hash():
