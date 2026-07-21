@@ -20,43 +20,66 @@ def _require(condition: bool, message: str) -> None:
         raise DesignError(message)
 
 
+def _mapping(value: Any, label: str) -> dict[str, Any]:
+    """Return a mapping or fail closed with a stable validation error."""
+    _require(isinstance(value, dict), f"{label} must be an object")
+    return value
+
+
+def _string(value: Any, label: str) -> str:
+    _require(isinstance(value, str), f"{label} must be a string")
+    return value
+
+
+def _string_list(value: Any, label: str) -> list[str]:
+    _require(isinstance(value, list) and all(isinstance(item, str) for item in value),
+             f"{label} must be a list of strings")
+    return value
+
+
 def validate_design(doc: dict[str, Any]) -> None:
+    _mapping(doc, "root")
     _require(doc.get("schema") == "canary-fence-design-v1", "wrong schema")
     _require(doc.get("status") == "DESIGN_ONLY_NO_RUNTIME_AUTHORITY", "design must grant no runtime authority")
-    store = doc.get("store", {})
+    store = _mapping(doc.get("store"), "store")
     _require(store.get("engine") == "PostgreSQL", "store must select PostgreSQL")
     for key in ("separate_from_trading_db", "independent_failure_domain", "independent_storage_and_backup", "credentials_and_operator_role_separate"):
         _require(store.get(key) is True, f"store.{key} must be true")
     _require(store.get("durability") == "COMMIT_WAIT_FOR_FLUSH", "durability must wait for WAL flush")
     _require(store.get("availability_policy") == "unavailable_is_fail_closed", "outage must fail closed")
-    tables = doc.get("tables", {})
-    auth = tables.get("canary_authorizations", {})
+    tables = _mapping(doc.get("tables"), "tables")
+    auth = _mapping(tables.get("canary_authorizations"), "tables.canary_authorizations")
     _require(auth.get("primary_key") == ["release_id", "a_nonce"], "authorization key must be release_id,a_nonce")
-    cols = auth.get("columns", {})
-    _require("state" in cols and all(s in cols["state"] for s in STATES), "authorization state check must enumerate all states")
+    cols = _mapping(auth.get("columns"), "tables.canary_authorizations.columns")
+    state_column = _string(cols.get("state"), "authorization state column")
+    _require(all(s in state_column for s in STATES), "authorization state check must enumerate all states")
     _require("terminal_state_constraint" in auth and "consumed_tuple_constraint" in auth and "revoked_tuple_constraint" in auth, "terminal tuple constraints missing")
-    fence = tables.get("restore_fence", {})
+    fence = _mapping(tables.get("restore_fence"), "tables.restore_fence")
     _require(fence.get("primary_key") == ["singleton"], "restore fence must have singleton key")
     _require("generation_rule" in fence and "increase" in fence["generation_rule"], "generation must be monotonic")
-    ops = doc.get("operations", {})
+    ops = _mapping(doc.get("operations"), "operations")
     for name in ("consume", "revoke"):
-        op = ops.get(name, {})
-        _require(op.get("isolation") == "SERIALIZABLE", f"{name} must be SERIALIZABLE")
-        _require("FOR UPDATE" in op.get("lock", ""), f"{name} must lock authorization row")
-        _require("UNUSED" in op.get("transition", "") and ("CONSUMED_BY" in op.get("transition", "") or "REVOKED_BY" in op.get("transition", "")), f"{name} transition missing")
-    _require(ops.get("consume", {}).get("commit", "").startswith("single transaction"), "consume must commit atomically")
-    _require("consume and revoke serialize" in ops.get("revoke", {}).get("race_rule", ""), "consume/revoke race rule missing")
-    restore = doc.get("restore_protocol", {})
+        op = _mapping(ops.get(name), f"operations.{name}")
+        _require(_string(op.get("isolation"), f"{name}.isolation") == "SERIALIZABLE", f"{name} must be SERIALIZABLE")
+        _require("FOR UPDATE" in _string(op.get("lock"), f"{name}.lock"), f"{name} must lock authorization row")
+        transition = _string(op.get("transition"), f"{name}.transition")
+        _require("UNUSED" in transition and ("CONSUMED_BY" in transition or "REVOKED_BY" in transition), f"{name} transition missing")
+    consume = _mapping(ops.get("consume"), "operations.consume")
+    revoke = _mapping(ops.get("revoke"), "operations.revoke")
+    _require(_string(consume.get("commit"), "consume.commit").startswith("single transaction"), "consume must commit atomically")
+    _require("consume and revoke serialize" in _string(revoke.get("race_rule"), "revoke.race_rule"), "consume/revoke race rule missing")
+    restore = _mapping(doc.get("restore_protocol"), "restore_protocol")
     _require(restore.get("interface") == "scripts/restore_trading_db.py", "restore interface must be canonical")
     _require(restore.get("raw_db_restore_authority") is False, "raw DB restore authority must be false")
-    order = restore.get("required_order", [])
-    _require(isinstance(order, list) and "bump_restore_generation" in order and "replace_or_open_trading_db" in order, "restore order is incomplete")
+    order = _string_list(restore.get("required_order"), "restore required_order")
+    _require("bump_restore_generation" in order and "replace_or_open_trading_db" in order, "restore order is incomplete")
     _require(order.index("bump_restore_generation") < order.index("replace_or_open_trading_db"), "generation bump must precede DB replacement")
     _require("RECOVERY_ONLY" in restore.get("generation_mismatch", ""), "generation mismatch must force recovery-only")
-    failures = doc.get("failure_rules", {})
+    failures = _mapping(doc.get("failure_rules"), "failure_rules")
     for key in ("terminal_states_never_revert", "external_state_is_authoritative_over_db_mirror", "live_trading_authority_granted"):
         _require(failures.get(key) is (False if key == "live_trading_authority_granted" else True), f"failure rule {key} invalid")
-    _require(doc.get("review", {}).get("required_before") == "T", "design review is required before T")
+    review = _mapping(doc.get("review"), "review")
+    _require(review.get("required_before") == "T", "design review is required before T")
 
 
 def main(path: Path = DEFAULT) -> int:
