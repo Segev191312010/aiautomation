@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tradebot://scanner-chain-v1",
+  "title": "Scanner release evidence chain v1 (pre-T template)",
+  "description": "Closed envelope for versioned P/S/Q/B/A/L/F/HOLD/STOP/R evidence. Instances and signatures remain unauthorized until their phase gates pass.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "artifact_type", "authority_granted"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"enum": ["P", "S", "Q", "B", "A", "L", "F", "HOLD", "STOP", "R-SUCCESS", "R-NOGO"]},
+    "authority_granted": {"const": false},
+    "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "artifact_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "signature_record": {"type": "string", "pattern": "^[^/]+\\.sig\\.json$"},
+    "rendering": {"type": "string", "pattern": "^[^/]+\\.md$"}
+  }
+}

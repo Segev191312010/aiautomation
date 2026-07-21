@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "manifest_id": "canary-hard-limits-v1",
+  "status": "non-authorizing-template",
+  "authority_granted": false,
+  "description": "Pre-T immutable safety ceilings. Exact Q values and signed ownership are supplied only after paper evidence and owner/risk approval.",
+  "immutable": {
+    "max_entry_intents": 1,
+    "max_entry_orders": 1,
+    "max_entry_adapter_calls": 1,
+    "no_short": true,
+    "workers": 1,
+    "claude_worker": false,
+    "claude_live": false,
+    "tv_write_route": false,
+    "mcp_order_tool": false
+  },
+  "deferred_to_signed_q": [
+    "symbols",
+    "max_order_quantity",
+    "max_order_notional",
+    "max_daily_notional",
+    "max_cumulative_filled_quantity",
+    "max_cumulative_filled_notional",
+    "max_open_positions",
+    "daily_loss_limit",
+    "cancel_timeout_seconds",
+    "observation_seconds",
+    "max_rollback_seconds"
+  ],
+  "review": {
+    "owner": "UNASSIGNED",
+    "risk_operator": "UNASSIGNED",
+    "signed": false,
+    "expires_at": null
+  }
+}

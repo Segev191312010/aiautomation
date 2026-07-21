@@ -16,6 +16,7 @@ ROOT = Path("docs/release-evidence/protocols")
 CANARY = ROOT / "scanner-canary-v1.json"
 SOAK = ROOT / "scanner-soak-v1.json"
 SCHEMA = ROOT / "scanner-canary-policy-schema-v1.json"
+HARD_LIMITS = Path("docs/release-evidence/manifests/canary-hard-limits-v1.json")
 LIVE_PHASES = frozenset({"live", "submit", "paper-live"})
 ALLOWED_PHASES = frozenset({"pre-t", "paper-startup", "paper-soak", "canary-authorization", "live-canary", "release-closeout", *LIVE_PHASES})
 REQUIRED_ASSERTIONS = {
@@ -111,6 +112,31 @@ def validate_schema_contract(schema: dict[str, Any]) -> None:
             raise ScannerChainError(f"runtime safety constant {key} must be false")
 
 
+def validate_hard_limits(limits: dict[str, Any]) -> None:
+    """Validate the non-authorizing immutable ceiling manifest."""
+    if limits.get("schema_version") != 1 or limits.get("manifest_id") != "canary-hard-limits-v1":
+        raise ScannerChainError("unexpected canary hard-limits identity")
+    if limits.get("status") != "non-authorizing-template" or limits.get("authority_granted") is not False:
+        raise ScannerChainError("hard limits must remain a non-authorizing template")
+    immutable = limits.get("immutable")
+    if not isinstance(immutable, dict):
+        raise ScannerChainError("hard limits immutable section must be an object")
+    expected = {
+        "max_entry_intents": 1, "max_entry_orders": 1,
+        "max_entry_adapter_calls": 1, "no_short": True, "workers": 1,
+        "claude_worker": False, "claude_live": False,
+        "tv_write_route": False, "mcp_order_tool": False,
+    }
+    if immutable != expected:
+        raise ScannerChainError("immutable canary safety ceilings drifted")
+    deferred = limits.get("deferred_to_signed_q")
+    if not isinstance(deferred, list) or len(deferred) != len(set(deferred)) or not all(isinstance(x, str) and x for x in deferred):
+        raise ScannerChainError("deferred Q fields must be a unique non-empty list")
+    review = limits.get("review")
+    if not isinstance(review, dict) or review.get("signed") is not False:
+        raise ScannerChainError("hard limits review must remain unsigned")
+
+
 def validate_canary(policy: dict[str, Any], *, schema: dict[str, Any] | None = None, require_simulation: bool = True) -> str:
     required = {"schema_version", "policy_id", "owner", "risk_operator", "limits", "runtime", "signed_at", "expires_at"}
     missing = required - policy.keys()
@@ -180,6 +206,7 @@ def verify_chain(repo_root: Path, *, phase: str = "pre-t", evidence: dict[str, A
     root = repo_root / ROOT
     schema = _load(repo_root / SCHEMA)
     validate_schema_contract(schema)
+    validate_hard_limits(_load(repo_root / HARD_LIMITS))
     soak = _load(repo_root / SOAK)
     policy = _load(repo_root / CANARY)
     if evidence is not None:

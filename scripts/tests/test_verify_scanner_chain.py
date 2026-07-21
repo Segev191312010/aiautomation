@@ -9,6 +9,7 @@ from scripts.verify_scanner_chain import (
     validate_canary,
     validate_evidence,
     validate_schema_contract,
+    validate_hard_limits,
     validate_soak,
     verify_chain,
 )
@@ -36,6 +37,18 @@ def soak():
 
 def schema():
     return json.loads(Path("docs/release-evidence/protocols/scanner-canary-policy-schema-v1.json").read_text())
+
+
+def hard_limits():
+    return json.loads(Path("docs/release-evidence/manifests/canary-hard-limits-v1.json").read_text())
+
+
+def test_hard_limits_are_non_authorizing_and_immutable():
+    validate_hard_limits(hard_limits())
+    candidate = hard_limits()
+    candidate["immutable"]["max_entry_orders"] = 2
+    with pytest.raises(ScannerChainError, match="ceilings drifted"):
+        validate_hard_limits(candidate)
 
 
 def test_schema_contract_preserves_immutable_safety_envelope():
