@@ -7,6 +7,7 @@ import pytest
 from scripts.verify_scanner_chain import (
     ScannerChainError,
     validate_canary,
+    validate_chain_schema_contract,
     validate_evidence,
     validate_schema_contract,
     validate_hard_limits,
@@ -44,6 +45,22 @@ def hard_limits():
     return json.loads(Path("docs/release-evidence/manifests/canary-hard-limits-v1.json").read_text())
 
 
+def chain_schema():
+    return json.loads(Path("docs/release-evidence/schemas/scanner-chain-v1.schema.json").read_text())
+
+
+def write_pre_t_artifacts(root: Path) -> None:
+    protocol_root = root / "docs/release-evidence/protocols"
+    manifest_root = root / "docs/release-evidence/manifests"
+    schema_root = root / "docs/release-evidence/schemas"
+    protocol_root.mkdir(parents=True)
+    manifest_root.mkdir(parents=True)
+    schema_root.mkdir(parents=True)
+    (protocol_root / "scanner-canary-policy-schema-v1.json").write_text(json.dumps(schema()))
+    (manifest_root / "canary-hard-limits-v1.json").write_text(json.dumps(hard_limits()))
+    (schema_root / "scanner-chain-v1.schema.json").write_text(json.dumps(chain_schema()))
+
+
 def test_hard_limits_are_non_authorizing_and_immutable():
     validate_hard_limits(hard_limits())
     candidate = hard_limits()
@@ -54,6 +71,42 @@ def test_hard_limits_are_non_authorizing_and_immutable():
 
 def test_schema_contract_preserves_immutable_safety_envelope():
     validate_schema_contract(schema())
+
+
+def test_chain_schema_preserves_closed_non_authorizing_envelope():
+    validate_chain_schema_contract(chain_schema())
+
+
+def test_pre_t_validates_only_frozen_schemas_and_hard_limits(tmp_path: Path):
+    write_pre_t_artifacts(tmp_path)
+    result = verify_chain(tmp_path, phase="pre-t")
+    assert set(result) == {"schema_hash", "chain_schema_hash", "hard_limits_hash"}
+    assert all(len(value) == 64 for value in result.values())
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "docs/release-evidence/protocols/scanner-soak-v1.json",
+        "docs/release-evidence/protocols/scanner-soak-v1.md",
+        "docs/release-evidence/protocols/scanner-soak-v1.sig.json",
+        "docs/release-evidence/protocols/scanner-canary-v1.json",
+        "docs/release-evidence/protocols/scanner-canary-v1.md",
+        "docs/release-evidence/protocols/scanner-canary-v1.sig.json",
+    ],
+)
+def test_pre_t_rejects_reserved_post_t_instances(tmp_path: Path, relative_path: str):
+    write_pre_t_artifacts(tmp_path)
+    instance = tmp_path / relative_path
+    instance.write_text("{}")
+    with pytest.raises(ScannerChainError, match="post-T scanner instance"):
+        verify_chain(tmp_path, phase="pre-t")
+
+
+def test_pre_t_rejects_post_t_evidence_argument(tmp_path: Path):
+    write_pre_t_artifacts(tmp_path)
+    with pytest.raises(ScannerChainError, match="evidence is forbidden"):
+        verify_chain(tmp_path, phase="pre-t", evidence={})
 
 
 @pytest.mark.parametrize(

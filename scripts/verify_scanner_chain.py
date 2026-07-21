@@ -1,7 +1,10 @@
-"""Fail-closed verifier for pre-T scanner policy/soak chain artifacts.
+"""Fail-closed verifier for scanner schemas and phase-ordered artifacts.
 
 This verifier is deliberately offline and standard-library-only.  It never
-connects to a broker and refuses any live-authority phase.
+connects to a broker and refuses any live-authority phase.  The ``pre-t`` mode
+is intentionally narrower than operational modes: it validates only frozen
+schemas and the non-authorizing hard-limit template.  Reserved post-T instance
+paths must not exist in that mode.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ CANARY = ROOT / "scanner-canary-v1.json"
 SOAK = ROOT / "scanner-soak-v1.json"
 SCHEMA = ROOT / "scanner-canary-policy-schema-v1.json"
 HARD_LIMITS = Path("docs/release-evidence/manifests/canary-hard-limits-v1.json")
+CHAIN_SCHEMA = Path("docs/release-evidence/schemas/scanner-chain-v1.schema.json")
 LIVE_PHASES = frozenset({"live", "submit", "paper-live"})
 ALLOWED_PHASES = frozenset({"pre-t", "paper-startup", "paper-soak", "canary-authorization", "live-canary", "release-closeout", *LIVE_PHASES})
 REQUIRED_ASSERTIONS = {
@@ -110,6 +114,44 @@ def validate_schema_contract(schema: dict[str, Any]) -> None:
     for key in ("claude_worker", "claude_live", "tv_write_route", "mcp_order_tool"):
         if runtime_props.get(key, {}).get("const") is not False:
             raise ScannerChainError(f"runtime safety constant {key} must be false")
+
+
+def validate_chain_schema_contract(schema: dict[str, Any]) -> None:
+    """Validate the closed, non-authorizing scanner evidence envelope."""
+    if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        raise ScannerChainError("scanner chain schema must use JSON Schema 2020-12")
+    if schema.get("$id") != "tradebot://scanner-chain-v1":
+        raise ScannerChainError("unexpected scanner chain schema identity")
+    if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+        raise ScannerChainError("scanner chain schema must be a closed object")
+    required = schema.get("required")
+    expected_required = {"schema_version", "artifact_type", "authority_granted"}
+    if not isinstance(required, list) or set(required) != expected_required:
+        raise ScannerChainError("scanner chain required fields drifted")
+    properties = schema.get("properties")
+    expected_properties = {
+        "schema_version", "artifact_type", "authority_granted", "candidate_sha",
+        "artifact_hash", "signature_record", "rendering",
+    }
+    if not isinstance(properties, dict) or set(properties) != expected_properties:
+        raise ScannerChainError("scanner chain properties drifted")
+    if properties["schema_version"].get("const") != 1:
+        raise ScannerChainError("scanner chain schema version is not immutable")
+    expected_types = {"P", "S", "Q", "B", "A", "L", "F", "HOLD", "STOP", "R-SUCCESS", "R-NOGO"}
+    artifact_types = properties["artifact_type"].get("enum")
+    if not isinstance(artifact_types, list) or set(artifact_types) != expected_types:
+        raise ScannerChainError("scanner chain artifact types drifted")
+    if properties["authority_granted"].get("const") is not False:
+        raise ScannerChainError("scanner chain template must not grant authority")
+    expected_patterns = {
+        "candidate_sha": r"^[0-9a-f]{40}$",
+        "artifact_hash": r"^[0-9a-f]{64}$",
+        "signature_record": r"^[^/]+\.sig\.json$",
+        "rendering": r"^[^/]+\.md$",
+    }
+    for key, pattern in expected_patterns.items():
+        if properties[key].get("pattern") != pattern:
+            raise ScannerChainError(f"scanner chain {key} pattern drifted")
 
 
 def validate_hard_limits(limits: dict[str, Any]) -> None:
@@ -243,15 +285,47 @@ def validate_evidence(evidence: dict[str, Any]) -> None:
         raise ScannerChainError("broker terminal/unique execution assertions failed")
 
 
+def _reserved_instance_paths(path: Path) -> tuple[Path, Path, Path]:
+    """Return canonical JSON plus its derived rendering and signature paths."""
+    return (
+        path,
+        path.with_suffix(".md"),
+        path.with_name(f"{path.stem}.sig.json"),
+    )
+
+
+def _reject_post_t_instances(repo_root: Path) -> None:
+    for artifact in (SOAK, CANARY):
+        for path in _reserved_instance_paths(repo_root / artifact):
+            # ``exists`` is false for a dangling symlink, so test both.  A
+            # dangling link at a reserved evidence path is still an unsafe
+            # premature instance and must fail closed.
+            if path.exists() or path.is_symlink():
+                raise ScannerChainError(
+                    f"post-T scanner instance is forbidden during pre-T: {path.relative_to(repo_root)}"
+                )
+
+
 def verify_chain(repo_root: Path, *, phase: str = "pre-t", evidence: dict[str, Any] | None = None) -> dict[str, str]:
     if not isinstance(phase, str) or phase not in ALLOWED_PHASES:
         raise ScannerChainError(f"unsupported scanner-chain phase: {phase!r}")
     if phase in LIVE_PHASES:
         raise ScannerChainError("live authority is never permitted by this pre-T verifier")
-    root = repo_root / ROOT
     schema = _load(repo_root / SCHEMA)
     validate_schema_contract(schema)
-    validate_hard_limits(_load(repo_root / HARD_LIMITS))
+    chain_schema = _load(repo_root / CHAIN_SCHEMA)
+    validate_chain_schema_contract(chain_schema)
+    hard_limits = _load(repo_root / HARD_LIMITS)
+    validate_hard_limits(hard_limits)
+    if phase == "pre-t":
+        if evidence is not None:
+            raise ScannerChainError("post-T scanner evidence is forbidden during pre-T")
+        _reject_post_t_instances(repo_root)
+        return {
+            "schema_hash": sha256_json(schema),
+            "chain_schema_hash": sha256_json(chain_schema),
+            "hard_limits_hash": sha256_json(hard_limits),
+        }
     soak = _load(repo_root / SOAK)
     policy = _load(repo_root / CANARY)
     if evidence is not None:

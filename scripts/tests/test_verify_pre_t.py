@@ -25,6 +25,12 @@ def test_real_manifest_fails_closed_when_mandatory_artifact_is_missing():
     assert "required file missing" in result.stderr
 
 
+def test_real_manifest_uses_true_pre_t_scanner_phase():
+    manifest = json.loads((ROOT / "docs/release-evidence/manifests/pre-t-gate-v1.json").read_text())
+    scanner = next(check for check in manifest["checks"] if check["name"] == "scanner-chain")
+    assert scanner["argv"][-2:] == ["--phase", "pre-t"]
+
+
 def test_candidate_must_be_full_sha():
     manifest = ROOT / "docs/release-evidence/manifests/pre-t-gate-v1.json"
     result = subprocess.run([sys.executable, str(SCRIPT), "--repo-root", str(ROOT), "--candidate", "HEAD", "--manifest", str(manifest)], capture_output=True, text=True)
