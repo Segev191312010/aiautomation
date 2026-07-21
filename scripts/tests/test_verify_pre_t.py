@@ -49,6 +49,7 @@ def test_minimal_manifest_executes_all_checks(tmp_path: Path):
         ("checks", [{"name": "same", "argv": ["true"]}, {"name": "same", "argv": ["true"]}], "duplicate"),
         ("checks", [{"name": "bad-timeout", "argv": ["true"], "timeout_seconds": 0}], "timeout_seconds"),
         ("checks", [{"name": "bad-timeout", "argv": ["true"], "timeout_seconds": True}], "timeout_seconds"),
+        ("checks", [{"name": "bad-timeout", "argv": ["true"], "timeout_seconds": 3601}], "timeout_seconds"),
     ],
 )
 def test_manifest_rejects_unsafe_or_ambiguous_fields(tmp_path: Path, field, value, message):

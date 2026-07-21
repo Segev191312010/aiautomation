@@ -21,6 +21,7 @@ from typing import Any
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SCHEMA = 1
+MAX_TIMEOUT_SECONDS = 3600
 
 
 class GateError(ValueError):
@@ -74,8 +75,9 @@ def _load(path: Path) -> dict[str, Any]:
         timeout = check.get("timeout_seconds", 300)
         # bool is an int subclass, but is never a valid timeout.
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                or not math.isfinite(timeout) or timeout <= 0):
-            _fail(f"{name}: timeout_seconds must be a positive number")
+                or not math.isfinite(timeout) or timeout <= 0
+                or timeout > MAX_TIMEOUT_SECONDS):
+            _fail(f"{name}: timeout_seconds must be > 0 and <= {MAX_TIMEOUT_SECONDS}")
     return value
 
 
