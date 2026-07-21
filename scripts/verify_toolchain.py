@@ -52,6 +52,12 @@ def check_manifest(path: Path) -> dict[str, Any]:
             fail(f"{name}: version_command and version_regex are mandatory")
         if any("\x00" in item for item in command):
             fail(f"{name}: version_command contains NUL")
+        # A lock must invoke provisioned tools by stable command name.  An
+        # operator-local absolute/relative path would make the attestation
+        # non-reproducible and could silently verify a different binary.
+        executable = command[0]
+        if Path(executable).is_absolute() or executable in {".", ".."} or "/" in executable or "\\" in executable:
+            fail(f"{name}: version_command executable must be a stable command name")
         try:
             compiled = re.compile(pattern)
         except re.error as exc:
@@ -133,6 +139,10 @@ def main() -> int:
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():
         manifest_path = root / manifest_path
+    try:
+        manifest_path.resolve().relative_to(root)
+    except ValueError:
+        fail("manifest must be inside repo-root")
     manifest = check_manifest(manifest_path)
     check_repo(root, manifest)
     check_executables(manifest)

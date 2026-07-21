@@ -42,6 +42,16 @@ def test_manifest_rejects_ambiguous_or_unsafe_fields(tmp_path: Path, entry: dict
         verify_toolchain.check_manifest(_manifest(tmp_path, entry))
 
 
+@pytest.mark.parametrize("executable", ["/opt/tools/python", "./python", "tools\\python"])
+def test_manifest_rejects_operator_local_executable_path(tmp_path: Path, executable: str):
+    path = _manifest(tmp_path, {
+        "version": "3.12.13", "version_command": [executable, "--version"],
+        "version_regex": r"Python (3\.12\.13)",
+    })
+    with pytest.raises(SystemExit, match="stable command name"):
+        verify_toolchain.check_manifest(path)
+
+
 def test_required_files_reject_traversal(tmp_path: Path):
     path = _manifest(tmp_path)
     data = json.loads(path.read_text())
@@ -49,3 +59,14 @@ def test_required_files_reject_traversal(tmp_path: Path):
     path.write_text(json.dumps(data))
     with pytest.raises(SystemExit, match="required file missing or invalid"):
         verify_toolchain.check_repo(tmp_path, verify_toolchain.check_manifest(path))
+
+
+def test_main_rejects_manifest_outside_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    outside = tmp_path.parent / "external-toolchain.json"
+    outside.write_text(json.dumps({"schema_version": 1, "tools": {
+        "python": {"version": "3.12.13", "version_command": ["python", "--version"],
+                   "version_regex": r"Python (3\\.12\\.13)"}
+    }, "required_files": []}))
+    monkeypatch.setattr("sys.argv", ["verify_toolchain.py", "--repo-root", str(tmp_path), "--manifest", str(outside)])
+    with pytest.raises(SystemExit, match="inside repo-root"):
+        verify_toolchain.main()
