@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -30,6 +31,16 @@ def _fail(message: str) -> None:
     raise SystemExit(f"pre-T verification failed: {message}")
 
 
+def _validate_rel_path(value: Any, label: str) -> str:
+    """Validate a manifest path before it can be joined to the repository."""
+    if not isinstance(value, str) or not value:
+        _fail(f"{label} must be a non-empty relative path")
+    candidate = Path(value)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        _fail(f"unsafe {label}: {value!r}")
+    return value
+
+
 def _load(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -41,18 +52,30 @@ def _load(path: Path) -> dict[str, Any]:
         if not isinstance(value.get(key), list) or not value[key]:
             _fail(f"manifest {key} must be a non-empty list")
     for rel in value["required_files"]:
-        if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
-            _fail(f"unsafe required file path: {rel!r}")
+        _validate_rel_path(rel, "required file path")
+    names: set[str] = set()
     for check in value["checks"]:
         if not isinstance(check, dict) or not isinstance(check.get("name"), str):
             _fail("each check requires a name")
+        name = check["name"]
+        if not name or name in names:
+            _fail(f"duplicate or empty check name: {name!r}")
+        names.add(name)
         argv = check.get("argv")
         if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or not x for x in argv):
             _fail(f"{check.get('name', '<unnamed>')}: argv must be non-empty strings")
-        if not isinstance(check.get("required_files", []), list):
-            _fail(f"{check['name']}: required_files must be a list")
+        check_files = check.get("required_files", [])
+        if not isinstance(check_files, list):
+            _fail(f"{name}: required_files must be a list")
+        for rel in check_files:
+            _validate_rel_path(rel, f"{name}: required file path")
         if check.get("allow_failure", False) is not False:
-            _fail(f"{check['name']}: allow_failure is forbidden")
+            _fail(f"{name}: allow_failure is forbidden")
+        timeout = check.get("timeout_seconds", 300)
+        # bool is an int subclass, but is never a valid timeout.
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not math.isfinite(timeout) or timeout <= 0):
+            _fail(f"{name}: timeout_seconds must be a positive number")
     return value
 
 
@@ -62,6 +85,18 @@ def _safe_rel(root: Path, rel: str) -> Path:
         path.relative_to(root)
     except ValueError:
         _fail(f"path escapes repository: {rel}")
+    # Required evidence must be a regular file in this checkout.  Following a
+    # symlink could make a manifest attest to content outside the candidate
+    # tree, so reject symlink components (including dangling links).
+    current = root
+    for part in Path(rel).parts:
+        current = current / part
+        if current.is_symlink():
+            _fail(f"symlink required file path is forbidden: {rel}")
+    try:
+        path.resolve(strict=False).relative_to(root.resolve())
+    except ValueError:
+        _fail(f"path escapes repository through symlink: {rel}")
     return path
 
 
@@ -115,7 +150,7 @@ def verify(root: Path, candidate: str, manifest_path: Path) -> list[str]:
                     break
                 env[key] = value.format(repo_root=str(root), candidate=candidate)
         try:
-            result = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True, timeout=int(check.get("timeout_seconds", 300)))
+            result = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True, timeout=check.get("timeout_seconds", 300))
         except (OSError, subprocess.TimeoutExpired) as exc:
             errors.append(f"{name}: could not execute: {exc}")
             continue

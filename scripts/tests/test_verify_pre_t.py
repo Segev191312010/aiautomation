@@ -4,9 +4,14 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/verify_pre_t.py"
+
+import sys
+sys.path.insert(0, str(ROOT / "scripts"))
+import verify_pre_t
 
 
 def _git(*args: str) -> str:
@@ -35,3 +40,32 @@ def test_minimal_manifest_executes_all_checks(tmp_path: Path):
     candidate = _git("rev-parse", "HEAD")
     result = subprocess.run(["python", str(SCRIPT), "--repo-root", str(ROOT), "--candidate", candidate, "--manifest", str(manifest)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("required_files", ["../outside"], "unsafe required file path"),
+        ("checks", [{"name": "same", "argv": ["true"]}, {"name": "same", "argv": ["true"]}], "duplicate"),
+        ("checks", [{"name": "bad-timeout", "argv": ["true"], "timeout_seconds": 0}], "timeout_seconds"),
+        ("checks", [{"name": "bad-timeout", "argv": ["true"], "timeout_seconds": True}], "timeout_seconds"),
+    ],
+)
+def test_manifest_rejects_unsafe_or_ambiguous_fields(tmp_path: Path, field, value, message):
+    manifest_data = {"schema_version": 1, "required_files": ["README.md"], "checks": [{"name": "ok", "argv": ["true"]}]}
+    manifest_data[field] = value
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(manifest_data))
+    candidate = _git("rev-parse", "HEAD")
+    result = subprocess.run(["python", str(SCRIPT), "--repo-root", str(ROOT), "--candidate", candidate, "--manifest", str(manifest)], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+def test_required_file_symlink_is_rejected(tmp_path: Path):
+    target = tmp_path / "target"
+    target.write_text("evidence")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(SystemExit, match="symlink"):
+        verify_pre_t._safe_rel(tmp_path, "link")
