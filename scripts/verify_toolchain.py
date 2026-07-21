@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 EXACT = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def fail(message: str) -> None:
@@ -34,7 +35,7 @@ def check_manifest(path: Path) -> dict[str, Any]:
     if not isinstance(tools, dict) or not tools:
         fail("tools must be a non-empty object")
     for name, entry in tools.items():
-        if not isinstance(entry, dict) or not isinstance(entry.get("version"), str):
+        if not isinstance(name, str) or not name or not isinstance(entry, dict) or not isinstance(entry.get("version"), str):
             fail(f"{name}: version is required")
         version = entry["version"]
         if not EXACT.fullmatch(version) or version.lower() in {"latest", "tbd", "todo"}:
@@ -49,10 +50,29 @@ def check_manifest(path: Path) -> dict[str, Any]:
             or not pattern
         ):
             fail(f"{name}: version_command and version_regex are mandatory")
+        if any("\x00" in item for item in command):
+            fail(f"{name}: version_command contains NUL")
         try:
-            re.compile(pattern)
+            compiled = re.compile(pattern)
         except re.error as exc:
             fail(f"{name}: invalid version_regex: {exc}")
+        if compiled.groups != 1:
+            fail(f"{name}: version_regex must contain exactly one capture group")
+        if "sha256" in entry and (not isinstance(entry["sha256"], str) or not SHA256.fullmatch(entry["sha256"])):
+            fail(f"{name}: sha256 must be a 64-character hexadecimal digest")
+        if "source" in entry and (not isinstance(entry["source"], str) or not entry["source"].strip()):
+            fail(f"{name}: source must be a non-empty string")
+        if "provenance" in entry and (not isinstance(entry["provenance"], str) or not entry["provenance"].strip()):
+            fail(f"{name}: provenance must be a non-empty string")
+        if "timeout_seconds" in entry and (
+            isinstance(entry["timeout_seconds"], bool)
+            or not isinstance(entry["timeout_seconds"], (int, float))
+            or not 0 < entry["timeout_seconds"] <= 300
+        ):
+            fail(f"{name}: timeout_seconds must be in (0, 300]")
+    required = value.get("required_files", [])
+    if not isinstance(required, list) or any(not isinstance(item, str) or not item.strip() for item in required):
+        fail("required_files must be a list of non-empty strings")
     return value
 
 
@@ -80,7 +100,8 @@ def check_repo(root: Path, manifest: dict[str, Any]) -> None:
         if manager is not None and npm and manager != f"npm@{npm['version']}":
             fail(f"packageManager={manager!r} disagrees with npm={npm['version']!r}")
     for rel in manifest.get("required_files", []):
-        if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or not (root / rel).is_file():
+        candidate = (root / rel).resolve()
+        if Path(rel).is_absolute() or root not in candidate.parents or not candidate.is_file():
             fail(f"required file missing or invalid: {rel!r}")
 
 
@@ -89,13 +110,18 @@ def check_executables(manifest: dict[str, Any]) -> None:
     for name, entry in manifest["tools"].items():
         command = entry["version_command"]
         try:
-            result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=entry_timeout(manifest, name))
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
             fail(f"{name}: version command failed: {exc}")
         output = (result.stdout + "\n" + result.stderr).strip()
         match = re.search(entry["version_regex"], output, re.MULTILINE)
         if not match or match.group(1) != entry["version"]:
             fail(f"{name}: executable output does not prove pinned version {entry['version']!r}")
+
+
+def entry_timeout(manifest: dict[str, Any], name: str) -> float:
+    value = manifest["tools"][name].get("timeout_seconds", 30)
+    return float(value)
 
 
 def main() -> int:
