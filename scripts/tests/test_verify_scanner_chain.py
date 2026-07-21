@@ -10,6 +10,7 @@ from scripts.verify_scanner_chain import (
     validate_evidence,
     validate_schema_contract,
     validate_hard_limits,
+    validate_signed_bindings,
     validate_soak,
     verify_chain,
 )
@@ -115,3 +116,24 @@ def test_policy_must_explicitly_remain_simulation_only():
 def test_unknown_phase_fails_closed(tmp_path: Path):
     with pytest.raises(ScannerChainError, match="unsupported scanner-chain phase"):
         verify_chain(tmp_path, phase="not-a-phase")
+
+
+def test_signed_bindings_require_verified_signature_and_exact_hashes():
+    from datetime import datetime, timezone
+    from scripts.verify_scanner_chain import sha256_json
+
+    candidate_policy = policy()
+    candidate_soak = soak()
+    candidate_soak.update({"owner": "soak-owner", "risk_operator": "soak-risk",
+                           "signed_at": "2026-07-20T00:00:00Z", "expires_at": "2026-07-22T00:00:00Z"})
+    kwargs = dict(schema=schema(), policy=candidate_policy, soak=candidate_soak,
+                  schema_hash=sha256_json(schema()),
+                  expected_policy_hash=sha256_json(candidate_policy),
+                  expected_soak_hash=sha256_json(candidate_soak),
+                  now=datetime(2026, 7, 20, 12, tzinfo=timezone.utc))
+    with pytest.raises(ScannerChainError, match="signature is not verified"):
+        validate_signed_bindings(**kwargs, signature_verified=False)
+    validate_signed_bindings(**kwargs, signature_verified=True)
+    kwargs["expected_policy_hash"] = "0" * 64
+    with pytest.raises(ScannerChainError, match="CANARY_POLICY_HASH"):
+        validate_signed_bindings(**kwargs, signature_verified=True)

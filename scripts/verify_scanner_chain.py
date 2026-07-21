@@ -188,6 +188,51 @@ def validate_soak(soak: dict[str, Any]) -> str:
     return sha256_json(soak)
 
 
+def validate_signed_bindings(
+    *,
+    schema: dict[str, Any],
+    policy: dict[str, Any],
+    soak: dict[str, Any],
+    schema_hash: str,
+    expected_policy_hash: str,
+    expected_soak_hash: str,
+    signature_verified: bool,
+    now: dt.datetime,
+) -> None:
+    """Validate the bindings that an authorized Q/P consumer must enforce.
+
+    The checked-in protocol files are deliberately unsigned templates, so this
+    function is not called by the pre-T template verifier.  A startup/canary
+    controller must call it only after verifying detached signatures through the
+    approved trust manifest.  Keeping the binding check explicit prevents a
+    valid-looking policy from being used with a different schema, soak protocol,
+    or stale signature.
+    """
+    if not signature_verified:
+        raise ScannerChainError("policy/soak detached signature is not verified")
+    for label, value in (("schema_hash", schema_hash), ("expected_policy_hash", expected_policy_hash), ("expected_soak_hash", expected_soak_hash)):
+        if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ScannerChainError(f"{label} must be a lowercase SHA-256 digest")
+    actual_schema_hash = sha256_json(schema)
+    if schema_hash != actual_schema_hash:
+        raise ScannerChainError("CANARY_POLICY_SCHEMA_HASH does not match loaded schema")
+    if expected_policy_hash != sha256_json(policy):
+        raise ScannerChainError("CANARY_POLICY_HASH does not match loaded policy")
+    if expected_soak_hash != sha256_json(soak):
+        raise ScannerChainError("SOAK_PROTOCOL_HASH does not match loaded soak protocol")
+    for artifact, label in ((policy, "canary policy"), (soak, "soak protocol")):
+        owner = artifact.get("owner")
+        risk = artifact.get("risk_operator")
+        if not isinstance(owner, str) or not owner.strip() or owner == "UNASSIGNED":
+            raise ScannerChainError(f"{label} owner is unassigned")
+        if not isinstance(risk, str) or not risk.strip() or risk == "UNASSIGNED":
+            raise ScannerChainError(f"{label} risk operator is unassigned")
+        signed = _dt(artifact.get("signed_at"), f"{label}.signed_at")
+        expires = _dt(artifact.get("expires_at"), f"{label}.expires_at")
+        if expires <= signed or now < signed or now >= expires:
+            raise ScannerChainError(f"{label} signature is expired or not yet valid")
+
+
 def validate_evidence(evidence: dict[str, Any]) -> None:
     for key, expected in REQUIRED_ASSERTIONS.items():
         if evidence.get(key) != expected:
