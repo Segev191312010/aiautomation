@@ -53,6 +53,26 @@ def _tree_hash(root: Path, paths: list[str]) -> str:
     return digest.hexdigest()
 
 
+def _has_symlink_component(root: Path, rel: str) -> bool:
+    """Return true when a repository-relative path traverses a symlink.
+
+    Runtime inputs must be regular files in the repository.  Following a
+    symlink here could hash bytes outside the checkout (or change underneath
+    verification), defeating the manifest's path/bytes guarantee.
+    """
+    current = root
+    for component in Path(rel).parts:
+        current = current / component
+        try:
+            if current.is_symlink():
+                return True
+        except OSError:
+            # An inaccessible path is unsafe; the caller will report it as a
+            # missing/unreadable runtime input rather than following it.
+            return True
+    return False
+
+
 def load_manifest(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -84,9 +104,22 @@ def verify(root: Path, manifest_path: Path) -> list[str]:
     # Every runtime-root file must be tracked and every declared root must be
     # repository-relative; this prevents an unmanifested source tree.
     for item in roots + excludes:
-        if Path(item).is_absolute() or ".." in Path(item).parts:
+        item_path = Path(item)
+        if item_path.is_absolute() or ".." in item_path.parts or "" in item_path.parts:
             errors.append(f"unsafe repository path pattern: {item}")
-    actual = _tree_hash(root, runtime)
+    # Never follow symlinked runtime roots/files.  This includes a symlinked
+    # parent directory, not only the final path component.
+    for item in roots:
+        root_path = root / item
+        if root_path.is_symlink() or _has_symlink_component(root, item):
+            errors.append(f"runtime root traverses symlink: {item}")
+    safe_runtime: list[str] = []
+    for rel in runtime:
+        if _has_symlink_component(root, rel):
+            errors.append(f"runtime file traverses symlink: {rel}")
+        else:
+            safe_runtime.append(rel)
+    actual = _tree_hash(root, safe_runtime)
     if actual != manifest["tree_sha256"]:
         errors.append(
             f"runtime tree digest mismatch: expected {manifest['tree_sha256']}, got {actual}"
