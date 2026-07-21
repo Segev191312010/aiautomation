@@ -11,6 +11,10 @@ import pytest
 # Ensure backend package is importable
 _BACKEND_DIR = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, _BACKEND_DIR)
+# Keep repo-root utilities importable when the prescribed suite is run from
+# ``backend/`` (for example, tests importing ``scripts.*``).
+_REPO_ROOT = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
+sys.path.insert(0, _REPO_ROOT)
 
 # Repo-local temp root avoids Windows permission issues with the global
 # temp directory that pytest uses by default.  Never touch getbasetemp()
