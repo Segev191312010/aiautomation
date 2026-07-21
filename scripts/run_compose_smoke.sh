@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the disposable pre-T Compose smoke gate.
 #
-# Usage: CANDIDATE_SHA=$(git rev-parse HEAD) scripts/run_compose_smoke.sh
+# Usage: scripts/run_compose_smoke.sh --candidate "$(git rev-parse HEAD)"
 # The candidate is mandatory and must be the checked-out commit.  The script
 # creates a unique Compose project, uses Docker-assigned ports, checks FastAPI
 # and nginx, and always tears down its project/volumes on exit.
@@ -11,14 +11,45 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
 die() { printf 'compose-smoke: %s\n' "$*" >&2; exit 1; }
+usage() {
+  printf '%s\n' 'usage: scripts/run_compose_smoke.sh --candidate 40-char-oid'
+}
+
+candidate_arg=
+while (($#)); do
+  case "$1" in
+    --candidate)
+      (($# >= 2)) || die "--candidate requires a value"
+      [[ -z "$candidate_arg" ]] || die "--candidate may be specified only once"
+      candidate_arg=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+# CANDIDATE_SHA remains a compatibility path for older automation, but the
+# governance interface and the aggregate pre-T gate use --candidate.  If both
+# are supplied they must identify exactly the same commit.
+candidate_env=${CANDIDATE_SHA:-}
+if [[ -n "$candidate_arg" && -n "$candidate_env" && "$candidate_arg" != "$candidate_env" ]]; then
+  die "--candidate and CANDIDATE_SHA disagree"
+fi
+candidate=${candidate_arg:-$candidate_env}
+[[ "$candidate" =~ ^[0-9a-f]{40}$ ]] || die "--candidate must be a lowercase 40-character commit OID"
+
+head_oid=$(git rev-parse HEAD)
+[[ "$candidate" == "$head_oid" ]] || die "candidate ($candidate) does not match HEAD ($head_oid)"
+git cat-file -e "${candidate}^{commit}" 2>/dev/null || die "candidate commit is not available"
+
 command -v docker >/dev/null 2>&1 || die "docker is required"
 docker compose version >/dev/null 2>&1 || die "docker compose plugin is required"
-
-candidate=${CANDIDATE_SHA:-}
-[[ "$candidate" =~ ^[0-9a-fA-F]{40}$ ]] || die "CANDIDATE_SHA must be a 40-character commit OID"
-head_oid=$(git rev-parse HEAD)
-[[ "$candidate" == "$head_oid" ]] || die "CANDIDATE_SHA ($candidate) does not match HEAD ($head_oid)"
-git cat-file -e "${candidate}^{commit}" 2>/dev/null || die "candidate commit is not available"
 
 # A UUID-like project name avoids collisions with developer stacks and other CI
 # jobs.  It is never persisted as an application secret.

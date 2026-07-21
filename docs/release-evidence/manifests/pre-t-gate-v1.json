@@ -31,7 +31,7 @@
     {"name": "runtime-file-manifest", "argv": ["python", "scripts/verify_runtime_file_manifest.py", "--repo-root", "{repo_root}", "--manifest", "docs/release-evidence/manifests/runtime-file-manifest-v1.json"]},
     {"name": "canary-fence-design", "argv": ["python", "scripts/verify_canary_fence_design.py", "docs/release-evidence/manifests/canary-fence-design-v1.json"]},
     {"name": "scanner-chain", "argv": ["python", "scripts/verify_scanner_chain.py", "--repo-root", "{repo_root}", "--phase", "paper-startup"]},
-    {"name": "compose-smoke", "argv": ["scripts/run_compose_smoke.sh"], "env": {"CANDIDATE_SHA": "{candidate}"}},
+    {"name": "compose-smoke", "argv": ["scripts/run_compose_smoke.sh", "--candidate", "{candidate}"]},
     {"name": "oci-provenance", "argv": ["scripts/build_sign_verify_oci.sh", "--candidate", "{candidate}", "--evidence", "docs/release-evidence/build/oci-build-v1.json"]},
     {"name": "phase-c-process", "argv": ["python", "scripts/check_phase_c_process_artifacts.py", "--manifest", "docs/release-evidence/manifests/phase-c-process-artifacts-v1.json", "--candidate", "{candidate}"]},
     {"name": "restore-fence-conformance", "argv": ["python", "-m", "pytest", "backend/tests/test_canary_fence_conformance.py", "backend/tests/test_restore_generation_fence.py", "-q", "-p", "no:cacheprovider"]}
