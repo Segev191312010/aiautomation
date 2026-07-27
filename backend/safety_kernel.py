@@ -16,6 +16,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from config import cfg
 from db.execution_lease import validate_fencing_token
@@ -287,18 +288,29 @@ async def _emergency_close_all_positions(source: str) -> None:
                 except Exception as exc:
                     log.warning("emergency_close: ticker fetch failed for %s: %s", pos.symbol, exc)
 
+                token = get_execution_fencing_token()
+                if not await validate_fencing_token(token):
+                    outcome_payload.update(
+                        outcome="rejected",
+                        reason="execution_lease_lost",
+                    )
+                    log.error("emergency_close: execution lease invalid for %s %s", pos.symbol, close_action)
+                    continue
+
                 if limit_px is not None:
-                    if not await validate_fencing_token(get_execution_fencing_token()):
+                    order = _LmtOrder(close_action, qty, limit_px)
+                    order.tif = "GTC"
+                    order.outsideRth = True
+                    ib_trade = await ibkr.place_order_guarded(
+                        contract, order, fencing_token=token
+                    )
+                    if ib_trade is None:
                         outcome_payload.update(
                             outcome="rejected",
                             reason="execution_lease_lost",
                         )
-                        log.error("emergency_close: execution lease invalid for %s %s", pos.symbol, close_action)
+                        log.error("emergency_close: order refused by lease guard for %s %s", pos.symbol, close_action)
                     else:
-                        order = _LmtOrder(close_action, qty, limit_px)
-                        order.tif = "GTC"
-                        order.outsideRth = True
-                        ib_trade = ibkr.ib.placeOrder(contract, order)
                         # Outcome on the submission log is "submitted". Terminal
                         # state arrives via orderStatus; wire a one-shot handler
                         # that emits a SECOND emergency_close_outcome with the
@@ -310,17 +322,19 @@ async def _emergency_close_all_positions(source: str) -> None:
                         _wire_terminal_outcome(ib_trade, outcome_payload)
                 elif in_rth:
                     # No finite quote but RTH — MKT is the last resort.
-                    if not await validate_fencing_token(get_execution_fencing_token()):
+                    order = _MktOrder(close_action, qty)
+                    order.tif = "GTC"
+                    order.outsideRth = False
+                    ib_trade = await ibkr.place_order_guarded(
+                        contract, order, fencing_token=token
+                    )
+                    if ib_trade is None:
                         outcome_payload.update(
                             outcome="rejected",
                             reason="execution_lease_lost",
                         )
-                        log.error("emergency_close: execution lease invalid for %s %s", pos.symbol, close_action)
+                        log.error("emergency_close: order refused by lease guard for %s %s", pos.symbol, close_action)
                     else:
-                        order = _MktOrder(close_action, qty)
-                        order.tif = "GTC"
-                        order.outsideRth = False
-                        ib_trade = ibkr.ib.placeOrder(contract, order)
                         outcome_payload.update(
                             outcome="submitted",
                             reason="mkt_fallback_rth_no_finite_quote",

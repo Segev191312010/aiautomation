@@ -55,6 +55,7 @@ def _fake_ibkr(bid=99.5, ask=100.5, last=100.0):
         ib=mock_ib,
         is_connected=lambda: True,
         make_stock_contract=lambda sym: SimpleNamespace(symbol=sym),
+        place_order_guarded=AsyncMock(side_effect=lambda contract, order, **_: mock_ib.placeOrder(contract, order)),
     ), mock_ib
 
 
@@ -246,7 +247,7 @@ async def test_emergency_close_emits_terminal_outcome_on_fill(caplog):
     )
 
     fake_ibkr_obj, mock_ib = _fake_ibkr(bid=99.5, ask=100.5, last=100.0)
-    mock_ib.placeOrder = MagicMock(return_value=fake_ib_trade)
+    fake_ibkr_obj.place_order_guarded = AsyncMock(return_value=fake_ib_trade)
 
     long_pos = _make_open_position("AAPL", "BUY", 10.0)
 
@@ -289,7 +290,7 @@ async def test_emergency_close_emits_terminal_outcome_on_cancel(caplog):
         orderStatus=SimpleNamespace(status="Submitted", avgFillPrice=0.0),
     )
     fake_ibkr_obj, mock_ib = _fake_ibkr(bid=99.5, ask=100.5, last=100.0)
-    mock_ib.placeOrder = MagicMock(return_value=fake_ib_trade)
+    fake_ibkr_obj.place_order_guarded = AsyncMock(return_value=fake_ib_trade)
     long_pos = _make_open_position("AAPL", "BUY", 10.0)
 
     with patch("config.cfg.SIM_MODE", False), \

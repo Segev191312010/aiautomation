@@ -339,7 +339,14 @@ async def place_order(
         return trade_rec
 
     try:
-        ib_trade: IBTrade = ibkr.ib.placeOrder(contract, ib_order)
+        ib_trade = await ibkr.place_order_guarded(
+            contract, ib_order, fencing_token=get_execution_fencing_token()
+        )
+        if ib_trade is None:
+            log.error("Order placement refused — execution lease lost during submission")
+            trade_rec.status = "ERROR"  # type: ignore[assignment]
+            await save_trade(trade_rec)
+            return trade_rec
         trade_rec.order_id = ib_trade.order.orderId
 
         # Update order_id in DB
@@ -483,14 +490,18 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
 
 async def cancel_order(order_id: int) -> bool:
     """Cancel an open order by IBKR order ID."""
-    if not await validate_fencing_token(get_execution_fencing_token()):
+    token = get_execution_fencing_token()
+    if not await validate_fencing_token(token):
         log.error("Execution lease invalid — refusing cancel_order(%d)", order_id)
         return False
     if not ibkr.is_connected():
         return False
     for ib_trade in ibkr.ib.openTrades():
         if ib_trade.order.orderId == order_id:
-            ibkr.ib.cancelOrder(ib_trade.order)
+            ok = await ibkr.cancel_order_guarded(ib_trade.order, fencing_token=token)
+            if not ok:
+                log.error("Cancel refused for order %d — execution lease lost", order_id)
+                return False
             log.info("Cancel requested for order %d", order_id)
             return True
     log.warning("Order %d not found among open trades", order_id)
@@ -558,6 +569,11 @@ async def reconcile_pending_orders() -> None:
     cancellation - even if the fill happened while the server was down.
     """
     from database import get_trades
+
+    token = get_execution_fencing_token()
+    if not await validate_fencing_token(token):
+        log.error("reconcile_pending_orders: execution lease invalid — skipping reconciliation")
+        return
 
     if not ibkr.is_connected():
         log.warning("reconcile_pending_orders: IBKR not connected, skipping")
@@ -628,6 +644,11 @@ async def _convert_mkt_orders_to_limit() -> None:
     if not ibkr.is_connected():
         return
 
+    token = get_execution_fencing_token()
+    if not await validate_fencing_token(token):
+        log.error("_convert_mkt_orders_to_limit: execution lease invalid — skipping resubmit")
+        return
+
     pending_db = {t.order_id: t for t in await get_trades(limit=500)
                   if t.status == "PENDING" and t.order_id}
 
@@ -648,10 +669,14 @@ async def _convert_mkt_orders_to_limit() -> None:
             continue
 
         # Cancel the existing MKT order and wait for confirmation
-        if not await validate_fencing_token(get_execution_fencing_token()):
+        token = get_execution_fencing_token()
+        if not await validate_fencing_token(token):
             log.error("Execution lease lost during MKT→LIMIT resubmit for %s %s — aborting resubmit", action, symbol)
             continue
-        ibkr.ib.cancelOrder(order)
+        ok = await ibkr.cancel_order_guarded(order, fencing_token=token)
+        if not ok:
+            log.error("MKT→LIMIT cancel refused for %s %s — execution lease lost", action, symbol)
+            continue
         # Wait for cancellation to be confirmed (up to 5s)
         for _wait in range(10):
             await asyncio.sleep(0.5)
@@ -677,14 +702,19 @@ async def _convert_mkt_orders_to_limit() -> None:
             continue
 
         # Place fresh LIMIT order
-        if not await validate_fencing_token(get_execution_fencing_token()):
+        if not await validate_fencing_token(token):
             log.error("Execution lease lost before fresh LIMIT placement for %s %s — aborting resubmit", action, symbol)
             continue
         from ib_insync import LimitOrder as _LimitOrder
         new_order = _LimitOrder(action, qty, limit_px)
         new_order.outsideRth = True
         new_order.tif = "GTC"
-        new_ib_trade = ibkr.ib.placeOrder(ib_trade.contract, new_order)
+        new_ib_trade = await ibkr.place_order_guarded(
+            ib_trade.contract, new_order, fencing_token=token
+        )
+        if new_ib_trade is None:
+            log.error("MKT→LIMIT placement refused for %s %s — execution lease lost", action, symbol)
+            continue
         log.info("Resubmitted %s %s as LIMIT lmt=%.2f (was MKT order %d)",
                  action, symbol, limit_px, order.orderId)
 

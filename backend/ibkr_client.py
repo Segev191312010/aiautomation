@@ -423,33 +423,52 @@ class IBKRClient:
         return positions
 
     # ------------------------------------------------------------------
-    # Contract factories
+    # Guarded broker mutations (Stage 9B Phase 1 SF1b / ADR 0007)
     # ------------------------------------------------------------------
 
-    def make_stock_contract(
-        self, symbol: str, exchange: str = "SMART", currency: str = "USD"
-    ) -> Stock:
-        return Stock(symbol, exchange, currency)
-
-    def make_future_contract(
+    async def place_order_guarded(
         self,
-        symbol: str,
-        exchange: str,
-        last_trade_date: str,
-        currency: str = "USD",
-    ) -> Future:
-        return Future(symbol, last_trade_date, exchange, currency=currency)
+        contract,
+        order,
+        *,
+        fencing_token: str | None,
+    ) -> IBTrade | None:
+        """Place an order only if this process still holds the execution lease.
 
-    def make_option_contract(
+        A stale or missing fencing token returns ``None`` without touching TWS,
+        so a duplicate or zombie process cannot send orders.
+        """
+        from db.execution_lease import validate_fencing_token
+
+        if not await validate_fencing_token(fencing_token):
+            log.critical(
+                "place_order_guarded rejected: stale or missing execution lease "
+                "token — order NOT sent to broker"
+            )
+            return None
+        return self._ib.placeOrder(contract, order)
+
+    async def cancel_order_guarded(
         self,
-        symbol: str,
-        last_trade_date: str,
-        strike: float,
-        right: str,
-        exchange: str = "SMART",
-        currency: str = "USD",
-    ) -> Option:
-        return Option(symbol, last_trade_date, strike, right, exchange, currency=currency)
+        ib_order,
+        *,
+        fencing_token: str | None,
+    ) -> bool:
+        """Cancel an order only if this process still holds the execution lease.
+
+        Returns ``True`` if the cancel request was forwarded to TWS. Returns
+        ``False`` if the lease is invalid so the caller can fail closed.
+        """
+        from db.execution_lease import validate_fencing_token
+
+        if not await validate_fencing_token(fencing_token):
+            log.critical(
+                "cancel_order_guarded rejected: stale or missing execution lease "
+                "token — cancel NOT sent to broker"
+            )
+            return False
+        self._ib.cancelOrder(ib_order)
+        return True
 
 
 # Module-level singleton — IB() is created lazily inside connect().
