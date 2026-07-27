@@ -147,8 +147,8 @@ async def acquire_execution_lease(
                     f"execution lease held by {existing.owner_id} until {existing.expires_at}"
                 )
             # Expired/lost lease — enforce quarantine before takeover.
-            if now < existing.expires_at + quarantine_seconds:
-                quarantine_end = existing.expires_at + quarantine_seconds
+            quarantine_end = existing.expires_at + quarantine_seconds
+            if now < quarantine_end:
                 raise RuntimeError(
                     f"execution lease in quarantine until {quarantine_end}; "
                     f"previous owner was {existing.owner_id}"

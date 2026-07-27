@@ -48,7 +48,7 @@ os.environ.setdefault("TEST_RATE_LIMIT_AUTH", "10000")
 os.environ.setdefault("JWT_BOOTSTRAP_SECRET", "test-bootstrap-secret")
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def anyio_backend():
     return "asyncio"
 
@@ -64,6 +64,7 @@ async def _test_execution_lease():
     re-acquisition, and order_executor / safety_kernel paths see a valid token.
     """
     import startup
+    from config import cfg
     from db.execution_lease import acquire_execution_lease, release_execution_lease
 
     # _TEST_DB is recreated at module import time, so no stale lease exists.
@@ -71,6 +72,9 @@ async def _test_execution_lease():
     startup._execution_lease = lease
     yield
     startup._execution_lease = None
+    # Restore the session DB path before releasing, because some tests change
+    # cfg.DB_PATH to an isolated file.
+    cfg.DB_PATH = _TEST_DB
     await release_execution_lease(lease.fencing_token)
 
 
