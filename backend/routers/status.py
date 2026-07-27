@@ -67,6 +67,17 @@ async def health_check():
     except ImportError:
         checks["memory_mb"] = None
 
+    # Execution ownership (Stage 9B Phase 1 SF1a)
+    lease_token = get_execution_fencing_token()
+    lease = await validate_fencing_token(lease_token) if lease_token else None
+    checks["execution_lease"] = {
+        "status": "held" if lease else "not_held",
+        "owner": lease.owner_id if lease else None,
+        "expires_at": lease.expires_at if lease else None,
+    }
+    if not lease:
+        overall = "degraded" if overall == "healthy" else overall
+
     return {
         "status": overall,
         "checks": checks,
