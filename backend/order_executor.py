@@ -648,7 +648,7 @@ async def _convert_mkt_orders_to_limit() -> None:
             continue
 
         # Cancel the existing MKT order and wait for confirmation
-        if not validate_fencing_token(get_execution_fencing_token()):
+        if not await validate_fencing_token(get_execution_fencing_token()):
             log.error("Execution lease lost during MKT→LIMIT resubmit for %s %s — aborting resubmit", action, symbol)
             continue
         ibkr.ib.cancelOrder(order)
@@ -677,7 +677,7 @@ async def _convert_mkt_orders_to_limit() -> None:
             continue
 
         # Place fresh LIMIT order
-        if not validate_fencing_token(get_execution_fencing_token()):
+        if not await validate_fencing_token(get_execution_fencing_token()):
             log.error("Execution lease lost before fresh LIMIT placement for %s %s — aborting resubmit", action, symbol)
             continue
         from ib_insync import LimitOrder as _LimitOrder
