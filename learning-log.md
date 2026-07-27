@@ -27,3 +27,23 @@ Chronological record of sessions, discoveries, and decisions.
 ### 2026-02-26 — Stage 2c: Multi-Pane Sync
 - Completed: Crosshair sync across panes, time-axis sync, resizable pane heights via drag handles
 - Next: Stage 3 (Stock Screener & Scanner)
+
+### 2026-07-28 — Stage 9B Phase 1 SF1a: Durable Cross-Host Execution Lease
+- Completed:
+  - Durable SQLite execution lease (owner, fencing token, version, TTL, heartbeat, quarantine)
+  - Atomic acquire/renew/release primitives in `backend/db/execution_lease.py`
+  - Lease integration into `backend/startup.py` and FastAPI lifespan heartbeat in `backend/main.py`
+  - Fencing-token validation on broker mutation paths in `order_executor.py`, `safety_kernel.py`, and `routers/status.py`
+  - `/api/health` now surfaces execution_lease status
+  - 11 lease primitive tests + 6 lifespan/health integration tests + 4 order-executor fencing regression tests
+- Critical bug caught and fixed:
+  - `order_executor.place_order` and `cancel_order` called `validate_fencing_token()` without `await`, so the async coroutine was always truthy and the lease check was silently bypassed. Added `await` and regression tests.
+- Learned:
+  - Session-scoped pytest fixture must publish a valid lease into `startup._execution_lease` for tests that exercise broker paths.
+  - Python 3.14 needs an explicit event loop before `ib_insync/eventkit` imports; newer FastAPI/Starlette `_IncludedRouter` requires unwrapping for route introspection.
+- Gotchas:
+  - Timing-sensitive quarantine tests need explicit `quarantine_seconds` in every `acquire_execution_lease` call.
+  - Tests that override `cfg.DB_PATH` must restore the session DB before fixture cleanup releases the session lease.
+- Evidence: backend pytest 839 passed; dashboard typecheck/build/vitest 364 passed.
+- Next: Stage 9B Phase 1 SF1b broker protection/reconciliation (ADR 0007), or complete SF1a evidence checklist/ADR.
+
