@@ -1,12 +1,22 @@
 """
 Shared test fixtures.
 """
+import asyncio
 import os
 import shutil
 import sys
 from pathlib import Path
 
 import pytest
+
+# eventkit (dependency of ib_insync) calls asyncio.get_event_loop() at import
+# time.  Python 3.12+ no longer creates an implicit event loop in the main
+# thread, so pytest collection fails on any module importing ib_insync.  Create
+# a default loop here, before collection imports those modules.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 # Ensure backend package is importable
 _BACKEND_DIR = os.path.join(os.path.dirname(__file__), "..")
@@ -41,6 +51,27 @@ os.environ.setdefault("JWT_BOOTSTRAP_SECRET", "test-bootstrap-secret")
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(scope="session", autouse=True)
+async def _test_execution_lease():
+    """Hold a durable execution lease for the whole test session.
+
+    Phase 1 (ADR 0006) requires a valid fencing token at every broker
+    mutation path.  Tests exercise those paths without a lifespan, so we
+    acquire a single lease here and publish it into startup's process-global
+    state.  validate_startup() detects the existing lease and skips
+    re-acquisition, and order_executor / safety_kernel paths see a valid token.
+    """
+    import startup
+    from db.execution_lease import acquire_execution_lease, release_execution_lease
+
+    # _TEST_DB is recreated at module import time, so no stale lease exists.
+    lease = await acquire_execution_lease(owner_id="pytest-session")
+    startup._execution_lease = lease
+    yield
+    startup._execution_lease = None
+    await release_execution_lease(lease.fencing_token)
 
 
 @pytest.fixture

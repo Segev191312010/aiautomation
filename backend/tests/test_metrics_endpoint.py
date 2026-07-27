@@ -79,13 +79,29 @@ def test_metrics_endpoint_serves_prometheus_text(client: TestClient) -> None:
     assert families, "no metric families parsed from /metrics body"
 
 
+def _route_paths(app: FastAPI) -> set[str]:
+    """Collect all route paths, including those inside included routers."""
+    paths: set[str] = set()
+    for route in app.routes:
+        if hasattr(route, "path"):
+            paths.add(route.path)
+        # FastAPI 0.115+ wraps included routers in _IncludedRouter with an
+        # original_router attribute; older versions flatten routes.
+        original = getattr(route, "original_router", None)
+        if original is not None:
+            for sub in getattr(original, "routes", []):
+                if hasattr(sub, "path"):
+                    paths.add(sub.path)
+    return paths
+
+
 def test_application_does_not_mount_metrics_without_isolated_profile() -> None:
     """Metrics are default-deny on the public application listener."""
     from main import _register_metrics_router
 
     production_like_app = FastAPI()
     assert _register_metrics_router(production_like_app, exposure_profile="off") is False
-    assert "/metrics" not in {route.path for route in production_like_app.routes}
+    assert "/metrics" not in _route_paths(production_like_app)
 
 
 def test_isolated_monitoring_profile_mounts_metrics() -> None:
@@ -93,7 +109,7 @@ def test_isolated_monitoring_profile_mounts_metrics() -> None:
 
     monitoring_app = FastAPI()
     assert _register_metrics_router(monitoring_app, exposure_profile="isolated") is True
-    assert "/metrics" in {route.path for route in monitoring_app.routes}
+    assert "/metrics" in _route_paths(monitoring_app)
 
 
 def test_all_metric_names_present(client: TestClient) -> None:

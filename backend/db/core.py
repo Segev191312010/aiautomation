@@ -203,6 +203,21 @@ CREATE TABLE IF NOT EXISTS diag_refresh_runs (
 );
 """
 
+# ── S9B: Cross-host execution lease (ADR 0006) ─────────────────────────────
+# Singleton row records the current execution owner, fencing token, and
+# expiration. All broker-mutation paths must validate the token.
+_CREATE_EXECUTION_LEASE = """
+CREATE TABLE IF NOT EXISTS execution_lease (
+    singleton     INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton = 1),
+    owner_id      TEXT NOT NULL,
+    fencing_token TEXT NOT NULL,
+    version       INTEGER NOT NULL,
+    started_at    REAL NOT NULL,
+    expires_at    REAL NOT NULL,
+    last_seen_at  REAL NOT NULL
+);
+"""
+
 
 _CREATE_ALERTS = """
 CREATE TABLE IF NOT EXISTS alerts (
@@ -556,6 +571,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_DIAG_SECTOR_PROJECTION_VALUES)
         await db.execute(_CREATE_DIAG_NEWS_CACHE)
         await db.execute(_CREATE_DIAG_REFRESH_RUNS)
+        await db.execute(_CREATE_EXECUTION_LEASE)
         await db.execute(_CREATE_ALERTS)
         await db.execute(_CREATE_ALERT_HISTORY)
         await db.execute(_CREATE_OPEN_POSITIONS)
@@ -613,6 +629,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_diag_projection_runs_ts ON diag_sector_projection_runs(run_ts DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_diag_news_published ON diag_news_cache(published_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_diag_refresh_status_lock ON diag_refresh_runs(status, lock_expires_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_execution_lease_expires ON execution_lease(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alerts_enabled_symbol ON alerts(enabled, symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_user_fired ON alert_history(user_id, fired_at DESC)")

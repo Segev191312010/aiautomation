@@ -14,8 +14,10 @@ from database import save_trade, update_trade_status
 from market_data import get_latest_price, finite_positive
 from models import Rule, Trade
 from config import cfg
+from db.execution_lease import validate_fencing_token
 from db.rate_limits import try_acquire_order_slot
 from services import order_lifecycle, order_recovery, safety_gate
+from startup import get_execution_fencing_token
 
 log = logging.getLogger(__name__)
 
@@ -257,6 +259,12 @@ async def place_order(
         if not permitted:
             return None
 
+    # Cross-host execution lease / fencing token (Stage 9B ADR 0006).
+    # All broker mutations must prove this process still owns the lease.
+    if not validate_fencing_token(get_execution_fencing_token()):
+        log.error("Execution lease token invalid or expired — refusing order placement")
+        return None
+
     if not ibkr.is_connected():
         log.error("Cannot place order — IBKR not connected")
         return None
@@ -321,6 +329,14 @@ async def place_order(
     # treated as safe to retry. R01/R08 track the missing durable-intent and
     # quarantine implementation.
     ib_order.orderRef = trade_rec.id
+
+    # Re-validate lease right before broker mutation. A quarantine or
+    # ownership loss between pre-flight and submission must block the call.
+    if not validate_fencing_token(get_execution_fencing_token()):
+        log.error("Execution lease lost before broker submission — marking trade ERROR")
+        trade_rec.status = "ERROR"  # type: ignore[assignment]
+        await save_trade(trade_rec)
+        return trade_rec
 
     try:
         ib_trade: IBTrade = ibkr.ib.placeOrder(contract, ib_order)
@@ -467,6 +483,9 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
 
 async def cancel_order(order_id: int) -> bool:
     """Cancel an open order by IBKR order ID."""
+    if not validate_fencing_token(get_execution_fencing_token()):
+        log.error("Execution lease invalid — refusing cancel_order(%d)", order_id)
+        return False
     if not ibkr.is_connected():
         return False
     for ib_trade in ibkr.ib.openTrades():
@@ -629,6 +648,9 @@ async def _convert_mkt_orders_to_limit() -> None:
             continue
 
         # Cancel the existing MKT order and wait for confirmation
+        if not validate_fencing_token(get_execution_fencing_token()):
+            log.error("Execution lease lost during MKT→LIMIT resubmit for %s %s — aborting resubmit", action, symbol)
+            continue
         ibkr.ib.cancelOrder(order)
         # Wait for cancellation to be confirmed (up to 5s)
         for _wait in range(10):
@@ -655,6 +677,9 @@ async def _convert_mkt_orders_to_limit() -> None:
             continue
 
         # Place fresh LIMIT order
+        if not validate_fencing_token(get_execution_fencing_token()):
+            log.error("Execution lease lost before fresh LIMIT placement for %s %s — aborting resubmit", action, symbol)
+            continue
         from ib_insync import LimitOrder as _LimitOrder
         new_order = _LimitOrder(action, qty, limit_px)
         new_order.outsideRth = True

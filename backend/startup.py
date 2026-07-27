@@ -22,6 +22,15 @@ import sys
 from pathlib import Path
 from typing import IO, TypedDict
 
+from db.execution_lease import (
+    Lease,
+    acquire_execution_lease,
+    release_execution_lease,
+    renew_execution_lease,
+    LEASE_HEARTBEAT_SECONDS,
+    LEASE_TTL_SECONDS,
+)
+
 log = logging.getLogger(__name__)
 
 DEFAULT_DEV_JWT_SECRET = "trading-dev-secret-MUST-SET-IN-ENV"
@@ -32,6 +41,7 @@ MIN_JWT_SECRET_BYTES = 32
 STAGE_9A_LIVE_RELEASE_APPROVED = False
 
 _execution_lock_handles: dict[str, IO[str]] = {}
+_execution_lease: Lease | None = None
 
 
 class StartupResult(TypedDict):
@@ -176,6 +186,70 @@ def release_execution_process_lock(
     log.info("execution owner lock released: %s", resolved)
 
 
+async def acquire_execution_lease_and_lock(
+    *,
+    db_path: str,
+    lock_path: str | None = None,
+) -> Lease:
+    """Acquire both the durable execution lease and the file lock fallback.
+
+    The lease provides cross-host ownership via SQLite; the file lock is a
+    fallback for the common single-host case and catches workers that bypass
+    the DB lease path. This must be called from an async context (lifespan).
+    """
+    global _execution_lease
+    if _execution_lease is not None:
+        raise RuntimeError("Execution lease already held by this process.")
+
+    # File lock first: cheap, immediate, same-host protection.
+    acquire_execution_process_lock(db_path=db_path, lock_path=lock_path)
+
+    try:
+        lease = await acquire_execution_lease()
+    except Exception:
+        # Roll back file lock if DB lease fails so caller can retry cleanly.
+        release_execution_process_lock(db_path=db_path, lock_path=lock_path)
+        raise
+
+    _execution_lease = lease
+    log.info("execution lease + lock acquired: owner=%s token=%s...", lease.owner_id, lease.fencing_token[:8])
+    return lease
+
+
+async def release_execution_lease_and_lock(
+    *,
+    db_path: str,
+    lock_path: str | None = None,
+) -> None:
+    """Release both the durable lease and the file lock fallback."""
+    global _execution_lease
+    if _execution_lease is not None:
+        await release_execution_lease(_execution_lease.fencing_token)
+        _execution_lease = None
+    release_execution_process_lock(db_path=db_path, lock_path=lock_path)
+
+
+async def renew_execution_lease_heartbeat() -> Lease | None:
+    """Renew the process execution lease if we hold one."""
+    global _execution_lease
+    if _execution_lease is None:
+        return None
+    renewed = await renew_execution_lease(
+        _execution_lease.fencing_token,
+        ttl_seconds=LEASE_TTL_SECONDS,
+    )
+    if renewed is None:
+        log.error("execution lease renewal failed — ownership may be lost")
+    _execution_lease = renewed
+    return renewed
+
+
+def get_execution_fencing_token() -> str | None:
+    """Return the current process fencing token, or None if not leased."""
+    lease = _execution_lease
+    return lease.fencing_token if lease is not None else None
+
+
 def validate_autopilot_matrix(
     *,
     mode: str,
@@ -276,21 +350,20 @@ def validate_autopilot_matrix(
     return errors
 
 
-def validate_execution_topology(*, workers: int) -> list[str]:
+def validate_execution_topology(*, workers: int, lease_acquired: bool = True) -> list[str]:
     """Return fatal errors for unsupported monolith worker topology.
 
     Every Uvicorn worker currently starts its own IBKR client, reconciliation,
-    alert, optimizer, learning, and bot lifespan loops. The execution gateway
-    does not yet have a durable leader lease/fencing token, so a multi-worker
-    process is unsafe regardless of ``AUTOPILOT_MODE`` (manual order routes
-    remain broker-capable while AI is OFF).
+    alert, optimizer, learning, and bot lifespan loops. With the durable
+    execution lease (ADR 0006) a multi-worker topology still risks concurrent
+    broker clients and duplicated background loops, so it remains unsupported.
     """
     if workers == 1:
         return []
     return [
         f"WORKERS={workers} is unsupported: the current monolith must run "
-        "exactly one Uvicorn worker because background and broker execution "
-        "ownership are not leased/fenced. Set WORKERS=1."
+        "exactly one Uvicorn worker. Background execution ownership is now "
+        "leased/fenced, but background tasks are not distributed yet. Set WORKERS=1."
     ]
 
 
@@ -388,12 +461,13 @@ async def validate_startup() -> StartupResult:
         )
 
     # ------------------------------------------------------------------
-    # 6. Single execution-owner topology (Stage 9A)
+    # 6. Single execution-owner topology (Stage 9A) + lease acquisition
     # ------------------------------------------------------------------
     # The durable rate limiter is shared across processes, but it does not
     # solve duplicated broker clients/background loops or stale-owner
-    # submission. Until the executor lease/fencing design lands, WORKERS=1 is
-    # a hard invariant for the whole monolith.
+    # submission. WORKERS=1 remains a hard invariant until background tasks are
+    # distributed. Then acquire the durable cross-host lease so this process
+    # is the recognized execution owner.
     topology_errors: list[str] = []
     raw_workers = os.getenv("WORKERS", "1") or "1"
     try:
@@ -405,6 +479,16 @@ async def validate_startup() -> StartupResult:
     else:
         topology_errors.extend(validate_execution_topology(workers=workers))
     errors.extend(topology_errors)
+
+    if not errors:
+        # If this process already owns the lease (e.g., multiple startup
+        # validation calls in tests), treat that as success rather than a
+        # duplicate-ownership error.
+        if get_execution_fencing_token() is None:
+            try:
+                await acquire_execution_lease_and_lock(db_path=cfg.DB_PATH)
+            except RuntimeError as exc:
+                errors.append(f"Could not acquire execution lease: {exc}")
 
     # ------------------------------------------------------------------
     # Summary log

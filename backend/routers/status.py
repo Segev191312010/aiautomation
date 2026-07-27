@@ -12,6 +12,8 @@ import bot_runner
 from config import cfg
 from ibkr_client import ibkr
 from runtime_state import get_data_health, get_diag_service
+from startup import get_execution_fencing_token
+from db.execution_lease import validate_fencing_token
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +158,15 @@ async def connect_ibkr(_user=Depends(get_current_user)):
             409,
             "Real-money IBKR connection is disabled by the Stage 9A release fence.",
         )
+    # Cross-host execution lease: only the current lease holder may open a
+    # broker connection.  This prevents a stale or duplicate process from
+    # attaching to TWS/Gateway.
+    if not await validate_fencing_token(get_execution_fencing_token()):
+        raise HTTPException(
+            409,
+            "Execution lease invalid or held by another process. "
+            "Cannot open broker connection.",
+        )
     ok = await ibkr.connect()
     if not ok:
         raise HTTPException(502, "Could not connect to IBKR. Is IB Gateway running?")
@@ -165,5 +176,6 @@ async def connect_ibkr(_user=Depends(get_current_user)):
 
 @router.post("/api/ibkr/disconnect")
 async def disconnect_ibkr(_user=Depends(get_current_user)):
+    # Disconnect is safe from any process; it only drops the local socket.
     await ibkr.disconnect()
     return {"connected": False}

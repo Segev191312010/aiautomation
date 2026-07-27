@@ -218,25 +218,50 @@ async def _stop_broker_runtime() -> None:
 async def lifespan(app: FastAPI):
     """Own the singleton execution lifecycle for the whole process.
 
-    This lock is same-host/shared-volume containment. ADR 0006 still requires
-    a durable cross-host lease and fencing token before LIVE approval.
+    ``validate_startup`` now acquires the durable cross-host execution
+    lease (ADR 0006) in addition to the same-host file lock fallback. The
+    lease heartbeat must run while the application is alive so ownership
+    does not expire under load.
     """
     from startup import (
-        acquire_execution_process_lock,
-        release_execution_process_lock,
+        release_execution_lease_and_lock,
+        renew_execution_lease_heartbeat,
         validate_startup,
     )
 
-    execution_lock_path = acquire_execution_process_lock(db_path=cfg.DB_PATH)
     try:
         await validate_startup()
         async with _application_lifespan(app):
-            yield
+            _lease_heartbeat_task = _start_lease_heartbeat(renew_execution_lease_heartbeat)
+            try:
+                yield
+            finally:
+                _lease_heartbeat_task.cancel()
+                try:
+                    await _lease_heartbeat_task
+                except asyncio.CancelledError:
+                    pass
     finally:
-        release_execution_process_lock(
-            db_path=cfg.DB_PATH,
-            lock_path=execution_lock_path,
-        )
+        try:
+            await release_execution_lease_and_lock(db_path=cfg.DB_PATH)
+        except Exception:
+            log.exception("Failed to release execution lease during shutdown")
+
+
+def _start_lease_heartbeat(renew: Any) -> asyncio.Task[Any]:
+    """Spawn a background task that renews the execution lease periodically."""
+    async def _heartbeat() -> None:
+        from startup import LEASE_HEARTBEAT_SECONDS
+        while True:
+            try:
+                await asyncio.sleep(LEASE_HEARTBEAT_SECONDS)
+            except asyncio.CancelledError:
+                break
+            try:
+                await renew()
+            except Exception:
+                log.exception("Execution lease heartbeat failed")
+    return asyncio.create_task(_heartbeat())
 
 
 @asynccontextmanager

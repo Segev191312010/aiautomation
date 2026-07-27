@@ -18,6 +18,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from config import cfg
+from db.execution_lease import validate_fencing_token
+from startup import get_execution_fencing_token
 
 # Symbol format validation (shared with api_contracts)
 _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,9}$")
@@ -286,30 +288,44 @@ async def _emergency_close_all_positions(source: str) -> None:
                     log.warning("emergency_close: ticker fetch failed for %s: %s", pos.symbol, exc)
 
                 if limit_px is not None:
-                    order = _LmtOrder(close_action, qty, limit_px)
-                    order.tif = "GTC"
-                    order.outsideRth = True
-                    ib_trade = ibkr.ib.placeOrder(contract, order)
-                    # Outcome on the submission log is "submitted". Terminal
-                    # state arrives via orderStatus; wire a one-shot handler
-                    # that emits a SECOND emergency_close_outcome with the
-                    # final outcome (filled / rejected / cancelled).
-                    outcome_payload.update(
-                        outcome="submitted",
-                        reason=f"marketable_limit @ {limit_px}",
-                    )
-                    _wire_terminal_outcome(ib_trade, outcome_payload)
+                    if not await validate_fencing_token(get_execution_fencing_token()):
+                        outcome_payload.update(
+                            outcome="rejected",
+                            reason="execution_lease_lost",
+                        )
+                        log.error("emergency_close: execution lease invalid for %s %s", pos.symbol, close_action)
+                    else:
+                        order = _LmtOrder(close_action, qty, limit_px)
+                        order.tif = "GTC"
+                        order.outsideRth = True
+                        ib_trade = ibkr.ib.placeOrder(contract, order)
+                        # Outcome on the submission log is "submitted". Terminal
+                        # state arrives via orderStatus; wire a one-shot handler
+                        # that emits a SECOND emergency_close_outcome with the
+                        # final outcome (filled / rejected / cancelled).
+                        outcome_payload.update(
+                            outcome="submitted",
+                            reason=f"marketable_limit @ {limit_px}",
+                        )
+                        _wire_terminal_outcome(ib_trade, outcome_payload)
                 elif in_rth:
                     # No finite quote but RTH — MKT is the last resort.
-                    order = _MktOrder(close_action, qty)
-                    order.tif = "GTC"
-                    order.outsideRth = False
-                    ib_trade = ibkr.ib.placeOrder(contract, order)
-                    outcome_payload.update(
-                        outcome="submitted",
-                        reason="mkt_fallback_rth_no_finite_quote",
-                    )
-                    _wire_terminal_outcome(ib_trade, outcome_payload)
+                    if not await validate_fencing_token(get_execution_fencing_token()):
+                        outcome_payload.update(
+                            outcome="rejected",
+                            reason="execution_lease_lost",
+                        )
+                        log.error("emergency_close: execution lease invalid for %s %s", pos.symbol, close_action)
+                    else:
+                        order = _MktOrder(close_action, qty)
+                        order.tif = "GTC"
+                        order.outsideRth = False
+                        ib_trade = ibkr.ib.placeOrder(contract, order)
+                        outcome_payload.update(
+                            outcome="submitted",
+                            reason="mkt_fallback_rth_no_finite_quote",
+                        )
+                        _wire_terminal_outcome(ib_trade, outcome_payload)
                 else:
                     # No finite quote AND outside RTH — refuse to send a MKT
                     # order on garbage quotes after-hours. Record and skip.
