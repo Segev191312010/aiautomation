@@ -1,6 +1,6 @@
 """Regression tests for ai_optimizer — prompt building and partial context safety."""
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -31,6 +31,87 @@ def test_get_ai_decisions_survives_partial_rule_rows(monkeypatch):
     text = format_rule_performance(partial_rows)
     assert "Good Rule" in text
     assert "?" in text  # missing keys should fallback to '?'
+
+
+@pytest.mark.anyio
+async def test_scheduled_optimizer_invokes_decision_stage_as_proposal_only(
+    anyio_backend,
+    monkeypatch,
+):
+    """The real scheduler call must select non-mutating proposal semantics."""
+    import ai_optimizer
+
+    context = {"trade_count": 1, "current_regime": "BULL"}
+    decisions = {"confidence": 0.8, "reasoning": "test proposal"}
+    apply_decisions = AsyncMock(
+        return_value={"applied": [], "blocked": [], "shadow": ["proposal"]}
+    )
+    monkeypatch.setattr(ai_optimizer, "_optimizer_running", False)
+    monkeypatch.setattr(
+        ai_optimizer,
+        "get_autopilot_config_dict",
+        AsyncMock(return_value={"emergency_stop": False}),
+    )
+    monkeypatch.setattr(ai_optimizer, "_build_context", AsyncMock(return_value=context))
+    monkeypatch.setattr(
+        ai_optimizer,
+        "_get_ai_decisions",
+        AsyncMock(return_value=decisions),
+    )
+    monkeypatch.setattr(
+        ai_optimizer,
+        "start_decision_run",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(ai_optimizer, "_apply_decisions", apply_decisions)
+    monkeypatch.setattr(ai_optimizer.ai_params, "save_to_db", AsyncMock())
+
+    import rule_validation
+
+    monkeypatch.setattr(
+        rule_validation,
+        "evaluate_paper_rules",
+        AsyncMock(return_value=[]),
+    )
+
+    result = await ai_optimizer.run_full_optimization()
+
+    assert result["success"] is True
+    apply_decisions.assert_awaited_once_with(
+        decisions,
+        context,
+        run_id=None,
+        item_ids=None,
+        proposal_only=True,
+    )
+
+
+@pytest.mark.anyio
+async def test_proposal_only_does_not_mutate_rules_or_queue_trades(
+    anyio_backend,
+):
+    from ai_optimizer import _apply_decisions
+
+    rule_apply = AsyncMock()
+    trade_queue = AsyncMock()
+    decisions = {
+        "rule_actions": [
+            {"action": "enable", "rule_id": "rule-1", "reason": "model vote"}
+        ],
+        "direct_trades": [
+            {"symbol": "AAPL", "action": "BUY", "reason": "model vote"}
+        ],
+    }
+    with patch("ai_rule_lab.apply_rule_actions", new=rule_apply), patch(
+        "execution_brain.queue_direct_candidates",
+        new=trade_queue,
+    ):
+        results = await _apply_decisions(decisions, {}, proposal_only=True)
+
+    rule_apply.assert_not_awaited()
+    trade_queue.assert_not_awaited()
+    assert results["applied"] == []
+    assert len(results["shadow"]) == 2
 
 
 @pytest.mark.anyio

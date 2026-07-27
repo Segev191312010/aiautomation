@@ -152,6 +152,10 @@ async def _apply_rule_action(
     updated.ai_reason = action.reason
 
     if action.action == "update":
+        if existing.status == "active" and not allow_active:
+            raise ValueError(
+                f"Cannot update active rule '{existing.id}' — allow_active=False"
+            )
         if not action.rule_payload:
             raise ValueError("update requires rule_payload")
         patch = action.rule_payload.copy()

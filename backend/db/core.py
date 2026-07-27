@@ -23,17 +23,21 @@ async def get_db():
 
 
 @asynccontextmanager
-async def transaction():
+async def transaction(*, busy_timeout_ms: int = 10_000):
     """Atomic multi-step operation — BEGIN IMMEDIATE, auto-COMMIT or ROLLBACK.
 
     Use for operations that touch multiple tables (e.g. finalize trade + delete
     position). Pass the yielded ``db`` connection to CRUD helpers via their
     optional ``db`` keyword argument so they share the same transaction.
+    Latency-sensitive safety callers may select a shorter non-negative busy
+    timeout and implement their own bounded retry policy.
     """
+    if busy_timeout_ms < 0:
+        raise ValueError("busy_timeout_ms must be non-negative")
     async with aiosqlite.connect(cfg.DB_PATH) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=FULL")
-        await db.execute("PRAGMA busy_timeout=10000")
+        await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -657,4 +661,3 @@ async def init_db() -> None:
         # Seed screener presets
         from db.screener import _seed_screener_presets
         await _seed_screener_presets(db)
-

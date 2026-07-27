@@ -151,13 +151,21 @@ def _build_ledger_items(decisions: dict) -> list[dict]:
     return build_ledger_items(decisions)
 
 
-async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None = None, item_ids: list[str] | None = None) -> dict:
-    """Apply AI decisions through guardrails. Returns summary of applied/blocked changes."""
+async def _apply_decisions(
+    decisions: dict,
+    context: dict,
+    *,
+    run_id: str | None = None,
+    item_ids: list[str] | None = None,
+    proposal_only: bool = False,
+) -> dict:
+    """Apply decisions, or record them without mutation in proposal-only mode."""
     enforcer = GuardrailEnforcer()
     confidence = decisions.get("confidence", 0.5)
     input_tokens = decisions.get("_input_tokens")
     output_tokens = decisions.get("_output_tokens")
     results = {"applied": [], "blocked": [], "shadow": []}
+    shadow_only = proposal_only or ai_params.shadow_mode
 
     # S10: track which item_id corresponds to which decision
     # item_ids follows the same order as _build_ledger_items output
@@ -179,7 +187,7 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
         new_score = min_score_rec.get("value", 50)
         old_score = ai_params.get_min_score()
 
-        if ai_params.shadow_mode:
+        if shadow_only:
             delta = new_score - old_score
             await log_shadow_decision("min_score", None, min_score_rec, old_score,
                                       delta_value=delta, confidence=confidence,
@@ -221,7 +229,7 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
         new_mult = risk_rec.get("value", 1.0)
         old_mult = ai_params.get_risk_multiplier()
 
-        if ai_params.shadow_mode:
+        if shadow_only:
             delta = new_mult - old_mult
             await log_shadow_decision("risk_multiplier", None, risk_rec, old_mult,
                                       delta_value=delta, confidence=confidence,
@@ -268,7 +276,7 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
         if not rule_id or action not in ("disable", "enable", "boost", "reduce"):
             continue
 
-        if ai_params.shadow_mode:
+        if shadow_only:
             rule_delta = {"disable": -1.0, "enable": 1.0,
                           "boost": float(rc.get("sizing_mult", 1.3)) - 1.0,
                           "reduce": float(rc.get("sizing_mult", 0.7)) - 1.0}.get(action, 0.0)
@@ -336,16 +344,24 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
 
     # ── Rule Lab Actions (create/modify/pause/retire rules) ────────────────
     rule_actions = decisions.get("rule_actions", [])
+    if rule_actions and proposal_only:
+        for action in rule_actions:
+            item_id = _next_item_id()
+            if item_id:
+                await mark_decision_item_shadow(item_id, notes="scheduled proposal only")
+            results["shadow"].append(
+                f"rule_{action.get('action', '?')}: "
+                f"{action.get('rule_id', 'new')} (proposal)"
+            )
+        rule_actions = []
     if rule_actions:
         # Collect item_ids for rule_action items
         ra_item_ids = [_next_item_id() for _ in rule_actions]
         try:
             from ai_rule_lab import apply_rule_actions
-            from safety_kernel import is_autopilot_live
-
             # S10-BE-07: pass run_id and item_ids for origin tracking
             lab_results = await apply_rule_actions(
-                rule_actions, author="ai", allow_active=is_autopilot_live(),
+                rule_actions, author="ai", allow_active=False,
                 decision_run_id=run_id, decision_item_ids=ra_item_ids,
             )
             for idx, lr in enumerate(lab_results):
@@ -366,6 +382,16 @@ async def _apply_decisions(decisions: dict, context: dict, *, run_id: str | None
 
     # ── Direct AI Trades ─────────────────────────────────────────────────────
     direct_trades = decisions.get("direct_trades", [])
+    if direct_trades and proposal_only:
+        for trade in direct_trades:
+            item_id = _next_item_id()
+            if item_id:
+                await mark_decision_item_shadow(item_id, notes="scheduled proposal only")
+            results["shadow"].append(
+                f"direct_trade: {trade.get('symbol', '?')} "
+                f"{trade.get('action', '?')} (proposal)"
+            )
+        direct_trades = []
     if direct_trades:
         # Collect item_ids for direct_trade items
         dt_item_ids = [_next_item_id() for _ in direct_trades]
@@ -496,7 +522,13 @@ async def run_full_optimization() -> dict:
             log.warning("Decision ledger recording failed (non-fatal): %s", ledger_exc)
 
         # Step 3: Apply through guardrails
-        results = await _apply_decisions(decisions, context, run_id=run_id, item_ids=item_ids)
+        results = await _apply_decisions(
+            decisions,
+            context,
+            run_id=run_id,
+            item_ids=item_ids,
+            proposal_only=True,
+        )
 
         # Finalize decision run
         if run_id:
@@ -505,17 +537,22 @@ async def run_full_optimization() -> dict:
             except Exception as exc:
                 log.warning("Failed to finalize decision run %s: %s", run_id, exc)
 
-        # Step 4: Evaluate paper rules + auto-promote if ready
+        # Step 4: Evaluate paper rules. Promotion is intentionally NOT
+        # scheduled: readiness evidence produces a proposal for an authorized
+        # operator, never an automatic PAPER -> active transition.
         try:
-            from rule_validation import evaluate_paper_rules, auto_promote_paper_rules
+            from rule_validation import evaluate_paper_rules
+
             eval_results = await evaluate_paper_rules()
-            promoted = await auto_promote_paper_rules()
-            if promoted:
-                for p in promoted:
-                    results["applied"].append(f"rule_promoted: {p['name']} (paper → active)")
-                log.info("Auto-promoted %d paper rules to active", len(promoted))
+            if eval_results:
+                ready_count = sum(1 for item in eval_results if item.get("passed"))
+                log.info(
+                    "Evaluated %d paper rule(s); %d ready for operator review",
+                    len(eval_results),
+                    ready_count,
+                )
         except Exception as e:
-            log.warning("Paper rule evaluation/promotion failed: %s", e)
+            log.warning("Paper rule evaluation failed: %s", e)
 
         _last_optimization = time.time()
         ai_params.last_recompute = _last_optimization

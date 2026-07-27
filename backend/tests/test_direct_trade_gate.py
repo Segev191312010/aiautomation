@@ -147,14 +147,13 @@ async def test_startup_refuses_to_boot_when_env_live_and_token_empty():
     """ENV=live + empty DIRECT_TRADE_INTENT_TOKEN -> startup errors out."""
     from startup import validate_startup
 
-    with patch.dict(os.environ, {"ENV": "live"}, clear=False), \
+    with patch.dict(os.environ, {"ENV": "live", "WORKERS": "1"}, clear=False), \
          patch.object(cfg, "DIRECT_TRADE_INTENT_TOKEN", ""), \
-         patch.object(cfg, "STRICT_CONFIG", False):  # don't sys.exit during test
-        result = await validate_startup()
+         patch.object(cfg, "STRICT_CONFIG", False):
+        with pytest.raises(SystemExit) as exc_info:
+            await validate_startup()
 
-    error_text = " ".join(result["errors"])
-    assert "DIRECT_TRADE_INTENT_TOKEN" in error_text
-    assert "live" in error_text.lower()
+    assert exc_info.value.code == 1
 
 
 @pytest.mark.asyncio

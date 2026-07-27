@@ -139,6 +139,23 @@ async def get_data_health_route():
 
 @router.post("/api/ibkr/connect")
 async def connect_ibkr(_user=Depends(get_current_user)):
+    if cfg.SIM_MODE:
+        raise HTTPException(
+            409,
+            "IBKR connection is disabled while SIM_MODE=true. "
+            "Restart with an approved broker-capable configuration.",
+        )
+    from startup import real_money_broker_configured
+
+    if real_money_broker_configured(
+        is_paper=cfg.IS_PAPER,
+        sim_mode=cfg.SIM_MODE,
+        ibkr_port=cfg.IBKR_PORT,
+    ):
+        raise HTTPException(
+            409,
+            "Real-money IBKR connection is disabled by the Stage 9A release fence.",
+        )
     ok = await ibkr.connect()
     if not ok:
         raise HTTPException(502, "Could not connect to IBKR. Is IB Gateway running?")

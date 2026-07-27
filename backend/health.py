@@ -15,7 +15,9 @@ import time
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from auth import get_current_user
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/health", tags=["health"])
@@ -139,7 +141,7 @@ async def readiness():
     return JSONResponse(payload, status_code=status_code)
 
 
-@router.get("/detailed")
+@router.get("/detailed", dependencies=[Depends(get_current_user)])
 async def detailed():
     """
     Extended health report.
@@ -188,7 +190,7 @@ async def detailed():
     return JSONResponse(base, status_code=status_code)
 
 
-@router.get("/bot")
+@router.get("/bot", dependencies=[Depends(get_current_user)])
 async def bot_health():
     """Bot/autopilot health report for operator visibility and alerting."""
     from config import cfg

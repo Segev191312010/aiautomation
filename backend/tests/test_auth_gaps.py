@@ -101,7 +101,25 @@ UNAUTHED_ROUTES = [
     ("GET", "/api/rules/templates", "rule templates list"),
     ("POST", "/api/rules/import", "rule import (bulk create)"),
     ("GET", "/api/events/log", "event log (leaks trade decisions)"),
+    ("GET", "/api/health/detailed", "health detail (leaks PID + IBKR port)"),
+    ("GET", "/api/health/bot", "bot health (leaks autopilot internals)"),
 ]
+
+
+# Liveness/readiness probes MUST stay unauthenticated for load balancers.
+PROBE_ROUTES_MUST_STAY_OPEN = [
+    ("GET", "/api/health", "liveness probe"),
+    ("GET", "/api/health/ready", "readiness probe"),
+]
+
+
+@pytest.mark.parametrize("method,path,description", PROBE_ROUTES_MUST_STAY_OPEN)
+def test_probe_routes_remain_unauthenticated(method, path, description, client):
+    """Liveness/readiness probes must respond without auth (load-balancer requirement)."""
+    resp = client.get(path)
+    assert resp.status_code != 401, (
+        f"{description}: {method} {path} returned 401 — probes must stay open"
+    )
 
 
 @pytest.mark.parametrize("method,path,description", UNAUTHED_ROUTES)
@@ -161,6 +179,8 @@ AUTHED_ROUTES_THAT_SHOULD_WORK = [
     ("GET", "/api/advisor/report", "advisor report (authed)"),
     ("GET", "/api/rules/templates", "rule templates list (authed)"),
     ("GET", "/api/events/log", "event log (authed)"),
+    ("GET", "/api/health/detailed", "health detail (authed)"),
+    ("GET", "/api/health/bot", "bot health (authed)"),
 ]
 
 

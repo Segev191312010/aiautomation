@@ -72,3 +72,41 @@ async def test_rule_lab_pause_updates_existing_rule_and_versions(anyio_backend):
     versions = await get_rule_versions(rule.id)
     assert versions
     assert versions[0]["status"] == "paused"
+
+
+@pytest.mark.anyio
+async def test_rule_lab_cannot_modify_active_rule_without_active_authority(anyio_backend):
+    await init_db()
+    rule = Rule(
+        name="Human Approved Rule",
+        symbol="AAPL",
+        enabled=True,
+        status="active",
+        conditions=[],
+        logic="AND",
+        action={"type": "BUY", "asset_type": "STK", "quantity": 3, "order_type": "MKT"},
+        cooldown_minutes=15,
+    )
+    from database import save_rule
+
+    await save_rule(rule)
+    results = await apply_rule_actions(
+        [
+            {
+                "action": "update",
+                "rule_id": rule.id,
+                "rule_payload": {"name": "AI Rewritten Rule"},
+                "reason": "model proposal",
+                "confidence": 0.9,
+            }
+        ],
+        author="ai",
+        allow_active=False,
+    )
+
+    assert results[0]["ok"] is False
+    assert "allow_active=False" in results[0]["reason"]
+    unchanged = await get_rule(rule.id)
+    assert unchanged is not None
+    assert unchanged.name == "Human Approved Rule"
+    assert unchanged.status == "active"
