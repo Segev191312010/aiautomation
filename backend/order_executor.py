@@ -261,7 +261,7 @@ async def place_order(
 
     # Cross-host execution lease / fencing token (Stage 9B ADR 0006).
     # All broker mutations must prove this process still owns the lease.
-    if not validate_fencing_token(get_execution_fencing_token()):
+    if not await validate_fencing_token(get_execution_fencing_token()):
         log.error("Execution lease token invalid or expired — refusing order placement")
         return None
 
@@ -332,7 +332,7 @@ async def place_order(
 
     # Re-validate lease right before broker mutation. A quarantine or
     # ownership loss between pre-flight and submission must block the call.
-    if not validate_fencing_token(get_execution_fencing_token()):
+    if not await validate_fencing_token(get_execution_fencing_token()):
         log.error("Execution lease lost before broker submission — marking trade ERROR")
         trade_rec.status = "ERROR"  # type: ignore[assignment]
         await save_trade(trade_rec)
@@ -483,7 +483,7 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
 
 async def cancel_order(order_id: int) -> bool:
     """Cancel an open order by IBKR order ID."""
-    if not validate_fencing_token(get_execution_fencing_token()):
+    if not await validate_fencing_token(get_execution_fencing_token()):
         log.error("Execution lease invalid — refusing cancel_order(%d)", order_id)
         return False
     if not ibkr.is_connected():
