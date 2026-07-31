@@ -59,6 +59,22 @@ def _isolated_db(tmp_path, monkeypatch):
     return db_path
 
 
+@pytest.fixture
+async def _with_lease(_isolated_db):
+    """Acquire a valid execution lease so the fenced reaper can run."""
+    import startup
+    from db.execution_lease import acquire_execution_lease, release_execution_lease
+
+    lease = await acquire_execution_lease(owner_id="idempotency-test")
+    prev = startup._execution_lease
+    startup._execution_lease = lease
+    try:
+        yield lease
+    finally:
+        startup._execution_lease = prev
+        await release_execution_lease(lease.fencing_token)
+
+
 def _pending_orphan(*, trade_id: str, timestamp_iso: str, order_id: int | None = None) -> Trade:
     """Build a Trade row exactly as ``place_order`` does at the PENDING save.
 
@@ -95,7 +111,7 @@ def _iso_minutes_ago(minutes: float) -> str:
 
 
 @pytest.mark.anyio
-async def test_current_unsafe_reaper_terminalizes_ambiguous_order(_isolated_db, anyio_backend):
+async def test_current_unsafe_reaper_terminalizes_ambiguous_order(_isolated_db, _with_lease, anyio_backend):
     """Characterize the LIVE-blocking behavior until UNKNOWN quarantine lands.
 
     ``order_id=None`` cannot distinguish "never submitted" from "accepted but
@@ -124,7 +140,7 @@ async def test_current_unsafe_reaper_terminalizes_ambiguous_order(_isolated_db, 
 
 
 @pytest.mark.anyio
-async def test_reaper_emits_grepable_orphan_token(_isolated_db, anyio_backend, caplog):
+async def test_reaper_emits_grepable_orphan_token(_isolated_db, _with_lease, anyio_backend, caplog):
     """Operators rely on the ``orphan_pending_reaped`` WARN token to find
     these crashes — pin the named outcome alongside the state transition.
     """
@@ -147,7 +163,7 @@ async def test_reaper_emits_grepable_orphan_token(_isolated_db, anyio_backend, c
 
 
 @pytest.mark.anyio
-async def test_reaper_does_not_touch_pending_with_order_id(_isolated_db, anyio_backend):
+async def test_reaper_does_not_touch_pending_with_order_id(_isolated_db, _with_lease, anyio_backend):
     """Boundary of the recovery: a PENDING row that *did* get an order_id is
     past the crash window — ``reconcile_pending_orders`` owns it, the reaper
     must leave it alone so we don't ERROR a live in-flight order.

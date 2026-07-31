@@ -37,6 +37,22 @@ def _isolated_db(tmp_path, monkeypatch):
     return db_path
 
 
+@pytest.fixture
+async def _with_lease(_isolated_db):
+    """Acquire a valid execution lease so the fenced reaper can run."""
+    import startup
+    from db.execution_lease import acquire_execution_lease, release_execution_lease
+
+    lease = await acquire_execution_lease(owner_id="reaper-test")
+    prev = startup._execution_lease
+    startup._execution_lease = lease
+    try:
+        yield lease
+    finally:
+        startup._execution_lease = prev
+        await release_execution_lease(lease.fencing_token)
+
+
 def _make_trade(*, status: str, order_id: int | None, timestamp_iso: str) -> Trade:
     return Trade(
         id=f"t-{timestamp_iso}-{order_id}",
@@ -65,6 +81,7 @@ def _make_trade(*, status: str, order_id: int | None, timestamp_iso: str) -> Tra
 @pytest.mark.anyio
 async def test_current_unsafe_reaper_marks_ambiguous_pending_as_error(
     _isolated_db,
+    _with_lease,
     anyio_backend,
     caplog,
 ):
@@ -99,7 +116,7 @@ async def test_current_unsafe_reaper_marks_ambiguous_pending_as_error(
 
 
 @pytest.mark.anyio
-async def test_reaper_leaves_pending_with_order_id_alone(_isolated_db, anyio_backend):
+async def test_reaper_leaves_pending_with_order_id_alone(_isolated_db, _with_lease, anyio_backend):
     from order_executor import reap_orphan_pending_trades
     from database import get_trades
 
@@ -123,7 +140,7 @@ async def test_reaper_leaves_pending_with_order_id_alone(_isolated_db, anyio_bac
 
 
 @pytest.mark.anyio
-async def test_reaper_skips_young_orphans(_isolated_db, anyio_backend):
+async def test_reaper_skips_young_orphans(_isolated_db, _with_lease, anyio_backend):
     from order_executor import reap_orphan_pending_trades
     from database import get_trades
 
@@ -265,7 +282,7 @@ def test_now_ts_returns_unix_seconds():
 
 
 @pytest.mark.anyio
-async def test_reaper_handles_tz_naive_timestamp(_isolated_db, anyio_backend):
+async def test_reaper_handles_tz_naive_timestamp(_isolated_db, _with_lease, anyio_backend):
     """A row with tz-naive timestamp must still be reaped (not crash on aware/naive cmp).
 
     The reaper defensively patches naive -> UTC at order_executor.py:499-500.
@@ -293,7 +310,7 @@ async def test_reaper_handles_tz_naive_timestamp(_isolated_db, anyio_backend):
 
 
 @pytest.mark.anyio
-async def test_reaper_defensively_reaps_malformed_timestamp(_isolated_db, anyio_backend):
+async def test_reaper_defensively_reaps_malformed_timestamp(_isolated_db, _with_lease, anyio_backend):
     """A row with garbage timestamp gets reaped (defensive fail-safe)."""
     from order_executor import reap_orphan_pending_trades
     from database import get_trades

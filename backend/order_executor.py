@@ -522,6 +522,11 @@ async def reap_orphan_pending_trades(stale_after_seconds: int = 600) -> int:
     Time comparison uses the single ``_now_utc()`` helper to avoid any
     naive/aware mismatch with ISO timestamps stored in the trade row.
     """
+    token = get_execution_fencing_token()
+    if not await validate_fencing_token(token):
+        log.error("orphan reaper: execution lease invalid — skipping orphan sweep")
+        return 0
+
     from database import get_pending_trades_all_users
 
     threshold = _now_utc() - timedelta(seconds=stale_after_seconds)

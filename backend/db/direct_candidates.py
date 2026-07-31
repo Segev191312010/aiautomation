@@ -189,7 +189,7 @@ async def purge_expired_candidates(*, user_id: str | None = None) -> int:
         stale_cutoff = (now - timedelta(days=7)).isoformat()
         await db.execute(
             "DELETE FROM direct_candidates "
-            "WHERE status IN ('applied','failed','expired') AND queued_at < ?",
+            "WHERE status IN ('applied','failed','expired','declined_by_ai') AND queued_at < ?",
             (stale_cutoff,),
         )
         await db.commit()

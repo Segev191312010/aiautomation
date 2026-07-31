@@ -191,3 +191,45 @@ async def test_convert_mkt_to_limit_refuses_stale_fencing_token(isolated_db):
             startup._execution_lease = prev_lease
     finally:
         await release_execution_lease(lease.fencing_token)
+
+
+# ============================================================================
+# Reconciler Fencing Tests (SF1b closeout)
+# ============================================================================
+
+
+@pytest.mark.anyio
+async def test_reconcile_pending_orders_refuses_without_lease(isolated_db):
+    """reconcile_pending_orders returns early when no lease is held."""
+    import startup
+    from order_executor import reconcile_pending_orders
+
+    prev_lease = startup._execution_lease
+    startup._execution_lease = None
+    try:
+        with patch("order_executor.ibkr.is_connected", return_value=True), \
+             patch("order_executor.ibkr.ib.openTrades") as mock_open_trades:
+            await reconcile_pending_orders()
+            mock_open_trades.assert_not_called()
+    finally:
+        startup._execution_lease = prev_lease
+
+
+@pytest.mark.anyio
+async def test_reconcile_pending_orders_refuses_stale_token(isolated_db):
+    """reconcile_pending_orders returns early with stale (released) token."""
+    import startup
+    from order_executor import reconcile_pending_orders
+
+    lease = await acquire_execution_lease(owner_id="real-owner")
+    await release_execution_lease(lease.fencing_token)
+
+    prev_lease = startup._execution_lease
+    startup._execution_lease = lease  # stale — already released
+    try:
+        with patch("order_executor.ibkr.is_connected", return_value=True), \
+             patch("order_executor.ibkr.ib.openTrades") as mock_open_trades:
+            await reconcile_pending_orders()
+            mock_open_trades.assert_not_called()
+    finally:
+        startup._execution_lease = prev_lease
