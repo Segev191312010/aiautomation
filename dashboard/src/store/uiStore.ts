@@ -38,7 +38,7 @@ export const useUIStore = create<UIState>((set) => ({
     } catch {
       /* SSR / test env */
     }
-    return 'system'
+    return 'dark'
   })(),
 
   setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
