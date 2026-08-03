@@ -24,8 +24,8 @@
   --warning: #c7771c;
   --shadow-color: rgba(17, 24, 39, 0.14);
   --grid-color: rgba(17, 24, 39, 0.06);
-  --radius-panel: 28px;
-  --radius-card: 24px;
+  --radius-panel: 12px;
+  --radius-card: 10px;
   --radius-chip: 999px;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -38,29 +38,30 @@
   color-scheme: light;
 }
 
+/* Dark trading-desk theme — the deliberate default. */
 :root[data-theme="dark"] {
-  --bg-primary: #0b1119;
-  --bg-secondary: #111926;
-  --bg-card: rgba(14, 21, 33, 0.72);
-  --bg-hover: rgba(24, 34, 49, 0.72);
-  --bg-input: rgba(11, 17, 25, 0.82);
+  --bg-primary: #0a0e14;
+  --bg-secondary: #0f141c;
+  --bg-card: rgba(20, 27, 38, 0.72);
+  --bg-hover: rgba(28, 38, 54, 0.72);
+  --bg-input: rgba(15, 20, 28, 0.82);
   --bg-sidebar: rgba(6, 10, 16, 0.96);
   --bg-header: rgba(8, 12, 19, 0.84);
-  --text-primary: #f5efe6;
-  --text-secondary: #c2b39e;
-  --text-muted: #8c857a;
-  --border: rgba(245, 158, 11, 0.12);
+  --text-primary: #e6edf3;
+  --text-secondary: #8b96a8;
+  --text-muted: #5c6675;
+  --border: rgba(255, 255, 255, 0.08);
   --accent: #f59e0b;
   --accent-hover: #f97316;
-  --accent-soft: rgba(245, 158, 11, 0.12);
+  --accent-soft: rgba(245, 158, 11, 0.14);
   --accent-strong: #facc15;
   --success: #34d399;
   --danger: #f87171;
   --warning: #fbbf24;
-  --shadow-color: rgba(0, 0, 0, 0.35);
-  --grid-color: rgba(255, 255, 255, 0.05);
-  --radius-panel: 28px;
-  --radius-card: 24px;
+  --shadow-color: rgba(0, 0, 0, 0.5);
+  --grid-color: rgba(255, 255, 255, 0.04);
+  --radius-panel: 12px;
+  --radius-card: 10px;
   --radius-chip: 999px;
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -90,14 +91,13 @@ body,
   margin: 0;
   padding: 0;
   background:
-    radial-gradient(circle at top left, rgba(245, 158, 11, 0.18), transparent 33%),
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.12), transparent 29%),
+    radial-gradient(circle at top left, var(--accent-soft), transparent 33%),
     linear-gradient(180deg, var(--bg-primary), var(--bg-secondary));
   color: var(--text-primary);
 }
 
 body {
-  font-family: "Avenir Next", "Segoe UI Variable Text", "Trebuchet MS", sans-serif;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   position: relative;
@@ -130,8 +130,9 @@ select {
 }
 
 .display-font {
-  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-  letter-spacing: -0.04em;
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .font-mono {
@@ -182,7 +183,7 @@ canvas {
 .glass-elevated {
   background: var(--bg-hover);
   border: 1px solid var(--border);
-  border-radius: 24px;
+  border-radius: var(--radius-card);
   backdrop-filter: blur(18px);
   box-shadow: 0 28px 60px -32px var(--shadow-color);
 }
