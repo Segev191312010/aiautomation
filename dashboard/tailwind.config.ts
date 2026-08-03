@@ -8,7 +8,7 @@ const config: Config = {
     extend: {
       fontFamily: {
         mono: ['"JetBrains Mono"', '"Fira Code"', '"Cascadia Code"', 'ui-monospace', 'monospace'],
-        sans: ['"Space Grotesk"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        sans: ['"Inter"', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
       },
       colors: {
         // ── CSS-variable-backed semantic tokens ──────────────────────────
@@ -64,15 +64,16 @@ const config: Config = {
         },
       },
       boxShadow: {
-        'terminal':    '0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02)',
-        'card':        '0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02)',
-        'glass':       '0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02)',
-        'card-lg':     '0 4px 12px rgba(0,0,0,0.06)',
-        'glass-lg':    '0 4px 12px rgba(0,0,0,0.06)',
-        'dropdown':    '0 8px 24px rgba(0,0,0,0.08)',
-        'glow-green':  '0 0 20px rgba(22,163,74,0.1)',
-        'glow-red':    '0 0 20px rgba(220,38,38,0.1)',
-        'glow-blue':   '0 0 20px rgba(79,70,229,0.1)',
+        'terminal':    '0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.1)',
+        'card':        '0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.1)',
+        'glass':       '0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.1)',
+        'card-lg':     '0 4px 16px rgba(0,0,0,0.3)',
+        'glass-lg':    '0 4px 16px rgba(0,0,0,0.3)',
+        'dropdown':    '0 8px 28px rgba(0,0,0,0.4)',
+        'glow-green':  '0 0 20px rgba(52,211,153,0.15)',
+        'glow-red':    '0 0 20px rgba(248,113,113,0.15)',
+        'glow-blue':   '0 0 20px rgba(79,70,229,0.15)',
+        'glow-accent': '0 0 20px rgba(245,158,11,0.15)',
       },
       borderRadius: {
         'xl':  '0.75rem',
@@ -89,14 +90,14 @@ const config: Config = {
       },
       keyframes: {
         tickUp: {
-          '0%':   { color: '#1A1A2E' },
-          '30%':  { color: '#16A34A' },
-          '100%': { color: '#1A1A2E' },
+          '0%':   { color: 'var(--text-primary)' },
+          '30%':  { color: 'var(--success)' },
+          '100%': { color: 'var(--text-primary)' },
         },
         tickDown: {
-          '0%':   { color: '#1A1A2E' },
-          '30%':  { color: '#DC2626' },
-          '100%': { color: '#1A1A2E' },
+          '0%':   { color: 'var(--text-primary)' },
+          '30%':  { color: 'var(--danger)' },
+          '100%': { color: 'var(--text-primary)' },
         },
         shimmer: {
           '0%':   { backgroundPosition: '-200% 0' },
