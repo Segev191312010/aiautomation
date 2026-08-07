@@ -248,6 +248,9 @@ class AIStatusResponse(BaseModel):
     last_optimization_at: Optional[str] = None
     optimizer_running: bool = False
     bot_health: Optional[BotHealthResponse] = None
+    # Phase 3: AI telemetry
+    ai_health_state: str = "disabled"  # disabled, healthy, degraded, delayed, blocked, stale, proposal_available
+    ai_telemetry: Optional[dict] = None  # AITelemetryCounters.to_dict()
 
 
 class AutopilotConfigResponse(BaseModel):

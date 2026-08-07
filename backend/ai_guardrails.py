@@ -790,6 +790,17 @@ async def get_ai_status_dict() -> dict:
         log.debug("Bot health fetch failed: %s", exc)
         bot_health = None
 
+    # Phase 3: AI telemetry
+    ai_health_state = "disabled"
+    ai_telemetry = None
+    try:
+        from ai_telemetry import get_health_status
+        health = get_health_status()
+        ai_health_state = health.get("health_state", "disabled")
+        ai_telemetry = health.get("overall")
+    except Exception as exc:
+        log.debug("AI telemetry fetch failed: %s", exc)
+
     return {
         "mode": mode,
         "autonomy_active": mode in ("PAPER", "LIVE") and not config.emergency_stop,
@@ -808,4 +819,6 @@ async def get_ai_status_dict() -> dict:
         "last_optimization_at": None,
         "optimizer_running": False,
         "bot_health": bot_health,
+        "ai_health_state": ai_health_state,
+        "ai_telemetry": ai_telemetry,
     }

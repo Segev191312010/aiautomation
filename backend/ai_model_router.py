@@ -106,9 +106,20 @@ async def ai_call(
                     model_id, primary,
                 )
 
-            # Record success for circuit breaker
+            # Record success for circuit breaker + telemetry
             from safety_kernel import record_ai_success
             record_ai_success(source)
+
+            from ai_telemetry import record_invocation
+            record_invocation(
+                source,
+                success=True,
+                fallback_used=is_fallback,
+                model_used=model_id,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=elapsed_ms,
+            )
 
             return AIResult(
                 ok=True,
@@ -128,10 +139,14 @@ async def ai_call(
                 " — trying next fallback" if idx < len(chain) - 1 else " — all models exhausted",
             )
 
-    # All models failed — record failure for circuit breaker
+    # All models failed — record failure for circuit breaker + telemetry
     from safety_kernel import record_ai_failure, trip_circuit_breaker
     tripped = record_ai_failure(source)
+
+    from ai_telemetry import record_invocation, record_circuit_breaker_trip
+    record_invocation(source, success=False, error=last_error)
     if tripped:
+        record_circuit_breaker_trip(source)
         try:
             await trip_circuit_breaker(source)
         except Exception as exc:
