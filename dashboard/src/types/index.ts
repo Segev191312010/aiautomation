@@ -318,6 +318,7 @@ export interface SystemStatus {
   live_trading_enabled?: boolean
   autopilot_emergency_stop?: boolean
   autopilot_daily_loss_locked?: boolean
+  offline_fallback?: boolean
   features?: {
     market_diagnostics: boolean
     autopilot_console?: boolean
@@ -457,6 +458,8 @@ export type WsEventType =
   | 'account_update'
   | 'order_filled'
   | 'order_modified'
+  | 'screener_scan'
+  | 'screener_quotes'
 
 export interface WsEvent {
   type: WsEventType

@@ -4,7 +4,7 @@
  */
 import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
-import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore } from '@/store'
+import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore, useScreenerStore } from '@/store'
 import { fetchTrades, fetchPositions, fetchAccountSummary } from '@/services/api'
 import type { AlertFiredEvent, AnyAccount, Position, SimPosition, WsEvent } from '@/types'
 import { useToast } from '@/components/ui/ToastProvider'
@@ -262,8 +262,22 @@ export function useWebSocket(): void {
       }
     })
 
+    // ── Screener Pipeline (Phase 2) ───────────────────────────────────────
+    const unScreenerScan = wsService.subscribe('screener_scan', (_ev: WsEvent) => {
+      useScreenerStore.getState().loadPipelineSnapshot()
+    })
+
+    const unScreenerQuotes = wsService.subscribe('screener_quotes', (ev: WsEvent) => {
+      const data = (ev.data ?? ev) as Record<string, unknown>
+      const quotes = data.quotes as Array<{ symbol: string; price: number; change_pct?: number; volume?: number }> | undefined
+      if (quotes && quotes.length > 0) {
+        useScreenerStore.getState().applyQuoteUpdate(quotes)
+      }
+    })
+
     return () => {
       unIBKR(); unBot(); unFill(); unSignal(); unReplay(); unReplayDone(); unBar(); unPositions(); unOrderModified(); unAlertFired()
+      unScreenerScan(); unScreenerQuotes()
       wsService.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

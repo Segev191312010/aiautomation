@@ -6,6 +6,11 @@ import type {
   ScreenerPreset,
   UniverseInfo,
 } from '@/types'
+import type {
+  ScreenerPipelineCandidate,
+  ScreenerPipelineStatus,
+  ScreenerPipelineSnapshot,
+} from '@/services/api/screener'
 import * as api from '@/services/api'
 
 interface ScreenerState {
@@ -25,6 +30,14 @@ interface ScreenerState {
   elapsedMs:        number
   totalSymbols:     number
 
+  // ── Unified Pipeline (Phase 2) ──────────────────────────────────────────
+  pipelineStatus:    ScreenerPipelineStatus | null
+  pipelineCandidates: ScreenerPipelineCandidate[]
+  pipelineLoading:   boolean
+  pipelineError:     string | null
+  autoRefresh:       boolean
+  refreshInterval:   number  // seconds
+
   addFilter:        () => void
   removeFilter:     (index: number) => void
   updateFilter:     (index: number, filter: ScanFilter) => void
@@ -42,6 +55,14 @@ interface ScreenerState {
 
   runScan:          () => Promise<void>
   enrichResults:    () => Promise<void>
+
+  // ── Pipeline actions ────────────────────────────────────────────────────
+  loadPipelineSnapshot:  () => Promise<void>
+  loadPipelineStatus:    () => Promise<void>
+  triggerPipelineScan:   () => Promise<void>
+  setAutoRefresh:        (enabled: boolean) => void
+  setRefreshInterval:    (seconds: number) => void
+  applyQuoteUpdate:      (quotes: Array<{ symbol: string; price: number; change_pct?: number; volume?: number }>) => void
 }
 
 function makeDefaultFilter(): ScanFilter {
@@ -70,6 +91,14 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   presetsLoaded:    false,
   elapsedMs:        0,
   totalSymbols:     0,
+
+  // Pipeline defaults
+  pipelineStatus:     null,
+  pipelineCandidates: [],
+  pipelineLoading:    false,
+  pipelineError:      null,
+  autoRefresh:        true,
+  refreshInterval:    60,
 
   addFilter: () =>
     set((s) => ({ filters: [...s.filters, makeDefaultFilter()] })),
@@ -172,5 +201,68 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
     } finally {
       set({ enriching: false })
     }
+  },
+
+  // ── Pipeline actions ────────────────────────────────────────────────────
+
+  loadPipelineSnapshot: async () => {
+    set({ pipelineLoading: true, pipelineError: null })
+    try {
+      const snap = await api.fetchPipelineSnapshot()
+      set({
+        pipelineCandidates: snap.candidates,
+        pipelineLoading: false,
+      })
+    } catch (err) {
+      set({
+        pipelineError: err instanceof Error ? err.message : 'Failed to load screener data',
+        pipelineLoading: false,
+      })
+    }
+  },
+
+  loadPipelineStatus: async () => {
+    try {
+      const status = await api.fetchPipelineStatus()
+      set({ pipelineStatus: status })
+    } catch {
+      // Non-critical — status will show as disconnected
+    }
+  },
+
+  triggerPipelineScan: async () => {
+    set({ pipelineLoading: true, pipelineError: null })
+    try {
+      const snap = await api.triggerPipelineScan()
+      set({
+        pipelineCandidates: snap.candidates,
+        pipelineLoading: false,
+      })
+    } catch (err) {
+      set({
+        pipelineError: err instanceof Error ? err.message : 'Scan failed',
+        pipelineLoading: false,
+      })
+    }
+  },
+
+  setAutoRefresh: (enabled) => set({ autoRefresh: enabled }),
+
+  setRefreshInterval: (seconds) => set({ refreshInterval: seconds }),
+
+  applyQuoteUpdate: (quotes) => {
+    set((s) => {
+      const updated = s.pipelineCandidates.map((c) => {
+        const q = quotes.find((q) => q.symbol === c.symbol)
+        if (!q) return c
+        return {
+          ...c,
+          price: q.price,
+          change_pct: q.change_pct ?? c.change_pct,
+          volume: q.volume ?? c.volume,
+        }
+      })
+      return { pipelineCandidates: updated }
+    })
   },
 }))

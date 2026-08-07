@@ -433,6 +433,57 @@ class ScreenerPreset(BaseModel):
     created_at: str = ""
 
 
+# ── Unified Screener Pipeline models (Phase 2) ──────────────────────────────
+
+class ScreenerCandidate(BaseModel):
+    """Canonical screener result — single source of truth for all scan paths."""
+    symbol: str
+    name: str = ""
+    exchange: str = ""
+    con_id: int = 0
+    price: float = 0.0
+    change_pct: float = 0.0
+    volume: int = 0
+    rank: int = 0
+    source: Literal["ibkr", "yfinance", "fallback"] = "yfinance"
+    sector: str | None = None
+    market_cap: float | None = None
+    indicators: dict[str, float] = Field(default_factory=dict)
+    screener_score: float = 0.0
+    setup: str = "mixed"
+    relative_volume: float = 0.0
+    momentum_20d: float = 0.0
+    trend_strength: float = 0.0
+    notes: list[str] = Field(default_factory=list)
+
+
+class ScreenerSnapshot(BaseModel):
+    """Persisted scan snapshot with metadata for freshness tracking."""
+    scan_id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
+    source: Literal["ibkr", "yfinance", "mixed"] = "mixed"
+    scan_name: str = ""
+    candidates: list[ScreenerCandidate] = Field(default_factory=list)
+    total_symbols: int = 0
+    skipped_symbols: list[str] = Field(default_factory=list)
+    elapsed_ms: int = 0
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    stale_at: str = ""  # ISO timestamp when this snapshot should be considered stale
+    errors: list[str] = Field(default_factory=list)
+
+
+class ScreenerStatusResponse(BaseModel):
+    """Live status of the screener pipeline for the dashboard."""
+    connected: bool = False
+    last_scan_at: str | None = None
+    last_scan_source: str = ""
+    last_scan_duration_ms: int = 0
+    candidate_count: int = 0
+    top_symbols: list[str] = Field(default_factory=list)
+    data_age_seconds: float = 0.0
+    stale: bool = True
+    errors: list[str] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Backtesting models
 # ---------------------------------------------------------------------------

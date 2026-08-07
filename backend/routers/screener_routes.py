@@ -180,3 +180,47 @@ async def screener_export_csv(body: ScanRequest):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=screener_results.csv"},
     )
+
+
+# ── Unified Screener Pipeline (Phase 2) ──────────────────────────────────────
+
+try:
+    from screener_pipeline import (
+        get_latest_snapshot,
+        get_status,
+        run_scan_now,
+        start as pipeline_start,
+        stop as pipeline_stop,
+    )
+    _PIPELINE_AVAILABLE = True
+except ImportError:
+    _PIPELINE_AVAILABLE = False
+
+
+@router.get("/pipeline/status")
+async def screener_pipeline_status():
+    """Get live status of the unified screener pipeline."""
+    if not _PIPELINE_AVAILABLE:
+        raise HTTPException(503, "Screener pipeline module not available")
+    status = await get_status()
+    return status.model_dump()
+
+
+@router.get("/pipeline/snapshot")
+async def screener_pipeline_snapshot():
+    """Get the latest scan snapshot (instant, no blocking)."""
+    if not _PIPELINE_AVAILABLE:
+        raise HTTPException(503, "Screener pipeline module not available")
+    snap = await get_latest_snapshot()
+    if snap is None:
+        raise HTTPException(503, "No scan snapshot available yet — pipeline may not be running")
+    return snap.model_dump()
+
+
+@router.post("/pipeline/scan-now")
+async def screener_pipeline_scan_now():
+    """Force an immediate scan and return the results."""
+    if not _PIPELINE_AVAILABLE:
+        raise HTTPException(503, "Screener pipeline module not available")
+    snap = await run_scan_now()
+    return snap.model_dump()

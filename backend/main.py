@@ -101,6 +101,7 @@ from data_health import DataFreshnessMonitor
 from diagnostics_api import create_diagnostics_router
 from diagnostics_service import DiagnosticsService
 from middleware import RateLimitMiddleware, SecurityHeadersMiddleware
+from metrics import router as metrics_router
 from screener import (
     run_scan, list_universes, validate_timeframe, enrich_symbols,
 )
@@ -166,11 +167,81 @@ initialize_runtime_state(ws_manager=manager, data_health=_data_health, diag_serv
 # Lifespan
 # ---------------------------------------------------------------------------
 
+async def _start_broker_runtime() -> None:
+    """Start broker-facing recovery only when simulation is disabled."""
+    if cfg.SIM_MODE:
+        log.info("SIM_MODE=true — skipping all IBKR startup activity")
+        return
+    from startup import real_money_broker_configured
+
+    if real_money_broker_configured(
+        is_paper=cfg.IS_PAPER,
+        sim_mode=cfg.SIM_MODE,
+        ibkr_port=cfg.IBKR_PORT,
+    ):
+        raise RuntimeError(
+            "Stage 9A release fence blocks real-money IBKR connection"
+        )
+
+    connected = await ibkr.connect()
+    if connected:
+        log.info("IBKR connected on startup")
+        await ibkr.start_reconnect_loop()
+        # R08 remains a LIVE blocker: an outcome can be ambiguous after
+        # broker acceptance but before the local order id is persisted.
+        try:
+            from order_executor import reap_orphan_pending_trades
+            await reap_orphan_pending_trades()
+        except Exception as exc:
+            log.error("orphan reaper failed on startup: %s", exc)
+        from order_executor import reconcile_pending_orders
+        asyncio.create_task(reconcile_pending_orders())
+        return
+
+    log.warning("IBKR not connected  --  auto-reconnect running in background")
+    await ibkr.start_reconnect_loop()
+    try:
+        from order_executor import reap_orphan_pending_trades
+        await reap_orphan_pending_trades()
+    except Exception as exc:
+        log.error("orphan reaper failed on startup: %s", exc)
+
+
+async def _stop_broker_runtime() -> None:
+    """Avoid touching the IBKR client in the hard simulation profile."""
+    if cfg.SIM_MODE:
+        return
+    await ibkr.disconnect()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # â"€â"€ Startup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
-    from startup import validate_startup
-    await validate_startup()
+    """Own the singleton execution lifecycle for the whole process.
+
+    This lock is same-host/shared-volume containment. ADR 0006 still requires
+    a durable cross-host lease and fencing token before LIVE approval.
+    """
+    from startup import (
+        acquire_execution_process_lock,
+        release_execution_process_lock,
+        validate_startup,
+    )
+
+    execution_lock_path = acquire_execution_process_lock(db_path=cfg.DB_PATH)
+    try:
+        await validate_startup()
+        async with _application_lifespan(app):
+            yield
+    finally:
+        release_execution_process_lock(
+            db_path=cfg.DB_PATH,
+            lock_path=execution_lock_path,
+        )
+
+
+@asynccontextmanager
+async def _application_lifespan(app: FastAPI):
+    # â"€â"€ Startup â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     await init_db()
     # Purge stale direct AI candidates left over from a previous process.
     # Always log the count (even when zero) so the paper-soak runbook can use
@@ -211,36 +282,21 @@ async def lifespan(app: FastAPI):
         await order_lifecycle.register_entry_position_from_fill(trade, rule_name=trade.rule_name)
     on_fill(lambda t: asyncio.create_task(_on_trade_fill_register(t)))
 
-    # Attempt IBKR connection (non-blocking)
-    connected = await ibkr.connect()
-    if connected:
-        log.info("IBKR connected on startup")
-        await ibkr.start_reconnect_loop()
-        # Orphan reaper runs AFTER ibkr.connect() so a row that's PENDING
-        # purely because IBKR was disconnected last cycle (not because of a
-        # crash mid-place_order) can be reconciled against the broker first
-        # by reconcile_pending_orders. The reaper only sweeps the residual
-        # set — PENDING rows with no order_id, older than 10 minutes.
-        try:
-            from order_executor import reap_orphan_pending_trades
-            await reap_orphan_pending_trades()
-        except Exception as exc:
-            log.error("orphan reaper failed on startup: %s", exc)
-        from order_executor import reconcile_pending_orders
-        asyncio.create_task(reconcile_pending_orders())
-    else:
-        log.warning("IBKR not connected  --  auto-reconnect running in background")
-        await ibkr.start_reconnect_loop()
-        # IBKR down at boot — still reap orphans so the DB doesn't drift,
-        # but they can only be the genuine no-order_id kind anyway.
-        try:
-            from order_executor import reap_orphan_pending_trades
-            await reap_orphan_pending_trades()
-        except Exception as exc:
-            log.error("orphan reaper failed on startup: %s", exc)
+    # SIM_MODE is a hard broker-disconnect boundary. It must not connect,
+    # reconcile, cancel, replace, or start an IBKR reconnect loop.
+    await _start_broker_runtime()
 
     await _start_market_heartbeat()
     await alert_engine.start()
+
+    # Start unified screener pipeline (Phase 2 — real-time screener)
+    try:
+        from screener_pipeline import set_broadcast as set_screener_broadcast, start as start_screener
+        set_screener_broadcast(_broadcast)
+        await start_screener()
+        log.info("Screener pipeline started")
+    except Exception as e:
+        log.warning("Screener pipeline failed to start: %s", e)
 
     # Sync autopilot mode from DB → cfg on startup (C-4/H-1 FIX).
     # The DB value overrides the env-derived cfg, so re-run the matrix
@@ -259,6 +315,7 @@ async def lifespan(app: FastAPI):
                 sim_mode=cfg.SIM_MODE,
                 jwt_secret=cfg.JWT_SECRET,
                 jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+                ibkr_port=cfg.IBKR_PORT,
             )
             if matrix_errors:
                 # Refuse to apply the DB mode. Force OFF and keep the
@@ -313,15 +370,41 @@ async def lifespan(app: FastAPI):
     # â"€â"€ Shutdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
     await _stop_market_heartbeat()
     await alert_engine.stop()
+    try:
+        from screener_pipeline import stop as stop_screener
+        await stop_screener()
+    except Exception:
+        pass
     await bot_runner.stop()
     await replay_engine.stop()
-    await ibkr.disconnect()
+    await _stop_broker_runtime()
     reset_runtime_state()
 
 
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+
+def _register_metrics_router(
+    application: FastAPI,
+    *,
+    exposure_profile: str | None = None,
+) -> bool:
+    """Expose metrics only under the explicit isolated-monitoring profile."""
+    profile = (
+        exposure_profile
+        if exposure_profile is not None
+        else os.getenv("METRICS_EXPOSURE_PROFILE", "off")
+    ).strip().lower()
+    if profile != "isolated":
+        return False
+    application.include_router(metrics_router)
+    log.warning(
+        "Prometheus metrics enabled; deployment must isolate /metrics "
+        "to the monitoring network"
+    )
+    return True
+
 
 app = FastAPI(title="Trading Dashboard", version="2.0.0", lifespan=lifespan)
 
@@ -332,6 +415,7 @@ app.include_router(rule_builder_router)
 app.include_router(risk_router)
 app.include_router(health_router)
 app.include_router(advisor_router)
+_register_metrics_router(app)
 from autopilot_api import router as autopilot_router
 app.include_router(autopilot_router)
 
@@ -1110,8 +1194,3 @@ from market_heartbeat import (  # noqa: E402
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=cfg.HOST, port=cfg.PORT, reload=True)
-
-
-
-
-
