@@ -2,16 +2,17 @@ import React, { Suspense, lazy, useEffect } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Layout from '@/components/layout/Layout'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
+import AuthGuard from '@/components/auth/AuthGuard'
 import Dashboard from '@/pages/Dashboard'
 import { useBotStore } from '@/store'
-import { fetchStatus, fetchAuthToken, setAuthToken } from '@/services/api'
+import { fetchStatus } from '@/services/api'
 import { APP_ROUTE_PATHS } from '@/utils/routes'
 
 const TradeBotPage = lazy(() => import('@/pages/TradeBotPage'))
 const MarketPage = lazy(() => import('@/pages/MarketPage'))
 const MarketRotationPage = lazy(() => import('@/pages/MarketRotationPage'))
 const SimulationPage = lazy(() => import('@/pages/SimulationPage'))
-const ScreenerPage = lazy(() => import('@/pages/ScreenerPage'))
+const MarketsPage = lazy(() => import('@/pages/MarketsPage'))
 const BacktestPage = lazy(() => import('@/pages/BacktestPage'))
 const AlertsPage = lazy(() => import('@/pages/AlertsPage'))
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
@@ -20,7 +21,6 @@ const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
 const RulesPage = lazy(() => import('@/pages/RulesPage'))
 const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
 const ChartsPage = lazy(() => import('@/pages/ChartsPage'))
-const SwingDashboardPage = lazy(() => import('@/pages/SwingDashboardPage'))
 
 function PageFallback() {
   return (
@@ -49,8 +49,8 @@ function AppRoutes() {
           <Route path={APP_ROUTE_PATHS.market} element={<MarketPage />} />
           <Route path={APP_ROUTE_PATHS.charts} element={<ChartsPage />} />
           <Route path={APP_ROUTE_PATHS.rotation} element={<MarketRotationPage />} />
-          <Route path={APP_ROUTE_PATHS.screener} element={<ScreenerPage />} />
-          <Route path={APP_ROUTE_PATHS.swing} element={<SwingDashboardPage />} />
+          <Route path={APP_ROUTE_PATHS.screener} element={<MarketsPage />} />
+          <Route path={APP_ROUTE_PATHS.swing} element={<MarketsPage />} />
           <Route path={APP_ROUTE_PATHS.stock} element={<StockProfilePage />} />
           <Route path={APP_ROUTE_PATHS.simulation} element={<SimulationPage />} />
           <Route path={APP_ROUTE_PATHS.backtest} element={<BacktestPage />} />
@@ -66,18 +66,11 @@ function AppRoutes() {
   )
 }
 
-export default function App() {
+function StatusPoller() {
   const setStatus = useBotStore((s) => s.setStatus)
 
   useEffect(() => {
-    const bootstrap = async () => {
-      try {
-        const { access_token } = await fetchAuthToken()
-        setAuthToken(access_token)
-      } catch {
-        /* backend offline */
-      }
-
+    const poll = async () => {
       try {
         const status = await fetchStatus()
         setStatus(status)
@@ -86,24 +79,23 @@ export default function App() {
       }
     }
 
-    bootstrap()
-    const timer = setInterval(async () => {
-      try {
-        const status = await fetchStatus()
-        setStatus(status)
-      } catch {
-        /* ignore */
-      }
-    }, 30_000)
-
+    poll()
+    const timer = setInterval(poll, 30_000)
     return () => clearInterval(timer)
   }, [setStatus])
 
+  return null
+}
+
+export default function App() {
   return (
     <BrowserRouter>
-      <Layout>
-        <AppRoutes />
-      </Layout>
+      <AuthGuard>
+        <Layout>
+          <StatusPoller />
+          <AppRoutes />
+        </Layout>
+      </AuthGuard>
     </BrowserRouter>
   )
 }

@@ -224,3 +224,15 @@ async def screener_pipeline_scan_now():
         raise HTTPException(503, "Screener pipeline module not available")
     snap = await run_scan_now()
     return snap.model_dump()
+
+
+# ── Universe Hygiene (Phase 2) ──────────────────────────────────────────────
+
+@router.get("/pipeline/quarantine")
+async def screener_quarantine_stats():
+    """Get quarantine statistics — delisted/invalid symbols filtered from scans."""
+    try:
+        from universe_hygiene import get_quarantine_stats
+        return await get_quarantine_stats()
+    except ImportError:
+        raise HTTPException(503, "Universe hygiene module not available")

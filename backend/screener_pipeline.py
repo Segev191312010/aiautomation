@@ -94,6 +94,13 @@ async def start() -> None:
     log.info("Screener pipeline starting (scan every %ds, quotes every %.1fs)",
              SCAN_INTERVAL_SECONDS, QUOTE_PUSH_INTERVAL)
 
+    # Initialize universe hygiene (load quarantine list)
+    try:
+        from universe_hygiene import init_quarantine
+        await init_quarantine()
+    except Exception as e:
+        log.warning("Universe hygiene init failed: %s", e)
+
     # Run an initial scan immediately
     _scan_task = asyncio.create_task(_scan_loop(), name="screener-scan-loop")
     _quote_task = asyncio.create_task(_quote_push_loop(), name="screener-quote-loop")
@@ -238,6 +245,13 @@ async def _run_yfinance_fallback() -> list[ScreenerCandidate]:
     try:
         from screener import load_universe, run_scan
         from models import ScanRequest, ScanFilter, FilterValue
+        from universe_hygiene import filter_universe
+
+        # Load and clean the universe
+        raw_symbols = load_universe("sp500")
+        clean_symbols = filter_universe(raw_symbols)
+        log.debug("yfinance fallback: %d symbols after quarantine filter (was %d)",
+                  len(clean_symbols), len(raw_symbols))
 
         # Use a minimal scan: S&P 500, top movers by volume
         request = ScanRequest(
