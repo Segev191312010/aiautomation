@@ -5,7 +5,31 @@
 
 export const BASE = ''  // same origin in prod; Vite proxy handles /api in dev
 
-// Auth token storage — persisted to localStorage so in-flight 401s can't strand it
+// ── API failure telemetry ─────────────────────────────────────────────────────
+// Lightweight event bus so the dashboard can surface API health without
+// requiring every component to wire its own error tracking.
+
+export type ApiFailureEvent = {
+  method: string
+  path: string
+  status: number
+  message: string
+  timestamp: number
+}
+
+type ApiFailureListener = (ev: ApiFailureEvent) => void
+const _failureListeners = new Set<ApiFailureListener>()
+
+export function onApiFailure(fn: ApiFailureListener): () => void {
+  _failureListeners.add(fn)
+  return () => { _failureListeners.delete(fn) }
+}
+
+function _emitApiFailure(ev: ApiFailureEvent) {
+  for (const fn of _failureListeners) fn(ev)
+}
+
+// ── Auth token storage ────────────────────────────────────────────────────────
 const AUTH_TOKEN_KEY = 'auth_token'
 export function setAuthToken(token: string | null) {
   if (token) localStorage.setItem(AUTH_TOKEN_KEY, token)
@@ -64,7 +88,13 @@ export async function req<T>(method: string, path: string, body?: unknown): Prom
       window.dispatchEvent(new Event('api:unauthorized'))
     }
     const text = await resp.text().catch(() => resp.statusText)
-    throw new Error(`${method} ${path} → ${resp.status}: ${text}`)
+    const err = new Error(`${method} ${path} → ${resp.status}: ${text}`)
+    ;(err as Error & { status: number }).status = resp.status
+    // Emit telemetry for non-401 failures (401s are auth lifecycle, not API bugs)
+    if (resp.status !== 401) {
+      _emitApiFailure({ method, path, status: resp.status, message: text, timestamp: Date.now() })
+    }
+    throw err
   }
   return resp.json() as Promise<T>
 }

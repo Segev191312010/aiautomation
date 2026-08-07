@@ -16,8 +16,11 @@ export const deleteAlert       = (id: string) => del<{ deleted: boolean }>(`/api
 export const toggleAlert       = (id: string) => post<{ id: string; enabled: boolean }>(`/api/alerts/${id}/toggle`)
 export const fetchAlertHistory = (limit = 100) => get<AlertHistory[]>(`/api/alerts/history?limit=${limit}`)
 export const testAlertNotification = (body: AlertCreate) => post<AlertTestResult>('/api/alerts/test', body)
+/** Backend route /api/alerts/stats is not yet implemented.
+ *  The alertStore falls back to client-side computation from history data. */
 export const fetchAlertStats   = () => get<AlertStats>('/api/alerts/stats')
 
-/** Subscribe this browser to Web Push notifications. */
+/** Backend route /api/push/subscribe is not yet implemented.
+ *  Web Push is a deferred feature — the useNotifications hook handles failure gracefully. */
 export const subscribePush = (subscription: PushSubscriptionJSON) =>
   post<{ subscribed: boolean }>('/api/push/subscribe', subscription)

@@ -43,9 +43,11 @@ export default function SignalsTable({ source, status, selectedId, onSelect, ref
   const load = useCallback(async () => {
     try {
       const data = await fetchSignals({ source, status, limit: 50, offset: 0 })
-      setRows(data)
+      // Defensive: ensure rows is always an array to prevent "rows.map is not a function"
+      setRows(Array.isArray(data) ? data : [])
       setError(null)
     } catch (err) {
+      setRows([])
       setError(err instanceof Error ? err.message : 'Failed to load signals')
     } finally {
       setLoading(false)

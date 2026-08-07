@@ -31,8 +31,8 @@ export const fetchClub97 = () =>
 export const fetchStockbeeScan = (scan: StockbeeScanName) =>
   get<StockbeeMover[]>(`/api/swing/stockbee/${scan}`)
 
-export const fetchIndustries = () =>
-  get<IndustryGroup[]>('/api/swing/industries')
+// fetchIndustries removed — backend route /api/swing/industries does not exist
+// and the function was never called from any component.
 
 export const fetchStages = () =>
   get<StageDistribution>('/api/swing/stages')

@@ -5,17 +5,17 @@ import ToastProvider from '@/components/ui/ToastProvider'
 import './index.css'
 
 // ── Theme initialisation (runs before React renders to prevent flash) ─────────
-// Priority: localStorage → system preference → default (light)
+// Priority: localStorage → system preference → trading-desk default (dark)
 function initTheme() {
   const stored = localStorage.getItem('theme') as 'light' | 'dark' | 'system' | null
-  let resolved: 'light' | 'dark' = 'light'
+  let resolved: 'light' | 'dark' = 'dark'  // trading-desk default
 
   if (stored === 'dark') {
     resolved = 'dark'
   } else if (stored === 'light') {
     resolved = 'light'
   } else if (stored === 'system' || stored === null) {
-    resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'dark'
   }
 
   document.documentElement.setAttribute('data-theme', resolved)
@@ -27,8 +27,8 @@ initTheme()
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   const stored = localStorage.getItem('theme')
   if (stored === 'system' || stored === null) {
-    const resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-    document.documentElement.setAttribute('data-theme', resolved)
+    // Trading-desk default is always dark
+    document.documentElement.setAttribute('data-theme', 'dark')
   }
 })
 

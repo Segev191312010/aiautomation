@@ -110,16 +110,18 @@ export function useWebSocket(): void {
       })
     })
 
-    // Order filled — refresh everything and push to activity feed
-    const unFill = wsService.subscribe('filled', (ev: WsEvent) => {
-      const symbol    = String(ev['symbol'] ?? '').toUpperCase()
-      const qty       = Number(ev['qty'] ?? 0)
-      const fillPrice = ev['price'] != null ? Number(ev['price']) : undefined
-      const side      = String(ev['action'] ?? 'BUY')
-      const ruleName  = String(ev['rule_name'] ?? 'Manual')
-      const slPrice   = ev['sl_price'] != null ? Number(ev['sl_price']) : undefined
-      const tpPrice   = ev['tp_price'] != null ? Number(ev['tp_price']) : undefined
-      const pctAcct   = ev['pct_of_account'] != null ? Number(ev['pct_of_account']) : undefined
+    // Order filled — refresh everything and push to activity feed.
+    // Backend emits { type: "order_filled", data: { symbol, action, qty, fill_price, rule_name, trade_id, ... } }
+    const unFill = wsService.subscribe('order_filled', (ev: WsEvent) => {
+      const payload  = (ev.data ?? ev) as Record<string, unknown>
+      const symbol   = String(payload['symbol'] ?? '').toUpperCase()
+      const qty      = Number(payload['qty'] ?? 0)
+      const fillPrice = payload['fill_price'] != null ? Number(payload['fill_price']) : (payload['price'] != null ? Number(payload['price']) : undefined)
+      const side     = String(payload['action'] ?? 'BUY')
+      const ruleName = String(payload['rule_name'] ?? 'Manual')
+      const slPrice  = payload['sl_price'] != null ? Number(payload['sl_price']) : undefined
+      const tpPrice  = payload['tp_price'] != null ? Number(payload['tp_price']) : undefined
+      const pctAcct  = payload['pct_of_account'] != null ? Number(payload['pct_of_account']) : undefined
 
       // Enriched toast
       const parts = [`${side} ${qty} ${symbol}`]
@@ -132,7 +134,7 @@ export function useWebSocket(): void {
       // Push to activity feed
       const { pushActivity, setTrades, setPositions, setAccount } = useAccountStore.getState()
       pushActivity({
-        id: String(ev['trade_id'] ?? crypto.randomUUID()),
+        id: String(payload['trade_id'] ?? crypto.randomUUID()),
         timestamp: new Date().toISOString(),
         type: 'fill',
         symbol,

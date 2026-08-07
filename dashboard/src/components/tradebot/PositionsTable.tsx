@@ -199,17 +199,41 @@ export default function PositionsTable() {
   const toast = useToast()
 
   // Fetch bracket data for live positions through the authenticated client
-  // so 401s drive session-expired and 404s surface as toasts. The legacy
-  // raw-fetch pair bypassed auth and silently 401'd or 404'd.
+  // so 401s drive session-expired and 404s surface as toasts.
+  // Backend route is /api/positions/summary which returns { positions_summary: [...], account: {...} }
+  // with sl_price/tp_price as flat numbers per position. Merge into existing positions.
   const fetchBrackets = useCallback(async () => {
     if (simMode || positions.length === 0) {
       setEnriched(positions as EnrichedPosition[])
       return
     }
     try {
-      const data = await get<unknown>('/api/positions/brackets')
-      if (Array.isArray(data)) {
-        setEnriched(data.filter(isEnrichedPosition))
+      const data = await get<{ positions_summary: Record<string, unknown>[] }>('/api/positions/summary')
+      if (data && Array.isArray(data.positions_summary)) {
+        // Build a lookup of bracket data keyed by symbol
+        const bracketBySymbol: Record<string, { sl_price?: number; tp_price?: number; pnl_pct?: number; pct_of_account?: number }> = {}
+        for (const s of data.positions_summary) {
+          const sym = String(s.symbol ?? '').toUpperCase()
+          bracketBySymbol[sym] = {
+            sl_price: s.sl_price != null ? Number(s.sl_price) : undefined,
+            tp_price: s.tp_price != null ? Number(s.tp_price) : undefined,
+            pnl_pct: s.pnl_pct != null ? Number(s.pnl_pct) : undefined,
+            pct_of_account: s.pct_of_account != null ? Number(s.pct_of_account) : undefined,
+          }
+        }
+        // Merge bracket data into existing positions
+        const merged = positions.map((p) => {
+          const brackets = bracketBySymbol[p.symbol.toUpperCase()]
+          if (!brackets) return p as EnrichedPosition
+          return {
+            ...p,
+            sl_order: brackets.sl_price != null ? { order_id: 0, price: brackets.sl_price, status: 'ACTIVE' } : null,
+            tp_order: brackets.tp_price != null ? { order_id: 0, price: brackets.tp_price, status: 'ACTIVE' } : null,
+            pnl_pct: brackets.pnl_pct,
+            pct_of_account: brackets.pct_of_account,
+          } as EnrichedPosition
+        })
+        setEnriched(merged)
       } else {
         setEnriched(positions as EnrichedPosition[])
       }
