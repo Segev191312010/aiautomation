@@ -272,7 +272,7 @@ async def _run_yfinance_fallback() -> list[ScreenerCandidate]:
         response = await run_scan(request)
 
         candidates = []
-        for row in response.results:
+        for rank, row in enumerate(response.results, start=1):
             candidates.append(ScreenerCandidate(
                 symbol=row.symbol,
                 price=row.price,
@@ -286,7 +286,7 @@ async def _run_yfinance_fallback() -> list[ScreenerCandidate]:
                 trend_strength=row.trend_strength,
                 notes=row.notes,
                 source="yfinance",
-                rank=i + 1,
+                rank=rank,
             ))
 
         return candidates

@@ -774,8 +774,9 @@ async def enrich_symbols(symbols: list[str]) -> list[EnrichResult]:
                 sector=info.get("sector"),
                 market_cap=info.get("marketCap"),
             )
-        except Exception:
-            return EnrichResult(symbol=sym, name=sym)
+        except Exception as exc:
+            log.warning("Unable to enrich %s: %s", sym, exc)
+            return None
 
     def _fetch_all():
         from concurrent.futures import ThreadPoolExecutor
