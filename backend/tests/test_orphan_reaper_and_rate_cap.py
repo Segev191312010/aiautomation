@@ -1,25 +1,25 @@
 """
 Batch 5b regression tests — orphan PENDING reaper and per-symbol order-rate cap.
 
-Pins these invariants:
+Characterizes current behavior and pins limiter invariants:
 
-1. The orphan reaper finds PENDING trades with no order_id older than the
-   configured threshold and marks them ERROR with reason
-   ``orphan_pending_reaped`` (named outcome, grep-able).
+1. KNOWN UNSAFE / LIVE BLOCKER: the orphan reaper marks an ambiguous PENDING
+   trade with no local order_id as ERROR. Broker acceptance is still possible;
+   this stays visible until UNKNOWN/quarantine reconciliation replaces it.
 2. The reaper leaves PENDING trades with an order_id alone (those are
    reconcile_pending_orders' job).
 3. The reaper does NOT touch trades younger than the threshold.
-4. The per-symbol rate cap rejects orders that exceed
-   MAX_ORDERS_PER_SYMBOL_PER_MIN within the rolling 60s window.
-5. Both subsystems use the same `_now_ts()` time source — no naive vs
-   tz-aware comparisons.
+4. The SQLite-backed per-symbol rate cap rejects orders that exceed
+   MAX_ORDERS_PER_SYMBOL_PER_MIN across callers in the rolling 60s window.
+5. Rate-limit storage failures block orders instead of failing open.
+6. The reaper time helpers use UTC consistently.
 """
 from __future__ import annotations
 
 import asyncio
 import time
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -58,12 +58,16 @@ def _make_trade(*, status: str, order_id: int | None, timestamp_iso: str) -> Tra
 
 
 # ---------------------------------------------------------------------------
-# 1. Reaper marks orphan PENDING (no order_id, old) as ERROR
+# 1. Characterization: current unsafe reaper terminalizes ambiguous outcome
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_reaper_marks_orphan_pending_as_error(_isolated_db, anyio_backend, caplog):
+async def test_current_unsafe_reaper_marks_ambiguous_pending_as_error(
+    _isolated_db,
+    anyio_backend,
+    caplog,
+):
     import logging
 
     from order_executor import reap_orphan_pending_trades
@@ -71,7 +75,7 @@ async def test_reaper_marks_orphan_pending_as_error(_isolated_db, anyio_backend,
 
     await init_db()
 
-    # Old PENDING without order_id — must be reaped
+    # This local shape does not prove whether the broker accepted the order.
     old_iso = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
     orphan = _make_trade(status="PENDING", order_id=None, timestamp_iso=old_iso)
     await save_trade(orphan)
@@ -79,7 +83,7 @@ async def test_reaper_marks_orphan_pending_as_error(_isolated_db, anyio_backend,
     with caplog.at_level(logging.WARNING):
         reaped = await reap_orphan_pending_trades(stale_after_seconds=600)
 
-    assert reaped == 1, "old orphan must be reaped"
+    assert reaped == 1, "characterize the current LIVE-blocking behavior"
 
     # Verify the DB row is now ERROR
     rows = await get_trades(limit=10)
@@ -143,23 +147,21 @@ async def test_reaper_skips_young_orphans(_isolated_db, anyio_backend):
 
 
 @pytest.mark.anyio
-async def test_rate_cap_permits_up_to_max(anyio_backend):
+async def test_rate_cap_permits_up_to_max(_isolated_db, anyio_backend):
     from order_executor import (
-        _check_and_record_rate_cap, _order_rate_window, MAX_ORDERS_PER_SYMBOL_PER_MIN,
+        _check_and_record_rate_cap, MAX_ORDERS_PER_SYMBOL_PER_MIN,
     )
-    _order_rate_window.clear()
 
     for i in range(MAX_ORDERS_PER_SYMBOL_PER_MIN):
         assert await _check_and_record_rate_cap("AAPL") is True, f"call {i} must be permitted"
 
 
 @pytest.mark.anyio
-async def test_rate_cap_rejects_when_window_full(anyio_backend, caplog):
+async def test_rate_cap_rejects_when_window_full(_isolated_db, anyio_backend, caplog):
     import logging
     from order_executor import (
-        _check_and_record_rate_cap, _order_rate_window, MAX_ORDERS_PER_SYMBOL_PER_MIN,
+        _check_and_record_rate_cap, MAX_ORDERS_PER_SYMBOL_PER_MIN,
     )
-    _order_rate_window.clear()
 
     for _ in range(MAX_ORDERS_PER_SYMBOL_PER_MIN):
         await _check_and_record_rate_cap("AAPL")
@@ -172,11 +174,10 @@ async def test_rate_cap_rejects_when_window_full(anyio_backend, caplog):
 
 
 @pytest.mark.anyio
-async def test_rate_cap_is_per_symbol(anyio_backend):
+async def test_rate_cap_is_per_symbol(_isolated_db, anyio_backend):
     from order_executor import (
-        _check_and_record_rate_cap, _order_rate_window, MAX_ORDERS_PER_SYMBOL_PER_MIN,
+        _check_and_record_rate_cap, MAX_ORDERS_PER_SYMBOL_PER_MIN,
     )
-    _order_rate_window.clear()
 
     # Fill AAPL's window completely
     for _ in range(MAX_ORDERS_PER_SYMBOL_PER_MIN):
@@ -187,20 +188,55 @@ async def test_rate_cap_is_per_symbol(anyio_backend):
 
 
 @pytest.mark.anyio
-async def test_rate_cap_evicts_old_timestamps(anyio_backend):
+async def test_rate_cap_evicts_old_timestamps(_isolated_db, anyio_backend):
     """Timestamps older than 60s must be evicted on each call."""
+    from db.core import transaction
     from order_executor import (
-        _check_and_record_rate_cap, _order_rate_window, MAX_ORDERS_PER_SYMBOL_PER_MIN,
+        _check_and_record_rate_cap, MAX_ORDERS_PER_SYMBOL_PER_MIN,
     )
-    _order_rate_window.clear()
 
-    # Pre-populate with stale timestamps (>60s old)
-    _order_rate_window["AAPL"] = [time.time() - 120] * MAX_ORDERS_PER_SYMBOL_PER_MIN
+    # First call lazily creates the shared schema, then replace it with a full
+    # window of stale rows.
+    assert await _check_and_record_rate_cap("AAPL") is True
+    stale_ts = int(time.time()) - 120
+    async with transaction() as db:
+        await db.execute("DELETE FROM order_rate_window")
+        await db.executemany(
+            "INSERT INTO order_rate_window (symbol, ts_unix, worker_pid) VALUES (?, ?, ?)",
+            [
+                ("AAPL", stale_ts, 1)
+                for _ in range(MAX_ORDERS_PER_SYMBOL_PER_MIN)
+            ],
+        )
 
     # The next call should evict and permit
     assert await _check_and_record_rate_cap("AAPL") is True
-    # Window should now contain only the new timestamp
-    assert len(_order_rate_window["AAPL"]) == 1
+    async with transaction() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM order_rate_window WHERE symbol = ?",
+            ("AAPL",),
+        ) as cur:
+            row = await cur.fetchone()
+    assert row == (1,)
+
+
+@pytest.mark.anyio
+async def test_rate_cap_storage_error_blocks_order(anyio_backend, caplog):
+    """A broken shared limiter must deny the order, never bypass the cap."""
+    import logging
+
+    from order_executor import _check_and_record_rate_cap
+
+    with (
+        patch(
+            "order_executor.try_acquire_order_slot",
+            new=AsyncMock(side_effect=RuntimeError("database unavailable")),
+        ),
+        caplog.at_level(logging.CRITICAL),
+    ):
+        assert await _check_and_record_rate_cap("AAPL") is False
+
+    assert any("order_rate_cap_unavailable" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

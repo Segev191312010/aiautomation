@@ -7,9 +7,8 @@ Call ``await validate_startup()`` inside the FastAPI ``lifespan`` function
 Behavior
 --------
 - Warnings  : logged but never abort the process.
-- Errors    : logged; if ``cfg.STRICT_CONFIG`` is ``True`` the process exits
-              with code 1 so the container/supervisor restarts with a clear
-              reason in the log.
+- Errors    : logged and always abort startup. A safety error is not advisory
+              and cannot be bypassed with ``STRICT_CONFIG=false``.
 
 ``validate_autopilot_matrix`` is also exported so runtime mode changes
 (e.g. DB-sync after startup, or operator mode flips) can enforce the same
@@ -18,17 +17,163 @@ invariants on the new mode without re-running the whole startup path.
 from __future__ import annotations
 
 import logging
+import os
 import sys
-from typing import TypedDict
+from pathlib import Path
+from typing import IO, TypedDict
 
 log = logging.getLogger(__name__)
 
 DEFAULT_DEV_JWT_SECRET = "trading-dev-secret-MUST-SET-IN-ENV"
+MIN_JWT_SECRET_BYTES = 32
+# Stage 9A is explicitly NO-GO for real-money AI.  This code-owned fence has
+# no environment override, so ordinary runtime credentials/configuration
+# cannot turn an unapproved release into LIVE.
+STAGE_9A_LIVE_RELEASE_APPROVED = False
+
+_execution_lock_handles: dict[str, IO[str]] = {}
 
 
 class StartupResult(TypedDict):
     errors: list[str]
     warnings: list[str]
+
+
+def _has_strong_jwt_secret(secret: str) -> bool:
+    """Return whether the legacy HS256 secret meets the containment floor.
+
+    This is not approval of the demo JWT flow for production. ADR 0008 still
+    requires an established identity/session system. The length floor only
+    prevents trivially forgeable empty/short secrets while that migration is
+    pending.
+    """
+    if secret == DEFAULT_DEV_JWT_SECRET:
+        return False
+    return len((secret or "").encode("utf-8")) >= MIN_JWT_SECRET_BYTES
+
+
+def _is_ephemeral_sqlite_path(db_path: str) -> bool:
+    """Detect SQLite in-memory URIs that cannot provide durable shared state."""
+    normalized = (db_path or "").strip().lower()
+    return (
+        not normalized
+        or normalized == ":memory:"
+        or normalized.startswith("file::memory:")
+        or (normalized.startswith("file:") and "mode=memory" in normalized)
+    )
+
+
+def real_money_broker_configured(
+    *,
+    is_paper: bool,
+    sim_mode: bool,
+    ibkr_port: int | None = None,
+) -> bool:
+    """Conservatively identify a configuration capable of reaching real money."""
+    if sim_mode:
+        return False
+    return not is_paper or ibkr_port in {7496, 4001}
+
+
+def _execution_lock_path(db_path: str, explicit_path: str | None = None) -> str:
+    configured = explicit_path or os.getenv("EXECUTION_LOCK_PATH", "").strip()
+    if configured:
+        return str(Path(configured).expanduser().resolve())
+    if _is_ephemeral_sqlite_path(db_path):
+        return str((Path.cwd() / ".tradebot-execution.lock").resolve())
+    database_path = Path(db_path).expanduser().resolve()
+    return str(database_path.with_name(f"{database_path.name}.execution.lock"))
+
+
+def _lock_file_nonblocking(handle: IO[str]) -> None:
+    if os.name == "nt":  # pragma: no cover - production image is Linux
+        import msvcrt
+
+        handle.seek(0)
+        if not handle.read(1):
+            handle.seek(0)
+            handle.write("\0")
+            handle.flush()
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle: IO[str]) -> None:
+    if os.name == "nt":  # pragma: no cover - production image is Linux
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def acquire_execution_process_lock(
+    *,
+    db_path: str,
+    lock_path: str | None = None,
+) -> str:
+    """Hold a host/shared-volume singleton lock for the process lifetime.
+
+    This catches undeclared Uvicorn/Gunicorn workers that do not set WORKERS.
+    It is immediate containment, not the durable cross-host lease/fencing
+    design from ADR 0006.
+    """
+    resolved = _execution_lock_path(db_path, lock_path)
+    if resolved in _execution_lock_handles:
+        raise RuntimeError(
+            "This process already owns the execution lock. Refusing to start "
+            "a second broker/background lifecycle."
+        )
+
+    try:
+        handle = open(resolved, "a+", encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot open execution-owner lock at {resolved!r}: {exc}"
+        ) from exc
+
+    try:
+        _lock_file_nonblocking(handle)
+    except (BlockingIOError, OSError) as exc:
+        handle.close()
+        raise RuntimeError(
+            "Another process already owns the execution lock. Refusing to "
+            "start duplicate broker/background loops."
+        ) from exc
+
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}\n")
+    handle.flush()
+    _execution_lock_handles[resolved] = handle
+    log.info("execution owner lock acquired: %s", resolved)
+    return resolved
+
+
+def release_execution_process_lock(
+    *,
+    db_path: str,
+    lock_path: str | None = None,
+) -> None:
+    """Release a lock acquired by :func:`acquire_execution_process_lock`."""
+    resolved = _execution_lock_path(db_path, lock_path)
+    handle = _execution_lock_handles.pop(resolved, None)
+    if handle is None:
+        return
+    try:
+        _unlock_file(handle)
+    finally:
+        handle.close()
+    log.info("execution owner lock released: %s", resolved)
 
 
 def validate_autopilot_matrix(
@@ -38,6 +183,7 @@ def validate_autopilot_matrix(
     sim_mode: bool,
     jwt_secret: str,
     jwt_bootstrap_secret: str | None,
+    ibkr_port: int | None = None,
 ) -> list[str]:
     """Check AUTOPILOT_MODE × IS_PAPER × SIM_MODE × auth for safe combinations.
 
@@ -53,16 +199,63 @@ def validate_autopilot_matrix(
         errors.append(f"AUTOPILOT_MODE='{mode}' is invalid. Must be OFF, PAPER, or LIVE.")
         return errors
 
-    if mode == "OFF":
-        # Inactive AI — nothing else to check.
-        return errors
+    broker_live = real_money_broker_configured(
+        is_paper=is_paper,
+        sim_mode=sim_mode,
+        ibkr_port=ibkr_port,
+    )
 
-    # PAPER and LIVE both grant AI authority. Refuse the default JWT_SECRET.
-    if jwt_secret == DEFAULT_DEV_JWT_SECRET:
+    if mode == "LIVE" and not STAGE_9A_LIVE_RELEASE_APPROVED:
         errors.append(
-            f"AUTOPILOT_MODE={mode} requires a non-default JWT_SECRET. "
-            "Set JWT_SECRET in .env to a strong random string before enabling AI authority."
+            "AUTOPILOT_MODE=LIVE is disabled by the Stage 9A release fence. "
+            "Critical pre-live risks and human approvals remain open; use OFF "
+            "or PAPER."
         )
+
+    if broker_live and not STAGE_9A_LIVE_RELEASE_APPROVED:
+        errors.append(
+            "Real-money broker connectivity is disabled by the Stage 9A "
+            "release fence. Use SIM_MODE or an IBKR paper account."
+        )
+
+    if is_paper and not sim_mode and ibkr_port in {7496, 4001}:
+        errors.append(
+            f"IS_PAPER=true cannot use known live IBKR port {ibkr_port}. "
+            "Refusing a flag/port mismatch that could reach real money."
+        )
+
+    # PAPER/LIVE grant AI authority. A real-money broker remains reachable by
+    # manual routes even while AI is OFF, so that state also requires hardened
+    # authentication.
+    if not _has_strong_jwt_secret(jwt_secret) and (
+        mode in ("PAPER", "LIVE") or broker_live
+    ):
+        errors.append(
+            f"AUTOPILOT_MODE={mode} with the configured broker/AI authority "
+            f"requires JWT_SECRET to be at least {MIN_JWT_SECRET_BYTES} bytes "
+            "and not the development placeholder. Set a cryptographically "
+            "random secret before enabling broker-capable operation."
+        )
+
+    # Bootstrap-token auth is a development convenience, not a real login
+    # flow. Refuse it whenever real-money manual orders are reachable or LIVE
+    # AI authority is requested.
+    if jwt_bootstrap_secret and (broker_live or mode == "LIVE"):
+        errors.append(
+            f"AUTOPILOT_MODE={mode} with real-money/LIVE authority cannot use "
+            "JWT_BOOTSTRAP_SECRET. Remove it and use the approved production "
+            "identity/session flow."
+        )
+
+    if mode == "PAPER" and broker_live:
+        errors.append(
+            "AUTOPILOT_MODE=PAPER with IS_PAPER=false and SIM_MODE=false would "
+            "send AI-authorized orders to a real-money broker. Use a paper "
+            "account/SIM_MODE, or complete the LIVE approval path."
+        )
+
+    if mode == "OFF":
+        return errors
 
     if mode == "LIVE":
         # Real-money AI is only safe when:
@@ -80,17 +273,25 @@ def validate_autopilot_matrix(
                 "AUTOPILOT_MODE=LIVE with SIM_MODE=true sends AI orders to the "
                 "virtual account. Real-money authority must not run in SIM_MODE."
             )
-        # Bootstrap-token auth is not a login flow; do not let real money run
-        # on a system where an unauthenticated local caller can mint a token.
-        # Callers can still set it for dev, but LIVE explicitly rejects it.
-        if jwt_bootstrap_secret:
-            errors.append(
-                "AUTOPILOT_MODE=LIVE with JWT_BOOTSTRAP_SECRET configured is "
-                "unsafe. Remove JWT_BOOTSTRAP_SECRET from .env and use a real "
-                "login flow before enabling live AI authority."
-            )
-
     return errors
+
+
+def validate_execution_topology(*, workers: int) -> list[str]:
+    """Return fatal errors for unsupported monolith worker topology.
+
+    Every Uvicorn worker currently starts its own IBKR client, reconciliation,
+    alert, optimizer, learning, and bot lifespan loops. The execution gateway
+    does not yet have a durable leader lease/fencing token, so a multi-worker
+    process is unsafe regardless of ``AUTOPILOT_MODE`` (manual order routes
+    remain broker-capable while AI is OFF).
+    """
+    if workers == 1:
+        return []
+    return [
+        f"WORKERS={workers} is unsupported: the current monolith must run "
+        "exactly one Uvicorn worker because background and broker execution "
+        "ownership are not leased/fenced. Set WORKERS=1."
+    ]
 
 
 async def validate_startup() -> StartupResult:
@@ -101,9 +302,8 @@ async def validate_startup() -> StartupResult:
       - ``errors``   -- list of fatal configuration problems.
       - ``warnings`` -- list of non-fatal advisories.
 
-    When ``cfg.STRICT_CONFIG`` is ``True`` and there are errors the function
-    calls ``sys.exit(1)`` *after* logging, so the problem is clearly visible
-    in the process log before shutdown.
+    Any error calls ``sys.exit(1)`` after logging. ``STRICT_CONFIG`` cannot
+    weaken a safety invariant.
     """
     # Deferred import: config triggers dotenv load, keep it lazy for tests.
     from config import cfg
@@ -114,10 +314,10 @@ async def validate_startup() -> StartupResult:
     # ------------------------------------------------------------------
     # 1. JWT secret + autopilot mode matrix (C6 + autopilot-matrix safety)
     # ------------------------------------------------------------------
-    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET and cfg.AUTOPILOT_MODE == "OFF":
+    if not _has_strong_jwt_secret(cfg.JWT_SECRET) and cfg.AUTOPILOT_MODE == "OFF":
         warnings.append(
-            "JWT_SECRET is the default development value. "
-            "Set a strong random secret before going to production."
+            f"JWT_SECRET is weaker than the {MIN_JWT_SECRET_BYTES}-byte "
+            "containment floor. Set a cryptographically random secret."
         )
     errors.extend(
         validate_autopilot_matrix(
@@ -126,6 +326,7 @@ async def validate_startup() -> StartupResult:
             sim_mode=cfg.SIM_MODE,
             jwt_secret=cfg.JWT_SECRET,
             jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+            ibkr_port=cfg.IBKR_PORT,
         )
     )
 
@@ -135,6 +336,10 @@ async def validate_startup() -> StartupResult:
     try:
         import aiosqlite
 
+        if _is_ephemeral_sqlite_path(cfg.DB_PATH):
+            raise ValueError(
+                "in-memory SQLite cannot provide durable/shared execution safety state"
+            )
         async with aiosqlite.connect(cfg.DB_PATH) as db:
             await db.execute("SELECT 1")
         log.info("database check: OK  path=%s", cfg.DB_PATH)
@@ -146,12 +351,10 @@ async def validate_startup() -> StartupResult:
     # ------------------------------------------------------------------
     live_ports = {7496, 4001}
     paper_ports = {7497, 4002}
-    if cfg.IS_PAPER and cfg.IBKR_PORT in live_ports:
-        # config.py raises in STRICT_CONFIG mode, so this is the non-strict
-        # path — demote to a warning so we surface it without double-exiting.
+    if cfg.IS_PAPER and cfg.IBKR_PORT in live_ports and cfg.SIM_MODE:
         warnings.append(
-            f"IS_PAPER=true but IBKR_PORT={cfg.IBKR_PORT} is a live-trading port. "
-            "Connections to a live account may be rejected or charged real money."
+            f"IS_PAPER=true but IBKR_PORT={cfg.IBKR_PORT} is a live-trading "
+            "port. SIM_MODE prevents connection, but correct the mismatch."
         )
     if not cfg.IS_PAPER and cfg.IBKR_PORT in paper_ports:
         warnings.append(
@@ -177,7 +380,6 @@ async def validate_startup() -> StartupResult:
     # but in any non-dev environment we additionally require an explicit
     # X-Intent-Token header matched against DIRECT_TRADE_INTENT_TOKEN. If the
     # env is "live" or "staging" and the token is empty, refuse to boot.
-    import os
     env_name = (os.getenv("ENV") or "").strip().lower()
     if env_name in {"live", "staging"} and not getattr(cfg, "DIRECT_TRADE_INTENT_TOKEN", ""):
         errors.append(
@@ -186,28 +388,23 @@ async def validate_startup() -> StartupResult:
         )
 
     # ------------------------------------------------------------------
-    # 6. Multi-worker order-execution-cap warning (Batch 9)
+    # 6. Single execution-owner topology (Stage 9A)
     # ------------------------------------------------------------------
-    # The per-symbol order-rate cap in order_executor is a per-process,
-    # in-memory dict guarded by an asyncio.Lock. Multi-worker uvicorn lets
-    # the effective cap scale linearly with worker count — a 6/min cap with
-    # WORKERS=2 silently becomes 12/min globally. Surface this loudly so the
-    # operator either drops to a single worker for the order-execution path
-    # or builds a Redis/SQL-backed cross-process limiter.
-    workers = int(os.getenv("WORKERS", "1") or "1")
-    if workers > 1 and getattr(cfg, "AUTOPILOT_MODE", "OFF") in ("PAPER", "LIVE"):
-        msg = (
-            f"WORKERS={workers} with autopilot active and an in-process "
-            "order-rate cap. Effective cap scales linearly with worker count; "
-            "build a cross-process limiter (Redis / SQL counter) before LIVE "
-            "or pin WORKERS=1 for the order-execution process."
+    # The durable rate limiter is shared across processes, but it does not
+    # solve duplicated broker clients/background loops or stale-owner
+    # submission. Until the executor lease/fencing design lands, WORKERS=1 is
+    # a hard invariant for the whole monolith.
+    topology_errors: list[str] = []
+    raw_workers = os.getenv("WORKERS", "1") or "1"
+    try:
+        workers = int(raw_workers)
+    except ValueError:
+        topology_errors.append(
+            f"WORKERS={raw_workers!r} is invalid; the current monolith requires WORKERS=1."
         )
-        if env_name == "live":
-            # In live, this is a hard refusal — over-trading on a doubled cap
-            # is account-threatening.
-            errors.append(msg)
-        else:
-            warnings.append(msg)
+    else:
+        topology_errors.extend(validate_execution_topology(workers=workers))
+    errors.extend(topology_errors)
 
     # ------------------------------------------------------------------
     # Summary log
@@ -231,8 +428,7 @@ async def validate_startup() -> StartupResult:
         log.error(
             "Startup validation failed with %d error(s).", len(errors)
         )
-        if cfg.STRICT_CONFIG:
-            log.error("STRICT_CONFIG=true — exiting to force a clean restart.")
-            sys.exit(1)
+        log.error("Startup errors are always fatal — exiting.")
+        sys.exit(1)
 
     return StartupResult(errors=errors, warnings=warnings)

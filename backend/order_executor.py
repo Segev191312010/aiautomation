@@ -14,6 +14,7 @@ from database import save_trade, update_trade_status
 from market_data import get_latest_price, finite_positive
 from models import Rule, Trade
 from config import cfg
+from db.rate_limits import try_acquire_order_slot
 from services import order_lifecycle, order_recovery, safety_gate
 
 log = logging.getLogger(__name__)
@@ -34,41 +35,44 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# Per-symbol order-rate cap. The existing _recent_orders dedup is keyed by
-# `symbol:action`, so a buggy rule that alternates BUY/SELL/BUY/SELL for one
-# symbol slips through. This window is keyed by symbol only and caps the
-# total submissions per 60 seconds regardless of action. Initial cap is
-# generous (6/min); tighten via env once we see the WARN line fire.
-#
-# This is a per-process counter — a multi-worker deployment would need a
-# cross-process limiter (Redis / DB counter); flagged for the next batch.
-_order_rate_window: dict[str, list[float]] = {}
-_order_rate_lock = asyncio.Lock()
+# Per-symbol order-rate cap. The durable SQLite window is shared by every
+# process that uses the same DB, so concurrent Uvicorn workers cannot multiply
+# the effective cap. This is defense in depth; Stage 9A also requires a single
+# execution worker until the executor lease/fencing design is implemented.
 MAX_ORDERS_PER_SYMBOL_PER_MIN = int(os.getenv("MAX_ORDERS_PER_SYMBOL_PER_MIN", "6"))
 
 
 async def _check_and_record_rate_cap(symbol: str) -> bool:
-    """Return True if the order is permitted; False if it exceeds the cap.
-
-    Held under a single lock so two concurrent place_order calls cannot both
-    pass the check and append a new timestamp (TOCTOU). The window is also
-    evicted of timestamps older than 60s on every call.
-    """
+    """Atomically reserve a shared order slot, failing closed on DB errors."""
     sym = symbol.upper()
-    now = _now_ts()
-    async with _order_rate_lock:
-        window = _order_rate_window.setdefault(sym, [])
-        # Evict stale entries (older than 60s)
-        cutoff = now - 60.0
-        window[:] = [ts for ts in window if ts >= cutoff]
-        if len(window) >= MAX_ORDERS_PER_SYMBOL_PER_MIN:
-            log.warning(
-                "order_rate_cap_exceeded: symbol=%s window=%d cap=%d",
-                sym, len(window), MAX_ORDERS_PER_SYMBOL_PER_MIN,
-            )
-            return False
-        window.append(now)
-        return True
+    try:
+        permitted = await try_acquire_order_slot(
+            sym,
+            max_per_minute=MAX_ORDERS_PER_SYMBOL_PER_MIN,
+            window_seconds=60,
+        )
+    except Exception as exc:
+        log.critical(
+            "order_rate_cap_unavailable: symbol=%s cap=%d error=%s — blocking order",
+            sym,
+            MAX_ORDERS_PER_SYMBOL_PER_MIN,
+            exc,
+        )
+        return False
+
+    if not permitted:
+        log.warning(
+            "order_rate_cap_exceeded: symbol=%s cap=%d window_seconds=60",
+            sym,
+            MAX_ORDERS_PER_SYMBOL_PER_MIN,
+        )
+        try:
+            from metrics import record_rate_cap_hit
+
+            record_rate_cap_hit(sym)
+        except Exception:
+            log.debug("rate-cap metric emission failed", exc_info=True)
+    return permitted
 
 
 def _safe_create_task(coro, *, name: str = "") -> asyncio.Task:
@@ -311,10 +315,11 @@ async def place_order(
     trade_rec.position_id = trade_rec.id
     await save_trade(trade_rec)
 
-    # Execution idempotency: stamp the broker order with our trade id so a retry
-    # or reconnect after a crash between save_trade(PENDING) and placeOrder can be
-    # reconciled against the broker's open orders by orderRef instead of placing a
-    # duplicate. (reap_orphan_pending_trades handles the local recovery side.)
+    # Correlation only: orderRef helps reconciliation search for this local
+    # trade, but IBKR does not guarantee uniqueness for orderRef. A timeout or
+    # crash after submission therefore remains UNKNOWN and must never be
+    # treated as safe to retry. R01/R08 track the missing durable-intent and
+    # quarantine implementation.
     ib_order.orderRef = trade_rec.id
 
     try:
@@ -706,8 +711,4 @@ async def get_open_orders() -> list[dict]:
         }
         for t in ibkr.ib.openTrades()
     ]
-
-
-
-
 

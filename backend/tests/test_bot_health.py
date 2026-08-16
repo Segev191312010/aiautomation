@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 import bot_runner
 import bot_health
+from auth import get_current_user
 from config import cfg
 from health import router as health_router
 
@@ -73,6 +74,7 @@ async def test_bot_health_endpoint_shape():
     bot_health._degraded_timestamps[:] = []
 
     app = FastAPI()
+    app.dependency_overrides[get_current_user] = lambda: "test_user"
     app.include_router(health_router)
 
     transport = ASGITransport(app=app)

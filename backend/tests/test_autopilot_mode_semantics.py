@@ -4,11 +4,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from ai_learning import check_auto_tighten
 from ai_params import ai_params
-from api_contracts import GuardrailConfigResponse
-from autopilot_api import _sync_mode_runtime
+from api_contracts import AutopilotModeRequest, GuardrailConfigResponse
+from autopilot_api import _sync_mode_runtime, set_autopilot_mode
 from config import cfg
 
 
@@ -47,6 +48,29 @@ def test_sync_mode_runtime_keeps_mode_semantics_consistent(
     assert cfg.AI_AUTONOMY_ENABLED is autonomy_enabled
     assert cfg.AI_SHADOW_MODE is cfg_shadow
     assert ai_params.shadow_mode is params_shadow
+
+
+@pytest.mark.anyio
+async def test_live_mode_api_is_blocked_by_stage_9a_release_fence(anyio_backend):
+    persist = AsyncMock()
+    with patch.object(cfg, "IS_PAPER", False), patch.object(
+        cfg, "SIM_MODE", False
+    ), patch.object(
+        cfg, "JWT_SECRET", "test-only-random-secret-at-least-32-bytes"
+    ), patch.object(
+        cfg, "JWT_BOOTSTRAP_SECRET", ""
+    ), patch(
+        "autopilot_api.update_autopilot_config",
+        new=persist,
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await set_autopilot_mode(
+                AutopilotModeRequest(mode="LIVE", reason="must remain blocked")
+            )
+
+    assert exc_info.value.status_code == 400
+    assert "Stage 9A release fence" in str(exc_info.value.detail)
+    persist.assert_not_awaited()
 
 
 @pytest.mark.anyio

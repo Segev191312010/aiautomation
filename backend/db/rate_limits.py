@@ -36,6 +36,7 @@ import os
 import sqlite3
 import time
 
+from config import cfg
 from db.core import transaction
 
 log = logging.getLogger(__name__)
@@ -46,8 +47,9 @@ log = logging.getLogger(__name__)
 # table-level SQLITE_LOCKED ("database is locked") that the busy handler does
 # NOT retry. We retry such transient locks ourselves with a short backoff so a
 # cold-start burst under WORKERS>1 still serializes cleanly.
-_LOCK_RETRIES = 8
+_LOCK_RETRIES = 4
 _LOCK_BACKOFF_SECONDS = 0.05
+_LOCK_BUSY_TIMEOUT_MS = 250
 
 _CREATE_ORDER_RATE_WINDOW = """
 CREATE TABLE IF NOT EXISTS order_rate_window (
@@ -61,6 +63,16 @@ _CREATE_ORDER_RATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_order_rate_symbol_ts
     ON order_rate_window(symbol, ts_unix)
 """
+
+
+def _database_is_ephemeral(db_path: str) -> bool:
+    normalized = (db_path or "").strip().lower()
+    return (
+        not normalized
+        or normalized == ":memory:"
+        or normalized.startswith("file::memory:")
+        or (normalized.startswith("file:") and "mode=memory" in normalized)
+    )
 
 
 async def _ensure_schema(db) -> None:
@@ -97,6 +109,15 @@ async def try_acquire_order_slot(
     # Fail closed: a cap of 0 (or negative) admits nothing.
     if max_per_minute <= 0:
         return False
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+    if not symbol or not symbol.strip():
+        raise ValueError("symbol must be non-empty")
+    if _database_is_ephemeral(cfg.DB_PATH):
+        raise RuntimeError(
+            "Order rate limiting requires a durable SQLite file; "
+            "blank/in-memory DB_PATH is unsafe"
+        )
 
     last_exc: sqlite3.OperationalError | None = None
     for attempt in range(_LOCK_RETRIES):
@@ -124,7 +145,7 @@ async def _acquire_once(
     now = int(time.time())
     cutoff = now - window_seconds
 
-    async with transaction() as db:
+    async with transaction(busy_timeout_ms=_LOCK_BUSY_TIMEOUT_MS) as db:
         await _ensure_schema(db)
 
         # 1. Evict expired rows globally so the table stays bounded over time.

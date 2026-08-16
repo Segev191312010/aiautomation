@@ -79,6 +79,23 @@ def test_metrics_endpoint_serves_prometheus_text(client: TestClient) -> None:
     assert families, "no metric families parsed from /metrics body"
 
 
+def test_application_does_not_mount_metrics_without_isolated_profile() -> None:
+    """Metrics are default-deny on the public application listener."""
+    from main import _register_metrics_router
+
+    production_like_app = FastAPI()
+    assert _register_metrics_router(production_like_app, exposure_profile="off") is False
+    assert "/metrics" not in {route.path for route in production_like_app.routes}
+
+
+def test_isolated_monitoring_profile_mounts_metrics() -> None:
+    from main import _register_metrics_router
+
+    monitoring_app = FastAPI()
+    assert _register_metrics_router(monitoring_app, exposure_profile="isolated") is True
+    assert "/metrics" in {route.path for route in monitoring_app.routes}
+
+
 def test_all_metric_names_present(client: TestClient) -> None:
     # Touch every labelled metric so its series materialises in the output.
     metrics.record_order_placed("test_src", "BUY")
@@ -130,3 +147,10 @@ def test_unknown_webhook_outcome_is_ignored(client: TestClient) -> None:
     metrics.record_webhook_outcome("not_a_real_outcome")
     body = _scrape(client)
     assert _value(body, "trading_webhook_events_total", outcome="not_a_real_outcome") == 0.0
+
+
+def test_rate_cap_metric_never_exports_symbol_labels(client: TestClient) -> None:
+    metrics.record_rate_cap_hit("PRIVATE-STRATEGY-SYMBOL")
+    family = _families(_scrape(client))["trading_rate_cap_hits"]
+    assert all(sample.labels == {} for sample in family.samples)
+    assert "PRIVATE-STRATEGY-SYMBOL" not in _scrape(client)

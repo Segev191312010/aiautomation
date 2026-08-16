@@ -28,8 +28,9 @@ Pins these invariants:
 6. Per-symbol order-rate cap fires AFTER the safety_gate, so a kernel-
    rejected order does NOT consume a slot in the rolling window.
 
-7. AsyncIO TOCTOU: ``MAX*3`` concurrent ``_check_and_record_rate_cap``
-   calls return exactly ``MAX`` True values (lock works).
+7. Cross-process TOCTOU: ``MAX*3`` concurrent
+   ``_check_and_record_rate_cap`` calls return exactly ``MAX`` True values
+   through the shared SQLite transaction.
 
 8. ``shadow_mode`` desync tripwire emits a CRITICAL log WITH
    ``stack_info`` populated.
@@ -343,8 +344,8 @@ async def test_get_pending_trades_all_users_crosses_tenants(_isolated_db, anyio_
 async def test_rate_cap_does_not_consume_slot_when_safety_rejects():
     """A safety-rejected order MUST NOT burn its rate-cap slot."""
     import order_executor as oe
-    oe._order_rate_window.clear()
     oe._recent_orders.clear()
+    acquire_slot = AsyncMock(return_value=True)
 
     rule = SimpleNamespace(
         id="r1", name="r", symbol="AAPL",
@@ -355,14 +356,12 @@ async def test_rate_cap_does_not_consume_slot_when_safety_rejects():
     with patch("order_executor.ibkr") as mock_ibkr, \
          patch("order_executor.safety_gate.evaluate_runtime_safety",
                new=AsyncMock(return_value=(False, "blocked-for-test"))), \
+         patch("order_executor.try_acquire_order_slot", new=acquire_slot), \
          patch("order_executor.cfg.SIM_MODE", False):
         mock_ibkr.get_account_summary = AsyncMock(return_value=SimpleNamespace(balance=100_000.0))
         await oe.place_order(rule)  # type: ignore[arg-type]
 
-    # The rejected order must NOT have left a timestamp in the window
-    assert "AAPL" not in oe._order_rate_window or not oe._order_rate_window["AAPL"], (
-        "safety-rejected orders must NOT consume a rate-cap slot"
-    )
+    acquire_slot.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -371,12 +370,11 @@ async def test_rate_cap_does_not_consume_slot_when_safety_rejects():
 
 
 @pytest.mark.asyncio
-async def test_rate_cap_lock_prevents_toctou_under_concurrency():
-    """Concurrent gather of MAX*3 calls returns exactly MAX True values."""
+async def test_rate_cap_lock_prevents_toctou_under_concurrency(_isolated_db):
+    """Concurrent gather of MAX*3 calls reserves exactly MAX shared slots."""
     from order_executor import (
-        _check_and_record_rate_cap, _order_rate_window, MAX_ORDERS_PER_SYMBOL_PER_MIN,
+        _check_and_record_rate_cap, MAX_ORDERS_PER_SYMBOL_PER_MIN,
     )
-    _order_rate_window.clear()
 
     results = await asyncio.gather(*[
         _check_and_record_rate_cap("AAPL")
@@ -384,7 +382,7 @@ async def test_rate_cap_lock_prevents_toctou_under_concurrency():
     ])
     n_true = sum(1 for r in results if r)
     assert n_true == MAX_ORDERS_PER_SYMBOL_PER_MIN, (
-        f"lock must admit exactly MAX={MAX_ORDERS_PER_SYMBOL_PER_MIN} concurrent "
+        f"shared limiter must admit exactly MAX={MAX_ORDERS_PER_SYMBOL_PER_MIN} concurrent "
         f"calls, got {n_true}"
     )
 

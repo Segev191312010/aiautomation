@@ -14,10 +14,9 @@ Design notes
 ------------
 - Metric names follow the ``trading_*`` prefix convention and the
   Prometheus ``_total`` suffix for counters.
-- The /metrics route is intentionally UNAUTHENTICATED: Prometheus scrapers
-  do not carry app bearer tokens, and the body exposes only aggregate
-  operational counters (no PII, no order contents).  Restrict access at the
-  network / reverse-proxy layer if needed.
+- The router is not mounted by default. The application only exposes it when
+  an operator explicitly selects the isolated-monitoring profile.
+- Labels are bounded and never contain symbols, order contents, or PII.
 - Helpers are defensive: a bad label value must never raise into a hot
   trading path, so each helper swallows instrumentation errors.
 """
@@ -66,11 +65,11 @@ bot_cycle_seconds = Histogram(
     "Duration of a bot run cycle in seconds.",
 )
 
-# Times a per-symbol rate cap blocked an action.
+# Times a per-symbol rate cap blocked an action. Do not label this by symbol:
+# raw trading-universe labels disclose strategy and create unbounded series.
 rate_cap_hits_total = Counter(
     "trading_rate_cap_hits_total",
     "Total rate-cap hits.",
-    ["symbol"],
 )
 
 # Current autopilot mode: 0=OFF, 1=PAPER, 2=LIVE.
@@ -154,9 +153,13 @@ def observe_bot_cycle_seconds(seconds: float) -> None:
 
 
 def record_rate_cap_hit(symbol: str) -> None:
-    """Increment the rate-cap-hit counter for ``symbol``."""
+    """Increment the aggregate rate-cap-hit counter.
+
+    ``symbol`` stays in the call signature for compatibility but is
+    deliberately not exported as a Prometheus label.
+    """
     try:
-        rate_cap_hits_total.labels(symbol=symbol).inc()
+        rate_cap_hits_total.inc()
     except Exception:
         log.debug("record_rate_cap_hit failed", exc_info=True)
 
