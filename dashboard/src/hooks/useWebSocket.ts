@@ -75,7 +75,7 @@ export function useWebSocket(): void {
   const mountedRef = useRef(false)
 
   const setQuotes      = useMarketStore((s) => s.setQuotes)
-  const applyLiveQuote = useMarketStore((s) => s.applyLiveQuote)
+  const applyRealtimeBar = useMarketStore((s) => s.applyRealtimeBar)
   const setBotRunning  = useBotStore((s) => s.setBotRunning)
   const setIBKR        = useBotStore((s) => s.setIBKR)
   const setPlayback    = useSimStore((s) => s.setPlayback)
@@ -204,19 +204,26 @@ export function useWebSocket(): void {
     // Broker real-time bar updates
     const unBar = wsService.subscribe('bar', (ev: WsEvent) => {
       const symbol = String(ev['symbol'] ?? '').toUpperCase()
-      const close  = Number(ev['close'])
-      const time   = Number(ev['time'])
-      if (!symbol || !Number.isFinite(close) || close <= 0 || !Number.isFinite(time) || time <= 0) return
-      const store  = useMarketStore.getState()
-      const series = store.bars[symbol] ?? store.compBars[symbol] ?? []
-      let barSeconds = 5
-      if (series.length >= 2) {
-        const last  = series[series.length - 1]
-        const prev  = series[series.length - 2]
-        const delta = last.time - prev.time
-        if (Number.isFinite(delta) && delta > 0) barSeconds = delta
+      const bar = {
+        time: Number(ev['time']),
+        open: Number(ev['open']),
+        high: Number(ev['high']),
+        low: Number(ev['low']),
+        close: Number(ev['close']),
+        volume: Number(ev['volume']),
       }
-      applyLiveQuote(symbol, close, Math.floor(time), barSeconds, 'ibkr', 0)
+      if (
+        !symbol
+        || Object.values(bar).some((value) => !Number.isFinite(value))
+        || bar.time <= 0
+        || bar.open <= 0
+        || bar.high <= 0
+        || bar.low <= 0
+        || bar.close <= 0
+        || bar.volume < 0
+      ) return
+      const resolution = useMarketStore.getState().chartResolution
+      applyRealtimeBar(symbol, bar, resolution)
     })
 
     // Live position + account updates from backend heartbeat

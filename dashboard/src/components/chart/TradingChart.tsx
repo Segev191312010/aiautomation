@@ -36,6 +36,7 @@ import { toHeikinAshi } from '@/utils/heikinAshi'
 import DrawingCanvas from '@/components/chart/DrawingCanvas'
 import AccessibleDataTable from '@/components/chart/AccessibleDataTable'
 import type { OHLCVBar, ChartType } from '@/types'
+import { chartBarsKey } from '@/utils/chartTimeframes'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyData = any
@@ -216,10 +217,10 @@ export default function TradingChart({
   const indSeriesRef  = useRef<Map<string, ISeriesApi<'Line'>[]>>(new Map())
   const chartTypeRef  = useRef<ChartType>('candlestick')
 
-  const bars               = useMarketStore((s) => s.bars[symbol] ?? [])
+  const bars               = useMarketStore((s) => s.bars[chartBarsKey(symbol, s.chartResolution)] ?? [])
   const chartType          = useMarketStore((s) => s.chartType)
   const compSymbol         = useMarketStore((s) => s.compSymbol)
-  const compBars           = useMarketStore((s) => s.compBars[compSymbol] ?? [])
+  const compBars           = useMarketStore((s) => s.compBars[chartBarsKey(compSymbol, s.chartResolution)] ?? [])
   const compMode           = useMarketStore((s) => s.compMode)
   const selectedIndicators = useMarketStore((s) => s.selectedIndicators)
   const replayBars         = useSimStore((s) => s.replayBars)
