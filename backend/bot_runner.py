@@ -79,6 +79,105 @@ def _update_corr_cache(key: tuple, matrix: dict) -> None:
     _corr_matrix_cache = matrix
 
 
+def _record_signal_scoring_failure(
+    exc: Exception,
+    *,
+    now: datetime,
+    symbol: str = "",
+    rule_id: str = "",
+) -> None:
+    """Record a scorer failure without allowing evidence failures to trade."""
+    message = f"Signal scoring failed{f' for {symbol}' if symbol else ''}: {exc}"
+    log.error(message)
+    for recorder in (
+        lambda: record_bot_error(message),
+        record_degraded_event,
+        lambda: metrics.record("signal_scoring_error", 1.0),
+        lambda: event_bus.publish(MetricEvent(
+            timestamp=now,
+            type=EventType.METRIC,
+            metric_type="signal_scoring_error",
+            value=1.0,
+            symbol=symbol,
+            rule_id=rule_id,
+        )),
+    ):
+        try:
+            recorder()
+        except Exception:
+            log.debug("Signal scoring failure evidence could not be recorded", exc_info=True)
+
+
+def _score_rule_candidates(triggered: list[tuple], bars_by_symbol: dict, now: datetime) -> list[dict]:
+    """Score triggered rules, excluding every candidate that cannot be scored."""
+    try:
+        from signal_scorer import signal_scorer
+        from ai_params import ai_params
+
+        signal_scorer.set_ai_weights(None)
+    except Exception as exc:
+        _record_signal_scoring_failure(exc, now=now)
+        return []
+
+    scored = []
+    for rule, sym in triggered:
+        if sym not in bars_by_symbol:
+            continue
+        try:
+            result = signal_scorer.score_signal(sym, bars_by_symbol[sym], rule.action.type)
+        except Exception as exc:
+            _record_signal_scoring_failure(
+                exc,
+                now=now,
+                symbol=str(sym).upper(),
+                rule_id=rule.id,
+            )
+            continue
+        result["_rule"] = rule
+        result["_symbol"] = sym
+        scored.append(result)
+
+    try:
+        ranked = signal_scorer.rank_signals(
+            scored,
+            top_n=5,
+            min_score=ai_params.get_min_score(),
+        )
+    except Exception as exc:
+        _record_signal_scoring_failure(exc, now=now)
+        return []
+
+    if ranked:
+        log.info("Signal scores: %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
+        for result in ranked:
+            signal_event = SignalEvent(
+                timestamp=now,
+                type=EventType.SIGNAL,
+                symbol=result["symbol"],
+                rule_id=result["_rule"].id,
+                rule_name=result["_rule"].name,
+                signal_type="LONG" if result["_rule"].action.type == "BUY" else "EXIT",
+                strength=result["composite_score"] / 100.0,
+                raw_score=result["composite_score"],
+            )
+            event_bus.publish(signal_event)
+            event_logger.log_event(signal_event)
+        metrics.record("signals_scored", len(ranked))
+
+    return [
+        {
+            "symbol": str(result["_symbol"]).upper(),
+            "trigger_symbol": result["_symbol"],
+            "source": "rule",
+            "score": float(result["composite_score"]),
+            "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
+            "is_exit": result["_rule"].action.type == "SELL",
+            "rule": result["_rule"],
+        }
+        for result in ranked
+    ]
+
+
 
 def set_broadcast(cb: Callable) -> None:
     global _broadcast
@@ -410,64 +509,7 @@ async def _run_cycle() -> None:
         triggered = evaluate_all(enabled, bars_by_symbol, universe_cache)
 
     # ── Score and rank signals ───────────────────────────────────────────────
-    rule_candidates: list[dict] = []
-    try:
-        from signal_scorer import signal_scorer
-        from ai_params import ai_params
-
-        # Inject AI signal weights if available (scorer detects regime internally)
-        signal_scorer.set_ai_weights(None)  # cleared; scorer will check ai_params per-regime
-
-        scored = []
-        for rule, sym in triggered:
-            if sym in bars_by_symbol:
-                result = signal_scorer.score_signal(sym, bars_by_symbol[sym], rule.action.type)
-                result["_rule"] = rule
-                result["_symbol"] = sym
-                scored.append(result)
-        ai_min_score = ai_params.get_min_score()
-        ranked = signal_scorer.rank_signals(scored, top_n=5, min_score=ai_min_score)
-        if ranked:
-            log.info("Signal scores: %s", ", ".join(f"{r['symbol']}={r['composite_score']}" for r in ranked))
-            # Emit SignalEvents
-            for r in ranked:
-                sig_event = SignalEvent(
-                    timestamp=now, type=EventType.SIGNAL,
-                    symbol=r["symbol"], rule_id=r["_rule"].id,
-                    rule_name=r["_rule"].name,
-                    signal_type="LONG" if r["_rule"].action.type == "BUY" else "EXIT",
-                    strength=r["composite_score"] / 100.0,
-                    raw_score=r["composite_score"],
-                )
-                event_bus.publish(sig_event)
-                event_logger.log_event(sig_event)
-            metrics.record("signals_scored", len(ranked))
-        rule_candidates = [
-            {
-                "symbol": str(r["_symbol"]).upper(),
-                "trigger_symbol": r["_symbol"],
-                "source": "rule",
-                "score": float(r["composite_score"]),
-                "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
-                "is_exit": r["_rule"].action.type == "SELL",
-                "rule": r["_rule"],
-            }
-            for r in ranked
-        ]
-    except Exception as exc:
-        log.warning("Signal scoring failed, using unranked: %s", exc)
-        rule_candidates = [
-            {
-                "symbol": str(sym).upper(),
-                "trigger_symbol": sym,
-                "source": "rule",
-                "score": 50.0,
-                "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
-                "is_exit": rule.action.type == "SELL",
-                "rule": rule,
-            }
-            for rule, sym in triggered
-        ]
+    rule_candidates = _score_rule_candidates(triggered, bars_by_symbol, now)
 
     # ── Execute triggered rules ───────────────────────────────────────────────
     total_signals = len(rule_candidates) + len(direct_candidates)
@@ -972,8 +1014,6 @@ from bot_exits import (  # noqa: E402
 async def _emit(payload: dict) -> None:
     if _broadcast:
         await _broadcast(payload)
-
-
 
 
 
