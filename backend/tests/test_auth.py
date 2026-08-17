@@ -16,9 +16,6 @@ from auth import create_token, verify_token, seed_demo_user, get_user, DEMO_USER
 async def setup_db(tmp_path):
     db_path = str(tmp_path / "test.db")
     cfg.DB_PATH = db_path
-    # Import database to use its DB_PATH
-    import database
-    database.DB_PATH = db_path
     async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (

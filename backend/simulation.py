@@ -73,8 +73,8 @@ CREATE TABLE IF NOT EXISTS sim_orders (
 """
 
 
-async def _ensure_sim_tables() -> None:
-    async with aiosqlite.connect(cfg.DB_PATH) as db:
+async def _ensure_sim_tables(db_path: str) -> None:
+    async with aiosqlite.connect(db_path) as db:
         await db.execute(_CREATE_SIM_ACCOUNT)
         await db.execute(_CREATE_SIM_POSITIONS)
         await db.execute(_CREATE_SIM_ORDERS)
@@ -93,10 +93,13 @@ class SimEngine:
     on the aiosqlite connection, which serialises concurrent coroutines.
     """
 
-    def __init__(self) -> None:
-        self._db = cfg.DB_PATH
-        self._ready = False
+    def __init__(self, db_path: str | None = None) -> None:
+        self._db_path_override = db_path
+        self._ready_db_path: str | None = None
         self._broadcast: Optional[Callable] = None
+
+    def _database_path(self) -> str:
+        return self._db_path_override or cfg.DB_PATH
 
     def set_broadcast(self, cb: Callable) -> None:
         self._broadcast = cb
@@ -105,8 +108,9 @@ class SimEngine:
 
     async def initialize(self) -> None:
         """Create tables and seed account if this is a fresh database."""
-        await _ensure_sim_tables()
-        async with aiosqlite.connect(self._db) as db:
+        db_path = self._database_path()
+        await _ensure_sim_tables(db_path)
+        async with aiosqlite.connect(db_path) as db:
             async with db.execute("SELECT COUNT(*) FROM sim_account") as cur:
                 (count,) = await cur.fetchone()  # type: ignore[misc]
             if count == 0:
@@ -115,7 +119,7 @@ class SimEngine:
                     (cfg.SIM_INITIAL_CASH, cfg.SIM_INITIAL_CASH),
                 )
                 await db.commit()
-        self._ready = True
+        self._ready_db_path = db_path
         log.info("SimEngine ready — initial cash = $%.2f", cfg.SIM_INITIAL_CASH)
 
     # ── Read helpers ─────────────────────────────────────────────────────────
@@ -124,7 +128,7 @@ class SimEngine:
         self, price_fn: Optional[Callable[[str], Optional[float]]] = None
     ) -> list[SimPositionState]:
         """Return all virtual positions with live P&L."""
-        async with aiosqlite.connect(self._db) as db:
+        async with aiosqlite.connect(self._database_path()) as db:
             async with db.execute(
                 "SELECT symbol, qty, avg_cost FROM sim_positions WHERE qty > 0"
             ) as cur:
@@ -156,7 +160,7 @@ class SimEngine:
         if positions is None:
             positions = await self.get_positions()
 
-        async with aiosqlite.connect(self._db) as db:
+        async with aiosqlite.connect(self._database_path()) as db:
             async with db.execute(
                 "SELECT cash, initial_cash, realized_pnl FROM sim_account WHERE id=1"
             ) as cur:
@@ -190,7 +194,7 @@ class SimEngine:
 
     async def get_orders(self, limit: int = 100) -> list[SimOrderRecord]:
         """Return recent virtual order history (newest first)."""
-        async with aiosqlite.connect(self._db) as db:
+        async with aiosqlite.connect(self._database_path()) as db:
             async with db.execute(
                 "SELECT id, symbol, action, qty, price, commission, pnl, timestamp "
                 "FROM sim_orders ORDER BY timestamp DESC LIMIT ?",
@@ -220,14 +224,14 @@ class SimEngine:
 
         Returns (success: bool, message: str).
         """
-        if not self._ready:
+        if self._ready_db_path != self._database_path():
             await self.initialize()
 
         oid = order_id or str(uuid.uuid4())
         commission = cfg.SIM_COMMISSION
         ts = datetime.now(timezone.utc).isoformat()
 
-        async with aiosqlite.connect(self._db) as db:
+        async with aiosqlite.connect(self._database_path()) as db:
             # Load account state
             async with db.execute(
                 "SELECT cash, realized_pnl FROM sim_account WHERE id=1"
@@ -324,7 +328,7 @@ class SimEngine:
 
     async def reset(self) -> None:
         """Wipe all positions and orders; restore cash to initial amount."""
-        async with aiosqlite.connect(self._db) as db:
+        async with aiosqlite.connect(self._database_path()) as db:
             await db.execute(
                 "UPDATE sim_account SET cash=?, realized_pnl=0 WHERE id=1",
                 (cfg.SIM_INITIAL_CASH,),

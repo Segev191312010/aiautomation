@@ -4,8 +4,8 @@ Covers: first order, within-cap, cap-exceeded, window expiry frees a slot,
 20 concurrent asyncio tasks -> exactly ``max_per_minute`` succeed, per-symbol
 scoping, and that eviction keeps the table bounded.
 
-Each test uses an isolated DB_PATH via monkeypatching ``cfg.DB_PATH`` (the
-same pattern conftest uses for ``database.DB_PATH``). ``db.core.transaction()``
+Each test uses an isolated DB_PATH via monkeypatching ``cfg.DB_PATH``.
+``db.core.transaction()``
 reads ``cfg.DB_PATH`` at call time, so the override fully isolates each test.
 """
 from __future__ import annotations

@@ -41,7 +41,6 @@ def _isolated_db(tmp_path, monkeypatch):
     """Give each test its own DB file."""
     db_path = str(tmp_path / "e2e.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
 
 
 def _make_rule(**overrides) -> Rule:

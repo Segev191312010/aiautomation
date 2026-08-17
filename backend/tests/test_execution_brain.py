@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import config
-import database
 from database import init_db
 from execution_brain import (
     choose_candidates,
@@ -17,8 +16,6 @@ def _isolated_db(tmp_path, monkeypatch):
     """Redirect DB_PATH to a fresh sqlite file per test."""
     db_path = str(tmp_path / "execution_brain.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
-    # db.core reads cfg.DB_PATH at open-time, so patching cfg is sufficient
 
 
 def test_choose_candidates_prefers_exit_for_same_symbol():

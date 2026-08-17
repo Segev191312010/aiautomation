@@ -149,7 +149,6 @@ def _patch_db(tmp_path, monkeypatch):
     import config
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
     import database
-    monkeypatch.setattr(database, "DB_PATH", db_path)
     return database
 
 

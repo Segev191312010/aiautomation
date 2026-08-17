@@ -16,7 +16,6 @@ import uuid
 import pytest
 
 import config
-import database
 from database import (
     init_db,
     save_rule,
@@ -37,7 +36,6 @@ from models import Rule, Condition, TradeAction, ScreenerPreset
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "tenancy.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
     return db_path
 
 

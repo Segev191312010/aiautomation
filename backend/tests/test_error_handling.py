@@ -29,7 +29,6 @@ async def client(tmp_path):
     from config import cfg
     cfg.DB_PATH = db_path
     import database
-    database.DB_PATH = db_path
 
     from main import app
     # Init DB for test

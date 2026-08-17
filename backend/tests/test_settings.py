@@ -17,8 +17,6 @@ from settings import get_settings, update_settings, DEFAULT_SETTINGS, _deep_merg
 async def setup_db(tmp_path):
     db_path = str(tmp_path / "test.db")
     cfg.DB_PATH = db_path
-    import database
-    database.DB_PATH = db_path
     async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (

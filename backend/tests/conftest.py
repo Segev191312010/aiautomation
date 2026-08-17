@@ -59,11 +59,8 @@ def tmp_path(request):
 
 @pytest.fixture(autouse=True)
 def _restore_db_path():
-    """Restore database.DB_PATH after tests that override it."""
-    import database
+    """Restore the authoritative runtime database path after each test."""
     from config import cfg
-    original_db = database.DB_PATH
     original_cfg = cfg.DB_PATH
     yield
-    database.DB_PATH = original_db
     cfg.DB_PATH = original_cfg

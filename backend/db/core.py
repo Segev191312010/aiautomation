@@ -8,8 +8,6 @@ from config import cfg
 
 log = logging.getLogger(__name__)
 
-DB_PATH = cfg.DB_PATH
-
 @asynccontextmanager
 async def get_db():
     """Open a DB connection with WAL mode and busy_timeout configured."""

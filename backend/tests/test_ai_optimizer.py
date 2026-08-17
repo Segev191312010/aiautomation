@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import config
-import database
 from database import init_db
 
 
@@ -13,7 +12,6 @@ from database import init_db
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "optimizer.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
 
 
 def test_get_ai_decisions_survives_partial_rule_rows(monkeypatch):
