@@ -61,7 +61,7 @@ async def test_scheduled_optimizer_invokes_decision_stage_as_proposal_only(
     monkeypatch.setattr(
         ai_optimizer,
         "start_decision_run",
-        AsyncMock(return_value=None),
+        AsyncMock(return_value="run-1"),
     )
     monkeypatch.setattr(ai_optimizer, "_apply_decisions", apply_decisions)
     monkeypatch.setattr(ai_optimizer.ai_params, "save_to_db", AsyncMock())
@@ -80,7 +80,7 @@ async def test_scheduled_optimizer_invokes_decision_stage_as_proposal_only(
     apply_decisions.assert_awaited_once_with(
         decisions,
         context,
-        run_id=None,
+        run_id="run-1",
         item_ids=None,
         proposal_only=True,
     )

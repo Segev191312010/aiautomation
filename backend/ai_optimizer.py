@@ -511,6 +511,7 @@ async def run_full_optimization() -> dict:
         # S10: Create decision run and items in ledger
         run_id = None
         item_ids = None
+        ledger_items = _build_ledger_items(decisions)
         try:
             context_json = json.dumps({
                 "pnl_summary": context.get("pnl_summary", {}),
@@ -539,15 +540,40 @@ async def run_full_optimization() -> dict:
                 input_tokens=decisions.get("_input_tokens"),
                 output_tokens=decisions.get("_output_tokens"),
             )
-
-            ledger_items = _build_ledger_items(decisions)
+            if not run_id:
+                raise RuntimeError("decision run persistence returned no run id")
             if ledger_items:
                 item_ids = await record_decision_items(
                     run_id, ledger_items,
                     regime=context.get("current_regime"),
                 )
+                if len(item_ids) != len(ledger_items):
+                    raise RuntimeError(
+                        "decision item persistence was incomplete: "
+                        f"expected {len(ledger_items)}, stored {len(item_ids)}"
+                    )
         except Exception as ledger_exc:
-            log.warning("Decision ledger recording failed (non-fatal): %s", ledger_exc)
+            log.error(
+                "Decision ledger recording failed — optimizer decisions blocked: %s",
+                ledger_exc,
+            )
+            if run_id:
+                try:
+                    await finalize_decision_run(
+                        run_id,
+                        status="error",
+                        error=f"ledger_persistence_failed: {ledger_exc}",
+                    )
+                except Exception:
+                    log.exception(
+                        "Failed to mark incomplete decision run %s as error",
+                        run_id,
+                    )
+            return {
+                "success": False,
+                "error": "decision_ledger_unavailable",
+                "detail": str(ledger_exc),
+            }
 
         # Step 3: Apply through guardrails
         results = await _apply_decisions(
