@@ -20,8 +20,6 @@ async def client(tmp_path):
     cfg.DB_PATH = db_path
     cfg.ENABLE_MARKET_DIAGNOSTICS = True
     import database
-
-    database.DB_PATH = db_path
     from main import app, _diag_service
     from auth import create_token
 

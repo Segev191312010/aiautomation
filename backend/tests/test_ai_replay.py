@@ -3,7 +3,6 @@ import json
 import pytest
 
 import config
-import database
 from database import init_db
 from ai_decision_ledger import (
     start_decision_run,
@@ -15,7 +14,6 @@ from ai_decision_ledger import (
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "replay.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
 
 
 async def _seed_runs(n: int = 3, user_id: str = "demo") -> list[str]:

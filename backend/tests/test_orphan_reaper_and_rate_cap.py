@@ -24,7 +24,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import config
-import database
 from database import init_db, save_trade
 from models import Trade
 
@@ -33,7 +32,6 @@ from models import Trade
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "reaper.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
     return db_path
 
 

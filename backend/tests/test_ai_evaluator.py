@@ -3,7 +3,6 @@ import json
 import pytest
 
 import config
-import database
 from database import init_db
 from ai_evaluator import (
     compute_slice_metrics,
@@ -22,7 +21,6 @@ from ai_evaluator import (
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "eval.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
 
 
 def _scored_items(pnls: list[float], confidence: float = 0.7) -> list[dict]:

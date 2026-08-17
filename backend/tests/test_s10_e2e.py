@@ -3,7 +3,6 @@ import json
 import pytest
 
 import config
-import database
 from database import init_db, save_rule, save_trade, finalize_trade_outcome
 from models import Rule, Trade
 from ai_decision_ledger import (
@@ -28,7 +27,6 @@ from ai_evaluator import (
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "s10e2e.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
 
 
 # ── E2E 1: Decision run -> direct trade -> finalized -> learning metrics ─────

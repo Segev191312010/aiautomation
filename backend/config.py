@@ -2,9 +2,24 @@
 Configuration — loaded from .env file or environment variables.
 """
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+_BACKEND_DIR = Path(__file__).resolve().parent
+
+
+def _database_path() -> str:
+    configured = os.getenv("DB_PATH", "").strip() or "trading_bot.db"
+    if configured == ":memory:" or configured.startswith("file:"):
+        return configured
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = _BACKEND_DIR / path
+    return str(path.resolve())
 
 
 class Config:
@@ -132,7 +147,7 @@ class Config:
     POSITION_SIZE_PCT: float = float(os.getenv("POSITION_SIZE_PCT", "0.005"))  # 0.5%
 
     # ── Database ─────────────────────────────────────────────────────────────
-    DB_PATH: str = os.getenv("DB_PATH", "trading_bot.db")
+    DB_PATH: str = _database_path()
     WS_PUSH_INTERVAL_SECONDS: float = float(os.getenv("WS_PUSH_INTERVAL_SECONDS", "0.5"))
     WS_CACHE_TTL_SECONDS: float = float(os.getenv("WS_CACHE_TTL_SECONDS", "0.5"))
     WS_STALE_WARN_SECONDS: int = int(os.getenv("WS_STALE_WARN_SECONDS", "10"))

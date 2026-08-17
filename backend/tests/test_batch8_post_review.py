@@ -56,7 +56,6 @@ import pandas as pd
 import pytest
 
 import config
-import database
 from database import init_db
 
 
@@ -64,7 +63,6 @@ from database import init_db
 def _isolated_db(tmp_path, monkeypatch):
     db_path = str(tmp_path / "batch8.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
     return db_path
 
 

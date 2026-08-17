@@ -59,7 +59,6 @@ async def client():
     from config import cfg
     cfg.DB_PATH = db_path
     import database
-    database.DB_PATH = db_path
     from main import app
 
     await database.init_db()

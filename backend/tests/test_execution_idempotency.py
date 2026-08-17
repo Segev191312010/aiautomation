@@ -40,7 +40,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import config
-import database
 from database import get_trades, init_db, save_trade
 from models import Trade
 
@@ -52,10 +51,9 @@ from models import Trade
 
 @pytest.fixture
 def _isolated_db(tmp_path, monkeypatch):
-    """Point both config and database at a throwaway DB for this test."""
+    """Point the authoritative config at a throwaway DB for this test."""
     db_path = str(tmp_path / "execution_idempotency.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", db_path)
-    monkeypatch.setattr(database, "DB_PATH", db_path)
     return db_path
 
 

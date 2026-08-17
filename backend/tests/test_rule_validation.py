@@ -116,7 +116,6 @@ async def test_promotion_readiness_endpoint_exposes_latest_validation(tmp_path, 
 
     db_path = str(tmp_path / "promotion_readiness.db")
     cfg.DB_PATH = db_path
-    database.DB_PATH = db_path
 
     from database import init_db, save_rule
     from main import app

@@ -37,14 +37,8 @@ from simulation import sim_engine  # noqa: E402
 async def seeded_db(tmp_path):
     db_path = str(tmp_path / "integration.db")
     cfg.DB_PATH = db_path
-    import database
-
-    database.DB_PATH = db_path
     # Full core schema (users + trades + settings + ...)
     await init_db()
-    # SimEngine caches its own db path; point it at the temp db and create
-    # its tables.
-    sim_engine._db = db_path
     await sim_engine.initialize()
     async with aiosqlite.connect(db_path) as db:
         await seed_demo_user(db)

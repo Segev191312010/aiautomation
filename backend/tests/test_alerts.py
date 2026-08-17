@@ -40,8 +40,6 @@ async def client(tmp_path):
 
     cfg.DB_PATH = db_path
     import database
-
-    database.DB_PATH = db_path
     from main import app
 
     await database.init_db()
@@ -233,8 +231,6 @@ async def test_one_shot_auto_disable(tmp_path):
 
     cfg.DB_PATH = db_path
     import database
-
-    database.DB_PATH = db_path
     await database.init_db()
 
     import alert_engine
@@ -271,8 +267,6 @@ async def test_recurring_cooldown_blocks(tmp_path):
 
     cfg.DB_PATH = db_path
     import database
-
-    database.DB_PATH = db_path
     await database.init_db()
 
     import alert_engine
@@ -307,8 +301,6 @@ async def test_recurring_fires_after_cooldown(tmp_path):
 
     cfg.DB_PATH = db_path
     import database
-
-    database.DB_PATH = db_path
     await database.init_db()
 
     import alert_engine
@@ -350,8 +342,6 @@ async def test_history_persisted_on_fire(tmp_path):
 
     cfg.DB_PATH = db_path
     import database
-
-    database.DB_PATH = db_path
     await database.init_db()
 
     import alert_engine
