@@ -1,12 +1,35 @@
 # ULTRAPLAN v4 — Live Status Ledger
 
+> **HISTORICAL STATUS — LIVE INSTRUCTIONS BLOCKED.** This ledger predates the
+> 2026-07-27 Stage 9A audit. Do not execute its canary/flip steps or treat its
+> `orderRef` claims as idempotency evidence. See `ROADMAP_TEAM_PLAN.md` and
+> `docs/risk/stage-9a-residual-risk-register.md`.
+
 > Durable source of truth for this build. Updated as work proceeds. Read this first when resuming.
 
 - **Branch:** `feature/ultraplan-v4` (off `feature/deep-review-p0-batch` @ `e1f42bd`)
 - **Plan:** `docs/ULTRAPLAN_v4.md`  ·  **Memory:** `~/.claude/.../memory/ultraplan-v4-trading-build.md`
 
-## Committed
-- **W1 foundation — `9f252bc`**: py3.11 pin (Dockerfile+CI), TV statuses + `tv_idempotency` table, `retention.py` GC bug fix, TV/Claude config + `.env` keys, `anthropic`/`prometheus_client` pinned, backup/restore scripts, +7 tests. Suite **672 → 679 green**.
+## Committed (feature/ultraplan-v4)
+- **`9f252bc` W1 foundation**: py3.11 pin (Dockerfile+CI), TV statuses + `tv_idempotency` table, `retention.py` GC bug fix, TV/Claude config + `.env` keys, deps pinned, backup/restore scripts, +7 tests. 672 → 679.
+- **`10ad9cd` W2-6 backend paper pipeline**: webhook ingest + /api/signals, order_proposal, mcp_server, claude_worker (default-OFF), metrics, rate_limits, health_extended, account day-pnl; routers + lifespan wired; interface bug fixed (tools_spec list / 1-arg dispatch / result-aware classify); +docs. 679 → 778.
+- **`045b8cc` W7 frontend**: Signals tab + components + API client/types; O(n) indicators (parity-tested) + VWAP session reset + a11y table; validateSymbol/ConfirmModal; Day-P&L badge. tsc clean, vitest 355 → 364, build OK.
+- **`ea0404c` orderRef idempotency (M1 closed)**: `ib_order.orderRef = trade_rec.id` before placeOrder; idempotency dedupe test promoted xfail → pass. 778 → 779.
+- **`0bde712` hard paper fence (review-driven CRITICAL fix)**: `place_proposed_order` fails closed for `source in {claude_worker, tv_webhook}` when `IS_PAPER=false` (→ `rejected`/`paper_fence`, broker never reached) unless `CLAUDE_LIVE_TRADING_ENABLED=true`. Scanner source unaffected. +flag +5 tests. 779 → 784.
+
+STATE: backend **784 green / 0 xfail**, frontend **364 green**, app imports (201 routes). No live-behaviour change yet (worker default-off; rate-cap + direct_ai untouched).
+
+## Independent review (Codex gpt-5.3-codex + Claude cross-check)
+Ran a multi-engine review of the v4 diff. CONVERGENT verdict: core verified clean (4-gate chain order/short-circuits/skip_safety=False; rejected|deferred never 'applied'; orderRef; async non-blocking worker + bounded tool loop; parameterized SQL; HMAC secret; no scanner-path behaviour change). ONE real CRITICAL (all engines): TV/Claude path was paper-only by convention, not code → **fixed in `0bde712` (paper fence)**. Overstated/dismissed: "secret hash-collision" (sha256+compare_digest is fine) and "IP fail-open" (it fails closed). Minor/known: in_review stranding (bounded by TTL purge), Claude-chooses-qty mapping, deferred-vs-rejected cause semantics.
+
+## Remaining live-path work (deferred — decisions/recommendations)
+- **Metrics call-site wiring** (additive observability in bot_runner/order_executor/webhook): low-risk; do as a follow-up commit. Not blocking.
+- **Cross-process rate-cap swap** (replace order_executor in-process asyncio.Lock with `db/rate_limits.try_acquire_order_slot`; fold `order_rate_window` DDL into init_db): BEHAVIOUR CHANGE to the live rate limiter. REQUIRED before `WORKERS>1`. Recommend wiring + a 2-worker smoke during the soak; **hold WORKERS=1 until then**.
+- **direct_ai_trader reroute**: RECOMMEND **NOT** rerouting through `place_proposed_order` — its signature `(rule, source, user_id)` drops `stop_price/is_exit/has_existing_position`, which would REGRESS exit/stop handling. Recon confirmed the safety kernel already runs on this path (explicit + inside place_order), so there is no true live bypass to close. Leave as-is (optional: extend the helper to forward those params + tests, then reroute).
+- **/api/signals user filter**: prod/multi-user only; the demo writes `user_id='demo'`, so filtering by the authed user could return empty in the single-user demo. Defer until multi-user.
+
+## Flip decision (preconditions NOT all met)
+Per protocol, do NOT flip the scanner LIVE yet: the cross-process rate cap isn't wired (so WORKERS>1 is unsafe) and the modified order path hasn't had a paper soak. Recommended path: run the paper soak (scanner on PAPER with the new helper + orderRef; TV/Claude path PAPER) per `paper_review_protocol.md`, wire the rate-cap swap, then flip per `LIVE_FLIP_RUNBOOK.md`.
 
 ## In flight — parallel agent fleets (do NOT relaunch agents on these files)
 **Fleet 1** (`wvwmmx31k`, 8): `routers/webhook_routes.py`(+test,+pine) · `order_proposal.py`+`mcp_server.py`+`claude_prompts.py`(+tests) · `claude_worker.py`+`claude_context.py`(+test) · `metrics.py`(+test) · Signals UI (`AutopilotPage.tsx`, `components/autopilot/*`, `types/signals.ts`, `services/api/signals.ts`) · charts (`indicators.ts`, `indicators_session.ts`, `chart/TradingChart.tsx`, `chart/AccessibleDataTable.tsx`) · polish (`validateSymbol.ts`, `ConfirmModal.tsx`, `tradebot/QuickOrderForm.tsx`, `pages/TradeBotPage.tsx`, `hooks/useMarketData.ts`) · docs (`LIVE_FLIP_RUNBOOK.md`, `rollback_tv_claude.md`, `DEPLOYMENT_v4.md`, `scripts/run_quality_gates.sh`).
@@ -51,4 +74,3 @@ webhook_routes.py(16✓, exports `router`+`signals_router`) · order_proposal.py
 - webhook: add a "never log the raw body (may contain secret)" guard/comment above the parse (review: HIGH future-regression; current code does NOT leak).
 - **CONFIRMED CLEAN:** webhook secret(HMAC constant-time)/IP(no XFF spoof)/freshness/idempotency/parameterized-SQL all hardened; `claude_worker` is PAPER-only and cannot reach the live broker; **e2e TV→paper-fill PASSES**; **autopilot guard-sequence locked** (check_trade_risk→portfolio→safety_gate→place_order(skip_safety=False), 5 tripwire tests). New e2e files: `tests/test_e2e_tv_to_paper_fill.py`, `tests/test_e2e_autopilot_live_smoke.py`.
 - The integration-safety-review's "double-kernel-run" BLOCKER is OVERSTATED: it's the EXISTING intentional dual-gate (bot_runner also runs safety_gate then place_order(skip_safety=False)). Keep the explicit-then-place_order pattern; do NOT collapse to skip_safety=True.
-

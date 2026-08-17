@@ -1,5 +1,10 @@
 # ULTRAPLAN v4 — TV Webhook + MCP + Claude Worker + Signals UI (code-grounded)
 
+> **SUPERSEDED FOR RELEASE PURPOSES.** Stage 9A (2026-07-27) makes this a
+> historical build plan. Its LIVE-flip and multi-worker claims must not be
+> executed; `ROADMAP_TEAM_PLAN.md` and the Stage 9A risk register are current,
+> and the application has a code-owned LIVE release fence.
+
 > Supersedes ULTRAPLAN v3. v3 was a document-only spec; v4 is rewritten against the
 > **actual** `/Users/salomon/aiautomation` repo after an 8-lane read-only recon. Where v3's
 > assumptions were wrong, v4 corrects them (see §2). Account: LIVE IBKR ~$5,600.

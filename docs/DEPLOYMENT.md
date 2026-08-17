@@ -1,5 +1,11 @@
 # Deployment Guide
 
+> **Stage 9A safety hold (2026-07-27):** This guide is not authorization for a
+> real-money or public deployment. `AUTOPILOT_MODE=LIVE` and configured
+> real-money broker connections are runtime-fenced, exactly one application
+> replica with `WORKERS=1` is required, and the open Stage 9A risk register
+> remains the release authority.
+
 ## Overview
 
 This guide covers deploying the trading platform to production environments. The platform consists of a FastAPI backend and a React frontend that can be deployed together or separately.
@@ -274,7 +280,7 @@ logfile=/var/log/supervisor/supervisord.log
 pidfile=/var/run/supervisord.pid
 
 [program:backend]
-command=uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+command=uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
  directory=/app/backend
 user=root
 autostart=true
@@ -332,7 +338,8 @@ Environment=DB_PATH=/opt/trading/data/trading.db
 Environment=JWT_SECRET=your-secret-key
 Environment=SIM_MODE=false
 Environment=IS_PAPER=true
-ExecStart=/opt/trading/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
+Environment=WORKERS=1
+ExecStart=/opt/trading/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 Restart=always
 RestartSec=5
 

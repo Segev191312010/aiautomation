@@ -1,5 +1,10 @@
 # Deployment Guide — ULTRAPLAN v4
 
+> **Stage 9A safety hold (2026-07-27):** Historical v4 instructions cannot
+> authorize LIVE. The code-owned release fence rejects
+> `AUTOPILOT_MODE=LIVE`; use this addendum only for isolated development/PAPER
+> work while the Stage 9A risk register is open.
+
 > v4 addendum to `docs/DEPLOYMENT.md`. This file covers ONLY what changed in
 > ULTRAPLAN v4: the Python 3.11 pin, the new TradingView (`TV_*`) and Claude
 > worker (`CLAUDE_*`) environment variables, DB backup/restore, and registering
@@ -141,14 +146,13 @@ SKIP_DOCKER=1 scripts/run_quality_gates.sh   # skip docker builds (faster local 
 
 ## 6. Deploy-time safety notes (v4)
 
-- **Keep `WORKERS=1`** (override the Dockerfile/compose default of 2) until the
-  cross-process SQLite rate cap (W5) lands. The per-process `asyncio.Lock` does
-  not coordinate across uvicorn workers, so `WORKERS>=2` is an over-trade risk.
-  Set in `.env`: `WORKERS=1`.
+- **Keep one replica and `WORKERS=1`.** Both Dockerfiles and Compose now
+  default to one worker. A SQLite rate cap is shared across local processes,
+  but broker clients/background loops still require the same-host process lock
+  and do not have cross-host lease/fencing. Set in `.env`: `WORKERS=1`.
 - **TV/Claude path stays PAPER** (IBKR port 7497) for a 7-day soak regardless of
   the scanner-path mode. See `docs/LIVE_FLIP_RUNBOOK.md`.
 - **Claude worker stays OFF** (`CLAUDE_WORKER_ENABLED=false`) until the soak is
   approved.
-- The LIVE scanner-path flip is a separate gated procedure —
-  `docs/LIVE_FLIP_RUNBOOK.md`. The TV/Claude rollback is
-  `docs/rollback_tv_claude.md`.
+- `docs/LIVE_FLIP_RUNBOOK.md` is retained as blocked historical material. It
+  must not be executed while the Stage 9A release fence is present.

@@ -27,13 +27,13 @@ Failure modes from `get_current_user`:
 
 All 401s include the `WWW-Authenticate: Bearer` response header.
 
-### Public, multi-factor (webhook + metrics)
+### Public webhook and isolated metrics
 
 `POST /api/webhook/tv` is a public route (no bearer dependency) because
 TradingView cannot send an `Authorization` header. Authenticity is established
-by three layered factors (see below). `GET /metrics` is intentionally
-unauthenticated and is expected to be restricted at the network / reverse-proxy
-layer.
+by three layered factors (see below). `/metrics` is absent by default. It is
+mounted only when `METRICS_EXPOSURE_PROFILE=isolated`; that profile requires a
+monitoring-only network/reverse-proxy boundary.
 
 ---
 
@@ -354,9 +354,10 @@ Prometheus text-exposition of all process metrics the process has touched.
 
 - Method: `GET`
 - Path: `/metrics`
-- Auth: UNAUTHENTICATED by design (Prometheus scrapers carry no bearer token;
-  the body exposes only aggregate operational counters — no PII, no order
-  contents). Restrict at the network / reverse-proxy layer if needed.
+- Availability: absent by default (`404`). Set
+  `METRICS_EXPOSURE_PROFILE=isolated` only on an isolated monitoring listener.
+- Auth: no application bearer token after that explicit mount; the network
+  boundary is mandatory.
 - Params: none
 - Response content type: `text/plain; version=0.0.4; charset=utf-8`
   (`CONTENT_TYPE_LATEST`).
@@ -369,7 +370,7 @@ Prometheus text-exposition of all process metrics the process has touched.
 | `trading_orders_filled_total` | counter | `source` | Total orders filled |
 | `trading_ibkr_disconnects_total` | counter | — | IBKR disconnect events |
 | `trading_bot_cycle_seconds` | histogram | — | Bot run-cycle duration (seconds) |
-| `trading_rate_cap_hits_total` | counter | `symbol` | Per-symbol rate-cap blocks |
+| `trading_rate_cap_hits_total` | counter | — | Aggregate rate-cap blocks; symbols are not exported |
 | `trading_autopilot_mode` | gauge | — | Autopilot mode (0=OFF, 1=PAPER, 2=LIVE) |
 | `trading_claude_calls_total` | counter | `outcome` | Claude worker LLM calls |
 | `trading_claude_cost_usd_total` | counter | — | Cumulative Claude spend (USD) |

@@ -1,9 +1,13 @@
 # Paper Review Protocol — 7-Day TV/Claude PAPER Soak
 
+> **Stage 9A scope note (2026-07-27):** This protocol may collect PAPER
+> development evidence only. It cannot authorize a LIVE flip, and the
+> application currently enforces that NO-GO with a runtime release fence.
+
 Operator's **daily checklist** for the 7-day TradingView -> Claude **paper-trading**
 soak. The goal of the soak is to prove the full inbound path —
 `POST /api/webhook/tv` ingest, Claude review worker, and PAPER order proposal —
-behaves correctly, safely, and economically **before** we flip the TV path LIVE.
+behaves correctly, safely, and economically before any future release review.
 
 Throughout the soak the system is **PAPER-only**:
 - `AUTOPILOT_MODE=PAPER` (the `trading_autopilot_mode` gauge should read `1`).
@@ -57,7 +61,7 @@ Incremented by the worker; cost accrues to `claude_cost_usd_total` and the
 | Endpoint | Auth | Returns |
 |---|---|---|
 | `GET /api/signals?source=&status=&limit=&offset=` | bearer | queued candidates, newest first |
-| `GET /metrics` | none (network-restricted) | Prometheus text exposition |
+| `GET /metrics` | none; isolated profile only | Prometheus text exposition |
 | `GET /api/health` | none | lightweight liveness |
 | `GET /api/health/ibkr` | bearer | `{connected, last_heartbeat_age_s}` |
 | `GET /api/health/database-integrity` | bearer | `{integrity, journal_mode}` |
@@ -68,6 +72,10 @@ Set these once per shell (replace host/token):
 export BASE=https://YOUR-HOST
 export TOK="Bearer YOUR_OPERATOR_TOKEN"
 ```
+
+Metrics checks additionally require `METRICS_EXPOSURE_PROFILE=isolated` on a
+monitoring-only listener. Do not enable the route on the public application
+listener.
 
 ---
 
@@ -213,11 +221,12 @@ the §2 decision means someone flipped LIVE early — **stop and investigate**.
 
 ---
 
-## 2. GO / NO-GO CRITERIA (decide after the full 7 days)
+## 2. PAPER EVIDENCE CRITERIA (evaluate after the full 7 days)
 
-Flip the TV path **LIVE** only if **every** criterion below holds across the
-**entire** 7-day window (not just the last day). If any single criterion fails,
-the answer is **NO-GO** — extend or restart the soak.
+These criteria can qualify the PAPER evidence bundle only if every item holds
+across the entire seven-day window. They do not authorize LIVE. If any single
+criterion fails, extend or restart the soak; if all pass, submit the evidence
+to the Stage 9A governance path while the LIVE fence remains in place.
 
 **GO requires ALL of:**
 
@@ -251,11 +260,10 @@ the answer is **NO-GO** — extend or restart the soak.
 10. **Mode discipline.** `trading_autopilot_mode` read `1` (PAPER) for the whole
     soak — no premature LIVE flip.
 
-If GO: flip the TV path to LIVE per the deployment runbook (which includes
-setting `AUTOPILOT_MODE=LIVE`, re-validating `TV_WEBHOOK_SECRET`/`TV_ALLOWED_IPS`,
-and confirming `trading_autopilot_mode` now reads `2`). **Re-run this entire
-daily checklist on day 1 of LIVE**, watching especially the first real `applied`
-order.
+If the PAPER evidence passes, archive it with the exact commit/configuration
+identity and request review. Do not set `AUTOPILOT_MODE=LIVE`; the historical
+deployment runbook is blocked and the remaining execution, protection,
+reconciliation, risk, identity, and approval gates still apply.
 
 ---
 

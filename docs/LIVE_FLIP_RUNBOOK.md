@@ -1,5 +1,12 @@
 # LIVE Flip Runbook — ULTRAPLAN v4 (scanner path only)
 
+> **BLOCKED / HISTORICAL — DO NOT EXECUTE.** As of 2026-07-27, Stage 9A is
+> NO-GO and the application rejects `AUTOPILOT_MODE=LIVE` at startup and at
+> runtime mode changes. This document is retained only to preserve earlier
+> operational context. A replacement runbook requires accepted ADRs, closed
+> critical risks, an identified artifact, paper-broker evidence, and named
+> human approvals.
+
 > Account: LIVE IBKR (~$5,600). This runbook flips ONLY the **scanner path** to
 > LIVE (`AUTOPILOT_MODE=LIVE`, IBKR LIVE port 7496). The **TradingView / Claude
 > path stays PAPER** (IBKR port 7497) for a 7-day soak regardless of this flip.
