@@ -51,8 +51,8 @@ services:
       # Dashboard static files embedded in container
       DASHBOARD_BUILD_DIR: "./dashboard/dist"
 
-      # Uvicorn tuning (workers, log level)
-      WORKERS: "${WORKERS:-2}"
+      # Single execution owner until durable lease/fencing is implemented.
+      WORKERS: "${WORKERS:-1}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
 
     # Persistent SQLite database volume

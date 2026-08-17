@@ -46,12 +46,12 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Production entry point:
-# - Uvicorn with configurable worker count (default 2)
+# - One Uvicorn worker until broker/background ownership is leased and fenced
 # - Bind to 0.0.0.0 so Docker port mapping works
 # - JSON logs to stdout (captured by docker logs / docker compose logs)
 CMD uvicorn main:app \
       --host 0.0.0.0 \
       --port 8000 \
-      --workers ${WORKERS:-2} \
+      --workers ${WORKERS:-1} \
       --log-level ${LOG_LEVEL:-info} \
       --no-access-log

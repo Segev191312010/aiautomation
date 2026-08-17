@@ -93,7 +93,7 @@ def test_isolated_monitoring_profile_mounts_metrics() -> None:
 
     monitoring_app = FastAPI()
     assert _register_metrics_router(monitoring_app, exposure_profile="isolated") is True
-    assert "/metrics" in {route.path for route in monitoring_app.routes}
+    assert "/metrics" in monitoring_app.openapi()["paths"]
 
 
 def test_all_metric_names_present(client: TestClient) -> None:

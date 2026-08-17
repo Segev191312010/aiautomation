@@ -161,6 +161,19 @@ class IBKRClient:
         (to survive "clientId already in use" errors which manifest as
         asyncio.TimeoutError rather than ConnectionRefusedError).
         """
+        from startup import real_money_broker_configured
+
+        if cfg.SIM_MODE:
+            raise RuntimeError("SIM_MODE=true: IBKR connection is disabled")
+        if real_money_broker_configured(
+            is_paper=cfg.IS_PAPER,
+            sim_mode=cfg.SIM_MODE,
+            ibkr_port=cfg.IBKR_PORT,
+        ):
+            raise RuntimeError(
+                "Stage 9A release fence blocks real-money IBKR connection"
+            )
+
         asyncio.set_event_loop(asyncio.get_running_loop())
         self._loop = asyncio.get_running_loop()
 

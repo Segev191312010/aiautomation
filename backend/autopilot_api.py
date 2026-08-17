@@ -144,6 +144,7 @@ async def set_autopilot_mode(request: AutopilotModeRequest):
         sim_mode=cfg.SIM_MODE,
         jwt_secret=cfg.JWT_SECRET,
         jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
+        ibkr_port=cfg.IBKR_PORT,
     )
     if matrix_errors:
         from fastapi import HTTPException
