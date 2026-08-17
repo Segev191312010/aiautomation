@@ -25,6 +25,10 @@ record, not the sole recovery mechanism.
 | Nested bundle SHA-256 | `d58e6442b00e61f20a3de02f6a0d21ed66eef64f60fc9f4a97e60296ac451f4a` |
 | PR3 source archive | `/Users/salomon/aiautomation-nested-archive-20260816/pr3-de380a1-source.tar.gz` |
 | PR3 archive SHA-256 | `4c9e77decbdb8a8acafa3873fecb6ec79e25e688d1db983e61670840bba7c856` |
+| Tracked dirty patch | `/Users/salomon/aiautomation-disposition-20260817/frozen-tracked-changes.patch` |
+| Tracked patch SHA-256 | `1633cf790863cccb0b6cf3954ce4834818a807fd20afce6fcf309b94044179e0` |
+| Archived untracked files | `/Users/salomon/aiautomation-disposition-20260817/untracked` (26 files; two nested repositories archived separately) |
+| Archived working copies | `/Users/salomon/aiautomation-nested-archive-20260816/working-copies/{main,pr3}` |
 
 `git bundle verify` confirms that the nested bundle contains complete history
 for 19 refs, including `main` at `faabe81a255f`, the linked PR3 branch at
@@ -33,6 +37,15 @@ for 19 refs, including `main` at `faabe81a255f`, the linked PR3 branch at
 The two execution lock files were checked with `lsof` before cleanup. Neither
 had an owning process. Their stored PIDs were stale historical text, not active
 locks.
+
+Cleanup verification completed after the reviewed salvage commits were pushed:
+
+- `/Users/salomon/aiautomation` reports zero `git status --porcelain` entries;
+- the post-clean status file is empty and has the SHA-256 of an empty file,
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+- both archived nested working copies remain clean and resolve to `faabe81`
+  and `de380a1`; and
+- no deferred file was destroyed to manufacture a clean checkout.
 
 ## 2. Disposition Vocabulary
 
