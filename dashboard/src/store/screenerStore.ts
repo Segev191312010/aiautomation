@@ -158,7 +158,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
 
   runScan: async () => {
     const { filters, selectedUniverse, customSymbols, interval, period } = get()
-    set({ scanning: true, results: [], skippedSymbols: [], enriched: {}, elapsedMs: 0, totalSymbols: 0 })
+    set({ scanning: true })
     try {
       const symbols = selectedUniverse === 'custom'
         ? customSymbols.split(',').map((s) => s.trim()).filter(Boolean)
@@ -174,6 +174,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
       set({
         results: resp.results,
         skippedSymbols: resp.skipped_symbols,
+        enriched: {},
         elapsedMs: resp.elapsed_ms ?? 0,
         totalSymbols: resp.total_symbols ?? 0,
       })

@@ -384,7 +384,7 @@ class ScanFilter(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    universe: Literal["sp500", "nasdaq100", "etfs", "custom"]
+    universe: Literal["sp500", "nasdaq100", "etfs", "us_all", "custom"]
     symbols: list[str] | None = None
     filters: list[ScanFilter] = Field(min_length=1)
     interval: str = "1d"

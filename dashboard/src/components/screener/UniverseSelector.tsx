@@ -6,6 +6,7 @@ const UNIVERSES: { id: string; label: string; description: string }[] = [
   { id: 'sp500', label: 'S&P 500', description: 'Large-cap US equities' },
   { id: 'nasdaq100', label: 'NASDAQ 100', description: 'Growth and tech heavy' },
   { id: 'etfs', label: 'ETFs', description: 'Broad fund universe' },
+  { id: 'us_all', label: 'All US Stocks', description: 'Broad US-listed equity universe' },
   { id: 'custom', label: 'Custom', description: 'Your own ticker list' },
 ]
 
