@@ -14,19 +14,11 @@ import type { IChartApi } from 'lightweight-charts'
 import { useMarketStore } from '@/store'
 import { INDICATOR_DEFS, type IndicatorId } from '@/utils/indicators'
 import type { ChartType } from '@/types'
+import { CHART_TIMEFRAMES } from '@/utils/chartTimeframes'
 
 // ── Timeframe definitions ───────────────────────────────────────────────────
 
-export const TOOLBAR_TIMEFRAMES = [
-  { label: '1m',  period: '1d',   interval: '1m'  },
-  { label: '5m',  period: '5d',   interval: '5m'  },
-  { label: '15m', period: '5d',   interval: '15m' },
-  { label: '30m', period: '5d',   interval: '30m' },
-  { label: '1H',  period: '1mo',  interval: '1h'  },
-  { label: '1D',  period: '1y',   interval: '1d'  },
-  { label: '1W',  period: '2y',   interval: '1wk' },
-  { label: '1M',  period: '5y',   interval: '1mo' },
-] as const
+export const TOOLBAR_TIMEFRAMES = CHART_TIMEFRAMES
 
 // ── Chart type options ──────────────────────────────────────────────────────
 

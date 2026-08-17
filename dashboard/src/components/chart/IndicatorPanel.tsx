@@ -19,6 +19,7 @@ import clsx from 'clsx'
 import { useChart, PANEL_THEME } from '@/hooks/useChart'
 import { useMarketStore } from '@/store'
 import { calcRSI, calcMACD, type LinePoint } from '@/utils/indicators'
+import { chartBarsKey } from '@/utils/chartTimeframes'
 
 function toTV(pts: LinePoint[]): LineData<Time>[] {
   return pts.map((p) => ({ time: p.time as Time, value: p.value }))
@@ -42,7 +43,7 @@ export function RSIPanel({ symbol, mainChart, className, onChartReady }: RSIPane
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
 
-  const bars = useMarketStore((s) => s.bars[symbol] ?? [])
+  const bars = useMarketStore((s) => s.bars[chartBarsKey(symbol, s.chartResolution)] ?? [])
 
   // Create series once chart is ready
   useEffect(() => {
@@ -161,7 +162,7 @@ export function MACDPanel({ symbol, mainChart, className, onChartReady }: MACDPa
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
 
-  const bars = useMarketStore((s) => s.bars[symbol] ?? [])
+  const bars = useMarketStore((s) => s.bars[chartBarsKey(symbol, s.chartResolution)] ?? [])
 
   // Create series once chart is ready
   useEffect(() => {

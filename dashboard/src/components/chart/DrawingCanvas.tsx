@@ -23,6 +23,7 @@ import {
 } from '@/utils/drawingEngine'
 import type { Drawing, DrawingPoint, DrawingType } from '@/types/drawing'
 import type { OHLCVBar } from '@/types'
+import { chartBarsKey } from '@/utils/chartTimeframes'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -98,7 +99,7 @@ export default function DrawingCanvas({ chart, series, symbol, timeframe }: Prop
     copySelected, paste, _flushSave,
   } = useDrawingStore()
 
-  const bars = useMarketStore((s) => s.bars[symbol] ?? []) as OHLCVBar[]
+  const bars = useMarketStore((s) => s.bars[chartBarsKey(symbol, s.chartResolution)] ?? []) as OHLCVBar[]
 
   // ── Coordinate converters ──────────────────────────────────────────────
 

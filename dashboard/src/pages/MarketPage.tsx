@@ -17,6 +17,11 @@ import { fetchYahooBars, fetchIBKRBars, fetchSettings } from '@/services/api'
 import { calcRSI, calcMACD } from '@/utils/indicators'
 import { useCrosshairSync, type ChartPane } from '@/hooks/useCrosshairSync'
 import { navigateToRoute } from '@/utils/routes'
+import {
+  chartBarsKey,
+  createLatestRequestGate,
+  type ChartTimeframe,
+} from '@/utils/chartTimeframes'
 
 const AUTO_REFRESH_MS: Record<string, number> = {
   '1m': 10_000,
@@ -55,6 +60,8 @@ function MarketSignalCard({
 
 export default function MarketPage() {
   const toast = useToast()
+  const toastRef = useRef(toast)
+  toastRef.current = toast
   const ibkrConnected = useBotStore((s) => s.ibkrConnected)
   const {
     selectedSymbol,
@@ -68,11 +75,12 @@ export default function MarketPage() {
     toggleCompMode,
   } = useMarketStore()
 
-  const [tfIdx, setTfIdx] = useState(5)
   const [searchInput, setSearch] = useState(selectedSymbol)
   const [loading, setLoading] = useState(false)
   const [showAlertForm, setShowAlertForm] = useState(false)
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const barsRequestGate = useRef(createLatestRequestGate())
+  const compBarsRequestGate = useRef(createLatestRequestGate())
   const [mainChartApi, setMainChartApi] = useState<IChartApi | null>(null)
   const chartContainerRef = useRef<HTMLDivElement>(null)
 
@@ -87,8 +95,11 @@ export default function MarketPage() {
   const loadDrawings = useDrawingStore((s) => s.loadDrawings)
 
   const quote = quotes[selectedSymbol]
+  const chartResolution = useMarketStore((s) => s.chartResolution)
+  const setChartResolution = useMarketStore((s) => s.setChartResolution)
+  const tfIdx = Math.max(0, TOOLBAR_TIMEFRAMES.findIndex((tf) => tf.interval === chartResolution))
   const currentTF = TOOLBAR_TIMEFRAMES[tfIdx]
-  const bars = useMarketStore((s) => s.bars[selectedSymbol] ?? [])
+  const bars = useMarketStore((s) => s.bars[chartBarsKey(selectedSymbol, chartResolution)] ?? [])
 
   const isStockLike = useCallback((symbol: string) => {
     const normalized = symbol.trim().toUpperCase()
@@ -230,89 +241,63 @@ export default function MarketPage() {
   const resetVolHeight = useCallback(() => setVolumeHeight(DEFAULT_VOL_HEIGHT), [])
   const resetIndHeight = useCallback(() => setIndicatorHeight(DEFAULT_IND_HEIGHT), [])
 
-  const loadBars = async (sym: string, idx: number) => {
+  const fetchBarsForTimeframe = useCallback(async (sym: string, tf: ChartTimeframe) => {
+    if (ibkrConnected && isStockLike(sym)) {
+      try {
+        return await fetchIBKRBars(sym, tf.ibkrBarSize, tf.ibkrDuration)
+      } catch {
+        return fetchYahooBars(sym, tf.period, tf.interval)
+      }
+    }
+    return fetchYahooBars(sym, tf.period, tf.interval)
+  }, [ibkrConnected, isStockLike])
+
+  const loadBars = useCallback(async (sym: string, idx: number) => {
     setLoading(true)
     const tf = TOOLBAR_TIMEFRAMES[idx]
+    const requestId = barsRequestGate.current.issue()
 
     try {
-      let nextBars
-      if (ibkrConnected && isStockLike(sym)) {
-        try {
-          const barSize =
-            tf.interval === '1d' ? '1 day'
-              : tf.interval === '1wk' ? '1 week'
-                : tf.interval === '1mo' ? '1 month'
-                  : '1 hour'
-          const duration =
-            tf.interval === '1d' ? '1 Y'
-              : tf.interval === '1wk' ? '2 Y'
-                : tf.interval === '1mo' ? '5 Y'
-                  : '30 D'
-          nextBars = await fetchIBKRBars(sym, barSize, duration)
-        } catch {
-          nextBars = await fetchYahooBars(sym, tf.period, tf.interval)
-        }
-      } else {
-        nextBars = await fetchYahooBars(sym, tf.period, tf.interval)
+      const nextBars = await fetchBarsForTimeframe(sym, tf)
+      if (barsRequestGate.current.isCurrent(requestId)) {
+        setBars(sym, tf.interval, nextBars)
       }
-
-      setBars(sym, nextBars)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to load bars'
       console.warn('[MarketPage] Bar load failed:', message)
       if (message.includes('400') || message.includes('interval')) {
-        toast.error(message)
+        toastRef.current.error(message)
       }
     } finally {
-      setLoading(false)
+      if (barsRequestGate.current.isCurrent(requestId)) setLoading(false)
     }
-  }
+  }, [fetchBarsForTimeframe, setBars])
 
-  const loadCompBars = async (sym: string, idx: number) => {
+  const loadCompBars = useCallback(async (sym: string, idx: number) => {
     const tf = TOOLBAR_TIMEFRAMES[idx]
+    const requestId = compBarsRequestGate.current.issue()
     try {
-      let nextBars
-      if (ibkrConnected && isStockLike(sym)) {
-        try {
-          const barSize =
-            tf.interval === '1d' ? '1 day'
-              : tf.interval === '1wk' ? '1 week'
-                : tf.interval === '1mo' ? '1 month'
-                  : '1 hour'
-          const duration =
-            tf.interval === '1d' ? '1 Y'
-              : tf.interval === '1wk' ? '2 Y'
-                : tf.interval === '1mo' ? '5 Y'
-                  : '30 D'
-          nextBars = await fetchIBKRBars(sym, barSize, duration)
-        } catch {
-          nextBars = await fetchYahooBars(sym, tf.period, tf.interval)
-        }
-      } else {
-        nextBars = await fetchYahooBars(sym, tf.period, tf.interval)
+      const nextBars = await fetchBarsForTimeframe(sym, tf)
+      if (compBarsRequestGate.current.isCurrent(requestId)) {
+        setCompBars(sym, tf.interval, nextBars)
       }
-
-      setCompBars(sym, nextBars)
     } catch (error) {
       console.warn('[MarketPage] Comp bar load failed:', error)
     }
-  }
+  }, [fetchBarsForTimeframe, setCompBars])
 
   const refreshActiveCharts = useCallback(() => {
     void loadBars(selectedSymbol, tfIdx)
     if (compMode && compSymbol) void loadCompBars(compSymbol, tfIdx)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSymbol, tfIdx, compMode, compSymbol])
+  }, [compMode, compSymbol, loadBars, loadCompBars, selectedSymbol, tfIdx])
 
   useEffect(() => {
     void loadBars(selectedSymbol, tfIdx)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSymbol, tfIdx])
+  }, [loadBars, selectedSymbol, tfIdx])
 
   useEffect(() => {
     if (compMode && compSymbol) void loadCompBars(compSymbol, tfIdx)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [compMode, compSymbol, tfIdx])
+  }, [compMode, compSymbol, loadCompBars, tfIdx])
 
   useEffect(() => {
     if (refreshTimerRef.current) clearInterval(refreshTimerRef.current)
@@ -324,8 +309,7 @@ export default function MarketPage() {
     return () => {
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSymbol, tfIdx, compMode, compSymbol, refreshActiveCharts])
+  }, [currentTF.interval, refreshActiveCharts])
 
   useEffect(() => {
     const onVisible = () => {
@@ -519,7 +503,7 @@ export default function MarketPage() {
 
           <ChartToolbar
             activeTfIdx={tfIdx}
-            onTfChange={setTfIdx}
+            onTfChange={(idx) => setChartResolution(TOOLBAR_TIMEFRAMES[idx].interval)}
             chartContainer={chartContainerRef.current}
             chartRef={mainChartApi}
             isLoading={loading}

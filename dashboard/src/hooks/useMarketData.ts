@@ -12,8 +12,6 @@
 import { useEffect, useCallback, useRef } from 'react'
 import {
   fetchWatchlist,
-  fetchYahooBars,
-  fetchIBKRBars,
   fetchAccountSummary,
   fetchPositions,
   subscribeRtBars,
@@ -31,11 +29,10 @@ export function useMarketData(): void {
   const activeWatchlist   = useMarketStore((s) => s.activeWatchlist)
   const selectedSymbol    = useMarketStore((s) => s.selectedSymbol)
   const compSymbol        = useMarketStore((s) => s.compSymbol)
+  const chartResolution   = useMarketStore((s) => s.chartResolution)
   const ibkrConnected     = useBotStore((s) => s.ibkrConnected)
   const setQuotes         = useMarketStore((s) => s.setQuotes)
   const applyLiveQuote    = useMarketStore((s) => s.applyLiveQuote)
-  const setBars           = useMarketStore((s) => s.setBars)
-  const setCompBars       = useMarketStore((s) => s.setCompBars)
   const setLoading        = useMarketStore((s) => s.setLoading)
   const setAccount        = useAccountStore((s) => s.setAccount)
   const setPositions      = useAccountStore((s) => s.setPositions)
@@ -60,30 +57,6 @@ export function useMarketData(): void {
       console.warn('[useMarketData] Quote fetch failed:', err)
     }
   }, [watchlists, activeWatchlist, setQuotes])
-
-  // ---- Chart bars ----
-
-  const refreshBars = useCallback(
-    async (symbol: string, setter: typeof setBars) => {
-      try {
-        const normalized = symbol.trim().toUpperCase()
-        let bars
-        if (ibkrConnected && isStockLike(normalized)) {
-          try {
-            bars = await fetchIBKRBars(normalized, '1 day', '6 M')
-          } catch {
-            bars = await fetchYahooBars(normalized, '6mo', '1d')
-          }
-        } else {
-          bars = await fetchYahooBars(normalized, '6mo', '1d')
-        }
-        setter(symbol, bars)
-      } catch (err) {
-        console.warn('[useMarketData] Bar fetch failed:', err)
-      }
-    },
-    [ibkrConnected],
-  )
 
   // ---- Account ----
 
@@ -135,20 +108,11 @@ export function useMarketData(): void {
 
     const unsubs = symbols.map((sym) =>
       wsMdService.subscribe(sym, (msg) => {
-        const store = useMarketStore.getState()
-        const series = store.bars[sym] ?? store.compBars[sym] ?? []
-        let barSeconds = 60
-        if (series.length >= 2) {
-          const last = series[series.length - 1]
-          const prev = series[series.length - 2]
-          const delta = last.time - prev.time
-          if (Number.isFinite(delta) && delta > 0) barSeconds = delta
-        }
         applyLiveQuote(
           sym,
           msg.price,
           msg.time ?? Math.floor(Date.now() / 1000),
-          barSeconds,
+          chartResolution,
           msg.source ?? 'yahoo',
           msg.stale_s ?? 0,
           msg.market_state,
@@ -157,7 +121,7 @@ export function useMarketData(): void {
     )
 
     return () => unsubs.forEach((u) => u())
-  }, [watchlists, activeWatchlist, selectedSymbol, compSymbol, applyLiveQuote])
+  }, [watchlists, activeWatchlist, selectedSymbol, compSymbol, chartResolution, applyLiveQuote])
 
   // ---- REST polling (full quote data -- change_pct, 52W, vol, etc.) ----
   // Also fires immediately whenever refreshQuotes changes (= watchlist changed),
@@ -187,16 +151,6 @@ export function useMarketData(): void {
     accountTimer.current = setInterval(refreshAccount, ACCOUNT_INTERVAL)
     return () => { if (accountTimer.current) clearInterval(accountTimer.current) }
   }, [refreshAccount])
-
-  // ---- Chart bars ----
-
-  useEffect(() => {
-    if (selectedSymbol) refreshBars(selectedSymbol, setBars)
-  }, [selectedSymbol, refreshBars, setBars])
-
-  useEffect(() => {
-    if (compSymbol) refreshBars(compSymbol, setCompBars)
-  }, [compSymbol, refreshBars, setCompBars])
 
   // Subscribe selected chart symbols to broker 5-second bars when IBKR is connected.
   // This gives smoother chart movement than relying only on quote ticks.

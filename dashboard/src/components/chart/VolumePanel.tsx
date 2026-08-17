@@ -17,6 +17,7 @@ import clsx from 'clsx'
 import { useChart, PANEL_THEME } from '@/hooks/useChart'
 import { useMarketStore } from '@/store'
 import type { OHLCVBar } from '@/types'
+import { chartBarsKey } from '@/utils/chartTimeframes'
 
 interface Props {
   symbol:       string
@@ -39,7 +40,7 @@ export default function VolumePanel({ symbol, mainChart, className, onChartReady
   const fittedRef = useRef(false)
   const onChartReadyRef = useRef(onChartReady)
   onChartReadyRef.current = onChartReady
-  const bars = useMarketStore((s) => s.bars[symbol] ?? [])
+  const bars = useMarketStore((s) => s.bars[chartBarsKey(symbol, s.chartResolution)] ?? [])
 
   // Create volume series once
   useEffect(() => {
