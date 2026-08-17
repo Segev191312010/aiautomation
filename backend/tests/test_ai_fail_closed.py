@@ -131,6 +131,30 @@ async def _run_optimizer(monkeypatch, *, start_result="run-1", item_result=None)
 
 
 @pytest.mark.anyio
+async def test_optimizer_reports_context_failure_and_never_calls_ai(monkeypatch, anyio_backend):
+    import ai_optimizer
+
+    get_decisions = AsyncMock()
+    monkeypatch.setattr(ai_optimizer, "_optimizer_running", False)
+    monkeypatch.setattr(
+        ai_optimizer,
+        "get_autopilot_config_dict",
+        AsyncMock(return_value={"emergency_stop": False}),
+    )
+    monkeypatch.setattr(
+        ai_optimizer,
+        "_build_context",
+        AsyncMock(side_effect=RuntimeError("database unavailable")),
+    )
+    monkeypatch.setattr(ai_optimizer, "_get_ai_decisions", get_decisions)
+
+    result = await ai_optimizer.run_full_optimization()
+
+    assert result == {"success": False, "error": "context_unavailable"}
+    get_decisions.assert_not_awaited()
+
+
+@pytest.mark.anyio
 async def test_optimizer_blocks_application_when_run_persistence_returns_no_id(monkeypatch, anyio_backend):
     result, apply_decisions, finalize = await _run_optimizer(
         monkeypatch,

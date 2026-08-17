@@ -45,11 +45,7 @@ _last_optimization: float = 0
 
 async def _build_context() -> dict:
     """Collect all data Claude needs to make decisions."""
-    try:
-        return await build_optimizer_context(lookback_days=cfg.ADVISOR_LOOKBACK_DAYS)
-    except Exception as e:
-        log.warning("Failed to fetch advisor data for optimizer: %s", e)
-        return {}
+    return await build_optimizer_context(lookback_days=cfg.ADVISOR_LOOKBACK_DAYS)
 
 
 # ── Claude API Call ──────────────────────────────────────────────────────────
@@ -499,7 +495,11 @@ async def run_full_optimization() -> dict:
         log.info("AI optimization cycle starting...")
 
         # Step 1: Gather context
-        context = await _build_context()
+        try:
+            context = await _build_context()
+        except Exception:
+            log.exception("Optimizer context unavailable — blocking AI decisions")
+            return {"success": False, "error": "context_unavailable"}
         if not context:
             return {"skipped": True, "reason": "no context data"}
 
