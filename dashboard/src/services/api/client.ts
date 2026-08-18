@@ -17,6 +17,10 @@ export type ApiFailureEvent = {
   timestamp: number
 }
 
+export interface ApiRequestOptions {
+  signal?: AbortSignal
+}
+
 type ApiFailureListener = (ev: ApiFailureEvent) => void
 const _failureListeners = new Set<ApiFailureListener>()
 
@@ -31,12 +35,15 @@ function _emitApiFailure(ev: ApiFailureEvent) {
 
 // ── Auth token storage ────────────────────────────────────────────────────────
 const AUTH_TOKEN_KEY = 'auth_token'
-export function setAuthToken(token: string | null) {
-  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token)
+let _sessionToken: string | null = localStorage.getItem(AUTH_TOKEN_KEY)
+
+export function setAuthToken(token: string | null, persist = true) {
+  _sessionToken = token
+  if (token && persist) localStorage.setItem(AUTH_TOKEN_KEY, token)
   else localStorage.removeItem(AUTH_TOKEN_KEY)
   if (token) _bootstrapResolve?.(token)
 }
-export function getAuthToken() { return localStorage.getItem(AUTH_TOKEN_KEY) }
+export function getAuthToken() { return _sessionToken }
 
 // Bootstrap gate — requests block here until a token is available on first load.
 // Prevents the initial store fetches from firing before AuthGuard's fetchAuthToken
@@ -46,7 +53,7 @@ export function getAuthToken() { return localStorage.getItem(AUTH_TOKEN_KEY) }
 let _bootstrapResolve: ((token: string) => void) | null = null
 let _bootstrapDone = false
 const _bootstrapPromise: Promise<string> = new Promise(resolve => {
-  const existing = localStorage.getItem(AUTH_TOKEN_KEY)
+  const existing = _sessionToken
   if (existing) {
     _bootstrapDone = true
     resolve(existing)
@@ -56,7 +63,7 @@ const _bootstrapPromise: Promise<string> = new Promise(resolve => {
 })
 
 async function _waitForToken(): Promise<string | null> {
-  const existing = localStorage.getItem(AUTH_TOKEN_KEY)
+  const existing = _sessionToken
   if (existing) return existing
   // Post-bootstrap with empty storage = logged-out state. Do not fall through
   // to the already-resolved bootstrap promise, which still holds the stale
@@ -70,21 +77,28 @@ async function _waitForToken(): Promise<string | null> {
   ])
 }
 
-export async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function sendRequest<T>(
+  method: string,
+  path: string,
+  body: unknown,
+  token: string | null,
+  handleUnauthorized: boolean,
+  options: ApiRequestOptions,
+): Promise<T> {
   const headers: Record<string, string> = {}
   if (body) headers['Content-Type'] = 'application/json'
-  const token = path === '/api/auth/token' ? null : await _waitForToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
 
   const resp = await fetch(`${BASE}${path}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    signal: options.signal,
   })
 
   if (!resp.ok) {
-    if (resp.status === 401) {
-      localStorage.removeItem(AUTH_TOKEN_KEY)
+    if (resp.status === 401 && handleUnauthorized) {
+      setAuthToken(null)
       window.dispatchEvent(new Event('api:unauthorized'))
     }
     const text = await resp.text().catch(() => resp.statusText)
@@ -99,7 +113,33 @@ export async function req<T>(method: string, path: string, body?: unknown): Prom
   return resp.json() as Promise<T>
 }
 
-export const get  = <T>(p: string)            => req<T>('GET',    p)
-export const post = <T>(p: string, b?: unknown) => req<T>('POST', p, b)
-export const put  = <T>(p: string, b?: unknown) => req<T>('PUT',  p, b)
-export const del  = <T>(p: string)            => req<T>('DELETE', p)
+export async function req<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: ApiRequestOptions = {},
+): Promise<T> {
+  const token = path === '/api/auth/token' ? null : await _waitForToken()
+  return sendRequest<T>(method, path, body, token, true, options)
+}
+
+export function reqWithAuthToken<T>(
+  method: string,
+  path: string,
+  token: string,
+  body?: unknown,
+  options: ApiRequestOptions = {},
+): Promise<T> {
+  return sendRequest<T>(method, path, body, token, false, options)
+}
+
+export const get  = <T>(p: string, options?: ApiRequestOptions) => req<T>('GET', p, undefined, options)
+export const post = <T>(p: string, b?: unknown, options?: ApiRequestOptions) => req<T>('POST', p, b, options)
+export const put  = <T>(p: string, b?: unknown, options?: ApiRequestOptions) => req<T>('PUT', p, b, options)
+export const del  = <T>(p: string, b?: unknown, options?: ApiRequestOptions) => req<T>('DELETE', p, b, options)
+export const postWithAuthToken = <T>(
+  p: string,
+  token: string,
+  b?: unknown,
+  options?: ApiRequestOptions,
+) => reqWithAuthToken<T>('POST', p, token, b, options)

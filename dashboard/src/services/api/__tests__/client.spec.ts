@@ -157,4 +157,45 @@ describe('api client — token revocation + bearer handling', () => {
     expect(getAuthToken()).toBeNull()
     expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
   })
+
+  it('keeps a non-persistent token only for the current session', async () => {
+    const { setAuthToken, getAuthToken } = await import('@/services/api/client')
+
+    setAuthToken('session-only', false)
+    expect(getAuthToken()).toBe('session-only')
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
+  })
+
+  it('uses a candidate token without activating or persisting it', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => (
+      new Response('{}', { status: 200 })
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    const { getAuthToken, postWithAuthToken } = await import('@/services/api/client')
+
+    await postWithAuthToken('/api/push/subscription/status', 'candidate-token', {
+      endpoint: 'https://push.example.test/device',
+    })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer candidate-token')
+    expect(getAuthToken()).toBeNull()
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull()
+  })
+
+  it('sends an authenticated JSON body with DELETE requests', async () => {
+    localStorage.setItem(TOKEN_KEY, 'valid-jwt')
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => (
+      new Response('{}', { status: 200 })
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    const { del } = await import('@/services/api/client')
+
+    await del('/api/push/subscribe', { endpoint: 'https://push.example.test/device' })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(init.method).toBe('DELETE')
+    expect(init.body).toBe(JSON.stringify({ endpoint: 'https://push.example.test/device' }))
+    expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json')
+  })
 })

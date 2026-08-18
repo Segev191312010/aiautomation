@@ -8,6 +8,7 @@ import type { Alert } from '@/types'
 import AlertList from '@/components/alerts/AlertList'
 import AlertHistoryTable from '@/components/alerts/AlertHistoryTable'
 import AlertForm from '@/components/alerts/AlertForm'
+import NotificationSettings from '@/components/alerts/NotificationSettings'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
@@ -40,7 +41,7 @@ function StatusPill({ count, label, color }: { count: number; label: string; col
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
-type ActiveTab = 'active' | 'history'
+type ActiveTab = 'active' | 'history' | 'delivery'
 
 export default function AlertsPage() {
   const loading     = useAlertStore((s) => s.loading)
@@ -48,6 +49,10 @@ export default function AlertsPage() {
   const loadHistory = useAlertStore((s) => s.loadHistory)
   const alerts      = useAlertStore((s) => s.alerts)
   const history     = useAlertStore((s) => s.history)
+  const notificationPrefs = useAlertStore((s) => s.notificationPrefs)
+  const notificationError = useAlertStore((s) => s.notificationError)
+  const loadNotificationPrefs = useAlertStore((s) => s.loadNotificationPrefs)
+  const updateNotificationPrefs = useAlertStore((s) => s.updateNotificationPrefs)
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('active')
   const [showForm, setShowForm]   = useState(false)
@@ -135,7 +140,7 @@ export default function AlertsPage() {
 
       {/* ── Tab bar ─────────────────────────────────────────────────────── */}
       <div className="flex border-b border-zinc-800 mb-4">
-        {(['active', 'history'] as ActiveTab[]).map((tab) => (
+        {(['active', 'history', 'delivery'] as ActiveTab[]).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -146,7 +151,7 @@ export default function AlertsPage() {
                 : 'border-transparent text-zinc-500 hover:text-zinc-400',
             ].join(' ')}
           >
-            {tab === 'active' ? 'Active Alerts' : 'History'}
+            {tab === 'active' ? 'Active Alerts' : tab === 'history' ? 'History' : 'Delivery'}
           </button>
         ))}
       </div>
@@ -158,8 +163,29 @@ export default function AlertsPage() {
             <AlertsPageSkeleton />
           ) : activeTab === 'active' ? (
             <AlertList onEdit={handleEdit} />
-          ) : (
+          ) : activeTab === 'history' ? (
             <AlertHistoryTable />
+          ) : (
+            <div className="max-w-2xl rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+              <div className="mb-4">
+                <h2 className="text-sm font-sans font-semibold text-zinc-100">
+                  Alert delivery
+                </h2>
+                <p className="mt-1 text-xs font-sans text-zinc-500">
+                  Preferences are stored on your account and apply across sessions.
+                </p>
+              </div>
+              <NotificationSettings
+                prefs={notificationPrefs}
+                onChange={updateNotificationPrefs}
+                onPushChange={async () => { await loadNotificationPrefs() }}
+              />
+              {notificationError && (
+                <p className="mt-3 text-xs font-sans text-red-400" role="alert">
+                  {notificationError}
+                </p>
+              )}
+            </div>
           )}
         </div>
       </ErrorBoundary>

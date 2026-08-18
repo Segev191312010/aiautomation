@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useAlertStore } from '@/store/alertStore'
 import type { Alert, AlertFiredEvent, AlertHistory, AlertStats } from '@/types'
+import { DEFAULT_NOTIFICATION_PREFS } from '@/types'
 
 // ---------------------------------------------------------------------------
 // Module-level mock for @/services/api
@@ -10,6 +11,8 @@ vi.mock('@/services/api', () => ({
   fetchAlerts:       vi.fn(),
   fetchAlertHistory: vi.fn(),
   fetchAlertStats:   vi.fn(),
+  fetchPushPreferences: vi.fn(),
+  updatePushPreferences: vi.fn(),
 }))
 
 // Import the mocked module so we can configure return values per-test.
@@ -62,12 +65,20 @@ function makeFiredEvent(alertId: string, symbol = 'AAPL'): AlertFiredEvent {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  vi.mocked(api.fetchPushPreferences).mockResolvedValue({ ...DEFAULT_NOTIFICATION_PREFS })
+  vi.mocked(api.updatePushPreferences).mockImplementation(async (partial) => ({
+    ...useAlertStore.getState().notificationPrefs,
+    ...partial,
+  }))
   useAlertStore.setState({
     alerts: [],
     history: [],
     unreadCount: 0,
     recentFired: [],
     loading: false,
+    notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
+    notificationLoading: false,
+    notificationError: null,
     alertStats: null,
   })
 })
@@ -745,23 +756,23 @@ describe('alertStore — updateNotificationPrefs', () => {
     vi.clearAllMocks()
   })
 
-  it('merges the partial update into the current prefs', () => {
-    useAlertStore.getState().updateNotificationPrefs({ muted: true })
+  it('merges the partial update into the current prefs', async () => {
+    await useAlertStore.getState().updateNotificationPrefs({ muted: true })
     expect(useAlertStore.getState().notificationPrefs.muted).toBe(true)
     // Other fields remain at their defaults
     expect(useAlertStore.getState().notificationPrefs.in_app).toBe(true)
   })
 
-  it('calls localStorage.setItem with the correct key', () => {
-    useAlertStore.getState().updateNotificationPrefs({ volume: 0.3 })
+  it('calls localStorage.setItem with the correct key', async () => {
+    await useAlertStore.getState().updateNotificationPrefs({ volume: 0.3 })
     expect(setItemSpy).toHaveBeenCalledWith(
       'alertNotificationPrefs',
       expect.any(String),
     )
   })
 
-  it('persists the full merged object to localStorage', () => {
-    useAlertStore.getState().updateNotificationPrefs({ volume: 0.3, muted: true })
+  it('persists the full merged object to localStorage', async () => {
+    await useAlertStore.getState().updateNotificationPrefs({ volume: 0.3, muted: true })
     const raw = localStorage.getItem('alertNotificationPrefs')
     expect(raw).not.toBeNull()
     const parsed = JSON.parse(raw!) as Record<string, unknown>
@@ -769,18 +780,81 @@ describe('alertStore — updateNotificationPrefs', () => {
     expect(parsed.muted).toBe(true)
   })
 
-  it('subsequent updates accumulate correctly', () => {
-    useAlertStore.getState().updateNotificationPrefs({ sound: 'alarm' })
-    useAlertStore.getState().updateNotificationPrefs({ volume: 0.1 })
+  it('subsequent updates accumulate correctly', async () => {
+    await useAlertStore.getState().updateNotificationPrefs({ sound: 'alarm' })
+    await useAlertStore.getState().updateNotificationPrefs({ volume: 0.1 })
     const prefs = useAlertStore.getState().notificationPrefs
     expect(prefs.sound).toBe('alarm')
     expect(prefs.volume).toBe(0.1)
   })
 
-  it('does not affect alerts, history, or unreadCount', () => {
+  it('does not affect alerts, history, or unreadCount', async () => {
     useAlertStore.setState({ alerts: [makeAlert('a1')], unreadCount: 5 })
-    useAlertStore.getState().updateNotificationPrefs({ browser_push: true })
+    await useAlertStore.getState().updateNotificationPrefs({ browser_push: true })
     expect(useAlertStore.getState().alerts).toHaveLength(1)
     expect(useAlertStore.getState().unreadCount).toBe(5)
+  })
+
+  it('loads the authenticated server preferences as authoritative', async () => {
+    vi.mocked(api.fetchPushPreferences).mockResolvedValue({
+      ...DEFAULT_NOTIFICATION_PREFS,
+      muted: true,
+      volume: 0.2,
+    })
+
+    await useAlertStore.getState().loadNotificationPrefs()
+
+    expect(useAlertStore.getState().notificationPrefs.muted).toBe(true)
+    expect(useAlertStore.getState().notificationPrefs.volume).toBe(0.2)
+    expect(useAlertStore.getState().notificationError).toBeNull()
+  })
+
+  it('rolls back an optimistic preference update when persistence fails', async () => {
+    vi.mocked(api.updatePushPreferences).mockRejectedValue(new Error('offline'))
+
+    await expect(
+      useAlertStore.getState().updateNotificationPrefs({ muted: true }),
+    ).rejects.toThrow('offline')
+
+    expect(useAlertStore.getState().notificationPrefs.muted).toBe(false)
+    expect(useAlertStore.getState().notificationError).toContain('offline')
+  })
+
+  it('serializes overlapping updates and ignores stale responses', async () => {
+    let resolveFirst!: (value: typeof DEFAULT_NOTIFICATION_PREFS) => void
+    let resolveSecond!: (value: typeof DEFAULT_NOTIFICATION_PREFS) => void
+    vi.mocked(api.updatePushPreferences)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve }))
+
+    const first = useAlertStore.getState().updateNotificationPrefs({ volume: 0.2 })
+    const second = useAlertStore.getState().updateNotificationPrefs({ volume: 0.8 })
+    await vi.waitFor(() => expect(api.updatePushPreferences).toHaveBeenCalledTimes(1))
+    expect(useAlertStore.getState().notificationPrefs.volume).toBe(0.8)
+
+    resolveFirst({ ...DEFAULT_NOTIFICATION_PREFS, volume: 0.2 })
+    await first
+    expect(useAlertStore.getState().notificationPrefs.volume).toBe(0.8)
+    await vi.waitFor(() => expect(api.updatePushPreferences).toHaveBeenCalledTimes(2))
+
+    resolveSecond({ ...DEFAULT_NOTIFICATION_PREFS, volume: 0.8 })
+    await second
+    expect(useAlertStore.getState().notificationPrefs.volume).toBe(0.8)
+  })
+
+  it('clears cached alerts and preferences on an auth transition', () => {
+    useAlertStore.setState({
+      alerts: [makeAlert('private')],
+      recentFired: [makeFiredEvent('private')],
+      notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS, muted: true },
+    })
+    localStorage.setItem('alertNotificationPrefs', JSON.stringify({ muted: true }))
+
+    useAlertStore.getState().resetForAuthTransition()
+
+    expect(useAlertStore.getState().alerts).toEqual([])
+    expect(useAlertStore.getState().recentFired).toEqual([])
+    expect(useAlertStore.getState().notificationPrefs).toEqual(DEFAULT_NOTIFICATION_PREFS)
+    expect(localStorage.getItem('alertNotificationPrefs')).toBeNull()
   })
 })

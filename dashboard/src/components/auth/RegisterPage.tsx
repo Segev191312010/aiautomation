@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { fetchAuthToken, setAuthToken } from '@/services/api'
+import { fetchAuthToken } from '@/services/api'
 import { useToast } from '@/components/ui/ToastProvider'
 
 interface Props {
@@ -30,8 +30,7 @@ export default function RegisterPage({ onShowLogin }: Props) {
     try {
       // Demo flow: registration obtains a token immediately.
       // In production this would POST /api/auth/register then login.
-      const { access_token } = await fetchAuthToken()
-      setAuthToken(access_token)
+      await fetchAuthToken()
       toast.success('Account created! Welcome.')
       onShowLogin()
     } catch {

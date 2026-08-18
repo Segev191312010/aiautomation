@@ -94,7 +94,11 @@ interface Props {
 const AlertSoundPlayer = forwardRef<AlertSoundPlayerHandle, Props>(
   function AlertSoundPlayer({ prefs }, ref) {
     const recentFired  = useAlertStore((s) => s.recentFired)
-    const prevCountRef = useRef(recentFired.length)
+    const latestEvent = recentFired[0]
+    const latestEventKey = latestEvent
+      ? `${latestEvent.alert_id}:${latestEvent.timestamp}`
+      : null
+    const previousEventKeyRef = useRef(latestEventKey)
     const audioCtxRef  = useRef<AudioContext | null>(null)
 
     // Lazily create AudioContext on first interaction to satisfy autoplay policy
@@ -139,12 +143,15 @@ const AlertSoundPlayer = forwardRef<AlertSoundPlayerHandle, Props>(
 
     // Fire sound whenever a new alert arrives
     useEffect(() => {
-      const newCount = recentFired.length
-      if (newCount > prevCountRef.current && prefs.sound_enabled) {
+      if (
+        latestEventKey
+        && latestEventKey !== previousEventKeyRef.current
+        && prefs.sound_enabled
+      ) {
         play(prefs.sound)
       }
-      prevCountRef.current = newCount
-    }, [recentFired.length, prefs.sound_enabled, prefs.sound, play])
+      previousEventKeyRef.current = latestEventKey
+    }, [latestEventKey, prefs.sound_enabled, prefs.sound, play])
 
     // Cleanup AudioContext on unmount
     useEffect(() => {

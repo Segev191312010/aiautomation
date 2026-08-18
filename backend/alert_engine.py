@@ -247,18 +247,25 @@ async def _fire_alert(alert: Alert, price: float) -> None:
     await save_alert_history(hist, alert.user_id)
 
     # Notify connected clients immediately after the durable history write.
-    await _emit(
-        {
-            "type": "alert_fired",
-            "alert_id": alert.id,
-            "name": alert.name,
-            "symbol": alert.symbol,
-            "condition_summary": summary,
-            "price": price,
-            "timestamp": now,
-        },
-        owner_user_id=alert.user_id,
-    )
+    try:
+        await _emit(
+            {
+                "type": "alert_fired",
+                "alert_id": alert.id,
+                "name": alert.name,
+                "symbol": alert.symbol,
+                "condition_summary": summary,
+                "price": price,
+                "timestamp": now,
+            },
+            owner_user_id=alert.user_id,
+        )
+    except Exception as exc:
+        log.error(
+            "WebSocket alert delivery failed for user %s (%s)",
+            alert.user_id,
+            type(exc).__name__,
+        )
 
     # Web Push is also persistence-first. Preference/config/provider failures
     # must never hide the already-persisted alert from connected clients.

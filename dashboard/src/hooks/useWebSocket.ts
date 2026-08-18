@@ -71,9 +71,22 @@ function parsePositionsUpdate(ev: WsEvent) {
   return { positions, account }
 }
 
-export function useWebSocket(): void {
-  const mountedRef = useRef(false)
+function parseAlertFiredEvent(event: WsEvent): AlertFiredEvent | null {
+  if (
+    event.type !== 'alert_fired'
+    || typeof event['alert_id'] !== 'string'
+    || typeof event['name'] !== 'string'
+    || typeof event['symbol'] !== 'string'
+    || typeof event['condition_summary'] !== 'string'
+    || typeof event['timestamp'] !== 'string'
+    || !isFiniteNumber(event['price'])
+  ) {
+    return null
+  }
+  return event as unknown as AlertFiredEvent
+}
 
+export function useWebSocket(): void {
   const setQuotes      = useMarketStore((s) => s.setQuotes)
   const applyRealtimeBar = useMarketStore((s) => s.applyRealtimeBar)
   const setBotRunning  = useBotStore((s) => s.setBotRunning)
@@ -86,9 +99,6 @@ export function useWebSocket(): void {
   toastRef.current = toast
 
   useEffect(() => {
-    if (mountedRef.current) return
-    mountedRef.current = true
-
     wsService.connect('/ws')
 
     // IBKR connection state
@@ -235,14 +245,14 @@ export function useWebSocket(): void {
     })
 
     const unAlertFired = wsService.subscribe('alert_fired', (ev: WsEvent) => {
+      const event = parseAlertFiredEvent(ev)
+      if (!event) return
       const alertStore = useAlertStore.getState()
-      const event = ev as unknown as AlertFiredEvent
       alertStore.pushFired(event)
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-        new Notification(`Alert: ${event.name}`, {
-          body: `${event.symbol} — ${event.condition_summary}\nPrice: $${event.price.toFixed(2)}`,
-          icon: '/favicon.ico',
-        })
+      if (alertStore.notificationPrefs.in_app) {
+        toastRef.current.info(
+          `Alert: ${event.name} | ${event.symbol} ${event.condition_summary} @ $${event.price.toFixed(2)}`,
+        )
       }
     })
 

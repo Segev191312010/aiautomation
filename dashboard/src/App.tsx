@@ -1,12 +1,17 @@
-import React, { Suspense, lazy, useEffect } from 'react'
+import React, { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import Layout from '@/components/layout/Layout'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
 import AuthGuard from '@/components/auth/AuthGuard'
 import Dashboard from '@/pages/Dashboard'
-import { useBotStore } from '@/store'
+import { useAlertStore, useBotStore } from '@/store'
 import { fetchStatus } from '@/services/api'
 import { APP_ROUTE_PATHS } from '@/utils/routes'
+import AlertSoundPlayer from '@/components/alerts/AlertSoundPlayer'
+import {
+  NotificationProvider,
+  useNotificationController,
+} from '@/components/alerts/NotificationProvider'
 
 const TradeBotPage = lazy(() => import('@/pages/TradeBotPage'))
 const MarketPage = lazy(() => import('@/pages/MarketPage'))
@@ -87,14 +92,51 @@ function StatusPoller() {
   return null
 }
 
+function NotificationRuntime() {
+  const preferences = useAlertStore((state) => state.notificationPrefs)
+  const loadPreferences = useAlertStore((state) => state.loadNotificationPrefs)
+  const [loaded, setLoaded] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void loadPreferences().then((success) => {
+      if (active) setLoaded(success)
+    })
+    return () => {
+      active = false
+    }
+  }, [loadPreferences])
+
+  if (!loaded) return null
+  return (
+    <>
+      <AlertSoundPlayer prefs={preferences} />
+      <PushSubscriptionRuntime preferenceEnabled={preferences.browser_push} />
+    </>
+  )
+}
+
+function PushSubscriptionRuntime({ preferenceEnabled }: { preferenceEnabled: boolean }) {
+  const { reconcile } = useNotificationController()
+
+  useEffect(() => {
+    void reconcile(preferenceEnabled)
+  }, [preferenceEnabled, reconcile])
+
+  return null
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <AuthGuard>
-        <Layout>
-          <StatusPoller />
-          <AppRoutes />
-        </Layout>
+        <NotificationProvider>
+          <Layout>
+            <StatusPoller />
+            <NotificationRuntime />
+            <AppRoutes />
+          </Layout>
+        </NotificationProvider>
       </AuthGuard>
     </BrowserRouter>
   )

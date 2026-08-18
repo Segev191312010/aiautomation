@@ -58,3 +58,12 @@ Chronological record of sessions, discoveries, and decisions.
 - Gotchas: emergency-close tests mocked `ibkr.ib.placeOrder` directly and had to be updated to mock `ibkr.place_order_guarded`; lease check must happen before any broker state reads during reconciliation
 - Safety state: LIVE remains NO-GO; no runtime-mode or `.env` change occurred
 - Next: Stage 9B Phase 2 (cross-host lease heartbeat TTL, intent/UNKNOWN reconciliation, or single trade gateway)
+
+### 2026-08-18 — Secure Consolidation Review and Notification Hardening
+- Completed: reconciled the multi-agent review into `docs/SECURE_CONSOLIDATION_PLAN.md`, including database disposition, ownership, telemetry, rollout/rollback, CI/manual gates, and LIVE non-authorization.
+- Completed: Web Push frontend activation now verifies endpoint ownership with a candidate token before mounting a session; account-wide preference no longer silently enrolls new browsers.
+- Completed: serialized push operations with session generations, abort signals, pending browser-mutation quarantine, authoritative endpoint rereads, and one shared notification controller for runtime/settings consumers.
+- Verified: backend 901 passed; frontend 423 passed; frontend typecheck and production build passed; focused auth/push/API suites passed; `git diff --check` passed.
+- Learned: a token must remain outside the global API client until cross-account browser state is verified; browser Push API promises require a late-completion barrier because abort cannot cancel every provider mutation.
+- Limitation: the branch is intentionally left uncommitted/dirty for human review; manual browser/provider delivery, two-user WebSocket, chart/feed, screener, and PAPER broker drills remain required; LIVE remains NO-GO.
+- Next: classify the dirty tree, assign human approvers, commit/push a clean candidate, run manual gates, and re-audit only the immutable SHA.

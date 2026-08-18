@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { fetchAuthToken, setAuthToken } from '@/services/api'
+import { fetchAuthToken } from '@/services/api'
 import { useToast } from '@/components/ui/ToastProvider'
 
 interface Props {
@@ -33,7 +33,6 @@ export default function LoginPage({ onLogin, onShowRegister }: Props) {
       // Demo flow: fetchAuthToken ignores credentials; in production this would
       // POST /api/auth/token with { username, password }.
       const { access_token } = await fetchAuthToken()
-      setAuthToken(access_token)
       if (remember) {
         localStorage.setItem('remember_me', '1')
       } else {

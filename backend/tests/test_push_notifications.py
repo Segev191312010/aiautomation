@@ -90,6 +90,7 @@ def ready_vapid(monkeypatch):
     [
         ("GET", "/api/push/status", None),
         ("POST", "/api/push/subscribe", _subscription()),
+        ("POST", "/api/push/subscription/status", {"endpoint": _subscription()["endpoint"]}),
         ("DELETE", "/api/push/subscribe", {"endpoint": _subscription()["endpoint"]}),
         ("GET", "/api/push/preferences", None),
         ("PUT", "/api/push/preferences", {"browser_push": True}),
@@ -272,7 +273,20 @@ async def test_subscription_cannot_transfer_between_users(push_client, ready_vap
     )
     assert response_a.status_code == 201
 
+    status_a = await push_client.post(
+        "/api/push/subscription/status",
+        headers=await _auth_headers(push_client, "demo"),
+        json={"endpoint": endpoint["endpoint"]},
+    )
+    assert status_a.json() == {"registered": True}
+
     headers_b = await _auth_headers(push_client, "user-b")
+    status_b = await push_client.post(
+        "/api/push/subscription/status",
+        headers=headers_b,
+        json={"endpoint": endpoint["endpoint"]},
+    )
+    assert status_b.json() == {"registered": False}
     response_b = await push_client.post(
         "/api/push/subscribe", headers=headers_b, json=endpoint
     )
@@ -451,8 +465,11 @@ async def test_alert_push_runs_after_history_and_only_when_enabled():
         sequence.append("history")
 
     async def deliver(**kwargs):
-        assert sequence == ["history"]
+        assert sequence == ["history", "websocket"]
         sequence.append("push")
+
+    async def emit(*args, **kwargs):
+        sequence.append("websocket")
 
     with (
         patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
@@ -464,12 +481,12 @@ async def test_alert_push_runs_after_history_and_only_when_enabled():
             AsyncMock(return_value=NotificationPreferences(browser_push=True)),
         ),
         patch.object(alert_engine, "deliver_alert_push", side_effect=deliver) as push,
-        patch.object(alert_engine, "_emit", AsyncMock()) as emit,
+        patch.object(alert_engine, "_emit", side_effect=emit) as emit_mock,
     ):
         await alert_engine._fire_alert(alert, 510)
-    assert sequence == ["history", "push"]
+    assert sequence == ["history", "websocket", "push"]
     push.assert_awaited_once()
-    assert emit.await_args.kwargs == {"owner_user_id": "demo"}
+    assert emit_mock.await_args.kwargs == {"owner_user_id": "demo"}
 
     with (
         patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
@@ -519,6 +536,41 @@ async def test_push_failure_does_not_undo_alert_or_block_websocket():
     save_alert.assert_awaited_once()
     save_history.assert_awaited_once()
     emit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_websocket_failure_does_not_block_persisted_push_fallback():
+    import alert_engine
+    from models import Alert, Condition
+    from settings import NotificationPreferences
+
+    alert = Alert(
+        name="Socket outage",
+        symbol="DIA",
+        condition=Condition(indicator="PRICE", params={}, operator=">", value=400),
+        user_id="demo",
+    )
+    with (
+        patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
+        patch.object(alert_engine, "save_alert", AsyncMock()) as save_alert,
+        patch.object(alert_engine, "save_alert_history", AsyncMock()) as save_history,
+        patch.object(
+            alert_engine,
+            "get_notification_preferences",
+            AsyncMock(return_value=NotificationPreferences(browser_push=True)),
+        ),
+        patch.object(
+            alert_engine,
+            "_emit",
+            AsyncMock(side_effect=RuntimeError("socket unavailable")),
+        ),
+        patch.object(alert_engine, "deliver_alert_push", AsyncMock()) as push,
+    ):
+        await alert_engine._fire_alert(alert, 410)
+
+    save_alert.assert_awaited_once()
+    save_history.assert_awaited_once()
+    assert push.await_args.kwargs["user_id"] == "demo"
 
 
 @pytest.mark.asyncio

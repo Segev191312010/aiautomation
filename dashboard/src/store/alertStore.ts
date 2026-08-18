@@ -16,6 +16,8 @@ interface AlertState {
   recentFired:       AlertFiredEvent[]
   loading:           boolean
   notificationPrefs: NotificationPrefs
+  notificationLoading: boolean
+  notificationError: string | null
   alertStats:        AlertStats | null
 
   setAlerts:                (a: Alert[]) => void
@@ -28,10 +30,25 @@ interface AlertState {
   loadAlerts:               () => Promise<void>
   loadHistory:              () => Promise<void>
   fetchAlertStats:          () => Promise<void>
-  updateNotificationPrefs:  (partial: Partial<NotificationPrefs>) => void
+  loadNotificationPrefs:    () => Promise<boolean>
+  updateNotificationPrefs:  (partial: Partial<NotificationPrefs>) => Promise<void>
+  clearNotificationError:   () => void
+  resetForAuthTransition:   () => void
 }
 
-export const useAlertStore = create<AlertState>((set) => ({
+let notificationMutationVersion = 0
+let notificationMutationGeneration = 0
+let notificationMutationQueue: Promise<void> = Promise.resolve()
+
+function cacheNotificationPrefs(preferences: NotificationPrefs): void {
+  try {
+    localStorage.setItem('alertNotificationPrefs', JSON.stringify(preferences))
+  } catch {
+    return
+  }
+}
+
+export const useAlertStore = create<AlertState>((set, get) => ({
   alerts:            [],
   history:           [],
   unreadCount:       0,
@@ -44,6 +61,8 @@ export const useAlertStore = create<AlertState>((set) => ({
     } catch { /* ignore */ }
     return { ...DEFAULT_NOTIFICATION_PREFS }
   })(),
+  notificationLoading: false,
+  notificationError: null,
   alertStats: null,
 
   setAlerts: (a) => set({ alerts: a }),
@@ -115,10 +134,70 @@ export const useAlertStore = create<AlertState>((set) => ({
       })
     }
   },
-  updateNotificationPrefs: (partial) =>
-    set((s) => {
-      const next = { ...s.notificationPrefs, ...partial }
-      try { localStorage.setItem('alertNotificationPrefs', JSON.stringify(next)) } catch { /* ignore */ }
-      return { notificationPrefs: next }
-    }),
+  loadNotificationPrefs: async () => {
+    set({ notificationLoading: true, notificationError: null })
+    try {
+      const preferences = await api.fetchPushPreferences()
+      cacheNotificationPrefs(preferences)
+      set({ notificationPrefs: preferences, notificationLoading: false })
+      return true
+    } catch (error) {
+      set({
+        notificationLoading: false,
+        notificationError: error instanceof Error ? error.message : 'Failed to load notification preferences',
+      })
+      return false
+    }
+  },
+  updateNotificationPrefs: async (partial) => {
+    const mutationVersion = ++notificationMutationVersion
+    const mutationGeneration = notificationMutationGeneration
+    const previous = get().notificationPrefs
+    const optimistic = { ...previous, ...partial }
+    cacheNotificationPrefs(optimistic)
+    set({
+      notificationPrefs: optimistic,
+      notificationLoading: true,
+      notificationError: null,
+    })
+    const request = notificationMutationQueue.then(async () => {
+      if (mutationGeneration !== notificationMutationGeneration) return null
+      return api.updatePushPreferences(partial)
+    })
+    notificationMutationQueue = request.then(() => undefined, () => undefined)
+    try {
+      const preferences = await request
+      if (preferences && mutationVersion === notificationMutationVersion) {
+        cacheNotificationPrefs(preferences)
+        set({ notificationPrefs: preferences, notificationLoading: false })
+      }
+    } catch (error) {
+      if (mutationVersion === notificationMutationVersion) {
+        cacheNotificationPrefs(previous)
+        set({
+          notificationPrefs: previous,
+          notificationLoading: false,
+          notificationError: error instanceof Error ? error.message : 'Failed to save notification preferences',
+        })
+      }
+      throw error
+    }
+  },
+  clearNotificationError: () => set({ notificationError: null }),
+  resetForAuthTransition: () => {
+    notificationMutationGeneration += 1
+    notificationMutationVersion += 1
+    notificationMutationQueue = Promise.resolve()
+    localStorage.removeItem('alertNotificationPrefs')
+    set({
+      alerts: [],
+      history: [],
+      unreadCount: 0,
+      recentFired: [],
+      notificationPrefs: { ...DEFAULT_NOTIFICATION_PREFS },
+      notificationLoading: false,
+      notificationError: null,
+      alertStats: null,
+    })
+  },
 }))

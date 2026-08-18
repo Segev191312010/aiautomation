@@ -15,6 +15,7 @@ from db.push_subscriptions import (
     PushSubscriptionLimitError,
     PushSubscriptionOwnershipError,
     delete_push_subscription,
+    get_push_subscription,
     list_push_subscriptions,
     upsert_push_subscription,
 )
@@ -171,6 +172,17 @@ async def subscribe_push(
     }
 
 
+@router.post("/subscription/status")
+async def get_subscription_status(
+    body: PushUnsubscribeRequest,
+    user=Depends(get_current_user),
+):
+    subscription = await get_push_subscription(body.endpoint)
+    return {
+        "registered": subscription is not None and subscription.user_id == user.id,
+    }
+
+
 @router.delete("/subscribe")
 async def unsubscribe_push(
     body: PushUnsubscribeRequest,
@@ -212,7 +224,7 @@ async def test_push_delivery(user=Depends(get_current_user)):
                 "type": "push_test",
                 "title": "Trading Dashboard",
                 "body": "Browser notifications are connected.",
-                "icon": "/favicon.ico",
+                "icon": "/icon.svg",
                 "tag": "push-test",
                 "data": {"test": True},
             },

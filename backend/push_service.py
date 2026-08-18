@@ -286,7 +286,7 @@ async def deliver_alert_push(
             "type": "alert_fired",
             "title": f"Alert: {name}",
             "body": f"{symbol} at {price:.2f} — {condition_summary}",
-            "icon": "/favicon.ico",
+            "icon": "/icon.svg",
             "tag": f"alert:{alert_id}",
             "data": {
                 "alert_id": alert_id,

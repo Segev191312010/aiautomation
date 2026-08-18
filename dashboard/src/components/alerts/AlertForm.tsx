@@ -283,10 +283,6 @@ export default function AlertForm({ onClose, editAlert, initialSymbol, initialPr
       } else {
         await createAlert(payload)
         toast.success('Alert created')
-
-        if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-          void Notification.requestPermission()
-        }
       }
 
       await loadAlerts()

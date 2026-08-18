@@ -12,7 +12,7 @@
  */
 import { useState, useCallback } from 'react'
 import type { NotificationPrefs, AlertSoundId } from '@/types'
-import { useNotifications } from '@/hooks/useNotifications'
+import { useNotificationController } from '@/components/alerts/NotificationProvider'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -107,25 +107,59 @@ function PrefRow({
 
 interface Props {
   prefs:       NotificationPrefs
-  onChange:    (partial: Partial<NotificationPrefs>) => void
+  onChange:    (partial: Partial<NotificationPrefs>) => void | Promise<void>
+  onPushChange: () => void | Promise<void>
   onTestSound?: () => void
   compact?:    boolean
 }
 
-export default function NotificationSettings({ prefs, onChange, onTestSound, compact = false }: Props) {
+export default function NotificationSettings({ prefs, onChange, onPushChange, onTestSound, compact = false }: Props) {
   const [open, setOpen]       = useState(!compact)
-  const { permission, request } = useNotifications()
+  const {
+    permission,
+    supported,
+    enabled,
+    ready,
+    subscribed,
+    loading,
+    error,
+    enable,
+    disable,
+    test,
+  } = useNotificationController()
+
+  const persistChange = useCallback(
+    (partial: Partial<NotificationPrefs>) => {
+      void Promise.resolve(onChange(partial)).catch(() => undefined)
+    },
+    [onChange],
+  )
 
   const handleBrowserPushToggle = useCallback(
     async (enabled: boolean) => {
-      if (enabled && permission !== 'granted') {
-        const granted = await request()
-        if (!granted) return
+      const changed = enabled ? await enable() : await disable()
+      if (changed) {
+        try {
+          await onPushChange()
+        } catch {
+          return
+        }
       }
-      onChange({ browser_push: enabled })
     },
-    [permission, request, onChange],
+    [disable, enable, onPushChange],
   )
+
+  const pushDescription = !supported
+    ? 'Persistent notifications are not supported by this browser.'
+    : !enabled
+      ? 'Disabled for this environment by the server.'
+      : !ready
+        ? 'Server VAPID configuration is incomplete.'
+        : permission === 'denied'
+          ? 'Blocked by browser — change this site permission.'
+          : subscribed
+            ? 'This browser is registered for background alerts.'
+            : 'Register this browser for alerts when the tab is closed.'
 
   const inner = (
     <div className="space-y-1 divide-y divide-zinc-800">
@@ -134,7 +168,7 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
         label="In-app toast"
         description="Show a toast notification inside the dashboard."
         checked={prefs.in_app}
-        onChange={(v) => onChange({ in_app: v })}
+        onChange={(v) => persistChange({ in_app: v })}
         ariaLabel="Toggle in-app notifications"
       />
 
@@ -143,7 +177,7 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
         label="Sound"
         description="Play a sound when an alert fires."
         checked={prefs.sound_enabled}
-        onChange={(v) => onChange({ sound_enabled: v })}
+        onChange={(v) => persistChange({ sound_enabled: v })}
         ariaLabel="Toggle sound notifications"
       >
         {/* Sound controls — only shown when sound is on */}
@@ -156,7 +190,7 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
                   key={opt.id}
                   type="button"
                   title={opt.description}
-                  onClick={() => onChange({ sound: opt.id })}
+                  onClick={() => persistChange({ sound: opt.id })}
                   className={[
                     'px-2.5 py-1 rounded-lg border text-[11px] font-sans font-semibold transition-all duration-100',
                     prefs.sound === opt.id
@@ -193,7 +227,7 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
               <button
                 type="button"
                 title={prefs.muted ? 'Unmute' : 'Mute'}
-                onClick={() => onChange({ muted: !prefs.muted })}
+                onClick={() => persistChange({ muted: !prefs.muted })}
                 className={[
                   'flex items-center justify-center w-6 h-6 rounded-md border transition-colors',
                   prefs.muted
@@ -220,7 +254,7 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
                 step="0.05"
                 value={prefs.volume}
                 disabled={prefs.muted}
-                onChange={(e) => onChange({ volume: Number(e.target.value) })}
+                onChange={(e) => persistChange({ volume: Number(e.target.value) })}
                 className="flex-1 h-1.5 accent-indigo-500 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
                 aria-label="Volume"
               />
@@ -234,29 +268,31 @@ export default function NotificationSettings({ prefs, onChange, onTestSound, com
 
       {/* Browser push */}
       <PrefRow
-        label="Browser push"
-        description={
-          permission === 'denied'
-            ? 'Blocked by browser — change in site settings.'
-            : 'Show OS-level notification even when tab is in background.'
-        }
-        checked={prefs.browser_push}
+        label="This browser"
+        description={pushDescription}
+        checked={subscribed}
         onChange={(v) => { void handleBrowserPushToggle(v) }}
-        disabled={permission === 'denied'}
+        disabled={loading || (!subscribed && (!supported || !enabled || !ready || permission === 'denied'))}
         ariaLabel="Toggle browser push notifications"
       >
-        {permission === 'default' && !prefs.browser_push && (
+        {subscribed && (
           <button
             type="button"
-            onClick={() => { void handleBrowserPushToggle(true) }}
+            disabled={loading}
+            onClick={() => { void test() }}
             className="mt-1.5 text-[11px] font-sans font-medium text-indigo-600 hover:underline"
           >
-            Request permission
+            Send test push
           </button>
         )}
         {permission === 'denied' && (
           <p className="mt-1 text-[10px] font-sans text-red-400">
             Permission denied. Enable notifications for this site in browser settings.
+          </p>
+        )}
+        {error && (
+          <p className="mt-1 text-[10px] font-sans text-red-400" role="alert">
+            {error}
           </p>
         )}
       </PrefRow>

@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import ToastProvider from '@/components/ui/ToastProvider'
+import { registerPushServiceWorker } from '@/services/browserPush'
 import './index.css'
 
 // ── Theme initialisation (runs before React renders to prevent flash) ─────────
@@ -22,6 +23,14 @@ function initTheme() {
 }
 
 initTheme()
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    registerPushServiceWorker().catch((error: unknown) => {
+      console.error('[push] service worker registration failed', error)
+    })
+  })
+}
 
 // Re-apply theme when system preference changes (handles "system" mode)
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {

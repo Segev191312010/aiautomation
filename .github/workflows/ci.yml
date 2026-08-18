@@ -25,6 +25,10 @@ jobs:
 
       - run: npm ci
 
+      - name: Enforce canonical database path
+        working-directory: .
+        run: ./scripts/check_db_path.sh
+
       - name: Typecheck
         run: npm run typecheck
 

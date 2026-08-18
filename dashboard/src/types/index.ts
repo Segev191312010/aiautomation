@@ -256,6 +256,37 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   in_app:        true,
 }
 
+export interface PushStatus {
+  enabled:               boolean
+  ready:                 boolean
+  public_key:            string | null
+  missing_configuration: string[]
+  invalid_configuration: string[]
+  subscribed:            boolean
+  subscription_count:    number
+  preferences:           NotificationPrefs
+}
+
+export interface PushSubscriptionResult {
+  subscribed:        boolean
+  created?:          boolean
+  subscription_count: number
+  preferences?:      NotificationPrefs
+}
+
+export interface PushSubscriptionStatus {
+  registered: boolean
+}
+
+export interface PushTestResult {
+  success:            boolean
+  subscription_count: number
+  delivered:          number
+  expired_removed:    number
+  failed:             number
+  skipped_preference: boolean
+}
+
 export interface AlertStats {
   total_today:      number
   total_week:       number
