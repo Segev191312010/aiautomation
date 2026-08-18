@@ -7,6 +7,7 @@ are drained on the next bot cycle; stale rows are marked ``expired``.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 
@@ -42,14 +43,32 @@ def choose_candidates(rule_candidates: list[dict], direct_candidates: list[dict]
 def _build_candidate_row(decision: dict) -> dict | None:
     symbol = str(decision.get("symbol", "")).upper()
     if not symbol:
+        log.warning("Rejecting AI candidate without a symbol")
+        return None
+    # Raw optimizer dictionaries must be explicit; do not turn an incomplete
+    # model response into a default BUY with neutral confidence.
+    action = str(decision.get("action", "")).upper()
+    if action not in {"BUY", "SELL"}:
+        log.warning("Rejecting AI candidate %s with invalid action", symbol)
+        return None
+    if "confidence" not in decision:
+        log.warning("Rejecting AI candidate %s without explicit confidence", symbol)
+        return None
+    try:
+        confidence = float(decision["confidence"])
+    except (TypeError, ValueError):
+        log.warning("Rejecting AI candidate %s with non-numeric confidence", symbol)
+        return None
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        log.warning("Rejecting AI candidate %s with out-of-range confidence", symbol)
         return None
     now = datetime.now(timezone.utc).isoformat()
     return {
         "symbol": symbol,
         "source": "ai_direct",
-        "score": float(decision.get("confidence", 0.5)) * 100.0,
+        "score": confidence * 100.0,
         "risk_pct": float(cfg.RISK_PER_TRADE_PCT),
-        "is_exit": str(decision.get("action", "BUY")).upper() == "SELL",
+        "is_exit": action == "SELL",
         "decision": dict(decision),
         "queued_at": now,
     }

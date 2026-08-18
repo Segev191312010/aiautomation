@@ -11,6 +11,24 @@ from execution_brain import (
 )
 
 
+def test_ai_candidate_requires_explicit_valid_decision_fields():
+    from execution_brain import _build_candidate_row
+
+    assert _build_candidate_row({"symbol": "AAPL", "action": "BUY"}) is None
+    assert _build_candidate_row({"symbol": "AAPL", "action": "HOLD", "confidence": 0.8}) is None
+    assert _build_candidate_row({"symbol": "AAPL", "action": "BUY", "confidence": float("nan")}) is None
+
+
+def test_ai_candidate_preserves_explicit_confidence_and_action():
+    from execution_brain import _build_candidate_row
+
+    row = _build_candidate_row({"symbol": "aapl", "action": "sell", "confidence": 0.73})
+    assert row is not None
+    assert row["symbol"] == "AAPL"
+    assert row["score"] == 73.0
+    assert row["is_exit"] is True
+
+
 @pytest.fixture
 def _isolated_db(tmp_path, monkeypatch):
     """Redirect DB_PATH to a fresh sqlite file per test."""

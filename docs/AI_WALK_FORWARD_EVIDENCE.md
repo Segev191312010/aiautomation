@@ -20,3 +20,11 @@ has results, the evaluator records its artifacts, and the run is completed.
 Failures must be persisted as `failed`. AI remains PAPER-only until a separate
 review approves the resulting report and its minimum sample, calibration,
 abstention, and baseline-comparison gates.
+
+## Decision input integrity
+
+Optimizer direct-trade dictionaries are fail-closed at the execution queue:
+they must explicitly contain a `BUY` or `SELL` action and finite confidence in
+the inclusive `[0, 1]` range. Missing fields are rejected rather than being
+silently defaulted to neutral confidence or `BUY`. This protects PAPER
+evidence from incomplete model responses and does not imply profitability.
