@@ -158,6 +158,9 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   },
 
   runScan: async () => {
+    // Do not allow overlapping requests to race and replace a newer scan with
+    // an older response when users double-click or press the shortcut twice.
+    if (get().scanning) return
     const { filters, selectedUniverse, customSymbols, interval, period } = get()
     set({ scanning: true })
     try {

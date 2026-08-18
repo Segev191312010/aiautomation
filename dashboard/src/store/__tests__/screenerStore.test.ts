@@ -47,6 +47,20 @@ beforeEach(() => {
 })
 
 describe('screenerStore runScan', () => {
+  it('ignores a second request while a scan is in progress', async () => {
+    let resolveScan!: (value: Awaited<ReturnType<typeof api.runScan>>) => void
+    vi.mocked(api.runScan).mockReturnValue(new Promise((resolve) => {
+      resolveScan = resolve
+    }))
+
+    const first = useScreenerStore.getState().runScan()
+    const second = useScreenerStore.getState().runScan()
+
+    expect(api.runScan).toHaveBeenCalledTimes(1)
+    resolveScan({ results: [], skipped_symbols: [], elapsed_ms: 1, total_symbols: 0 })
+    await Promise.all([first, second])
+  })
+
   it('keeps the previous result visible until its replacement arrives', async () => {
     let resolveScan!: (value: Awaited<ReturnType<typeof api.runScan>>) => void
     vi.mocked(api.runScan).mockReturnValue(new Promise((resolve) => {
