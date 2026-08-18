@@ -29,9 +29,11 @@ async def test_place_manual_order_bypasses_autopilot_authority(anyio_backend):
         "routers.orders.place_order",
         new=AsyncMock(return_value=fake_trade),
     ) as mock_place:
-        payload = await place_manual_order(body)
+        payload = await place_manual_order(body, user=Mock(id="alice"))
 
     assert payload == {"id": "trade-1"}
     _, kwargs = mock_place.await_args
+    rule = mock_place.await_args.args[0]
+    assert rule.user_id == "alice"
     assert kwargs["source"] == "manual"
     assert kwargs["require_autopilot_authority"] is False

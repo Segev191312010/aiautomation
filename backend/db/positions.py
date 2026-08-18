@@ -36,21 +36,21 @@ async def get_open_positions(user_id: str = "demo") -> list[OpenPosition]:
     """Return all tracked open positions for a user."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT data FROM open_positions WHERE user_id=?", (user_id,)
+            "SELECT data, user_id FROM open_positions WHERE user_id=?", (user_id,)
         ) as cur:
             rows = await cur.fetchall()
-    return [OpenPosition.model_validate(json.loads(r[0])) for r in rows]
+    return [OpenPosition.model_validate({**json.loads(r[0]), "user_id": r[1]}) for r in rows]
 
 
 async def get_open_position(trade_id: str, user_id: str = "demo") -> OpenPosition | None:
     """Return a single tracked position by trade_id."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT data FROM open_positions WHERE id=? AND user_id=?",
+            "SELECT data, user_id FROM open_positions WHERE id=? AND user_id=?",
             (trade_id, user_id),
         ) as cur:
             row = await cur.fetchone()
-    return OpenPosition.model_validate(json.loads(row[0])) if row else None
+    return OpenPosition.model_validate({**json.loads(row[0]), "user_id": row[1]}) if row else None
 
 
 async def delete_open_position(

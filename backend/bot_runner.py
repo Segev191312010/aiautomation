@@ -104,7 +104,11 @@ def get_bot_health() -> dict:
 
 
 async def emit_bot_health(*, force: bool = False, **kw) -> None:
-    await _emit_bot_health_raw(is_running=_running, force=force)
+    await _emit_bot_health_raw(
+        is_running=_running,
+        force=force,
+        owner_user_id=cfg.BOT_OWNER_USER_ID,
+    )
 
 
 
@@ -177,11 +181,11 @@ async def _loop() -> None:
 
 
 async def _run_cycle() -> None:
-    rules = await get_rules()
+    rules = await get_rules(user_id=cfg.BOT_OWNER_USER_ID)
     enabled = [r for r in rules if r.enabled]
 
     # Load open positions BEFORE bar fetch so their symbols are included
-    open_positions = await get_open_positions()
+    open_positions = await get_open_positions(user_id=cfg.BOT_OWNER_USER_ID)
 
     # ── Collect all symbols needed ────────────────────────────────────────────
     # Single-symbol rules: just use rule.symbol
@@ -671,7 +675,7 @@ async def _run_cycle() -> None:
                     "trade_id": trade_payload.get("id"),
                     "order_id": trade_payload.get("order_id"),
                     "reason": decision.reason,
-                })
+                }, owner_user_id=candidate.get("_owner_user_id"))
             except Exception as exc:
                 log.warning("Direct AI trade blocked for %s: %s", symbol, exc)
             continue
@@ -893,7 +897,7 @@ async def _run_cycle() -> None:
                 "symbol": trigger_symbol,
                 "action": rule.action.type,
                 "qty": rule.action.quantity,
-            })
+            }, user_id=rule.user_id)
         except Exception as exc:
             log.warning("Signal notification failed for %s/%s: %s", rule.name, trigger_symbol, exc)
 
@@ -908,7 +912,7 @@ async def _run_cycle() -> None:
                 "qty": rule.action.quantity,
                 "trade_id": trade.id,
                 "order_id": trade.order_id,
-            })
+            }, owner_user_id=rule.user_id)
 
     await _emit({
         "type": "bot",
@@ -919,7 +923,7 @@ async def _run_cycle() -> None:
         "signals": total_signals,
         "last_run": _last_run,
         "next_run": _next_run,
-    })
+    }, owner_user_id=cfg.BOT_OWNER_USER_ID)
 
     # Emit cycle metrics
     metrics.record("cycle_signals", total_signals)
@@ -937,6 +941,7 @@ async def _run_cycle() -> None:
 async def _create_paper_trade(order_rule: Rule, fill_price: float | None) -> Trade:
     now_iso = datetime.now(timezone.utc).isoformat()
     trade = Trade(
+        user_id=order_rule.user_id,
         rule_id=order_rule.id,
         rule_name=order_rule.name,
         symbol=order_rule.symbol,
@@ -969,11 +974,9 @@ from bot_exits import (  # noqa: E402
 )
 
 
-async def _emit(payload: dict) -> None:
+async def _emit(payload: dict, *, owner_user_id: str | None = None) -> None:
     if _broadcast:
-        await _broadcast(payload)
-
-
+        await _broadcast(payload, owner_user_id=owner_user_id)
 
 
 

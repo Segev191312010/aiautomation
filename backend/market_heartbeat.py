@@ -107,7 +107,16 @@ async def _market_heartbeat_loop() -> None:
             log.debug("Market heartbeat fetch failed: %s", exc)
 
         _position_push_counter += 1
-        if _position_push_counter % 3 == 0 and ibkr.is_connected() and not cfg.SIM_MODE:
+        if (
+            _position_push_counter % 3 == 0
+            and cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED
+            and ibkr.is_connected()
+            and not cfg.SIM_MODE
+        ):
+            owner_user_id = cfg.IBKR_ACCOUNT_OWNER_USER_ID
+            if not owner_user_id:
+                log.error("Skipping private IBKR position stream: account owner is not configured")
+                continue
             try:
                 positions = [p.model_dump() for p in await ibkr.get_positions()]
                 acct = await ibkr.get_account_summary()
@@ -115,7 +124,7 @@ async def _market_heartbeat_loop() -> None:
                     "type": "positions_update",
                     "positions": positions,
                     "account": acct.model_dump(),
-                })
+                }, owner_user_id=owner_user_id)
             except Exception as exc:
                 log.debug("Position broadcast failed: %s", exc)
 

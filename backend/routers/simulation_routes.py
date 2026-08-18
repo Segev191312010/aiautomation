@@ -45,9 +45,10 @@ class SimOrderRequest(BaseModel):
 
 
 @router.post("/order", status_code=201)
-async def sim_place_order(body: SimOrderRequest):
+async def sim_place_order(body: SimOrderRequest, user=Depends(get_current_user)):
     ok, msg = await sim_engine.execute_order(
         symbol=body.symbol.upper(), action=body.action, qty=body.qty, price=body.price,
+        user_id=user.id,
     )
     if not ok:
         raise HTTPException(400, msg)
@@ -55,13 +56,17 @@ async def sim_place_order(body: SimOrderRequest):
 
 
 @router.post("/reset")
-async def sim_reset():
-    await sim_engine.reset()
+async def sim_reset(user=Depends(get_current_user)):
+    await sim_engine.reset(user_id=user.id)
     return {"reset": True, "initial_cash": cfg.SIM_INITIAL_CASH}
 
 
 @router.get("/playback")
-async def playback_state():
+async def playback_state(user=Depends(get_current_user)):
+    try:
+        replay_engine.assert_owner(user.id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     return replay_engine.state.model_dump()
 
 
@@ -72,7 +77,7 @@ class LoadReplayRequest(BaseModel):
 
 
 @router.post("/playback/load")
-async def playback_load(body: LoadReplayRequest):
+async def playback_load(body: LoadReplayRequest, user=Depends(get_current_user)):
     sym = body.symbol.upper()
     bars: list[dict] = []
     try:
@@ -84,25 +89,34 @@ async def playback_load(body: LoadReplayRequest):
     if not bars:
         raise HTTPException(404, f"No replay data for {sym}")
 
-    await replay_engine.load(sym, bars)
+    await replay_engine.load(sym, bars, user_id=user.id)
     return replay_engine.state.model_dump()
 
 
 @router.post("/playback/play")
-async def playback_play():
-    await replay_engine.play()
+async def playback_play(user=Depends(get_current_user)):
+    try:
+        await replay_engine.play(user_id=user.id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     return replay_engine.state.model_dump()
 
 
 @router.post("/playback/pause")
-async def playback_pause():
-    await replay_engine.pause()
+async def playback_pause(user=Depends(get_current_user)):
+    try:
+        await replay_engine.pause(user_id=user.id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     return replay_engine.state.model_dump()
 
 
 @router.post("/playback/stop")
-async def playback_stop():
-    await replay_engine.stop()
+async def playback_stop(user=Depends(get_current_user)):
+    try:
+        await replay_engine.stop(user_id=user.id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     return replay_engine.state.model_dump()
 
 
@@ -111,6 +125,9 @@ class SpeedRequest(BaseModel):
 
 
 @router.post("/playback/speed")
-async def playback_speed(body: SpeedRequest):
-    replay_engine.set_speed(body.speed)
+async def playback_speed(body: SpeedRequest, user=Depends(get_current_user)):
+    try:
+        replay_engine.set_speed(body.speed, user_id=user.id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc))
     return {"speed": replay_engine.state.speed}

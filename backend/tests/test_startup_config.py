@@ -17,6 +17,8 @@ def restore_cfg():
         "IS_PAPER": cfg.IS_PAPER,
         "IBKR_PORT": cfg.IBKR_PORT,
         "SIM_MODE": cfg.SIM_MODE,
+        "IBKR_ACCOUNT_OWNER_USER_ID": cfg.IBKR_ACCOUNT_OWNER_USER_ID,
+        "IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED": cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED,
     }
     try:
         yield
@@ -63,6 +65,26 @@ async def test_validate_startup_errors_on_default_jwt_secret_paper_mode(restore_
     result = await validate_startup()
 
     assert any("non-default JWT_SECRET" in e for e in result["errors"])
+
+
+@pytest.mark.anyio
+async def test_private_ibkr_streaming_requires_explicit_operator_owner(restore_cfg, anyio_backend):
+    cfg.DB_PATH = ":memory:"
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.STRICT_CONFIG = False
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.IS_PAPER = True
+    cfg.IBKR_PORT = 7497
+    cfg.SIM_MODE = False
+    cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED = True
+    cfg.IBKR_ACCOUNT_OWNER_USER_ID = ""
+
+    result = await validate_startup()
+    assert any("IBKR_ACCOUNT_OWNER_USER_ID" in error for error in result["errors"])
+
+    cfg.IBKR_ACCOUNT_OWNER_USER_ID = "operator"
+    result = await validate_startup()
+    assert not any("IBKR_ACCOUNT_OWNER_USER_ID" in error for error in result["errors"])
 
 
 # ── Autopilot matrix validator ───────────────────────────────────────────────

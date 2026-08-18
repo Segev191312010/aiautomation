@@ -35,7 +35,7 @@ async def get_rule_route(rule_id: str, user=Depends(get_current_user)):
 
 @router.post("", status_code=201)
 async def create_rule(body: RuleCreate, user=Depends(get_current_user)):
-    rule = Rule(**body.model_dump())
+    rule = Rule(**body.model_dump(), user_id=user.id)
     await save_rule(rule, user_id=user.id)
     return rule.model_dump()
 

@@ -254,7 +254,8 @@ async def _fire_alert(alert: Alert, price: float) -> None:
             "condition_summary": summary,
             "price": price,
             "timestamp": now,
-        }
+        },
+        owner_user_id=alert.user_id,
     )
 
     log.info(
@@ -269,7 +270,7 @@ def _condition_summary(cond: Condition) -> str:
     return f"{ind} {cond.operator} {cond.value}"
 
 
-async def _emit(payload: dict) -> None:
+async def _emit(payload: dict, *, owner_user_id: str | None = None) -> None:
     """Broadcast a WebSocket event if broadcast callback is set."""
     if _broadcast:
-        await _broadcast(payload)
+        await _broadcast(payload, owner_user_id=owner_user_id)

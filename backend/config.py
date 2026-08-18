@@ -13,6 +13,10 @@ class Config:
     IBKR_HOST: str = os.getenv("IBKR_HOST", "127.0.0.1")
     IBKR_PORT: int = int(os.getenv("IBKR_PORT", "7497"))
     IBKR_CLIENT_ID: int = int(os.getenv("IBKR_CLIENT_ID", "1"))
+    IBKR_ACCOUNT_OWNER_USER_ID: str = os.getenv("IBKR_ACCOUNT_OWNER_USER_ID", "").strip()
+    IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED: bool = (
+        os.getenv("IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED", "false").lower() == "true"
+    )
 
     # ── Safety ───────────────────────────────────────────────────────────────
     # IS_PAPER=true → connects to IBKR paper account (real API, fake money)
@@ -31,6 +35,7 @@ class Config:
 
     # ── Bot behaviour ────────────────────────────────────────────────────────
     BOT_INTERVAL_SECONDS: int = int(os.getenv("BOT_INTERVAL_SECONDS", "900"))  # 15 min default; fits ~1000-stock scans
+    BOT_OWNER_USER_ID: str = os.getenv("BOT_OWNER_USER_ID", "demo").strip()
 
     # ── Trading risk limits ───────────────────────────────────────────────────
     SHORT_ALLOWED: bool = os.getenv("SHORT_ALLOWED", "false").lower() == "true"

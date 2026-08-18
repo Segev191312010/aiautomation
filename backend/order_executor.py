@@ -293,6 +293,7 @@ async def place_order(
     # Record trade in DB (PENDING status)
     now_iso = _now_iso()
     trade_rec = Trade(
+        user_id=rule.user_id,
         rule_id=rule.id,
         rule_name=rule.name,
         symbol=rule.symbol,
@@ -395,6 +396,8 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
 
             try:
                 from notification_service import notification_service
+                if not trade_rec.user_id:
+                    raise ValueError("filled trade is missing persisted owner user_id")
                 _safe_create_task(notification_service.notify_order_filled({
                     "symbol": trade_rec.symbol,
                     "action": trade_rec.action,
@@ -402,9 +405,13 @@ async def _watch_fill(ib_trade: IBTrade, trade_rec: Trade, contract, rule: Rule 
                     "fill_price": fill_price,
                     "rule_name": trade_rec.rule_name,
                     "trade_id": trade_rec.id,
-                }), name=f"notify_fill:{trade_rec.symbol}")
-            except Exception:
-                pass
+                }, user_id=trade_rec.user_id), name=f"notify_fill:{trade_rec.symbol}")
+            except Exception as exc:
+                log.error(
+                    "Order-fill notification dropped for trade=%s: %s",
+                    trade_rec.id,
+                    exc,
+                )
 
             log.info("Fill ready for exit tracker: %s %s @ %.4f",
                      trade_rec.action, trade_rec.symbol, fill_price)
@@ -706,8 +713,6 @@ async def get_open_orders() -> list[dict]:
         }
         for t in ibkr.ib.openTrades()
     ]
-
-
 
 
 

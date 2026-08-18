@@ -18,6 +18,7 @@ invariants on the new mode without re-running the whole startup path.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import TypedDict
 
@@ -169,6 +170,16 @@ async def validate_startup() -> StartupResult:
             "Ensure this is intentional."
         )
 
+    if (
+        not cfg.SIM_MODE
+        and cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED
+        and not cfg.IBKR_ACCOUNT_OWNER_USER_ID
+    ):
+        errors.append(
+            "IBKR_ACCOUNT_OWNER_USER_ID is required when shared IBKR account "
+            "position streaming is enabled. Refusing unowned private fanout."
+        )
+
     # ------------------------------------------------------------------
     # 5. Direct-trades intent token gate (live / staging environments)
     # ------------------------------------------------------------------
@@ -177,7 +188,6 @@ async def validate_startup() -> StartupResult:
     # but in any non-dev environment we additionally require an explicit
     # X-Intent-Token header matched against DIRECT_TRADE_INTENT_TOKEN. If the
     # env is "live" or "staging" and the token is empty, refuse to boot.
-    import os
     env_name = (os.getenv("ENV") or "").strip().lower()
     if env_name in {"live", "staging"} and not getattr(cfg, "DIRECT_TRADE_INTENT_TOKEN", ""):
         errors.append(

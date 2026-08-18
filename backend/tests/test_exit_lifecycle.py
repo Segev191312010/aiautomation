@@ -215,7 +215,7 @@ async def test_short_pnl_positive_when_price_falls(anyio_backend):
     emitted = []
     with patch("order_executor.place_order", new_callable=AsyncMock, return_value=filled_trade), \
          patch("bot_exits.get_open_position", new_callable=AsyncMock, return_value=pos), \
-         patch("bot_exits._emit", new_callable=AsyncMock, side_effect=lambda p: emitted.append(p)), \
+         patch("bot_exits._emit", new_callable=AsyncMock, side_effect=lambda p, **_: emitted.append(p)), \
          patch("services.order_lifecycle.stamp_exit_trade_context", new_callable=AsyncMock), \
          patch("services.order_lifecycle.finalize_filled_exit_trade", new_callable=AsyncMock, return_value=finalized_trade):
 

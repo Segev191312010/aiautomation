@@ -37,9 +37,9 @@ def was_exited_this_cycle(symbol: str) -> bool:
     return symbol.upper() in _exited_this_cycle
 
 
-async def _emit(payload: dict) -> None:
+async def _emit(payload: dict, *, owner_user_id: str | None = None) -> None:
     if _broadcast:
-        await _broadcast(payload)
+        await _broadcast(payload, owner_user_id=owner_user_id)
 
 
 async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
@@ -100,8 +100,9 @@ async def _process_exits(open_positions: list, bars_by_symbol: dict) -> None:
             log.warning("Position %s has qty=%s (<1) — removing from tracker", pos.symbol, pos.quantity)
             await _emit({"type": "exit", "symbol": pos.symbol, "reason": "qty_below_1",
                          "action": "SELL" if pos.side == "BUY" else "BUY",
-                         "qty": 0, "entry_price": pos.entry_price, "exit_price": 0, "pnl": 0})
-            await delete_open_position(pos.id)
+                         "qty": 0, "entry_price": pos.entry_price, "exit_price": 0, "pnl": 0},
+                        owner_user_id=pos.user_id)
+            await delete_open_position(pos.id, user_id=pos.user_id)
             continue
 
         await _place_exit_order(pos, sym, qty, current_price, reason)
@@ -113,7 +114,9 @@ async def _reconcile_pending_exit(pos) -> None:
     from services import order_lifecycle, order_recovery
 
     now = datetime.now(timezone.utc)
-    trade = await get_trade_by_order_id(pos.exit_pending_order_id, symbol=pos.symbol)
+    trade = await get_trade_by_order_id(
+        pos.exit_pending_order_id, symbol=pos.symbol, user_id=pos.user_id,
+    )
     resolution = order_recovery.evaluate_pending_exit_resolution(
         pos,
         trade,
@@ -123,7 +126,7 @@ async def _reconcile_pending_exit(pos) -> None:
 
     if resolution.state == "filled" and trade is not None:
         order_recovery.clear_pending_exit(pos)
-        await save_open_position(pos)
+        await save_open_position(pos, user_id=pos.user_id)
 
         current_price = trade.fill_price or pos.entry_price
         finalized = await order_lifecycle.finalize_filled_exit_trade(
@@ -139,7 +142,7 @@ async def _reconcile_pending_exit(pos) -> None:
             "action": "SELL" if pos.side == "BUY" else "BUY",
             "qty": int(pos.quantity), "entry_price": pos.entry_price,
             "exit_price": current_price, "pnl": pnl,
-        })
+        }, owner_user_id=pos.user_id)
         log.info("EXIT FILLED %s pnl=%.2f (reconciled pending)", pos.symbol, pnl)
         _exited_this_cycle.add(pos.symbol.upper())
         return
@@ -154,7 +157,7 @@ async def _reconcile_pending_exit(pos) -> None:
             except Exception as exc:
                 log.warning("Failed to cancel exit order %d: %s", pos.exit_pending_order_id, exc)
         order_recovery.mark_exit_retry_state(pos, resolution.reason or "Exit reconciliation failed", now=now)
-        await save_open_position(pos)
+        await save_open_position(pos, user_id=pos.user_id)
         log.warning("Exit retry needed for %s - attempt %d: %s", pos.symbol, pos.exit_attempts, resolution.reason)
         await _check_retry_cap(pos)
         return
@@ -169,7 +172,7 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
     from services import order_lifecycle, order_recovery
 
     # Re-fetch position from DB to avoid stale reads (BUG-7)
-    fresh_pos = await get_open_position(pos.id)
+    fresh_pos = await get_open_position(pos.id, user_id=pos.user_id)
     if fresh_pos is None:
         log.warning("Position %s no longer exists at exit time — skipping", sym)
         return
@@ -184,6 +187,7 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
 
     exit_action = "SELL" if pos.side == "BUY" else "BUY"
     exit_rule = Rule(
+        user_id=pos.user_id,
         id=pos.rule_id,
         name=f"EXIT:{pos.rule_name}",
         symbol=sym,
@@ -203,7 +207,7 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
         exit_trade = await place_order(exit_rule, source="rule", is_exit=True, has_existing_position=True)
         if not exit_trade:
             order_recovery.mark_exit_retry_state(pos, "place_order returned None", now=now)
-            await save_open_position(pos)
+            await save_open_position(pos, user_id=pos.user_id)
             return
 
         await order_lifecycle.stamp_exit_trade_context(exit_trade, pos)
@@ -223,16 +227,16 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
                 "type": "exit", "symbol": sym, "reason": reason,
                 "action": exit_action, "qty": qty,
                 "entry_price": pos.entry_price, "exit_price": fill, "pnl": pnl,
-            })
+            }, owner_user_id=pos.user_id)
             log.info("EXIT %s qty=%d reason='%s' pnl=%.2f", sym, qty, reason, pnl)
             _exited_this_cycle.add(sym.upper())
         elif normalized == "PENDING":
             order_recovery.mark_exit_pending_submitted(pos, exit_trade.order_id, now=now)
-            await save_open_position(pos)
+            await save_open_position(pos, user_id=pos.user_id)
             log.info("Exit order PENDING for %s (order_id=%s)", sym, exit_trade.order_id)
         else:
             order_recovery.mark_exit_retry_state(pos, f"Exit order {normalized}", now=now)
-            await save_open_position(pos)
+            await save_open_position(pos, user_id=pos.user_id)
             if not force_close:
                 await _check_retry_cap(pos)
             else:
@@ -240,7 +244,7 @@ async def _place_exit_order(pos, sym: str, qty: int, current_price: float, reaso
 
     except (OrderError, RuntimeError) as exc:
         order_recovery.mark_exit_retry_state(pos, str(exc), now=now)
-        await save_open_position(pos)
+        await save_open_position(pos, user_id=pos.user_id)
         log.error("Exit order FAILED for %s (attempt %d): %s", sym, pos.exit_attempts, exc)
         if not force_close:
             await _check_retry_cap(pos)
@@ -262,7 +266,7 @@ async def _check_retry_cap(pos) -> None:
             "message": f"EXIT RETRY CAP: {msg}",
             "symbol": pos.symbol,
             "severity": "critical",
-        })
+        }, owner_user_id=pos.user_id)
         try:
             from manual_intervention import raise_intervention
 

@@ -101,7 +101,7 @@ async def api_alerts_test(body: AlertCreate, user=Depends(get_current_user)):
         from runtime_state import get_ws_manager
         mgr = get_ws_manager()
         if mgr:
-            await mgr.broadcast({
+            await mgr.send_to_user(user.id, {
                 "type": "alert_fired",
                 "alert_id": temp_alert.id,
                 "name": temp_alert.name,

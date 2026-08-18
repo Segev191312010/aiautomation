@@ -11,27 +11,29 @@ log = logging.getLogger(__name__)
 async def get_rules(user_id: str = "demo") -> list[Rule]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT data FROM rules WHERE user_id=?", (user_id,)
+            "SELECT data, user_id FROM rules WHERE user_id=?", (user_id,)
         ) as cursor:
             rows = await cursor.fetchall()
-    return [Rule.model_validate(json.loads(r[0])) for r in rows]
+    return [Rule.model_validate({**json.loads(r[0]), "user_id": r[1]}) for r in rows]
 
 
 async def get_rule(rule_id: str, user_id: str = "demo") -> Rule | None:
     async with get_db() as db:
         async with db.execute(
-            "SELECT data FROM rules WHERE id=? AND user_id=?", (rule_id, user_id)
+            "SELECT data, user_id FROM rules WHERE id=? AND user_id=?", (rule_id, user_id)
         ) as cur:
             row = await cur.fetchone()
-    return Rule.model_validate(json.loads(row[0])) if row else None
+    return Rule.model_validate({**json.loads(row[0]), "user_id": row[1]}) if row else None
 
 
-async def save_rule(rule: Rule, user_id: str = "demo") -> None:
+async def save_rule(rule: Rule, user_id: str | None = None) -> None:
+    owner_user_id = user_id or rule.user_id or "demo"
+    rule.user_id = owner_user_id
     rule.updated_at = datetime.now(timezone.utc).isoformat()
     async with get_db() as db:
         await db.execute(
             "INSERT OR REPLACE INTO rules (id, data, user_id) VALUES (?, ?, ?)",
-            (rule.id, rule.model_dump_json(), user_id),
+            (rule.id, rule.model_dump_json(), owner_user_id),
         )
         await db.commit()
 

@@ -32,7 +32,7 @@ class NotificationService:
     per-user notification preferences and rate limiting."""
 
     def __init__(self):
-        self._rate_limits: dict[int, list[float]] = {}  # user_id -> timestamps
+        self._rate_limits: dict[str, list[float]] = {}  # user_id -> timestamps
         self._max_per_minute = 10
         self._ws_broadcast: Any = None  # Set by main.py on startup
 
@@ -40,7 +40,13 @@ class NotificationService:
         """Register the WebSocket broadcast function from main.py."""
         self._ws_broadcast = broadcast_fn
 
-    def _check_rate_limit(self, user_id: int) -> bool:
+    @staticmethod
+    def _require_user_id(user_id: str) -> str:
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise ValueError("user_id must be a non-empty string")
+        return user_id.strip()
+
+    def _check_rate_limit(self, user_id: str) -> bool:
         """Return True if notification is allowed, False if rate-limited."""
         now = time.time()
         timestamps = self._rate_limits.get(user_id, [])
@@ -49,16 +55,17 @@ class NotificationService:
         self._rate_limits[user_id] = timestamps
         return len(timestamps) < self._max_per_minute
 
-    def _record_notification(self, user_id: int):
+    def _record_notification(self, user_id: str):
         now = time.time()
         if user_id not in self._rate_limits:
             self._rate_limits[user_id] = []
         self._rate_limits[user_id].append(now)
 
-    async def notify_alert_fired(self, alert: dict, user_id: int = 1):
+    async def notify_alert_fired(self, alert: dict, *, user_id: str):
         """Send notification when an alert fires."""
+        user_id = self._require_user_id(user_id)
         if not self._check_rate_limit(user_id):
-            logger.warning("Rate limited notifications for user %d", user_id)
+            logger.warning("Rate limited notifications for user %s", user_id)
             return
 
         payload = NotificationPayload(
@@ -69,11 +76,12 @@ class NotificationService:
             notification_type="alert_fired",
             data=alert,
         )
-        await self._broadcast(payload)
+        await self._broadcast(payload, user_id=user_id)
         self._record_notification(user_id)
 
-    async def notify_signal(self, signal: dict, user_id: int = 1):
+    async def notify_signal(self, signal: dict, *, user_id: str):
         """Send notification when a trading signal is generated."""
+        user_id = self._require_user_id(user_id)
         if not self._check_rate_limit(user_id):
             return
 
@@ -84,11 +92,12 @@ class NotificationService:
             notification_type="signal",
             data=signal,
         )
-        await self._broadcast(payload)
+        await self._broadcast(payload, user_id=user_id)
         self._record_notification(user_id)
 
-    async def notify_order_filled(self, order: dict, user_id: int = 1):
+    async def notify_order_filled(self, order: dict, *, user_id: str):
         """Send notification when an order is filled."""
+        user_id = self._require_user_id(user_id)
         payload = NotificationPayload(
             title=f"Order Filled: {order.get('action', '')} {order.get('symbol', '')}",
             body=f"{order.get('qty', 0)} shares at ${order.get('fill_price', 0):.2f}",
@@ -96,10 +105,11 @@ class NotificationService:
             notification_type="order_filled",
             data=order,
         )
-        await self._broadcast(payload)
+        await self._broadcast(payload, user_id=user_id)
 
-    async def notify_risk_event(self, event: dict, user_id: int = 1):
+    async def notify_risk_event(self, event: dict, *, user_id: str):
         """Send notification for risk warnings/breaches."""
+        user_id = self._require_user_id(user_id)
         payload = NotificationPayload(
             title=f"Risk {event.get('level', 'Warning')}: {event.get('symbol', '')}",
             body=event.get("message", "Risk limit triggered"),
@@ -107,9 +117,9 @@ class NotificationService:
             notification_type="risk_event",
             data=event,
         )
-        await self._broadcast(payload)
+        await self._broadcast(payload, user_id=user_id)
 
-    async def _broadcast(self, payload: NotificationPayload):
+    async def _broadcast(self, payload: NotificationPayload, *, user_id: str):
         """Broadcast notification via WebSocket."""
         if self._ws_broadcast is None:
             logger.debug("No WS broadcast function registered; skipping notification")
@@ -126,7 +136,7 @@ class NotificationService:
             },
         }
         try:
-            await self._ws_broadcast(msg)
+            await self._ws_broadcast(msg, owner_user_id=user_id)
         except Exception:
             logger.exception("Failed to broadcast notification")
 

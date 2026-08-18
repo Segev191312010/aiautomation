@@ -91,8 +91,7 @@ async def start() -> None:
     if _running:
         return
     _running = True
-    log.info("Screener pipeline starting (scan every %ds, quotes every %.1fs)",
-             SCAN_INTERVAL_SECONDS, QUOTE_PUSH_INTERVAL)
+    log.info("Screener pipeline starting (scan every %ds)", SCAN_INTERVAL_SECONDS)
 
     # Initialize universe hygiene (load quarantine list)
     try:
@@ -103,7 +102,7 @@ async def start() -> None:
 
     # Run an initial scan immediately
     _scan_task = asyncio.create_task(_scan_loop(), name="screener-scan-loop")
-    _quote_task = asyncio.create_task(_quote_push_loop(), name="screener-quote-loop")
+    _quote_task = None
 
 
 async def stop() -> None:
@@ -190,9 +189,6 @@ async def _run_single_scan() -> ScreenerSnapshot:
 
     async with _snapshot_lock:
         _latest_snapshot = snapshot
-
-    # ── Step 5: Broadcast scan update via WebSocket ──────────────────────
-    await _broadcast_scan_update(snapshot)
 
     log.info("Screener scan complete: %d candidates, %dms, source=%s",
              len(candidates), elapsed, source)
@@ -337,8 +333,9 @@ async def _quote_push_loop() -> None:
 
 async def _push_quotes() -> None:
     """Collect quotes for top candidates and broadcast."""
-    if _ws_broadcast is None:
-        return
+    # Screener snapshots are hydrated and refreshed through authenticated REST.
+    # No user-owned WebSocket audience exists for this global pipeline.
+    return
 
     snap = _latest_snapshot
     if not snap or not snap.candidates:
