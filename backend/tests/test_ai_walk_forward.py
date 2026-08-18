@@ -1,7 +1,6 @@
 import pytest
 
 import config
-import database
 from database import init_db
 from ai_walk_forward import create_walk_forward_run, complete_walk_forward_run, get_walk_forward_run
 
@@ -10,7 +9,6 @@ from ai_walk_forward import create_walk_forward_run, complete_walk_forward_run, 
 def _isolated_db(tmp_path, monkeypatch):
     path = str(tmp_path / "walk-forward.db")
     monkeypatch.setattr(config.cfg, "DB_PATH", path)
-    monkeypatch.setattr(database, "DB_PATH", path)
 
 
 def _fold(index=0):
