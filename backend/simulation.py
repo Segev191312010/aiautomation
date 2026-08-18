@@ -218,6 +218,8 @@ class SimEngine:
         qty: float,
         price: float,
         order_id: Optional[str] = None,
+        *,
+        user_id: str,
     ) -> tuple[bool, str]:
         """
         Execute a virtual order against the sim account.
@@ -320,13 +322,14 @@ class SimEngine:
                     "commission": commission,
                     "pnl": pnl,
                     "timestamp": ts,
-                }
+                },
+                owner_user_id=user_id,
             )
         return True, f"{action} {qty} {symbol} @ {price:.4f}"
 
     # ── Reset ────────────────────────────────────────────────────────────────
 
-    async def reset(self) -> None:
+    async def reset(self, *, user_id: str) -> None:
         """Wipe all positions and orders; restore cash to initial amount."""
         async with aiosqlite.connect(self._database_path()) as db:
             await db.execute(
@@ -339,7 +342,7 @@ class SimEngine:
         log.info("SimEngine reset — cash restored to $%.2f", cfg.SIM_INITIAL_CASH)
 
         if self._broadcast:
-            await self._broadcast({"type": "sim_reset"})
+            await self._broadcast({"type": "sim_reset"}, owner_user_id=user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +372,7 @@ class ReplayEngine:
         self._bars: list[dict] = []
         self._task: Optional[asyncio.Task] = None
         self._broadcast: Optional[Callable] = None
+        self._owner_user_id: str | None = None
 
     def set_broadcast(self, cb: Callable) -> None:
         self._broadcast = cb
@@ -377,11 +381,17 @@ class ReplayEngine:
     def state(self) -> PlaybackState:
         return self._state
 
+    def assert_owner(self, user_id: str) -> None:
+        if self._owner_user_id is not None and self._owner_user_id != user_id:
+            raise PermissionError("Replay session belongs to another user")
+
     # ── Control ──────────────────────────────────────────────────────────────
 
-    async def load(self, symbol: str, bars: list[dict]) -> None:
+    async def load(self, symbol: str, bars: list[dict], *, user_id: str) -> None:
         """Load sorted-ascending OHLCV bars and reset to start."""
-        await self.stop()
+        self.assert_owner(user_id)
+        await self.stop(user_id=user_id)
+        self._owner_user_id = user_id
         self._bars = bars
         n = len(bars)
         self._state = PlaybackState(
@@ -397,7 +407,8 @@ class ReplayEngine:
         )
         log.info("ReplayEngine loaded %d bars for %s", n, symbol)
 
-    async def play(self) -> None:
+    async def play(self, *, user_id: str) -> None:
+        self.assert_owner(user_id)
         if self._state.active:
             return
         if not self._bars:
@@ -407,7 +418,11 @@ class ReplayEngine:
         self._task = asyncio.create_task(self._run())
         log.info("Replay started — %s @ %dx", self._state.symbol, self._state.speed)
 
-    async def pause(self) -> None:
+    async def pause(self, *, user_id: str | None = None, force: bool = False) -> None:
+        if not force:
+            if user_id is None:
+                raise ValueError("user_id is required")
+            self.assert_owner(user_id)
         self._state.active = False
         if self._task:
             self._task.cancel()
@@ -418,15 +433,16 @@ class ReplayEngine:
             self._task = None
         log.info("Replay paused at %d/%d", self._state.current_index, self._state.total_bars)
 
-    async def stop(self) -> None:
-        await self.pause()
+    async def stop(self, *, user_id: str | None = None, force: bool = False) -> None:
+        await self.pause(user_id=user_id, force=force)
         self._state.current_index = 0
         self._state.progress = 0.0
         if self._bars:
             self._state.current_ts = self._state.start_ts
         log.info("Replay stopped")
 
-    def set_speed(self, speed: int) -> None:
+    def set_speed(self, speed: int, *, user_id: str) -> None:
+        self.assert_owner(user_id)
         self._state.speed = max(1, min(int(speed), 100))
         log.info("Replay speed → %dx", self._state.speed)
 
@@ -452,7 +468,8 @@ class ReplayEngine:
                         "current_index": idx,
                         "total_bars": n,
                         **bar,
-                    }
+                    },
+                    owner_user_id=self._owner_user_id,
                 )
 
             idx += 1
@@ -474,7 +491,8 @@ class ReplayEngine:
         self._state.progress = 1.0
         if self._broadcast:
             await self._broadcast(
-                {"type": "replay_done", "symbol": self._state.symbol}
+                {"type": "replay_done", "symbol": self._state.symbol},
+                owner_user_id=self._owner_user_id,
             )
         log.info("Replay finished for %s", self._state.symbol)
 

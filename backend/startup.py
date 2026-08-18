@@ -372,6 +372,16 @@ async def validate_startup() -> StartupResult:
             "Ensure this is intentional."
         )
 
+    if (
+        not cfg.SIM_MODE
+        and cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED
+        and not cfg.IBKR_ACCOUNT_OWNER_USER_ID
+    ):
+        errors.append(
+            "IBKR_ACCOUNT_OWNER_USER_ID is required when shared IBKR account "
+            "position streaming is enabled. Refusing unowned private fanout."
+        )
+
     # ------------------------------------------------------------------
     # 5. Direct-trades intent token gate (live / staging environments)
     # ------------------------------------------------------------------

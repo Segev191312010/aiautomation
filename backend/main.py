@@ -266,7 +266,12 @@ async def _application_lifespan(app: FastAPI):
     bot_runner.set_broadcast(_broadcast)
     sim_engine.set_broadcast(_broadcast)
     replay_engine.set_broadcast(_broadcast)
-    ibkr.set_broadcast(_broadcast)
+    async def _broadcast_shared_ibkr_event(payload: dict) -> None:
+        if not cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED:
+            return
+        await _broadcast(payload, owner_user_id=cfg.IBKR_ACCOUNT_OWNER_USER_ID or None)
+
+    ibkr.set_broadcast(_broadcast_shared_ibkr_event)
     alert_engine.set_broadcast(_broadcast)
     notification_service.set_ws_broadcast(_broadcast)
     # Wire yahoo_data freshness recording into the central monitor so
@@ -291,8 +296,7 @@ async def _application_lifespan(app: FastAPI):
 
     # Start unified screener pipeline (Phase 2 — real-time screener)
     try:
-        from screener_pipeline import set_broadcast as set_screener_broadcast, start as start_screener
-        set_screener_broadcast(_broadcast)
+        from screener_pipeline import start as start_screener
         await start_screener()
         log.info("Screener pipeline started")
     except Exception as e:
@@ -376,7 +380,7 @@ async def _application_lifespan(app: FastAPI):
     except Exception:
         pass
     await bot_runner.stop()
-    await replay_engine.stop()
+    await replay_engine.stop(force=True)
     await _stop_broker_runtime()
     reset_runtime_state()
 
@@ -639,7 +643,11 @@ async def ws_general(ws: WebSocket):
         await ws.close(code=4003, reason="Origin not allowed")
         return
     # Echo the "bearer" subprotocol so the browser completes the handshake.
-    await manager.connect(ws, subprotocol="bearer" if bearer_offered else None)
+    await manager.connect(
+        ws,
+        user_id=user_id,
+        subprotocol="bearer" if bearer_offered else None,
+    )
     try:
         while True:
             data = await ws.receive_text()

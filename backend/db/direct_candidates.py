@@ -98,6 +98,7 @@ async def drain_candidates(
             payload["_candidate_id"] = cand_id
             payload["queued_at"] = queued_at
             payload["ttl_seconds"] = ttl
+            payload["_owner_user_id"] = user_id
             results.append(payload)
             ids.append(cand_id)
 

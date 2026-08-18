@@ -66,7 +66,7 @@ async def authed_client(seeded_db):
 @pytest.mark.asyncio
 async def test_order_lifecycle_buy_then_sell_round_trip(authed_client):
     """BUY opens a position, matching SELL closes it."""
-    await sim_engine.reset()
+    await sim_engine.reset(user_id="demo")
 
     # Patch market-data lookup so the sim order placer has a fill price
     async def _mock_price(_symbol):
@@ -105,7 +105,7 @@ async def test_order_lifecycle_buy_then_sell_round_trip(authed_client):
 @pytest.mark.asyncio
 async def test_order_rejected_when_no_market_data(authed_client):
     """Without a price source the manual order path returns 503."""
-    await sim_engine.reset()
+    await sim_engine.reset(user_id="demo")
 
     async def _none(_symbol):
         return None

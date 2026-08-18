@@ -32,6 +32,8 @@ def restore_cfg(monkeypatch):
         "IS_PAPER": cfg.IS_PAPER,
         "IBKR_PORT": cfg.IBKR_PORT,
         "SIM_MODE": cfg.SIM_MODE,
+        "IBKR_ACCOUNT_OWNER_USER_ID": cfg.IBKR_ACCOUNT_OWNER_USER_ID,
+        "IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED": cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED,
     }
     try:
         yield
@@ -86,6 +88,31 @@ async def test_validate_startup_fatally_rejects_weak_secret_in_paper_mode(
     with pytest.raises(SystemExit) as exc_info:
         await validate_startup()
     assert exc_info.value.code == 1
+
+
+@pytest.mark.anyio
+async def test_private_ibkr_streaming_requires_explicit_operator_owner(
+    restore_cfg,
+    tmp_path,
+    anyio_backend,
+):
+    cfg.DB_PATH = str(tmp_path / "private-streaming.db")
+    cfg.JWT_SECRET = "strong-random-secret"
+    cfg.STRICT_CONFIG = False
+    cfg.AUTOPILOT_MODE = "OFF"
+    cfg.IS_PAPER = True
+    cfg.IBKR_PORT = 7497
+    cfg.SIM_MODE = False
+    cfg.IBKR_PRIVATE_ACCOUNT_STREAMING_ENABLED = True
+    cfg.IBKR_ACCOUNT_OWNER_USER_ID = ""
+
+    with pytest.raises(SystemExit) as exc_info:
+        await validate_startup()
+    assert exc_info.value.code == 1
+
+    cfg.IBKR_ACCOUNT_OWNER_USER_ID = "operator"
+    result = await validate_startup()
+    assert not any("IBKR_ACCOUNT_OWNER_USER_ID" in error for error in result["errors"])
 
 
 # ── Autopilot matrix validator ───────────────────────────────────────────────

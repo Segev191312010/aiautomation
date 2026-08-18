@@ -152,7 +152,9 @@ def get_bot_health(*, is_running: bool = False) -> dict:
     }
 
 
-async def emit_bot_health(*, is_running: bool = False, force: bool = False) -> None:
+async def emit_bot_health(
+    *, is_running: bool = False, force: bool = False, owner_user_id: str
+) -> None:
     global _last_bot_health_emit_at
     if not cfg.ENABLE_BOT_HEALTH_MONITORING:
         return
@@ -164,4 +166,4 @@ async def emit_bot_health(*, is_running: bool = False, force: bool = False) -> N
         await _broadcast({
             "type": "bot_health",
             **get_bot_health(is_running=is_running),
-        })
+        }, owner_user_id=owner_user_id)

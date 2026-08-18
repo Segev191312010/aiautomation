@@ -40,7 +40,7 @@ async def cancel_order_route(order_id: int):
 
 
 @router.post("/manual", status_code=201)
-async def place_manual_order(body: ManualOrderRequest):
+async def place_manual_order(body: ManualOrderRequest, user=Depends(get_current_user)):
     """Place a manual order — routes to sim if SIM_MODE, else IBKR."""
     if cfg.SIM_MODE:
         from simulation import sim_engine
@@ -59,6 +59,7 @@ async def place_manual_order(body: ManualOrderRequest):
             raise HTTPException(503, "No market data available for " + sym)
         ok, msg = await sim_engine.execute_order(
             symbol=sym, action=body.action, qty=float(body.quantity), price=price,
+            user_id=user.id,
         )
         if not ok:
             raise HTTPException(400, msg)
@@ -69,6 +70,7 @@ async def place_manual_order(body: ManualOrderRequest):
         raise HTTPException(503, "IBKR not connected — start IB Gateway first")
 
     rule = Rule(
+        user_id=user.id,
         name="Manual", symbol=body.symbol.upper(), enabled=True, conditions=[],
         action=TradeAction(
             type=body.action, asset_type=body.asset_type,

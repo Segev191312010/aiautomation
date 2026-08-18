@@ -34,6 +34,7 @@ _VALID_UNIVERSES = frozenset(["sp500", "nasdaq100", "etfs", "all", "us_all"])
 
 
 class Rule(BaseModel):
+    user_id: Optional[str] = None
     id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
     name: str
     # Single-symbol rule: set symbol, leave universe=None.
@@ -192,6 +193,7 @@ class OpenPosition(BaseModel):
 # ---------------------------------------------------------------------------
 
 class Trade(BaseModel):
+    user_id: Optional[str] = None
     id: str = Field(default_factory=lambda: str(_uuid.uuid4()))
     rule_id: str
     rule_name: str

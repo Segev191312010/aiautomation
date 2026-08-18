@@ -4,7 +4,7 @@
  */
 import { useEffect, useRef } from 'react'
 import { wsService } from '@/services/ws'
-import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore, useScreenerStore } from '@/store'
+import { useMarketStore, useAccountStore, useBotStore, useSimStore, useAlertStore } from '@/store'
 import { fetchTrades, fetchPositions, fetchAccountSummary } from '@/services/api'
 import type { AlertFiredEvent, AnyAccount, Position, SimPosition, WsEvent } from '@/types'
 import { useToast } from '@/components/ui/ToastProvider'
@@ -234,29 +234,6 @@ export function useWebSocket(): void {
       if (account) setAccount(account)
     })
 
-    // Order modified (SL/TP changed)
-    const unOrderModified = wsService.subscribe('order_modified', (ev: WsEvent) => {
-      const sym = String(ev['symbol'] ?? '')
-      const type = String(ev['order_type'] ?? 'Order')
-      const price = Number(ev['new_price'] ?? 0)
-      toastRef.current.success(`${type} for ${sym} modified to $${price.toFixed(2)}`)
-
-      // Push to activity feed
-      const { pushActivity } = useAccountStore.getState()
-      pushActivity({
-        id: crypto.randomUUID(),
-        timestamp: new Date().toISOString(),
-        type: 'signal',
-        symbol: sym,
-        action: 'SELL',
-        qty: 0,
-        ruleName: `${type} Modified`,
-        slPrice: type === 'Stop Loss' ? price : undefined,
-        tpPrice: type === 'Take Profit' ? price : undefined,
-        status: 'FILLED',
-      })
-    })
-
     const unAlertFired = wsService.subscribe('alert_fired', (ev: WsEvent) => {
       const alertStore = useAlertStore.getState()
       const event = ev as unknown as AlertFiredEvent
@@ -269,22 +246,8 @@ export function useWebSocket(): void {
       }
     })
 
-    // ── Screener Pipeline (Phase 2) ───────────────────────────────────────
-    const unScreenerScan = wsService.subscribe('screener_scan', (_ev: WsEvent) => {
-      useScreenerStore.getState().loadPipelineSnapshot()
-    })
-
-    const unScreenerQuotes = wsService.subscribe('screener_quotes', (ev: WsEvent) => {
-      const data = (ev.data ?? ev) as Record<string, unknown>
-      const quotes = data.quotes as Array<{ symbol: string; price: number; change_pct?: number; volume?: number }> | undefined
-      if (quotes && quotes.length > 0) {
-        useScreenerStore.getState().applyQuoteUpdate(quotes)
-      }
-    })
-
     return () => {
-      unIBKR(); unBot(); unFill(); unSignal(); unReplay(); unReplayDone(); unBar(); unPositions(); unOrderModified(); unAlertFired()
-      unScreenerScan(); unScreenerQuotes()
+      unIBKR(); unBot(); unFill(); unSignal(); unReplay(); unReplayDone(); unBar(); unPositions(); unAlertFired()
       wsService.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -67,11 +67,15 @@ async def test_sim_engine_follows_runtime_config_path_changes(
 
     monkeypatch.setattr(cfg, "DB_PATH", first_path)
     await engine.initialize()
-    first_result = await engine.execute_order("AAPL", "BUY", 1, 10)
+    first_result = await engine.execute_order(
+        "AAPL", "BUY", 1, 10, user_id="database-path-test"
+    )
     assert first_result[0] is True
 
     monkeypatch.setattr(cfg, "DB_PATH", second_path)
-    second_result = await engine.execute_order("MSFT", "BUY", 1, 20)
+    second_result = await engine.execute_order(
+        "MSFT", "BUY", 1, 20, user_id="database-path-test"
+    )
     assert second_result[0] is True
 
     async with aiosqlite.connect(first_path) as db:
@@ -99,7 +103,9 @@ async def test_explicit_sim_engine_path_remains_isolated(
 
     monkeypatch.setattr(cfg, "DB_PATH", unrelated_path)
     await engine.initialize()
-    result = await engine.execute_order("NVDA", "BUY", 1, 30)
+    result = await engine.execute_order(
+        "NVDA", "BUY", 1, 30, user_id="database-path-test"
+    )
 
     assert result[0] is True
     assert Path(explicit_path).exists()

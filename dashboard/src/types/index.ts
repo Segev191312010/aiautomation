@@ -445,7 +445,6 @@ export type WsEventType =
   | 'ibkr_state'
   | 'bot'
   | 'signal'
-  | 'filled'
   | 'error'
   | 'bar'
   | 'quote'
@@ -455,11 +454,7 @@ export type WsEventType =
   | 'sim_reset'
   | 'alert_fired'
   | 'positions_update'
-  | 'account_update'
   | 'order_filled'
-  | 'order_modified'
-  | 'screener_scan'
-  | 'screener_quotes'
 
 export interface WsEvent {
   type: WsEventType

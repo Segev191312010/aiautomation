@@ -11,14 +11,16 @@ from db.core import get_db
 log = logging.getLogger(__name__)
 
 async def save_trade(
-    trade: Trade, user_id: str = "demo", *, db: aiosqlite.Connection | None = None,
+    trade: Trade, user_id: str | None = None, *, db: aiosqlite.Connection | None = None,
 ) -> None:
+    owner_user_id = user_id or trade.user_id or "demo"
+    trade.user_id = owner_user_id
     async def _execute(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "INSERT OR REPLACE INTO trades (id, rule_id, symbol, action, timestamp, data, user_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (trade.id, trade.rule_id, trade.symbol, trade.action,
-             trade.timestamp, trade.model_dump_json(), user_id),
+             trade.timestamp, trade.model_dump_json(), owner_user_id),
         )
     if db is not None:
         await _execute(db)
@@ -31,11 +33,11 @@ async def save_trade(
 async def get_trades(limit: int = 200, user_id: str = "demo") -> list[Trade]:
     async with get_db() as db:
         async with db.execute(
-            "SELECT data FROM trades WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
+            "SELECT data, user_id FROM trades WHERE user_id=? ORDER BY timestamp DESC LIMIT ?",
             (user_id, limit),
         ) as cur:
             rows = await cur.fetchall()
-    return [Trade.model_validate(json.loads(r[0])) for r in rows]
+    return [Trade.model_validate({**json.loads(r[0]), "user_id": r[1]}) for r in rows]
 
 
 async def get_pending_trades_all_users(limit: int = 2000) -> list[Trade]:
@@ -54,7 +56,7 @@ async def get_pending_trades_all_users(limit: int = 2000) -> list[Trade]:
         # is available in the bundled build and lets us filter server-side.
         try:
             async with db.execute(
-                "SELECT data FROM trades "
+                "SELECT data, user_id FROM trades "
                 "WHERE json_extract(data, '$.status') = 'PENDING' "
                 "ORDER BY timestamp ASC LIMIT ?",
                 (limit,),
@@ -64,14 +66,14 @@ async def get_pending_trades_all_users(limit: int = 2000) -> list[Trade]:
             # JSON1 unavailable — fall back to a Python-side filter on a
             # full recent slice.
             async with db.execute(
-                "SELECT data FROM trades ORDER BY timestamp DESC LIMIT ?",
+                "SELECT data, user_id FROM trades ORDER BY timestamp DESC LIMIT ?",
                 (limit * 5,),
             ) as cur:
                 rows = await cur.fetchall()
     out: list[Trade] = []
     for r in rows:
         try:
-            t = Trade.model_validate(json.loads(r[0]))
+            t = Trade.model_validate({**json.loads(r[0]), "user_id": r[1]})
         except Exception:
             continue
         if t.status == "PENDING":
@@ -83,12 +85,12 @@ async def get_trade(trade_id: str, user_id: str = "demo") -> Trade | None:
     """Fetch a single trade by its ID."""
     async with get_db() as db:
         async with db.execute(
-            "SELECT data FROM trades WHERE id=? AND user_id=?",
+            "SELECT data, user_id FROM trades WHERE id=? AND user_id=?",
             (trade_id, user_id),
         ) as cur:
             row = await cur.fetchone()
     if row:
-        return Trade.model_validate(json.loads(row[0]))
+        return Trade.model_validate({**json.loads(row[0]), "user_id": row[1]})
     return None
 
 
@@ -102,7 +104,7 @@ async def get_trade_by_order_id(order_id: int, symbol: str | None = None, user_i
             rows = await cur.fetchall()
     for r in rows:
         try:
-            trade = Trade.model_validate(json.loads(r[0]))
+            trade = Trade.model_validate({**json.loads(r[0]), "user_id": user_id})
             if trade.order_id == order_id:
                 if symbol and trade.symbol.upper() != symbol.upper():
                     continue  # B5 FIX: skip order ID reuse from different symbol
@@ -213,4 +215,3 @@ async def finalize_trade_outcome(
             log.warning("Failed to attach realized trade to decision item: %s", exc)
 
     return trade
-
