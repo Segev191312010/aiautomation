@@ -1,7 +1,7 @@
-# Downstream Execution — `4d8bbda`
+# Downstream Execution — `d104372`
 
 **Branch:** `integration/post-reconciliation`  
-**Current SHA:** `4d8bbda2c7bb97018db8da9be4bda86470b34dbb`  
+**Current SHA:** `d104372e89f11bbed2068d1f52ccb98a69fea268`  
 **Status:** automated gates green; PAPER evidence pending; LIVE **NO-GO**
 
 ## Included in this SHA

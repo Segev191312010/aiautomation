@@ -1,4 +1,4 @@
-# Browser Validation Checklist — `4d8bbda2c7bb97018db8da9be4bda86470b34dbb`
+# Browser Validation Checklist — `d104372e89f11bbed2068d1f52ccb98a69fea268`
 
 This checklist records manual browser evidence for the downstream execution
 build. It is intentionally separate from unit, integration, and deterministic
@@ -7,7 +7,7 @@ This checklist does not authorize PAPER or LIVE trading.
 
 ## Run metadata and preconditions
 
-- [ ] Record the exact deployed SHA shown by the application: `4d8bbda2c7bb97018db8da9be4bda86470b34dbb`.
+- [ ] Record the exact deployed SHA shown by the application: `d104372e89f11bbed2068d1f52ccb98a69fea268`.
 - [ ] Record environment URL, UTC start/end, browser/version, OS, and operator.
 - [ ] Use two disposable authenticated accounts in separate browser profiles.
 - [ ] Confirm HTTPS (or explicitly approved local development origin), valid
