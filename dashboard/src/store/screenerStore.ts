@@ -21,7 +21,7 @@ interface ScreenerState {
   presets:          ScreenerPreset[]
   universes:        UniverseInfo[]
   filters:          ScanFilter[]
-  selectedUniverse: string
+  selectedUniverse: ScreenerUniverse
   customSymbols:    string
   interval:         string
   period:           string
