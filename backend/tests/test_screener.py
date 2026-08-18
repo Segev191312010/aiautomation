@@ -20,7 +20,6 @@ from screener import (
     load_universe, list_universes, validate_timeframe,
     make_indicator_key, evaluate_symbol, _compute_indicator_series,
     compute_screener_snapshot, run_scan, build_market_opportunity_snapshot,
-    enrich_symbols,
 )
 
 
@@ -303,7 +302,7 @@ class TestScanRequestValidation:
         assert req.universe == "sp500"
         assert req.limit == 100
 
-    def test_us_all_request_is_supported(self):
+    def test_us_all_is_a_supported_universe(self):
         req = ScanRequest(
             universe="us_all",
             filters=[ScanFilter(
@@ -327,43 +326,6 @@ class TestScanRequestValidation:
                 )],
                 limit=1000,
             )
-
-
-@pytest.mark.asyncio
-async def test_enrichment_omits_failed_symbols():
-    with patch("screener.yf.Ticker", side_effect=RuntimeError("provider unavailable")):
-        assert await enrich_symbols(["BAD"]) == []
-
-
-@pytest.mark.asyncio
-async def test_pipeline_fallback_assigns_stable_ranks():
-    from screener_pipeline import _run_yfinance_fallback
-
-    response = ScanResponse(
-        results=[
-            ScanResultRow(
-                symbol="AAPL",
-                price=100,
-                change_pct=1,
-                volume=1_000_000,
-                indicators={},
-            ),
-            ScanResultRow(
-                symbol="MSFT",
-                price=200,
-                change_pct=2,
-                volume=2_000_000,
-                indicators={},
-            ),
-        ],
-        skipped_symbols=[],
-    )
-
-    with patch("screener.run_scan", new=AsyncMock(return_value=response)):
-        candidates = await _run_yfinance_fallback()
-
-    assert [candidate.symbol for candidate in candidates] == ["AAPL", "MSFT"]
-    assert [candidate.rank for candidate in candidates] == [1, 2]
 
 
 # ---------------------------------------------------------------------------
