@@ -81,6 +81,22 @@ listener.
 
 ## 1. DAILY CHECKLIST (run once per day, same time each day)
 
+### 1.0 Offline preflight (before connecting to IBKR)
+
+Run the repository validator against the exact environment file used for the
+drill. It makes no network calls, never prints secret values, and always
+reports `LIVE authorized: NO`:
+
+```bash
+python scripts/validate_paper_readiness.py --env-file backend/.env
+```
+
+To validate an evidence bundle after the session, add `--bundle
+path/to/bundle`. The bundle is incomplete until it contains `session.json`,
+`metrics.jsonl`, `signals.jsonl`, `health.jsonl`, `restart-check.json`, and
+`logs.txt`. Passing this command is only a completeness/configuration check;
+it is not a substitute for the seven-day operator review below.
+
 Do every step. Record the numbers in a running log so day-over-day trends are
 visible (the go/no-go decision in §2 depends on the 7-day trend, not a single day).
 
