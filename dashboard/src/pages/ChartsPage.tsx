@@ -7,6 +7,7 @@
 import { useState, useMemo } from 'react'
 import { useMarketStore } from '@/store'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
+import { buildTradingViewUrl } from '@/utils/tradingView'
 
 const IB_CHART_BASE = 'http://127.0.0.1:5001'
 
@@ -25,8 +26,7 @@ export default function ChartsPage() {
       const syms = multiSymbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean).join(',')
       return `${IB_CHART_BASE}/ib_multichart.html?symbols=${syms}&tf=${timeframe}`
     }
-    const sym = selectedSymbol || 'AAPL'
-    return `${IB_CHART_BASE}/ib_chart.html?symbol=${sym}&tf=${timeframe}`
+    return buildTradingViewUrl(selectedSymbol || 'AAPL', timeframe === '1' ? '1m' : timeframe === '5' ? '5m' : timeframe === 'D' ? '1d' : timeframe === 'W' ? '1wk' : '1mo')
   }, [mode, selectedSymbol, multiSymbols, timeframe])
 
   const handleSymbolSubmit = () => {
@@ -113,11 +113,14 @@ export default function ChartsPage() {
             key={chartUrl}
             src={chartUrl}
             className="w-full h-full border-0"
-            title="ib_chart"
+            title={mode === 'single' ? 'TradingView chart' : 'ib_chart multi-chart'}
             allow="fullscreen"
           />
         </div>
       </ErrorBoundary>
+      <p className="text-[11px] text-[var(--text-muted)]">
+        Single charts use TradingView's hosted widget. Real-time availability and latency depend on exchange/data-feed entitlements and TradingView's embed terms; a TradingView Pro subscription alone does not grant this app zero-delay data.
+      </p>
     </div>
   )
 }
