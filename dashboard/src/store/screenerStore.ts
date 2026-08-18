@@ -30,6 +30,7 @@ interface ScreenerState {
   presetsLoaded:    boolean
   elapsedMs:        number
   totalSymbols:     number
+  scanError:        string | null
 
   // ── Unified Pipeline (Phase 2) ──────────────────────────────────────────
   pipelineStatus:    ScreenerPipelineStatus | null
@@ -92,6 +93,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
   presetsLoaded:    false,
   elapsedMs:        0,
   totalSymbols:     0,
+  scanError:        null,
 
   // Pipeline defaults
   pipelineStatus:     null,
@@ -162,7 +164,7 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
     // an older response when users double-click or press the shortcut twice.
     if (get().scanning) return
     const { filters, selectedUniverse, customSymbols, interval, period } = get()
-    set({ scanning: true })
+    set({ scanning: true, scanError: null })
     try {
       const symbols = selectedUniverse === 'custom'
         ? customSymbols.split(',').map((s) => s.trim()).filter(Boolean)
@@ -181,11 +183,15 @@ export const useScreenerStore = create<ScreenerState>((set, get) => ({
         enriched: {},
         elapsedMs: resp.elapsed_ms ?? 0,
         totalSymbols: resp.total_symbols ?? 0,
+        scanError: null,
       })
       // Auto-enrich (await so scanning spinner covers enrichment)
       if (resp.results.length > 0) {
         await get().enrichResults()
       }
+    } catch (err) {
+      set({ scanError: err instanceof Error ? err.message : 'Scan failed' })
+      throw err
     } finally {
       set({ scanning: false })
     }

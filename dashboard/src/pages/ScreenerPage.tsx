@@ -74,6 +74,7 @@ export default function ScreenerPage() {
     period,
     elapsedMs,
     totalSymbols,
+    scanError,
     loadPresets,
     loadUniverses,
     runScan,
@@ -147,7 +148,7 @@ export default function ScreenerPage() {
     }
   }, [runScan, toast])
 
-  const showPrescanEmpty = !hasScannedRef.current && !scanning && results.length === 0
+  const showPrescanEmpty = !hasScannedRef.current && !scanning && results.length === 0 && !scanError
 
   // Setup distribution from results
   const setupCounts = results.reduce<Record<string, number>>((acc, r) => {
@@ -233,6 +234,7 @@ export default function ScreenerPage() {
                       key={item.value}
                       type="button"
                       onClick={() => handleIntervalChange(item.value)}
+                      aria-pressed={interval === item.value}
                       className={
                         interval === item.value
                           ? 'rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-sans font-medium text-white'
@@ -253,6 +255,7 @@ export default function ScreenerPage() {
                       key={item.value}
                       type="button"
                       onClick={() => setPeriod(item.value)}
+                      aria-pressed={period === item.value}
                       className={
                         period === item.value
                           ? 'rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-sans font-medium text-white'
@@ -359,8 +362,25 @@ export default function ScreenerPage() {
             />
           </div>
 
+          {scanning && results.length > 0 && (
+            <div className="flex items-center gap-3 border-b border-[var(--border)] bg-[var(--accent-soft)]/30 px-5 py-3 text-xs text-[var(--text-secondary)]" role="status" aria-live="polite">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--border)] border-t-[var(--accent)]" aria-hidden="true" />
+              <span>Refreshing results — your previous scan remains visible.</span>
+            </div>
+          )}
+          {scanError && (
+            <div className="mx-5 mt-4 flex items-start justify-between gap-3 rounded-lg border border-[color:rgba(248,113,113,0.35)] bg-[color:rgba(248,113,113,0.1)] px-4 py-3 text-xs text-[var(--danger)]" role="alert">
+              <span><strong>Scan failed.</strong> {scanError}{results.length > 0 ? ' Showing the previous results.' : ''}</span>
+              <button type="button" onClick={handleScan} className="shrink-0 font-semibold underline underline-offset-2">Retry</button>
+            </div>
+          )}
           {showPrescanEmpty ? (
             <EmptyState />
+          ) : !scanning && !scanError && hasScannedRef.current && results.length === 0 ? (
+            <div className="flex flex-col items-center justify-center px-6 py-16 text-center" role="status">
+              <p className="text-sm font-medium text-[var(--text-secondary)]">No matches for this scan</p>
+              <p className="mt-1 text-xs text-[var(--text-muted)]">Try widening the universe or relaxing a filter, then run the scan again.</p>
+            </div>
           ) : (
             <div className="p-5">
               <ScanResultsTable />

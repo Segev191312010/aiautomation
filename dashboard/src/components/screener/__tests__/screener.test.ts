@@ -25,6 +25,7 @@ beforeEach(() => {
     presetsLoaded: false,
     elapsedMs: 0,
     totalSymbols: 0,
+    scanError: null,
   })
 })
 
@@ -193,6 +194,36 @@ describe('ScreenerStore timing fields', () => {
     const s = useScreenerStore.getState()
     expect(s.elapsedMs).toBe(2345)
     expect(s.totalSymbols).toBe(503)
+  })
+})
+
+describe('ScreenerStore scan status', () => {
+  it('retains prior results while a refresh is in progress', () => {
+    useScreenerStore.setState({
+      results: [{
+        symbol: 'AAPL', price: 175, change_pct: 1, volume: 1000,
+        indicators: {}, screener_score: 80, setup: 'trend', relative_volume: 1.2,
+        momentum_20d: 4, trend_strength: 20, notes: [],
+      }],
+      scanning: true,
+    })
+    const state = useScreenerStore.getState()
+    expect(state.scanning).toBe(true)
+    expect(state.results).toHaveLength(1)
+  })
+
+  it('stores a visible scan error without discarding results', () => {
+    useScreenerStore.setState({
+      results: [{
+        symbol: 'MSFT', price: 380, change_pct: -0.5, volume: 1000,
+        indicators: {}, screener_score: 70, setup: 'pullback', relative_volume: 1,
+        momentum_20d: -1, trend_strength: 15, notes: [],
+      }],
+      scanError: 'Backend unavailable',
+    })
+    const state = useScreenerStore.getState()
+    expect(state.scanError).toBe('Backend unavailable')
+    expect(state.results[0].symbol).toBe('MSFT')
   })
 })
 
