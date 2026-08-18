@@ -1,5 +1,7 @@
 # AI walk-forward evidence
 
+**Implementation baseline:** `c850786a209b3ef96cf5bdbe12630ca3e56bbf56`
+
 `ai_learning_loop()` is an operational rolling-metrics job. It recomputes
 7/30/90-day outcomes every six hours and is **not** a persisted replay or
 walk-forward evaluation.
