@@ -20,6 +20,8 @@ from typing import Callable, Optional
 import pandas as pd
 
 from config import cfg
+from push_service import PushNotReadyError, deliver_alert_push
+from settings import get_notification_preferences
 from database import (
     get_enabled_alerts_all,
     save_alert,
@@ -244,7 +246,7 @@ async def _fire_alert(alert: Alert, price: float) -> None:
     )
     await save_alert_history(hist, alert.user_id)
 
-    # Broadcast via WebSocket
+    # Notify connected clients immediately after the durable history write.
     await _emit(
         {
             "type": "alert_fired",
@@ -256,6 +258,29 @@ async def _fire_alert(alert: Alert, price: float) -> None:
             "timestamp": now,
         }
     )
+
+    # Web Push is also persistence-first. Preference/config/provider failures
+    # must never hide the already-persisted alert from connected clients.
+    try:
+        preferences = await get_notification_preferences(alert.user_id)
+        if preferences.browser_push:
+            await deliver_alert_push(
+                user_id=alert.user_id,
+                alert_id=alert.id,
+                name=alert.name,
+                symbol=alert.symbol,
+                condition_summary=summary,
+                price=price,
+                timestamp=now,
+            )
+    except PushNotReadyError:
+        log.warning("Web Push is enabled for user %s but the server is not ready", alert.user_id)
+    except Exception as exc:
+        log.error(
+            "Web Push alert delivery failed for user %s (%s)",
+            alert.user_id,
+            type(exc).__name__,
+        )
 
     log.info(
         "Alert FIRED: [%s] %s on %s @ %.2f", alert.id, summary, alert.symbol, price

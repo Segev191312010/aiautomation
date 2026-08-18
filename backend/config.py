@@ -136,6 +136,18 @@ class Config:
     # ── Alert engine ──────────────────────────────────────────────────────────
     ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
 
+    # Browser Web Push
+    VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+    VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+    VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "").strip()
+    WEB_PUSH_ALLOWED_HOSTS: str = os.getenv(
+        "WEB_PUSH_ALLOWED_HOSTS",
+        "fcm.googleapis.com,push.services.mozilla.com,web.push.apple.com,notify.windows.com",
+    ).strip()
+    WEB_PUSH_MAX_SUBSCRIPTIONS_PER_USER: int = int(
+        os.getenv("WEB_PUSH_MAX_SUBSCRIPTIONS_PER_USER", "10")
+    )
+
     # ── Exit logic (position tracker) ────────────────────────────────────────
     # Hard stop: entry_price - ATR_STOP_MULT × ATR(14) — never moves after entry
     ATR_STOP_MULT: float = float(os.getenv("ATR_STOP_MULT", "3.0"))
