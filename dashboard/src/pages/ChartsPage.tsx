@@ -120,6 +120,7 @@ export default function ChartsPage() {
       </ErrorBoundary>
       <p className="text-[11px] text-[var(--text-muted)]">
         Single charts use TradingView's hosted widget. Real-time availability and latency depend on exchange/data-feed entitlements and TradingView's embed terms; a TradingView Pro subscription alone does not grant this app zero-delay data.
+        {' '}<a className="underline" href="https://www.tradingview.com/widget-docs/faq/data/" target="_blank" rel="noopener noreferrer">TradingView data policy</a>
       </p>
     </div>
   )
