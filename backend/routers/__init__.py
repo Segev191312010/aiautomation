@@ -23,6 +23,7 @@ def register_routers(app: FastAPI) -> None:
     from routers.orders import router as orders_router
     from routers.screener_routes import router as screener_router
     from routers.alerts_routes import router as alerts_router
+    from routers.push_routes import router as push_router
     from routers.swing_routes import router as swing_router
 
     app.include_router(rules_router)
@@ -30,6 +31,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(orders_router)
     app.include_router(screener_router)
     app.include_router(alerts_router)
+    app.include_router(push_router)
     app.include_router(swing_router)
 
     # Batch C — IBKR/broker state

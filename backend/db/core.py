@@ -224,6 +224,24 @@ CREATE TABLE IF NOT EXISTS alert_history (
 """
 
 
+_CREATE_PUSH_SUBSCRIPTIONS = """
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    endpoint        TEXT NOT NULL UNIQUE,
+    p256dh          TEXT NOT NULL,
+    auth            TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    last_success_at TEXT,
+    last_failure_at TEXT,
+    last_error      TEXT,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+"""
+
+
 _CREATE_OPEN_POSITIONS = """
 CREATE TABLE IF NOT EXISTS open_positions (
     id              TEXT PRIMARY KEY,
@@ -556,6 +574,7 @@ async def init_db() -> None:
         await db.execute(_CREATE_DIAG_REFRESH_RUNS)
         await db.execute(_CREATE_ALERTS)
         await db.execute(_CREATE_ALERT_HISTORY)
+        await db.execute(_CREATE_PUSH_SUBSCRIPTIONS)
         await db.execute(_CREATE_OPEN_POSITIONS)
         await db.execute(_CREATE_AI_GUARDRAILS)
         await db.execute(_CREATE_AI_AUDIT_LOG)
@@ -615,6 +634,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alerts_enabled_symbol ON alerts(enabled, symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_user_fired ON alert_history(user_id, fired_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_alert_history_alert ON alert_history(alert_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_user ON open_positions(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_open_positions_symbol ON open_positions(symbol, user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_audit_log_ts ON ai_audit_log(timestamp DESC)")
