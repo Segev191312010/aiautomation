@@ -689,7 +689,7 @@ export interface ScanFilter {
 }
 
 export interface ScanRequest {
-  universe: string
+  universe: 'sp500' | 'nasdaq100' | 'etfs' | 'us_all' | 'custom'
   symbols?: string[]
   filters: ScanFilter[]
   interval: string

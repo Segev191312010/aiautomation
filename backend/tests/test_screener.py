@@ -302,6 +302,18 @@ class TestScanRequestValidation:
         assert req.universe == "sp500"
         assert req.limit == 100
 
+    def test_us_all_is_a_supported_universe(self):
+        req = ScanRequest(
+            universe="us_all",
+            filters=[ScanFilter(
+                indicator="RSI",
+                params={"length": 14},
+                operator="LT",
+                value=FilterValue(type="number", number=30),
+            )],
+        )
+        assert req.universe == "us_all"
+
     def test_limit_capped(self):
         with pytest.raises(ValidationError):
             ScanRequest(

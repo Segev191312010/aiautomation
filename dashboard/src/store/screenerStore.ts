@@ -12,6 +12,7 @@ import type {
   ScreenerPipelineSnapshot,
 } from '@/services/api/screener'
 import * as api from '@/services/api'
+import type { ScreenerUniverse } from '@/services/api/screener'
 
 interface ScreenerState {
   results:          ScanResultRow[]
@@ -42,7 +43,7 @@ interface ScreenerState {
   removeFilter:     (index: number) => void
   updateFilter:     (index: number, filter: ScanFilter) => void
   setFilters:       (filters: ScanFilter[]) => void
-  setUniverse:      (universe: string) => void
+  setUniverse:      (universe: ScreenerUniverse) => void
   setCustomSymbols: (symbols: string) => void
   setInterval:      (interval: string) => void
   setPeriod:        (period: string) => void

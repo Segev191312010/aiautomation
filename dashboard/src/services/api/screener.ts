@@ -10,8 +10,10 @@ import type {
 } from '@/types'
 import { get, post, del } from './client'
 
+export type ScreenerUniverse = 'sp500' | 'nasdaq100' | 'etfs' | 'us_all' | 'custom'
+
 export const runScan = (request: {
-  universe: string
+  universe: ScreenerUniverse
   symbols?: string[]
   filters: ScanFilter[]
   interval: string
