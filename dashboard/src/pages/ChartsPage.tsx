@@ -1,15 +1,12 @@
 /**
- * ChartsPage — embeds ib_chart (single + multi-chart) via iframe.
+ * ChartsPage — embeds TradingView (single) and the optional ib_chart fallback (multi).
  *
- * ib_chart runs on port 5001 as a sidecar Flask service.
- * Supports single-symbol charts and multi-chart grid from screener results.
+ * Multi-symbol mode is an explicitly optional ib_chart sidecar fallback.
  */
 import { useState, useMemo } from 'react'
 import { useMarketStore } from '@/store'
 import ErrorBoundary from '@/components/ui/ErrorBoundary'
-import { buildTradingViewUrl } from '@/utils/tradingView'
-
-const IB_CHART_BASE = 'http://127.0.0.1:5001'
+import { buildIbMultiChartUrl, buildTradingViewUrl } from '@/utils/tradingView'
 
 type ChartMode = 'single' | 'multi'
 type Timeframe = 'D' | 'W' | 'M' | '5' | '1'
@@ -23,8 +20,7 @@ export default function ChartsPage() {
 
   const chartUrl = useMemo(() => {
     if (mode === 'multi') {
-      const syms = multiSymbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean).join(',')
-      return `${IB_CHART_BASE}/ib_multichart.html?symbols=${syms}&tf=${timeframe}`
+      return buildIbMultiChartUrl(multiSymbols.split(','), timeframe)
     }
     return buildTradingViewUrl(selectedSymbol || 'AAPL', timeframe === '1' ? '1m' : timeframe === '5' ? '5m' : timeframe === 'D' ? '1d' : timeframe === 'W' ? '1wk' : '1mo')
   }, [mode, selectedSymbol, multiSymbols, timeframe])

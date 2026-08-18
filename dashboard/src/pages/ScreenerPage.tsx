@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useCallback } from 'react'
 import { useScreenerStore } from '@/store'
+import { buildIbMultiChartUrl } from '@/utils/tradingView'
 import { useToast } from '@/components/ui/ToastProvider'
 import UniverseSelector from '@/components/screener/UniverseSelector'
 import PresetSelector from '@/components/screener/PresetSelector'
@@ -345,7 +346,7 @@ export default function ScreenerPage() {
                 <div className="flex items-center gap-2">
                   {results.length > 0 && (
                     <a
-                      href={`http://127.0.0.1:5001/ib_multichart.html?symbols=${results.slice(0, 9).map(r => r.symbol).join(',')}&tf=D`}
+                      href={buildIbMultiChartUrl(results.slice(0, 9).map(r => r.symbol), 'D')}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] px-3 py-2 text-[11px] font-semibold text-white transition-colors hover:bg-[color:rgba(245,158,11,0.24)]"
