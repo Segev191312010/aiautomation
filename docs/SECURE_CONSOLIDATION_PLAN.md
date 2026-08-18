@@ -3,8 +3,8 @@
 **Status:** Draft governing plan; LIVE **NO-GO**
 **Captured:** 2026-08-18 (Asia/Jerusalem)
 **Integration branch:** `integration/post-reconciliation`
-**Last pushed baseline:** `6234fec54619a797e4851c93c61aa54d2b4efa6a`
-**Candidate SHA:** TBD — current working tree still contains the notification frontend delta
+**Last pushed baseline:** `04ed0fab14d8b38f6c84f2f8a17addc69840bbff`
+**Candidate SHA:** `04ed0fab14d8b38f6c84f2f8a17addc69840bbff` — automated gates are green; operational PAPER evidence remains pending
 **Authority:** This document supplements `ROADMAP_TEAM_PLAN.md`; it does not authorize live trading.
 
 ## 1. Executive Picture
