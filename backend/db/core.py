@@ -500,6 +500,44 @@ CREATE TABLE IF NOT EXISTS ai_evaluation_slices (
 );
 """
 
+# Persisted walk-forward evidence.  This is deliberately separate from the
+# rolling learning metrics and records the immutable train/test fold contract.
+_CREATE_AI_WALK_FORWARD_RUNS = """
+CREATE TABLE IF NOT EXISTS ai_walk_forward_runs (
+    id              TEXT PRIMARY KEY,
+    candidate_type  TEXT NOT NULL,
+    candidate_key   TEXT NOT NULL,
+    baseline_key    TEXT,
+    request_json    TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued',
+    summary_json    TEXT,
+    error           TEXT,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    user_id         TEXT NOT NULL DEFAULT 'demo'
+);
+"""
+
+_CREATE_AI_WALK_FORWARD_FOLDS = """
+CREATE TABLE IF NOT EXISTS ai_walk_forward_folds (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              TEXT NOT NULL,
+    fold_index          INTEGER NOT NULL,
+    train_start         TEXT NOT NULL,
+    train_end           TEXT NOT NULL,
+    test_start          TEXT NOT NULL,
+    test_end            TEXT NOT NULL,
+    train_count         INTEGER NOT NULL DEFAULT 0,
+    test_count          INTEGER NOT NULL DEFAULT 0,
+    metrics_json        TEXT NOT NULL,
+    evidence_json       TEXT NOT NULL DEFAULT '{}',
+    created_at          TEXT NOT NULL,
+    user_id             TEXT NOT NULL DEFAULT 'demo',
+    UNIQUE(run_id, fold_index),
+    FOREIGN KEY(run_id) REFERENCES ai_walk_forward_runs(id) ON DELETE CASCADE
+);
+"""
+
 _ALLOWED_COLUMNS: set[tuple[str, str]] = {
     ("rules", "user_id"),
     ("trades", "user_id"),
@@ -593,6 +631,8 @@ async def init_db() -> None:
         await db.execute(_CREATE_AI_DECISION_ITEMS)
         await db.execute(_CREATE_AI_EVALUATION_RUNS)
         await db.execute(_CREATE_AI_EVALUATION_SLICES)
+        await db.execute(_CREATE_AI_WALK_FORWARD_RUNS)
+        await db.execute(_CREATE_AI_WALK_FORWARD_FOLDS)
         await db.commit()
 
         # Migrate: add user_id column to existing tables
@@ -655,6 +695,8 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_decision_items_trade ON ai_decision_items(created_trade_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_evaluation_runs_created ON ai_evaluation_runs(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_evaluation_slices_run ON ai_evaluation_slices(evaluation_run_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_walk_forward_runs_created ON ai_walk_forward_runs(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_ai_walk_forward_folds_run ON ai_walk_forward_folds(run_id, fold_index)")
         await db.commit()
 
         # TV webhook migration: add source column to existing direct_candidates rows
