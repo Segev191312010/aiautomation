@@ -599,3 +599,29 @@ async def test_preference_read_failure_does_not_block_websocket():
         await alert_engine._fire_alert(alert, 210)
     emit.assert_awaited_once()
     push.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disabled_browser_preference_short_circuits_push_delivery():
+    """A user opt-out must prevent subscription lookup and provider delivery."""
+    import push_service
+    from settings import NotificationPreferences
+
+    with (
+        patch.object(push_service, "get_push_readiness") as readiness,
+        patch.object(
+            push_service,
+            "get_notification_preferences",
+            AsyncMock(return_value=NotificationPreferences(browser_push=False)),
+        ),
+        patch.object(push_service, "list_push_subscriptions", AsyncMock()) as list_subscriptions,
+    ):
+        readiness.return_value.ready = True
+        result = await push_service.deliver_push(
+            user_id="demo",
+            payload={"type": "alert_fired"},
+        )
+
+    assert result.skipped_preference is True
+    assert result.subscription_count == 0
+    list_subscriptions.assert_not_awaited()
