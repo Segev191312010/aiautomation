@@ -24,6 +24,7 @@ from db.push_subscriptions import (
     record_push_success,
 )
 from settings import get_notification_preferences
+from metrics import record_web_push_delivery, set_web_push_readiness
 
 log = logging.getLogger(__name__)
 _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
@@ -31,6 +32,7 @@ _BASE64URL_PATTERN = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
 
 @dataclass(frozen=True)
 class PushReadiness:
+    enabled: bool
     ready: bool
     public_key: str | None
     missing: tuple[str, ...] = ()
@@ -39,6 +41,7 @@ class PushReadiness:
 
     def api_payload(self) -> dict[str, object]:
         return {
+            "enabled": self.enabled,
             "ready": self.ready,
             "public_key": self.public_key,
             "missing_configuration": list(self.missing),
@@ -120,6 +123,7 @@ def is_allowed_push_endpoint(endpoint: str) -> bool:
 
 
 def get_push_readiness() -> PushReadiness:
+    enabled = bool(getattr(cfg, "WEB_PUSH_ENABLED", False))
     values = {
         "VAPID_PUBLIC_KEY": str(getattr(cfg, "VAPID_PUBLIC_KEY", "")).strip(),
         "VAPID_PRIVATE_KEY": str(getattr(cfg, "VAPID_PRIVATE_KEY", "")).strip(),
@@ -156,13 +160,16 @@ def get_push_readiness() -> PushReadiness:
             invalid.append("VAPID_PUBLIC_KEY")
 
     invalid_tuple = tuple(dict.fromkeys(invalid))
-    return PushReadiness(
-        ready=not missing and not invalid_tuple,
+    readiness = PushReadiness(
+        enabled=enabled,
+        ready=enabled and not missing and not invalid_tuple,
         public_key=public_key,
         missing=missing,
         invalid=invalid_tuple,
         vapid=vapid,
     )
+    set_web_push_readiness(enabled=readiness.enabled, ready=readiness.ready)
+    return readiness
 
 
 async def _record_failure(subscription_id: str, error_code: str) -> None:
@@ -179,6 +186,7 @@ async def _deliver_one(
     readiness: PushReadiness,
 ) -> str:
     if not is_allowed_push_endpoint(subscription.endpoint):
+        record_web_push_delivery("blocked")
         await _record_failure(subscription.id, "endpoint_not_allowed")
         log.warning("Blocked disallowed Web Push endpoint for subscription %s", subscription.id)
         return "failed"
@@ -195,10 +203,12 @@ async def _deliver_one(
     except WebPushException as exc:
         status_code = getattr(exc.response, "status_code", None)
         if status_code in (404, 410):
+            record_web_push_delivery("expired")
             await delete_push_subscription_by_id(subscription.id)
             log.info("Removed expired Web Push subscription %s", subscription.id)
             return "expired"
         error_code = f"http_{status_code}" if status_code else "webpush_error"
+        record_web_push_delivery("failed")
         await _record_failure(subscription.id, error_code)
         log.warning(
             "Web Push delivery failed for subscription %s (%s)",
@@ -207,6 +217,7 @@ async def _deliver_one(
         )
         return "failed"
     except Exception:
+        record_web_push_delivery("failed")
         await _record_failure(subscription.id, "delivery_error")
         log.warning("Web Push delivery failed for subscription %s", subscription.id)
         return "failed"
@@ -215,6 +226,7 @@ async def _deliver_one(
         await record_push_success(subscription.id)
     except Exception:
         log.error("Failed to record Web Push success metadata for subscription %s", subscription.id)
+    record_web_push_delivery("delivered")
     return "delivered"
 
 
@@ -226,16 +238,19 @@ async def deliver_push(
 ) -> PushDeliveryResult:
     readiness = get_push_readiness()
     if not readiness.ready:
+        record_web_push_delivery("disabled" if not readiness.enabled else "not_ready")
         raise PushNotReadyError
 
     if respect_preference:
         preferences = await get_notification_preferences(user_id)
         if not preferences.browser_push:
+            record_web_push_delivery("preference_skipped")
             return PushDeliveryResult(skipped_preference=True)
 
     subscriptions = await list_push_subscriptions(user_id)
     result = PushDeliveryResult(subscription_count=len(subscriptions))
     if not subscriptions:
+        record_web_push_delivery("no_subscription")
         return result
 
     payload_json = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)

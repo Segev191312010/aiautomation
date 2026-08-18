@@ -8,6 +8,8 @@ from collections.abc import Mapping
 
 from fastapi import WebSocket
 
+from metrics import record_websocket_outcome
+
 log = logging.getLogger(__name__)
 
 
@@ -60,6 +62,7 @@ class ConnectionManager:
         self._connections_by_user[bound_user_id].add(ws)
         self._user_by_connection[ws] = bound_user_id
         self.metrics["connections"] += 1
+        record_websocket_outcome("connected")
 
     def disconnect(self, ws: WebSocket) -> None:
         user_id = self._user_by_connection.pop(ws, None)
@@ -71,16 +74,19 @@ class ConnectionManager:
             if not sockets:
                 self._connections_by_user.pop(user_id, None)
         self.metrics["disconnects"] += 1
+        record_websocket_outcome("disconnected")
 
     async def broadcast_public(self, data: Mapping[str, object]) -> None:
         event = self._sanitize(data)
         event_type = self._event_type(event)
         if event_type not in PUBLIC_EVENT_TYPES:
             self.metrics["rejected_public_events"] += 1
+            record_websocket_outcome("public_rejected")
             log.warning("Rejected non-public WebSocket fanout event type=%r", event_type)
             return
         await self._send_many(set(self._user_by_connection), event)
         self.metrics["public_events"] += 1
+        record_websocket_outcome("public_delivered")
 
     async def send_to_user(self, user_id: str, data: Mapping[str, object]) -> None:
         owner_user_id = self._require_user_id(user_id)
@@ -88,10 +94,12 @@ class ConnectionManager:
         event_type = self._event_type(event)
         if event_type not in PRIVATE_EVENT_TYPES:
             self.metrics["rejected_private_events"] += 1
+            record_websocket_outcome("private_rejected")
             log.warning("Rejected non-private user WebSocket event type=%r", event_type)
             return
         await self._send_many(set(self._connections_by_user.get(owner_user_id, ())), event)
         self.metrics["private_events"] += 1
+        record_websocket_outcome("private_delivered")
 
     async def route_event(
         self,
@@ -106,11 +114,13 @@ class ConnectionManager:
         if event_type in PRIVATE_EVENT_TYPES:
             if owner_user_id is None:
                 self.metrics["private_events_missing_owner"] += 1
+                record_websocket_outcome("private_missing_owner")
                 log.error("Dropped private WebSocket event without trusted owner type=%s", event_type)
                 return
             await self.send_to_user(owner_user_id, data)
             return
         self.metrics["unknown_events"] += 1
+        record_websocket_outcome("unknown_event")
         log.warning("Dropped WebSocket event with unclassified type=%r", event_type)
 
     async def broadcast(self, data: Mapping[str, object]) -> None:
@@ -134,6 +144,7 @@ class ConnectionManager:
                 await ws.send_text(payload)
             except Exception as exc:
                 log.debug("WebSocket send failed, marking dead: %s", exc)
+                record_websocket_outcome("send_failed")
                 dead.append(ws)
         for ws in dead:
             self.disconnect(ws)

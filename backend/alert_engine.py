@@ -262,26 +262,30 @@ async def _fire_alert(alert: Alert, price: float) -> None:
 
     # Web Push is also persistence-first. Preference/config/provider failures
     # must never hide the already-persisted alert from connected clients.
-    try:
-        preferences = await get_notification_preferences(alert.user_id)
-        if preferences.browser_push:
-            await deliver_alert_push(
-                user_id=alert.user_id,
-                alert_id=alert.id,
-                name=alert.name,
-                symbol=alert.symbol,
-                condition_summary=summary,
-                price=price,
-                timestamp=now,
+    if cfg.WEB_PUSH_ENABLED:
+        try:
+            preferences = await get_notification_preferences(alert.user_id)
+            if preferences.browser_push:
+                await deliver_alert_push(
+                    user_id=alert.user_id,
+                    alert_id=alert.id,
+                    name=alert.name,
+                    symbol=alert.symbol,
+                    condition_summary=summary,
+                    price=price,
+                    timestamp=now,
+                )
+        except PushNotReadyError:
+            log.warning(
+                "Web Push is enabled for user %s but the server is not ready",
+                alert.user_id,
             )
-    except PushNotReadyError:
-        log.warning("Web Push is enabled for user %s but the server is not ready", alert.user_id)
-    except Exception as exc:
-        log.error(
-            "Web Push alert delivery failed for user %s (%s)",
-            alert.user_id,
-            type(exc).__name__,
-        )
+        except Exception as exc:
+            log.error(
+                "Web Push alert delivery failed for user %s (%s)",
+                alert.user_id,
+                type(exc).__name__,
+            )
 
     log.info(
         "Alert FIRED: [%s] %s on %s @ %.2f", alert.id, summary, alert.symbol, price

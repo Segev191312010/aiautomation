@@ -142,6 +142,7 @@ class Config:
     ALERT_CHECK_INTERVAL_SECONDS: int = int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
 
     # Browser Web Push
+    WEB_PUSH_ENABLED: bool = os.getenv("WEB_PUSH_ENABLED", "false").lower() == "true"
     VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "").strip()
     VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "").strip()
     VAPID_SUBJECT: str = os.getenv("VAPID_SUBJECT", "").strip()

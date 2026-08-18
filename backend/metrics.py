@@ -98,6 +98,28 @@ webhook_events_total = Counter(
     ["outcome"],
 )
 
+websocket_events_total = Counter(
+    "trading_websocket_events_total",
+    "Total general WebSocket lifecycle and routing outcomes.",
+    ["outcome"],
+)
+
+web_push_delivery_total = Counter(
+    "trading_web_push_delivery_total",
+    "Total browser Web Push delivery outcomes.",
+    ["outcome"],
+)
+
+web_push_enabled = Gauge(
+    "trading_web_push_enabled",
+    "Whether browser Web Push is enabled by environment configuration.",
+)
+
+web_push_ready = Gauge(
+    "trading_web_push_ready",
+    "Whether browser Web Push is enabled and configuration-valid.",
+)
+
 # Seconds since the last accepted (non-rejected) signal was processed.
 seconds_since_last_accepted_signal = Gauge(
     "trading_seconds_since_last_accepted_signal",
@@ -112,6 +134,29 @@ WEBHOOK_OUTCOMES = (
     "secret_reject",
     "freshness_reject",
     "duplicate",
+)
+
+WEBSOCKET_OUTCOMES = (
+    "connected",
+    "disconnected",
+    "public_delivered",
+    "private_delivered",
+    "public_rejected",
+    "private_rejected",
+    "private_missing_owner",
+    "unknown_event",
+    "send_failed",
+)
+
+WEB_PUSH_OUTCOMES = (
+    "delivered",
+    "expired",
+    "failed",
+    "blocked",
+    "disabled",
+    "not_ready",
+    "preference_skipped",
+    "no_subscription",
 )
 
 # Mapping from textual autopilot mode to the gauge's numeric encoding.
@@ -214,6 +259,37 @@ def record_webhook_outcome(outcome: str) -> None:
         webhook_events_total.labels(outcome=outcome).inc()
     except Exception:
         log.debug("record_webhook_outcome failed", exc_info=True)
+
+
+def record_websocket_outcome(outcome: str) -> None:
+    """Increment a bounded WebSocket lifecycle or routing outcome."""
+    try:
+        if outcome not in WEBSOCKET_OUTCOMES:
+            log.debug("record_websocket_outcome: unknown outcome %r", outcome)
+            return
+        websocket_events_total.labels(outcome=outcome).inc()
+    except Exception:
+        log.debug("record_websocket_outcome failed", exc_info=True)
+
+
+def record_web_push_delivery(outcome: str) -> None:
+    """Increment a bounded browser Web Push delivery outcome."""
+    try:
+        if outcome not in WEB_PUSH_OUTCOMES:
+            log.debug("record_web_push_delivery: unknown outcome %r", outcome)
+            return
+        web_push_delivery_total.labels(outcome=outcome).inc()
+    except Exception:
+        log.debug("record_web_push_delivery failed", exc_info=True)
+
+
+def set_web_push_readiness(*, enabled: bool, ready: bool) -> None:
+    """Publish global Web Push feature and readiness state."""
+    try:
+        web_push_enabled.set(1 if enabled else 0)
+        web_push_ready.set(1 if ready else 0)
+    except Exception:
+        log.debug("set_web_push_readiness failed", exc_info=True)
 
 
 def set_seconds_since_last_accepted_signal(seconds: float) -> None:

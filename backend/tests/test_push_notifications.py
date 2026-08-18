@@ -76,6 +76,7 @@ def ready_vapid(monkeypatch):
     from config import cfg
 
     public_key, private_key, subject = _vapid_config()
+    monkeypatch.setattr(cfg, "WEB_PUSH_ENABLED", True)
     monkeypatch.setattr(cfg, "VAPID_PUBLIC_KEY", public_key)
     monkeypatch.setattr(cfg, "VAPID_PRIVATE_KEY", private_key)
     monkeypatch.setattr(cfg, "VAPID_SUBJECT", subject)
@@ -104,6 +105,7 @@ async def test_push_routes_require_authentication(push_client, method, path, bod
 async def test_status_reports_missing_configuration_without_secrets(push_client, monkeypatch):
     from config import cfg
 
+    monkeypatch.setattr(cfg, "WEB_PUSH_ENABLED", True)
     monkeypatch.setattr(cfg, "VAPID_PUBLIC_KEY", "")
     monkeypatch.setattr(cfg, "VAPID_PRIVATE_KEY", "")
     monkeypatch.setattr(cfg, "VAPID_SUBJECT", "")
@@ -122,9 +124,23 @@ async def test_status_reports_missing_configuration_without_secrets(push_client,
 
 
 @pytest.mark.asyncio
+async def test_status_reports_environment_kill_switch(push_client, monkeypatch):
+    from config import cfg
+
+    monkeypatch.setattr(cfg, "WEB_PUSH_ENABLED", False)
+    response = await push_client.get(
+        "/api/push/status", headers=await _auth_headers(push_client)
+    )
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+    assert response.json()["ready"] is False
+
+
+@pytest.mark.asyncio
 async def test_subscribe_returns_503_when_server_not_ready(push_client, monkeypatch):
     from config import cfg
 
+    monkeypatch.setattr(cfg, "WEB_PUSH_ENABLED", True)
     monkeypatch.setattr(cfg, "VAPID_PUBLIC_KEY", "")
     monkeypatch.setattr(cfg, "VAPID_PRIVATE_KEY", "")
     monkeypatch.setattr(cfg, "VAPID_SUBJECT", "")
@@ -439,6 +455,7 @@ async def test_alert_push_runs_after_history_and_only_when_enabled():
         sequence.append("push")
 
     with (
+        patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
         patch.object(alert_engine, "save_alert", AsyncMock()),
         patch.object(alert_engine, "save_alert_history", side_effect=save_history),
         patch.object(
@@ -452,9 +469,10 @@ async def test_alert_push_runs_after_history_and_only_when_enabled():
         await alert_engine._fire_alert(alert, 510)
     assert sequence == ["history", "push"]
     push.assert_awaited_once()
-    emit.assert_awaited_once()
+    assert emit.await_args.kwargs == {"owner_user_id": "demo"}
 
     with (
+        patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
         patch.object(alert_engine, "save_alert", AsyncMock()),
         patch.object(alert_engine, "save_alert_history", AsyncMock()),
         patch.object(
@@ -482,6 +500,7 @@ async def test_push_failure_does_not_undo_alert_or_block_websocket():
         user_id="demo",
     )
     with (
+        patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
         patch.object(alert_engine, "save_alert", AsyncMock()) as save_alert,
         patch.object(alert_engine, "save_alert_history", AsyncMock()) as save_history,
         patch.object(
@@ -514,6 +533,7 @@ async def test_preference_read_failure_does_not_block_websocket():
         user_id="demo",
     )
     with (
+        patch.object(alert_engine.cfg, "WEB_PUSH_ENABLED", True),
         patch.object(alert_engine, "save_alert", AsyncMock()),
         patch.object(alert_engine, "save_alert_history", AsyncMock()),
         patch.object(
