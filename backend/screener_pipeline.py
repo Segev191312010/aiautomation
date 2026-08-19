@@ -298,14 +298,12 @@ async def _enrich_candidates(candidates: list[ScreenerCandidate]) -> None:
     """Add sector and market cap data to candidates."""
     try:
         from screener import enrich_symbols
-        from models import EnrichRequest
 
         symbols = [c.symbol for c in candidates[:100]]  # Enrich top 100
         if not symbols:
             return
 
-        request = EnrichRequest(symbols=symbols)
-        enriched = await enrich_symbols(request)
+        enriched = await enrich_symbols(symbols)
 
         enrich_map = {e.symbol: e for e in enriched}
         for c in candidates:
