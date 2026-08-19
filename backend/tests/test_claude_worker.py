@@ -86,7 +86,7 @@ class _FakeAnthropic:
         self.messages = _FakeMessages(list(type(self)._script))
 
 
-def _install_fake_mcp(dispatch: AsyncMock | None = None) -> None:
+def _install_fake_mcp(dispatch: AsyncMock | None = None) -> AsyncMock:
     """Inject a fake mcp_server module so the worker's lazy import resolves."""
     mod = types.ModuleType("mcp_server")
     mod.tools_spec = [
@@ -95,6 +95,7 @@ def _install_fake_mcp(dispatch: AsyncMock | None = None) -> None:
     ]
     mod.dispatch_tool_call = dispatch or AsyncMock(return_value={"ok": True})
     sys.modules["mcp_server"] = mod
+    return mod.dispatch_tool_call
 
 
 @pytest.fixture(autouse=True)
@@ -137,7 +138,7 @@ async def test_disabled_is_noop():
 async def test_approve_path_marks_applied():
     await init_db()
     await _queue_tv_candidate("approve-1")
-    _install_fake_mcp(AsyncMock(return_value={"order_id": "sim-1", "status": "filled"}))
+    dispatch = _install_fake_mcp(AsyncMock(return_value={"order_id": "sim-1", "status": "filled"}))
 
     _FakeAnthropic._script = [
         _message([_tool_use_block("propose_order", {"symbol": "AAPL", "qty": 10})], "tool_use"),
@@ -151,13 +152,14 @@ async def test_approve_path_marks_applied():
 
     assert status == "applied"
     assert await get_candidate_status("approve-1") == "applied"
+    dispatch.assert_awaited_once_with({"name": "propose_order", "input": {"symbol": "AAPL", "qty": 10}})
 
 
 async def test_decline_path_marks_declined_by_ai():
     """An explicit decline tool call maps to declined_by_ai (no propose_order)."""
     await init_db()
     await _queue_tv_candidate("decline-1")
-    _install_fake_mcp(AsyncMock(return_value={"ok": True}))
+    dispatch = _install_fake_mcp(AsyncMock(return_value={"ok": True}))
 
     _FakeAnthropic._script = [
         _message([_tool_use_block("mark_declined", {"signal_id": "decline-1", "reason": "risk/reward is poor"})], "tool_use"),
@@ -171,6 +173,10 @@ async def test_decline_path_marks_declined_by_ai():
 
     assert status == "declined_by_ai"
     assert await get_candidate_status("decline-1") == "declined_by_ai"
+    dispatch.assert_awaited_once_with({
+        "name": "mark_declined",
+        "input": {"signal_id": "decline-1", "reason": "risk/reward is poor"},
+    })
 
 
 async def test_explicit_decline_tool_marks_declined_by_ai():
