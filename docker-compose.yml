@@ -85,6 +85,8 @@ services:
     build:
       context: .
       dockerfile: dashboard/Dockerfile
+      args:
+        VITE_JWT_BOOTSTRAP_SECRET: "${JWT_BOOTSTRAP_SECRET:-}"
     container_name: trading-dashboard
     restart: unless-stopped
 

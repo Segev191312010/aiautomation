@@ -11,6 +11,9 @@
 # =============================================================================
 FROM node:20-alpine AS builder
 
+ARG VITE_JWT_BOOTSTRAP_SECRET
+ENV VITE_JWT_BOOTSTRAP_SECRET=$VITE_JWT_BOOTSTRAP_SECRET
+
 WORKDIR /build
 
 # Copy package manifest and lockfile
