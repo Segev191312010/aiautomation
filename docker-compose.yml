@@ -44,6 +44,9 @@ services:
       IS_PAPER: "${IS_PAPER:-true}"
       SIM_MODE: "${SIM_MODE:-false}"
       MOCK_MODE: "${MOCK_MODE:-false}"
+      # nginx reaches the backend over the Docker bridge; keep bootstrap auth
+      # available for this local-only stack while LIVE remains disabled.
+      BOOTSTRAP_ALLOW_REMOTE: "${BOOTSTRAP_ALLOW_REMOTE:-1}"
       # TWS runs on the host Mac; override with IBKR_HOST=127.0.0.1 only when
       # the backend itself runs outside Docker.
       IBKR_HOST: "${IBKR_HOST:-host.docker.internal}"
