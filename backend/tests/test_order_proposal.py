@@ -67,6 +67,7 @@ def _patch_chain(monkeypatch, calls, *, risk=None, impact=None, safety=None, tra
 
     async def fake_evaluate_runtime_safety(*a, **kw):
         calls.append("safety_gate")
+        captured["safety_kwargs"] = kw
         return safety
 
     captured = {}
@@ -95,6 +96,18 @@ async def test_chain_order_on_approved(monkeypatch):
     # Approved path must call place_order with skip_safety=False (no bypass).
     assert captured["skip_safety"] is False
     assert captured["source"] == "claude_worker"
+    assert captured["safety_kwargs"] == {
+        "symbol": "AAPL",
+        "side": "BUY",
+        "quantity": 10,
+        "source": "claude_worker",
+        "account_equity": 1.0,
+        "price_estimate": 150.0,
+        "stop_price": None,
+        "is_exit": False,
+        "has_existing_position": False,
+        "require_autopilot_authority": True,
+    }
 
 
 async def test_risk_block_short_circuits(monkeypatch):

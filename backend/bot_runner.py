@@ -818,7 +818,9 @@ async def _run_cycle() -> None:
             source="rule",
             account_equity=available_cash,
             price_estimate=price,
+            stop_price=None,
             is_exit=False,
+            has_existing_position=False,
             require_autopilot_authority=True,
         )
         if not allowed:
@@ -972,7 +974,6 @@ from bot_exits import (  # noqa: E402
 async def _emit(payload: dict) -> None:
     if _broadcast:
         await _broadcast(payload)
-
 
 
 
