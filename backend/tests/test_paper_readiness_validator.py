@@ -13,9 +13,10 @@ SPEC.loader.exec_module(validator)
 def paper_env() -> dict[str, str]:
     return {
         "AUTOPILOT_MODE": "PAPER", "IS_PAPER": "true", "SIM_MODE": "false",
-        "IBKR_PORT": "7497", "CLAUDE_WORKER_ENABLED": "true",
-        "TV_WEBHOOK_SECRET": "secret-is-not-printed", "TV_IP_STRICT": "true",
-        "TV_ALLOWED_IPS": "192.0.2.1", "METRICS_EXPOSURE_PROFILE": "isolated",
+        "IBKR_HOST": "127.0.0.1", "IBKR_PORT": "7497", "IBKR_CLIENT_ID": "1",
+        "CLAUDE_WORKER_ENABLED": "true", "TV_WEBHOOK_SECRET": "secret-is-not-printed",
+        "TV_IP_STRICT": "true", "TV_ALLOWED_IPS": "192.0.2.1",
+        "METRICS_EXPOSURE_PROFILE": "isolated",
     }
 
 

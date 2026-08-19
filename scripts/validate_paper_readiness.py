@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Validate PAPER preflight and an optional evidence bundle offline.
+"""Validate PAPER configuration and optional evidence artifacts offline.
 
-This command never opens a network connection and never changes application
-configuration. It is intentionally a preflight, not proof that a PAPER soak
-was executed; the bundle checks require operator-produced artifacts.
+The validator reads an operator-supplied environment file, makes no network
+connections, never prints configuration values, and always denies LIVE.
+Passing this check is not evidence that a broker session was executed.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ REQUIRED_BUNDLE_FILES = (
 
 
 def load_env_file(path: Path) -> dict[str, str]:
-    """Read simple KEY=VALUE lines without expanding or printing secrets."""
+    """Read simple KEY=VALUE lines without expanding or displaying values."""
     values: dict[str, str] = {}
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
@@ -53,12 +53,20 @@ def check_paper_environment(env: Mapping[str, str]) -> list[str]:
         failures.append("IS_PAPER must be true")
     if env.get("SIM_MODE", "").lower() != "false":
         failures.append("SIM_MODE must be false for the real IBKR PAPER drill")
+    if not env.get("IBKR_HOST", "").strip():
+        failures.append("IBKR_HOST must be set")
     try:
         port = int(env.get("IBKR_PORT", ""))
     except ValueError:
         port = None
     if port not in PAPER_PORTS:
         failures.append("IBKR_PORT must be 7497 (TWS) or 4002 (Gateway) for PAPER")
+    try:
+        client_id = int(env.get("IBKR_CLIENT_ID", ""))
+    except ValueError:
+        client_id = None
+    if client_id is None or client_id < 0:
+        failures.append("IBKR_CLIENT_ID must be a non-negative integer")
     if env.get("CLAUDE_WORKER_ENABLED", "").lower() != "true":
         failures.append("CLAUDE_WORKER_ENABLED must be true")
     if not env.get("TV_WEBHOOK_SECRET", ""):
@@ -75,24 +83,29 @@ def check_paper_environment(env: Mapping[str, str]) -> list[str]:
 def check_bundle(path: Path) -> list[str]:
     """Check operator artifacts without interpreting or uploading their data."""
     if not path.is_dir():
-        return [f"evidence bundle does not exist: {path}"]
-    return [f"missing evidence artifact: {name}" for name in REQUIRED_BUNDLE_FILES if not (path / name).is_file()]
+        return ["evidence bundle directory does not exist"]
+    return [
+        f"missing evidence artifact: {name}"
+        for name in REQUIRED_BUNDLE_FILES
+        if not (path / name).is_file()
+    ]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--env-file", type=Path, help="optional .env file to validate")
+    parser.add_argument("--env-file", type=Path, required=True, help="exact .env file to validate")
     parser.add_argument("--bundle", type=Path, help="optional operator evidence bundle directory")
-    parser.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable output")
+    parser.add_argument("--json", action="store_true", dest="as_json", help="emit safe machine-readable output")
     args = parser.parse_args()
-    env = dict(os.environ)
-    parse_error = None
-    if args.env_file:
-        try:
-            env.update(load_env_file(args.env_file))
-        except (OSError, ValueError) as exc:
-            parse_error = str(exc)
-    failures = ([parse_error] if parse_error else []) + check_paper_environment(env)
+
+    failures: list[str] = []
+    try:
+        env = load_env_file(args.env_file)
+    except (OSError, ValueError) as exc:
+        env = {}
+        failures.append(str(exc))
+    if not failures:
+        failures.extend(check_paper_environment(env))
     bundle_failures = check_bundle(args.bundle) if args.bundle else []
     failures.extend(bundle_failures)
     result = {
