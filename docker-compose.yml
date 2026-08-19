@@ -44,6 +44,10 @@ services:
       IS_PAPER: "${IS_PAPER:-true}"
       SIM_MODE: "${SIM_MODE:-false}"
       MOCK_MODE: "${MOCK_MODE:-false}"
+      # TWS runs on the host Mac; override with IBKR_HOST=127.0.0.1 only when
+      # the backend itself runs outside Docker.
+      IBKR_HOST: "${IBKR_HOST:-host.docker.internal}"
+      IBKR_PORT: "${IBKR_PORT:-7497}"
 
       # Database path inside container (persisted via volume)
       DB_PATH: "/data/trading_bot.db"
