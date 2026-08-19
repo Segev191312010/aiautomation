@@ -130,6 +130,29 @@ def test_secret_redacted_in_model_dump():
     assert _TEST_SECRET not in p.model_dump_json()
 
 
+def test_webhook_logs_never_include_raw_body_or_secret(caplog):
+    """Access logs may identify the outcome, but never capture webhook data."""
+    import json as _json
+
+    marker = "log-privacy-" + _now_iso()
+    body = _body(strategy_order_id=marker)
+    raw_body = _json.dumps(body, separators=(",", ":"))
+    with caplog.at_level("INFO"):
+        response = _client().post(
+            "/api/webhook/tv",
+            content=raw_body,
+            headers={
+                "Content-Type": "application/json",
+                "X-TV-Secret": _TEST_SECRET,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    log_output = caplog.text
+    assert raw_body not in log_output
+    assert _TEST_SECRET not in log_output
+
+
 # ---------------------------------------------------------------------------
 # IP allowlist
 # ---------------------------------------------------------------------------
