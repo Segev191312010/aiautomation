@@ -37,12 +37,12 @@ services:
 
     # All secrets and environment config from .env file (never in image)
     env_file:
-      - .env
+      - "${PAPER_ENV_FILE:-./backend/.env}"
 
     environment:
       # Production safety defaults — override in .env for live trading
       IS_PAPER: "${IS_PAPER:-true}"
-      SIM_MODE: "${SIM_MODE:-true}"
+      SIM_MODE: "${SIM_MODE:-false}"
       MOCK_MODE: "${MOCK_MODE:-false}"
 
       # Database path inside container (persisted via volume)
