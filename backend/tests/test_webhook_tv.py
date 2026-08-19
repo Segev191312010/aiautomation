@@ -8,6 +8,8 @@ Uses a minimal FastAPI app that includes the webhook router(s) and runs
 from __future__ import annotations
 
 import os
+import sqlite3
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -277,6 +279,57 @@ def test_duplicate_event_key_returns_duplicate_same_id():
     assert r2.status_code == 200, r2.text
     assert r2.json()["status"] == "duplicate"
     assert r2.json()["signal_id"] == first_id
+
+
+def test_signals_are_scoped_to_authenticated_user_unless_explicit_admin():
+    """A valid token must not turn /api/signals into a cross-tenant feed."""
+    alice_id = "alice-signal-" + uuid.uuid4().hex
+    bob_id = "bob-signal-" + uuid.uuid4().hex
+    alice_signal = "sig-" + uuid.uuid4().hex
+    bob_signal = "sig-" + uuid.uuid4().hex
+    db = sqlite3.connect(_DB)
+    try:
+        db.execute(
+            "INSERT INTO users (id, email, password_hash, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+            (alice_id, f"{alice_id}@local", "unused", _now_iso(), "{}"),
+        )
+        db.execute(
+            "INSERT INTO users (id, email, password_hash, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+            (bob_id, f"{bob_id}@local", "unused", _now_iso(), "{}"),
+        )
+        for signal_id, owner in ((alice_signal, alice_id), (bob_signal, bob_id)):
+            db.execute(
+                "INSERT INTO direct_candidates (id, user_id, symbol, payload, queued_at, ttl_seconds, status, source) "
+                "VALUES (?, ?, 'AAPL', '{}', ?, 300, 'pending_review', 'test')",
+                (signal_id, owner, _now_iso()),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    c = _client()
+    alice_rows = c.get("/api/signals", headers={"Authorization": f"Bearer {create_token(alice_id)}"})
+    assert alice_rows.status_code == 200, alice_rows.text
+    assert {row["id"] for row in alice_rows.json()["signals"]} == {alice_signal}
+
+    bob_rows = c.get("/api/signals", headers={"Authorization": f"Bearer {create_token(bob_id)}"})
+    assert bob_rows.status_code == 200, bob_rows.text
+    assert {row["id"] for row in bob_rows.json()["signals"]} == {bob_signal}
+
+    admin_id = "admin-signal-" + uuid.uuid4().hex
+    db = sqlite3.connect(_DB)
+    try:
+        db.execute(
+            "INSERT INTO users (id, email, password_hash, created_at, settings) VALUES (?, ?, ?, ?, ?)",
+            (admin_id, f"{admin_id}@local", "unused", _now_iso(), '{"is_admin": true}'),
+        )
+        db.commit()
+    finally:
+        db.close()
+    admin_rows = c.get("/api/signals", headers={"Authorization": f"Bearer {create_token(admin_id)}"})
+    assert admin_rows.status_code == 200, admin_rows.text
+    ids = {row["id"] for row in admin_rows.json()["signals"]}
+    assert {alice_signal, bob_signal} <= ids
 
 
 def test_different_strategy_order_id_creates_new_signal():

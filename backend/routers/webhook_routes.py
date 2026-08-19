@@ -45,6 +45,21 @@ router = APIRouter(prefix="/api/webhook", tags=["webhook"])
 signals_router = APIRouter(tags=["signals"], dependencies=[Depends(get_current_user)])
 
 
+def _is_signal_admin(user) -> bool:
+    """Return whether *user* may inspect candidates owned by other users.
+
+    User roles are intentionally represented in the existing settings JSON so
+    this change does not require a schema migration.  Missing or malformed
+    settings always default to a tenant-scoped user.  The demo account is not
+    implicitly privileged; deployments that need operator-wide visibility must
+    explicitly set ``{"is_admin": true}`` (or ``{"role": "admin"}``).
+    """
+    settings = getattr(user, "settings", None)
+    if not isinstance(settings, dict):
+        return False
+    return settings.get("is_admin") is True or settings.get("role") == "admin"
+
+
 # ---------------------------------------------------------------------------
 # Payload model
 # ---------------------------------------------------------------------------
@@ -250,6 +265,7 @@ async def list_signals(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    user=Depends(get_current_user),
 ):
     """List queued candidates (auth-gated), newest first.
 
@@ -257,6 +273,9 @@ async def list_signals(
     """
     clauses: list[str] = []
     args: list = []
+    if not _is_signal_admin(user):
+        clauses.append("user_id=?")
+        args.append(user.id)
     if source is not None:
         clauses.append("source=?")
         args.append(source)
