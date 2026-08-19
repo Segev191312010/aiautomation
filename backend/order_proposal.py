@@ -142,6 +142,10 @@ async def place_proposed_order(
         source=source,
         account_equity=_account_value_floor(),
         price_estimate=est_price,
+        stop_price=None,
+        is_exit=False,
+        has_existing_position=False,
+        require_autopilot_authority=True,
     )
     risk_snapshot["safety_gate"] = {"allowed": allowed, "reason": reason}
     if not allowed:
