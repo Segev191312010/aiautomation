@@ -29,6 +29,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV DB_PATH=/data/trading_bot.db
 
 # Install Python dependencies (own layer — only rebuilds when requirements.txt changes)
 COPY backend/requirements.txt ./requirements.txt
@@ -36,6 +37,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend source
 COPY backend/ ./
+COPY scripts/check_db_path.sh ./scripts/check_db_path.sh
+RUN chmod +x ./scripts/check_db_path.sh
 
 # Copy the built React SPA from Stage 1 into the location FastAPI expects.
 # config.py defaults DASHBOARD_BUILD_DIR to "../dashboard/dist", but inside
@@ -60,7 +63,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
 #   - Exactly one Uvicorn worker until broker/background ownership has a
 #     durable leader lease and fencing token (enforced again at startup)
 #   - Bind to all interfaces so Docker port mapping works
-CMD uvicorn main:app \
+CMD ./scripts/check_db_path.sh --docker && exec uvicorn main:app \
       --host 0.0.0.0 \
       --port 8000 \
       --workers ${WORKERS:-1} \

@@ -22,6 +22,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ENV DB_PATH=/data/trading_bot.db
 
 # Install Python dependencies (separate layer for better caching)
 # Only rebuilds when requirements.txt changes
@@ -30,6 +31,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend application code
 COPY backend/ ./
+COPY scripts/check_db_path.sh ./scripts/check_db_path.sh
+RUN chmod +x ./scripts/check_db_path.sh
 
 # Create persistent volume mount point for SQLite database
 RUN mkdir -p /data && chown appuser:appgroup /data
@@ -49,7 +52,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
 # - One Uvicorn worker until broker/background ownership is leased and fenced
 # - Bind to 0.0.0.0 so Docker port mapping works
 # - JSON logs to stdout (captured by docker logs / docker compose logs)
-CMD uvicorn main:app \
+CMD ./scripts/check_db_path.sh --docker && exec uvicorn main:app \
       --host 0.0.0.0 \
       --port 8000 \
       --workers ${WORKERS:-1} \
