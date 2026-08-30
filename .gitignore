@@ -1,50 +1,40 @@
-.venv/
-__pycache__/
-*.pyc
-nul
-node_modules/
-.pytest_cache/
-coverage/
-.coverage
-*.log
-backend/*.log
-backend/server.log
-*.exe
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json
+.claude/worktrees/
 
-# Frontend build output
-/dashboard/dist/
-
-# Scratch / local artifacts
-backend/data/event_logs/
-backend/_stage13*.py
-backend/_rm_append.py
-
-# Secrets & local config
 .env
 *.env.local
 backend/.env
-.claude/settings.local.json
-.claude/worktrees/
-.qwen/
+dashboard/.env*
 
-# Runtime artifacts (codex review .md files in logs/ are kept)
+.venv/
+**/.venv/
+node_modules/
+**/node_modules/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+.tmp/
+**/.tmp/
+*.py[cod]
+*.tsbuildinfo
+
+dashboard/dist/
+coverage/
+.coverage
+*.log
 *.pid
-logs/*.log
-logs/*.pid
+*.execution.lock
 
-# Database files
 *.db
 *.db-wal
 *.db-shm
-.tmp/
-
-# IB Chart sidecar (runs on port 5001, not part of main app)
-/ib_chart/
-
-# Separate stocksdashboard repo (embedded clone, not a submodule)
-/stocksdashboard/
-
-# Editor configs
-/.vscode/
-
-dashboard/.env*
+*.sqlite
+*.sqlite3
+backups/
+data/
+!backend/trading/data/
+!backend/trading/data/**/*.py

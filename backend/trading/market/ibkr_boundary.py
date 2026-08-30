@@ -1,0 +1,355 @@
+"""IBKR market-data boundary for the evidence-gated V1 engine.
+
+This module intentionally contains no IBKR client import and opens no network
+connection.  A single connection actor owns that integration elsewhere; this
+boundary validates its outputs before they reach scanner or rule code.
+"""
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from hashlib import sha256
+import json
+from typing import Literal, Protocol
+
+from trading.contracts import Candidate, CompletedBar
+
+
+PAPER_TWS_PORT = 7497
+MAX_ADMITTED_CANDIDATES = 50
+DEFAULT_BAR_MAX_AGE = timedelta(seconds=30)
+
+
+class MarketDataBoundaryError(ValueError):
+    """Raised when market data cannot be admitted to the V1 pipeline."""
+
+
+class ConnectionConfigurationError(MarketDataBoundaryError):
+    """Raised when the adapter is not pointed at the PAPER TWS port."""
+
+
+class ScannerSupportError(MarketDataBoundaryError):
+    """Raised when TWS does not support the frozen scanner request."""
+
+
+class MarketDataQualityError(MarketDataBoundaryError):
+    """Raised when data is delayed, incomplete, stale, or otherwise unsafe."""
+
+
+class ScannerDataError(MarketDataBoundaryError):
+    """Raised when scanner identity or ranking cannot be trusted."""
+
+
+@dataclass(frozen=True)
+class ScannerRequest:
+    """The only scanner request admitted by the V1 data boundary."""
+
+    instrument: Literal["STK"] = "STK"
+    location: Literal["STK.US.MAJOR"] = "STK.US.MAJOR"
+    scan_code: Literal["HOT_BY_VOLUME"] = "HOT_BY_VOLUME"
+    stock_type_filter: Literal["COMMON"] = "COMMON"
+    number_of_rows: int = MAX_ADMITTED_CANDIDATES
+
+    def __post_init__(self) -> None:
+        if self.number_of_rows != MAX_ADMITTED_CANDIDATES:
+            raise ValueError("the V1 scanner request must ask for exactly 50 rows")
+
+
+DEFAULT_SCANNER_REQUEST = ScannerRequest()
+
+
+@dataclass(frozen=True)
+class IBKRScannerResult:
+    """Raw scanner identity and source rank returned by the connection actor."""
+
+    con_id: int
+    symbol: str
+    currency: str
+    security_type: str
+    stock_type: str
+    primary_exchange: str
+    rank: int
+
+
+@dataclass(frozen=True)
+class ScannerRecord:
+    """One scanner result retained for persistence and admission auditing."""
+
+    source: IBKRScannerResult
+    candidate: Candidate | None
+    admitted: bool
+    rejection_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ScannerSnapshot:
+    """All raw-ranked results plus the bounded admitted candidate set."""
+
+    request: ScannerRequest
+    records: tuple[ScannerRecord, ...]
+    admitted_candidates: tuple[Candidate, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.admitted_candidates) > MAX_ADMITTED_CANDIDATES:
+            raise ValueError("scanner admitted more than 50 candidates")
+
+    @property
+    def raw_results(self) -> tuple[IBKRScannerResult, ...]:
+        return tuple(record.source for record in self.records)
+
+
+@dataclass(frozen=True)
+class IBKRTradeBar:
+    """Raw completed-bar event from the one connection actor."""
+
+    con_id: int
+    interval_start_utc: datetime
+    interval_end_utc: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    rth: bool
+    bar_type: Literal["TRADES"] = "TRADES"
+    delayed: bool = False
+    frozen: bool = False
+    complete: bool = True
+    received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class BarBatch:
+    """Data and transport health returned by the connection actor."""
+
+    bars: tuple[IBKRTradeBar, ...]
+    connected: bool = True
+    pacing_failed: bool = False
+    error: str | None = None
+
+
+class IBKRConnectionActor(Protocol):
+    """The sole integration seam for request IDs, callbacks, and reconnects."""
+
+    async def supports_scanner(self, request: ScannerRequest) -> bool:
+        """Return whether TWS supports the frozen request at this session."""
+
+    async def scan(self, request: ScannerRequest) -> Sequence[IBKRScannerResult]:
+        """Return source-ranked scanner results without changing the request."""
+
+    async def completed_trade_bars(self, con_id: int) -> BarBatch:
+        """Return only the recent five-minute bar batch for one contract."""
+
+
+def _require_aware(value: datetime, field_name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise MarketDataQualityError(f"{field_name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _validate_scanner_identity(result: IBKRScannerResult) -> None:
+    if result.con_id <= 0:
+        raise ScannerDataError("scanner result has an invalid conId")
+    if not result.symbol.strip():
+        raise ScannerDataError("scanner result has an empty symbol")
+    if result.currency.upper() != "USD":
+        raise ScannerDataError("scanner result is not a USD contract")
+    if result.security_type.upper() != "STK":
+        raise ScannerDataError("scanner result is not a stock contract")
+    if result.stock_type.upper() != "COMMON":
+        raise ScannerDataError("scanner result is not a common stock")
+    if not result.primary_exchange.strip():
+        raise ScannerDataError("scanner result has no primary exchange")
+    if result.rank < 1:
+        raise ScannerDataError("scanner rank must be positive")
+
+
+def qualify_scanner_results(
+    results: Sequence[IBKRScannerResult],
+    *,
+    scanner_run_id: str,
+    request: ScannerRequest = DEFAULT_SCANNER_REQUEST,
+) -> ScannerSnapshot:
+    """Retain every source result while admitting at most 50 valid candidates."""
+    if not scanner_run_id.strip():
+        raise ScannerDataError("scanner_run_id must be non-empty")
+    if request != DEFAULT_SCANNER_REQUEST:
+        raise ScannerDataError("scanner request is not the frozen V1 request")
+
+    ordered = sorted(results, key=lambda result: (result.rank, result.con_id))
+    seen_con_ids: set[int] = set()
+    seen_ranks: set[int] = set()
+    records: list[ScannerRecord] = []
+    admitted: list[Candidate] = []
+
+    for result in ordered:
+        _validate_scanner_identity(result)
+        if result.con_id in seen_con_ids:
+            raise ScannerDataError(f"duplicate scanner conId: {result.con_id}")
+        if result.rank in seen_ranks:
+            raise ScannerDataError(f"duplicate scanner rank: {result.rank}")
+        seen_con_ids.add(result.con_id)
+        seen_ranks.add(result.rank)
+
+        if result.rank > MAX_ADMITTED_CANDIDATES or len(admitted) >= MAX_ADMITTED_CANDIDATES:
+            records.append(
+                ScannerRecord(
+                    source=result,
+                    candidate=None,
+                    admitted=False,
+                    rejection_reason="admission_cap_reached",
+                )
+            )
+            continue
+
+        candidate = Candidate(
+            scanner_run_id=scanner_run_id,
+            con_id=result.con_id,
+            symbol=result.symbol,
+            currency="USD",
+            security_type="STK",
+            stock_type="COMMON",
+            primary_exchange=result.primary_exchange.strip().upper(),
+            rank=result.rank,
+            admission_status="admitted",
+        )
+        admitted.append(candidate)
+        records.append(ScannerRecord(source=result, candidate=candidate, admitted=True))
+
+    return ScannerSnapshot(
+        request=request,
+        records=tuple(records),
+        admitted_candidates=tuple(admitted),
+    )
+
+
+def _bar_fingerprint(bar: IBKRTradeBar) -> str:
+    payload = {
+        "con_id": bar.con_id,
+        "interval_start_utc": _require_aware(bar.interval_start_utc, "interval_start_utc").isoformat(),
+        "interval_end_utc": _require_aware(bar.interval_end_utc, "interval_end_utc").isoformat(),
+        "open": str(bar.open),
+        "high": str(bar.high),
+        "low": str(bar.low),
+        "close": str(bar.close),
+        "volume": str(bar.volume),
+        "rth": bar.rth,
+    }
+    return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_completed_trade_bars(
+    batch: BarBatch,
+    *,
+    now: datetime,
+    max_age: timedelta = DEFAULT_BAR_MAX_AGE,
+) -> tuple[CompletedBar, ...]:
+    """Convert a healthy live TRADES batch into strictly completed five-minute bars."""
+    observed_at = _require_aware(now, "now")
+    if max_age <= timedelta(0):
+        raise ValueError("max_age must be positive")
+    if not batch.connected:
+        raise MarketDataQualityError("IBKR market-data connection is unavailable")
+    if batch.pacing_failed:
+        raise MarketDataQualityError("IBKR market-data pacing limit blocked the request")
+    if batch.error:
+        raise MarketDataQualityError("IBKR market-data request failed")
+
+    validated: list[CompletedBar] = []
+    fingerprints: set[str] = set()
+    intervals: set[tuple[int, datetime]] = set()
+    for raw in batch.bars:
+        start = _require_aware(raw.interval_start_utc, "interval_start_utc")
+        end = _require_aware(raw.interval_end_utc, "interval_end_utc")
+        received_at = _require_aware(raw.received_at, "received_at")
+        if raw.bar_type != "TRADES":
+            raise MarketDataQualityError("only completed TRADES bars are admissible")
+        if raw.delayed:
+            raise MarketDataQualityError("delayed market data cannot feed a candidate")
+        if raw.frozen:
+            raise MarketDataQualityError("frozen market data cannot feed a candidate")
+        if not raw.complete:
+            raise MarketDataQualityError("incomplete bars cannot feed a candidate")
+        if end > observed_at:
+            raise MarketDataQualityError("bar interval ends in the future")
+        if observed_at - end > max_age:
+            raise MarketDataQualityError("stale market data cannot feed a candidate")
+        if received_at > observed_at + timedelta(seconds=1):
+            raise MarketDataQualityError("bar receipt timestamp is in the future")
+        if raw.con_id <= 0:
+            raise MarketDataQualityError("bar has an invalid conId")
+
+        fingerprint = _bar_fingerprint(raw)
+        interval_identity = (raw.con_id, start)
+        if fingerprint in fingerprints or interval_identity in intervals:
+            raise MarketDataQualityError("duplicate market bar cannot feed a candidate")
+        fingerprints.add(fingerprint)
+        intervals.add(interval_identity)
+
+        try:
+            validated.append(
+                CompletedBar(
+                    con_id=raw.con_id,
+                    interval_start_utc=start,
+                    interval_end_utc=end,
+                    open=raw.open,
+                    high=raw.high,
+                    low=raw.low,
+                    close=raw.close,
+                    volume=raw.volume,
+                    rth=raw.rth,
+                    source="ibkr",
+                    data_mode="live",
+                    completed=True,
+                )
+            )
+        except ValueError as exc:
+            raise MarketDataQualityError("bar failed the five-minute OHLC validation") from exc
+    return tuple(validated)
+
+
+@dataclass
+class PaperIBKRMarketData:
+    """Validated PAPER data facade backed by one caller-owned connection actor."""
+
+    actor: IBKRConnectionActor
+    host: str
+    port: int = PAPER_TWS_PORT
+    bar_max_age: timedelta = DEFAULT_BAR_MAX_AGE
+    _scanner_ready: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.host.strip():
+            raise ConnectionConfigurationError("IBKR host must be non-empty")
+        if self.port != PAPER_TWS_PORT:
+            raise ConnectionConfigurationError(
+                f"only TWS PAPER port {PAPER_TWS_PORT} is supported by the V1 data boundary"
+            )
+        if self.bar_max_age <= timedelta(0):
+            raise ConnectionConfigurationError("bar_max_age must be positive")
+
+    async def initialize(self) -> None:
+        """Verify scanner support before allowing a session to request data."""
+        supported = await self.actor.supports_scanner(DEFAULT_SCANNER_REQUEST)
+        if not supported:
+            raise ScannerSupportError("TWS does not support the frozen HOT_BY_VOLUME scanner request")
+        self._scanner_ready = True
+
+    async def scanner_snapshot(self, *, scanner_run_id: str) -> ScannerSnapshot:
+        if not self._scanner_ready:
+            await self.initialize()
+        results = await self.actor.scan(DEFAULT_SCANNER_REQUEST)
+        return qualify_scanner_results(results, scanner_run_id=scanner_run_id)
+
+    async def completed_bars(
+        self,
+        *,
+        con_id: int,
+        now: datetime,
+    ) -> tuple[CompletedBar, ...]:
+        if con_id <= 0:
+            raise MarketDataQualityError("conId must be positive")
+        batch = await self.actor.completed_trade_bars(con_id)
+        return validate_completed_trade_bars(batch, now=now, max_age=self.bar_max_age)

@@ -9,14 +9,23 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone, timedelta
+from typing import Any
 
 import bcrypt
 import aiosqlite
 from fastapi import HTTPException, Request
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
+from pydantic import BaseModel, Field
 
 from config import cfg
-from models import User
+
+
+class User(BaseModel):
+    id: str
+    email: str | None = None
+    created_at: str | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 def _hash_password(password: str) -> str:
@@ -50,7 +59,7 @@ def verify_token(token: str) -> str | None:
     try:
         payload = jwt.decode(token, cfg.JWT_SECRET, algorithms=[cfg.JWT_ALGORITHM])
         return payload.get("sub")
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 

@@ -4,7 +4,6 @@ Tests for auth module — token creation, verification, demo user seeding.
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("DB_PATH", "test_trading.db")
-os.environ.setdefault("SIM_MODE", "true")
 
 import pytest
 import aiosqlite
@@ -16,9 +15,6 @@ from auth import create_token, verify_token, seed_demo_user, get_user, DEMO_USER
 async def setup_db(tmp_path):
     db_path = str(tmp_path / "test.db")
     cfg.DB_PATH = db_path
-    # Import database to use its DB_PATH
-    import database
-    database.DB_PATH = db_path
     async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -29,7 +25,6 @@ async def setup_db(tmp_path):
         await db.commit()
         await seed_demo_user(db)
     yield
-    # cleanup happens via tmp_path
 
 
 @pytest.mark.asyncio

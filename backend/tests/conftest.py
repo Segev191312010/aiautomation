@@ -4,7 +4,9 @@ Shared test fixtures.
 import os
 import shutil
 import sys
+from hashlib import sha256
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -16,18 +18,19 @@ sys.path.insert(0, _BACKEND_DIR)
 # temp directory that pytest uses by default.  Never touch getbasetemp()
 # or tempfile.gettempdir() — both can hit unwritable global paths on
 # Windows cold starts.
-_LOCAL_TMP = os.path.join(os.path.abspath(_BACKEND_DIR), ".tmp", "pytest")
+_LOCAL_TMP = os.path.join(
+    os.path.abspath(_BACKEND_DIR),
+    ".tmp",
+    "pytest",
+    f"{os.getpid()}-{uuid4().hex}",
+)
 os.makedirs(_LOCAL_TMP, exist_ok=True)
 
-# Use a real temp file for the test DB.
-# SQLite ":memory:" gives each aiosqlite.connect() its own independent
-# database, so init_db() creates tables in one connection while CRUD
-# functions open a second (empty) connection — tables not found.
+# Use one real SQLite file per pytest process because each aiosqlite connection
+# gets a distinct in-memory database.  A run-unique root prevents a crashed or
+# concurrently running suite from leaking state into another process.
 _TEST_DB = os.path.join(_LOCAL_TMP, "test_trading_platform.db")
-if os.path.exists(_TEST_DB):
-    os.unlink(_TEST_DB)
 os.environ["DB_PATH"] = _TEST_DB
-os.environ["SIM_MODE"] = "true"
 
 # Relaxed rate limits for tests — avoid 429s when multiple test files
 # hit /api/auth/token in the same test session.
@@ -50,7 +53,8 @@ def tmp_path(request):
     Uses pathlib.Path directly instead of tmp_path_factory.getbasetemp()
     which would create dirs inside the unwritable global temp on Windows.
     """
-    p = Path(_LOCAL_TMP) / request.node.name
+    node_digest = sha256(request.node.nodeid.encode("utf-8")).hexdigest()[:12]
+    p = Path(_LOCAL_TMP) / f"{request.node.name}-{node_digest}"
     p.mkdir(parents=True, exist_ok=True)
     yield p
     # Best-effort cleanup; Windows may hold file locks
@@ -59,11 +63,8 @@ def tmp_path(request):
 
 @pytest.fixture(autouse=True)
 def _restore_db_path():
-    """Restore database.DB_PATH after tests that override it."""
-    import database
+    """Restore the configured database path after each test."""
     from config import cfg
-    original_db = database.DB_PATH
     original_cfg = cfg.DB_PATH
     yield
-    database.DB_PATH = original_db
     cfg.DB_PATH = original_cfg

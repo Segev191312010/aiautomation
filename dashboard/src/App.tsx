@@ -1,101 +1,104 @@
-import React, { Suspense, lazy, useEffect } from 'react'
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import Layout from '@/components/layout/Layout'
-import ErrorBoundary from '@/components/ui/ErrorBoundary'
-import AuthGuard from '@/components/auth/AuthGuard'
-import Dashboard from '@/pages/Dashboard'
-import { useBotStore } from '@/store'
-import { fetchStatus } from '@/services/api'
-import { APP_ROUTE_PATHS } from '@/utils/routes'
-
-const TradeBotPage = lazy(() => import('@/pages/TradeBotPage'))
-const MarketPage = lazy(() => import('@/pages/MarketPage'))
-const MarketRotationPage = lazy(() => import('@/pages/MarketRotationPage'))
-const SimulationPage = lazy(() => import('@/pages/SimulationPage'))
-const MarketsPage = lazy(() => import('@/pages/MarketsPage'))
-const BacktestPage = lazy(() => import('@/pages/BacktestPage'))
-const AlertsPage = lazy(() => import('@/pages/AlertsPage'))
-const SettingsPage = lazy(() => import('@/pages/SettingsPage'))
-const StockProfilePage = lazy(() => import('@/pages/StockProfilePage'))
-const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'))
-const RulesPage = lazy(() => import('@/pages/RulesPage'))
-const AutopilotPage = lazy(() => import('@/pages/AutopilotPage'))
-const ChartsPage = lazy(() => import('@/pages/ChartsPage'))
-
-function PageFallback() {
-  return (
-    <div className="flex h-64 items-center justify-center">
-      <div className="card rounded-lg px-6 py-5 text-center shadow-card">
-        <p className="text-sm font-semibold tracking-wide text-gray-800 font-sans">
-          Loading view
-        </p>
-        <p className="mt-1 text-xs text-gray-500 font-sans">
-          Preparing market workspace...
-        </p>
-      </div>
-    </div>
-  )
-}
-
-function AppRoutes() {
-  const location = useLocation()
-
-  return (
-    <ErrorBoundary key={location.pathname}>
-      <Suspense fallback={<PageFallback />}>
-        <Routes>
-          <Route path={APP_ROUTE_PATHS.dashboard} element={<Dashboard />} />
-          <Route path={APP_ROUTE_PATHS.tradebot} element={<TradeBotPage />} />
-          <Route path={APP_ROUTE_PATHS.market} element={<MarketPage />} />
-          <Route path={APP_ROUTE_PATHS.charts} element={<ChartsPage />} />
-          <Route path={APP_ROUTE_PATHS.rotation} element={<MarketRotationPage />} />
-          <Route path={APP_ROUTE_PATHS.screener} element={<MarketsPage />} />
-          <Route path={APP_ROUTE_PATHS.swing} element={<MarketsPage />} />
-          <Route path={APP_ROUTE_PATHS.stock} element={<StockProfilePage />} />
-          <Route path={APP_ROUTE_PATHS.simulation} element={<SimulationPage />} />
-          <Route path={APP_ROUTE_PATHS.backtest} element={<BacktestPage />} />
-          <Route path={APP_ROUTE_PATHS.rules} element={<RulesPage />} />
-          <Route path={APP_ROUTE_PATHS.alerts} element={<AlertsPage />} />
-          <Route path={APP_ROUTE_PATHS.analytics} element={<AnalyticsPage />} />
-          <Route path={APP_ROUTE_PATHS.advisor} element={<AutopilotPage />} />
-          <Route path={APP_ROUTE_PATHS.settings} element={<SettingsPage />} />
-          <Route path="*" element={<Navigate to={APP_ROUTE_PATHS.dashboard} replace />} />
-        </Routes>
-      </Suspense>
-    </ErrorBoundary>
-  )
-}
-
-function StatusPoller() {
-  const setStatus = useBotStore((s) => s.setStatus)
-
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const status = await fetchStatus()
-        setStatus(status)
-      } catch {
-        /* backend offline */
-      }
-    }
-
-    poll()
-    const timer = setInterval(poll, 30_000)
-    return () => clearInterval(timer)
-  }, [setStatus])
-
-  return null
-}
+const modules = [
+  {
+    name: 'Market intake',
+    detail: 'Normalized snapshots and scanner ports feed deterministic strategy evaluation.',
+    state: 'Contract ready',
+  },
+  {
+    name: 'Strategy lifecycle',
+    detail: 'Draft, backtest, shadow, pause, and retire transitions are explicit and versioned.',
+    state: 'Active',
+  },
+  {
+    name: 'Risk authority',
+    detail: 'Position, portfolio, and daily-loss limits remain deterministic and fail closed.',
+    state: 'Active',
+  },
+  {
+    name: 'Decision ledger',
+    detail: 'Every proposal records its inputs, fingerprint, disposition, and explanation.',
+    state: 'Active',
+  },
+  {
+    name: 'Broker adapter',
+    detail: 'Execution is isolated behind a port. Automated order authority is not enabled.',
+    state: 'Locked',
+  },
+  {
+    name: 'Learning evidence',
+    detail: 'Outcome analytics exist; promotion still requires current-SHA evidence.',
+    state: 'Evidence pending',
+  },
+]
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthGuard>
-        <Layout>
-          <StatusPoller />
-          <AppRoutes />
-        </Layout>
-      </AuthGuard>
-    </BrowserRouter>
+    <main className="app-shell">
+      <header className="hero">
+        <div>
+          <p className="eyebrow">Clean rebuild baseline</p>
+          <h1>Autotrader V1</h1>
+          <p className="lede">
+            A small, auditable trading engine built around explicit strategy states,
+            deterministic risk, and evidence-gated execution authority.
+          </p>
+        </div>
+        <div className="mode-card" aria-label="Current engine authority">
+          <span className="status-dot" />
+          <div>
+            <strong>Backtest + Shadow</strong>
+            <span>Order execution disabled</span>
+          </div>
+        </div>
+      </header>
+
+      <section className="fence-grid" aria-label="Authority fences">
+        <article>
+          <span>Automated PAPER</span>
+          <strong>Locked</strong>
+          <p>Requires reviewed Phase-5 evidence for the running source SHA.</p>
+        </article>
+        <article>
+          <span>LIVE</span>
+          <strong>Hard NO-GO</strong>
+          <p>Requires the complete independent release conjunction and owner approval.</p>
+        </article>
+        <article>
+          <span>Current objective</span>
+          <strong>Prove the engine</strong>
+          <p>Build rules, replay them, shadow decisions, and measure outcomes.</p>
+        </article>
+      </section>
+
+      <section>
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Retained kernel</p>
+            <h2>System modules</h2>
+          </div>
+          <span>{modules.length} bounded modules</span>
+        </div>
+        <div className="module-grid">
+          {modules.map((module) => (
+            <article className="module-card" key={module.name}>
+              <div>
+                <h3>{module.name}</h3>
+                <span>{module.state}</span>
+              </div>
+              <p>{module.detail}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="next-step">
+        <p className="eyebrow">Next build slice</p>
+        <h2>Scanner → rule proposal → deterministic risk → shadow decision</h2>
+        <p>
+          No legacy bot loop is connected. The next implementation work is measured against
+          this single pipeline and its evidence, not the retired monolith.
+        </p>
+      </section>
+    </main>
   )
 }

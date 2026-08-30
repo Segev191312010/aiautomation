@@ -1,7 +1,7 @@
 """
 Production middleware stack -- rate limiting, request logging, security headers.
 
-Register in main.py (Starlette applies middleware inside-out):
+Register in the application entry point (Starlette applies middleware inside-out):
 
     from middleware import RateLimitMiddleware, RequestLogMiddleware, SecurityHeadersMiddleware
     app.add_middleware(SecurityHeadersMiddleware)

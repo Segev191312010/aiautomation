@@ -1,0 +1,124 @@
+AUTOTRADER V1 - REAL-TIME IBKR PAPER AUTOMATION
+
+PURPOSE
+Build a local-only automated trader that reads real-time IBKR market data and
+submits only IBKR PAPER orders. LIVE accounts, LIVE ports, and LIVE runtime
+paths are forbidden.
+
+LOCKED RUNTIME CONTRACT
+- Engine native host: 127.0.0.1.
+- TWS port: 7497 only.
+- One configured PAPER account and one dedicated client ID.
+- Runtime and evidence accept only real IBKR live streaming data or real IBKR
+  historical bars. Delayed, frozen, stale, incomplete, duplicate, malformed,
+  or pacing-failed data blocks the session.
+- Fixtures and fake brokers are test-only. Runtime and evidence import guards
+  reject them.
+- PAPER execution requires a signed receipt; real-data shadow does not.
+- A PAPER receipt binds build SHA, evidence digest, strategy and policy hashes,
+  PAPER account, client ID, owner approval, issue time, and expiry. Expiry is
+  the close of the fifth US trading session after issue.
+- TWS auto-start requires a valid receipt, healthy preflight, clean
+  reconciliation, a healthy scheduler, and no kill state.
+
+FIRST ACTIVE STRATEGY: ORB_V1
+- US common stocks only; long entries only; regular trading hours only.
+- Opening range: 09:30 through 09:45 America/New_York.
+- Scanner: HOT_BY_VOLUME at 09:45:05 ET, retaining all rankings and admitting
+  at most 50 qualified symbols.
+- First completed five-minute bar closing above the opening-range high may
+  qualify once per symbol per session.
+- Entry cutoff: 12:00 ET.
+- Price: 10 through 300 USD; 20-day average dollar volume at least 20M USD.
+- Fresh quote: at most two seconds old; spread at most 15 bps.
+- Parent limit may chase no more than 20 bps beyond the breakout close.
+- Stop: exactly one Wilder ATR(14) below entry. Target: exactly 2R.
+- AI only returns PROPOSE or ABSTAIN for a completed RuleSetup. It cannot edit
+  prices, quantity, account, authority, or broker commands.
+- Risk alone sizes orders and enforces: maximum three positions, 0.5 percent
+  net-liq risk per trade, 2 percent daily-loss breaker, notional limits, one
+  trade per symbol/day, and no pyramiding.
+
+DELIVERY TICKETS
+
+RTP-00 BASELINE AND GOVERNANCE
+- Preserve the existing dirty rebuild and unrelated worktrees.
+- Do not modify .env files, SQLite databases, or paper review protocol docs.
+- Configure a legitimate local Git identity before any commit.
+- Record exact baseline SHA, full quality-gate output, and local archive.
+- Keep work local until the owner restores an authorized remote.
+
+RTP-01 CONTRACTS, POLICIES, AND STORAGE
+- Version immutable strategies, policies, runs, scanner runs, candidates,
+  completed bars, quotes, setups, AI reviews, intents, approvals, decisions,
+  leases, risk reservations, broker events, bracket groups, and reconciliation.
+- Keep ORB_V1 as the only active strategy. The registry supports future
+  immutable strategies but they must be separately evidenced and receipted.
+- Migrate existing V1 databases non-destructively and preserve archived data.
+- Move test fakes under backend/tests/fakes and enforce a runtime import
+  firewall.
+
+RTP-02 REAL IBKR ACTOR
+- Use the official pinned TWS Python API client through one IBKRTwsActor.
+- Actor owns socket lifecycle, request IDs, scanner, historical bars, quotes,
+  callbacks, account snapshots, subscriptions, and reconnects.
+- Validate API handshake, expected managed PAPER account, client-ID availability,
+  scanner support, real-time entitlement, and data-line capacity before a run.
+- Request real RTH TRADES historical bars for ATR and 20-day dollar-volume
+  warmup. A capacity or data-quality failure blocks the run.
+- Reconcile positions, open orders, executions, and known bracket legs before
+  entries. Unknown or mismatched state blocks new entries.
+
+RTP-03 SCHEDULER, AI, AND RISK
+- Acquire a durable scheduler lease and persist one terminal decision per
+  candidate. Restart must reuse stable decision identity and never duplicate.
+- Run ScannerRun -> Candidate -> CompletedBar/Quote -> RuleSetup -> AIReview
+  -> RiskApproval -> Decision.
+- Enforce JSON-schema AI output, a maximum of 20 calls and 5 USD per session.
+  Invalid, unavailable, slow, or over-budget AI becomes AI_BLOCKED; there is
+  no rules-only fallback.
+- Create single-use 15-second risk approvals and atomically reserve exposure.
+
+RTP-04 PAPER AUTHORITY AND EXECUTION
+- Sign and verify AuthorityReceipt payloads with Ed25519. Signing keys live in
+  the local macOS Keychain; runtime uses a pinned public key and never prints
+  key material.
+- Enter paper_active only after receipt, preflight, scheduler, risk, and
+  reconciliation all pass. A reconnect repeats every check before entries can
+  resume.
+- IBKRTwsPaperExecutor persists the group, legs, reservation, idempotency key,
+  owner, and correlations before broker submission.
+- Bracket order sequence: parent Transmit=False, target Transmit=False, stop
+  Transmit=True last; target and stop share an OCA group.
+- Unknown, rejected, duplicate, partial, timed-out, or mismatched state is
+  MANUAL_INTERVENTION. It fences entries and never auto-retries, repairs, or
+  force-closes positions.
+
+RTP-05 SHADOW, DRILL, AND PAPER CANARY
+- Shadow uses only real IBKR data. Modelled analytics are explicitly labelled:
+  buy at ask plus 5 bps, sell at bid minus 5 bps, plus a frozen commission
+  policy. Modelled fills are never broker-fill evidence.
+- PAPER eligibility requires ten complete real-data RTH shadow sessions, at
+  least 100 terminal decisions, 30 modelled fills, replay equality, complete
+  decisions, PF >= 1.20, max drawdown <= 3 percent, and AI expectancy at least
+  95 percent of the rule-only baseline.
+- A real PAPER drill must prove order IDs, permIds, orderRefs, OCA linkage,
+  restart reconciliation, sibling cancellation, and an observed protected
+  partial fill.
+- Only then issue the exact-SHA ORB_V1 PAPER receipt. New strategies repeat
+  the evidence and drill gates.
+
+OPERATOR CONTROLS
+- States: blocked, shadow_ready, paper_ready, paper_active.
+- Local command: autotraderctl paper stop. It persists the kill state and
+  immediately prevents new entries.
+- Dashboard is read-only except emergency stop. It cannot start automation,
+  promote authority, edit policies, or submit manual orders.
+
+TESTS AND EVIDENCE
+- Verify import firewall, TWS account/port/client checks, entitlement quality,
+  scanner and pacing failures, reconnects, ORB timing and price boundaries,
+  AI schema and budget limits, risk concurrency, scheduler leases, broker
+  sequencing, reconciliation, and protected-partial-fill behavior.
+- Every authority increase requires docs/evidence/<SOURCE_SHA>/ evidence.
+  Green tests alone are incomplete.

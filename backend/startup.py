@@ -1,29 +1,15 @@
-"""
-Startup validation and initialization checks.
-
-Call ``await validate_startup()`` inside the FastAPI ``lifespan`` function
-(or any other startup hook) to surface misconfiguration early.
-
-Behavior
---------
-- Warnings  : logged but never abort the process.
-- Errors    : logged; if ``cfg.STRICT_CONFIG`` is ``True`` the process exits
-              with code 1 so the container/supervisor restarts with a clear
-              reason in the log.
-
-``validate_autopilot_matrix`` is also exported so runtime mode changes
-(e.g. DB-sync after startup, or operator mode flips) can enforce the same
-invariants on the new mode without re-running the whole startup path.
-"""
+"""Fail-fast startup validation for the execution-disabled V1 service."""
 from __future__ import annotations
 
 import logging
-import sys
+import os
 from typing import TypedDict
 
-log = logging.getLogger(__name__)
+import aiosqlite
 
-DEFAULT_DEV_JWT_SECRET = "trading-dev-secret-MUST-SET-IN-ENV"
+from config import DEFAULT_DEV_JWT_SECRET, cfg, resolve_jwt_bootstrap_secret
+
+log = logging.getLogger(__name__)
 
 
 class StartupResult(TypedDict):
@@ -31,208 +17,84 @@ class StartupResult(TypedDict):
     warnings: list[str]
 
 
-def validate_autopilot_matrix(
-    *,
-    mode: str,
-    is_paper: bool,
-    sim_mode: bool,
-    jwt_secret: str,
-    jwt_bootstrap_secret: str | None,
-) -> list[str]:
-    """Check AUTOPILOT_MODE × IS_PAPER × SIM_MODE × auth for safe combinations.
+LEGACY_AUTHORITY_ENVIRONMENT_VARIABLES = frozenset(
+    {
+        "AUTOTRADER_MODE",
+        "AUTOPILOT_MODE",
+        "LIVE_ALLOWED",
+        "AI_AUTONOMY_ENABLED",
+        "AI_SHADOW_MODE",
+        "CLAUDE_LIVE_TRADING_ENABLED",
+        "AUTO_TRADING_ENABLED",
+        "AUTOMATED_TRADING_ENABLED",
+        "AUTO_EXECUTION_ENABLED",
+        "EXECUTION_ENABLED",
+        "ENABLE_AUTOTRADING",
+        "ENABLE_AUTO_TRADING",
+        "ENABLE_PAPER_TRADING",
+        "ENABLE_LIVE_TRADING",
+        "PAPER_TRADING_ENABLED",
+        "LIVE_TRADING_ENABLED",
+        "ALLOW_PAPER_TRADING",
+        "ALLOW_LIVE_TRADING",
+        "BOT_AUTOSTART",
+        "BOT_ENABLED",
+        "RULE_BOT_ENABLED",
+    }
+)
 
-    Returns a list of human-readable error strings; empty list == safe.
-    Callable both from initial startup validation and from runtime mode
-    changes (DB sync, operator flip). Keep this pure so it can be unit
-    tested without mutating cfg.
-    """
-    errors: list[str] = []
-    mode = (mode or "OFF").upper()
 
-    if mode not in ("OFF", "PAPER", "LIVE"):
-        errors.append(f"AUTOPILOT_MODE='{mode}' is invalid. Must be OFF, PAPER, or LIVE.")
-        return errors
-
-    if mode == "OFF":
-        # Inactive AI — nothing else to check.
-        return errors
-
-    # PAPER and LIVE both grant AI authority. Refuse the default JWT_SECRET.
-    if jwt_secret == DEFAULT_DEV_JWT_SECRET:
-        errors.append(
-            f"AUTOPILOT_MODE={mode} requires a non-default JWT_SECRET. "
-            "Set JWT_SECRET in .env to a strong random string before enabling AI authority."
-        )
-
-    if mode == "LIVE":
-        # Real-money AI is only safe when:
-        #   - broker is live (IS_PAPER=false) AND
-        #   - sim interception is off (SIM_MODE=false).
-        # Any other combination means AI thinks it's live but orders land
-        # somewhere else — surface the mismatch loudly.
-        if is_paper and not sim_mode:
-            errors.append(
-                "AUTOPILOT_MODE=LIVE with IS_PAPER=true routes AI orders to the "
-                "paper broker. Use AUTOPILOT_MODE=PAPER instead, or set IS_PAPER=false."
-            )
-        if sim_mode:
-            errors.append(
-                "AUTOPILOT_MODE=LIVE with SIM_MODE=true sends AI orders to the "
-                "virtual account. Real-money authority must not run in SIM_MODE."
-            )
-        # Bootstrap-token auth is not a login flow; do not let real money run
-        # on a system where an unauthenticated local caller can mint a token.
-        # Callers can still set it for dev, but LIVE explicitly rejects it.
-        if jwt_bootstrap_secret:
-            errors.append(
-                "AUTOPILOT_MODE=LIVE with JWT_BOOTSTRAP_SECRET configured is "
-                "unsafe. Remove JWT_BOOTSTRAP_SECRET from .env and use a real "
-                "login flow before enabling live AI authority."
-            )
-
-    return errors
+def _legacy_authority_environment_variables() -> tuple[str, ...]:
+    """Return only known authority switches, never general data settings."""
+    return tuple(sorted(LEGACY_AUTHORITY_ENVIRONMENT_VARIABLES & os.environ.keys()))
 
 
 async def validate_startup() -> StartupResult:
-    """
-    Run all startup checks.
-
-    Returns a dict with two keys:
-      - ``errors``   -- list of fatal configuration problems.
-      - ``warnings`` -- list of non-fatal advisories.
-
-    When ``cfg.STRICT_CONFIG`` is ``True`` and there are errors the function
-    calls ``sys.exit(1)`` *after* logging, so the problem is clearly visible
-    in the process log before shutdown.
-    """
-    # Deferred import: config triggers dotenv load, keep it lazy for tests.
-    from config import cfg
-
     errors: list[str] = []
     warnings: list[str] = []
 
-    # ------------------------------------------------------------------
-    # 1. JWT secret + autopilot mode matrix (C6 + autopilot-matrix safety)
-    # ------------------------------------------------------------------
-    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET and cfg.AUTOPILOT_MODE == "OFF":
-        warnings.append(
-            "JWT_SECRET is the default development value. "
-            "Set a strong random secret before going to production."
+    forbidden_authority_variables = _legacy_authority_environment_variables()
+    if forbidden_authority_variables:
+        errors.append(
+            "Legacy authority environment variables are unsupported: "
+            + ", ".join(forbidden_authority_variables)
         )
-    errors.extend(
-        validate_autopilot_matrix(
-            mode=cfg.AUTOPILOT_MODE,
-            is_paper=cfg.IS_PAPER,
-            sim_mode=cfg.SIM_MODE,
-            jwt_secret=cfg.JWT_SECRET,
-            jwt_bootstrap_secret=getattr(cfg, "JWT_BOOTSTRAP_SECRET", "") or None,
-        )
-    )
 
-    # ------------------------------------------------------------------
-    # 2. Database accessibility
-    # ------------------------------------------------------------------
+    if cfg.JWT_SECRET == DEFAULT_DEV_JWT_SECRET:
+        message = "JWT_SECRET is the development value"
+        if cfg.APP_ENV in {"production", "staging"}:
+            errors.append(f"{message}; configure a strong secret before deployment")
+        else:
+            warnings.append(f"{message}; local bootstrap only")
+
     try:
-        import aiosqlite
+        resolve_jwt_bootstrap_secret()
+    except ValueError as exc:
+        errors.append(str(exc))
 
+    try:
         async with aiosqlite.connect(cfg.DB_PATH) as db:
             await db.execute("SELECT 1")
-        log.info("database check: OK  path=%s", cfg.DB_PATH)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         errors.append(f"Database not accessible at '{cfg.DB_PATH}': {exc}")
 
-    # ------------------------------------------------------------------
-    # 3. IBKR port / paper mode consistency
-    # ------------------------------------------------------------------
-    live_ports = {7496, 4001}
-    paper_ports = {7497, 4002}
-    if cfg.IS_PAPER and cfg.IBKR_PORT in live_ports:
-        # config.py raises in STRICT_CONFIG mode, so this is the non-strict
-        # path — demote to a warning so we surface it without double-exiting.
-        warnings.append(
-            f"IS_PAPER=true but IBKR_PORT={cfg.IBKR_PORT} is a live-trading port. "
-            "Connections to a live account may be rejected or charged real money."
-        )
-    if not cfg.IS_PAPER and cfg.IBKR_PORT in paper_ports:
-        warnings.append(
-            f"IS_PAPER=false but IBKR_PORT={cfg.IBKR_PORT} is a paper-trading port. "
-            "Live orders will not reach a real account."
-        )
+    for warning in warnings:
+        log.warning("STARTUP WARNING: %s", warning)
+    for error in errors:
+        log.error("STARTUP ERROR: %s", error)
 
-    # ------------------------------------------------------------------
-    # 4. SIM_MODE vs IS_PAPER advisory
-    # ------------------------------------------------------------------
-    if cfg.SIM_MODE and not cfg.IS_PAPER:
-        warnings.append(
-            "SIM_MODE=true and IS_PAPER=false: orders go to the virtual account, "
-            "but IBKR is configured for live trading. "
-            "Ensure this is intentional."
-        )
+    # Authority violations are security failures, not configuration advice.
+    # They must stop the process even when STRICT_CONFIG is disabled for other
+    # local-development validation errors.
+    if forbidden_authority_variables:
+        raise RuntimeError("Autotrader V1 authority validation failed: " + "; ".join(errors))
 
-    # ------------------------------------------------------------------
-    # 5. Direct-trades intent token gate (live / staging environments)
-    # ------------------------------------------------------------------
-    # /api/autopilot/direct-trades/execute lets an authenticated caller place
-    # an arbitrary AIDirectTrade. The HTTP path now forces skip_safety=False,
-    # but in any non-dev environment we additionally require an explicit
-    # X-Intent-Token header matched against DIRECT_TRADE_INTENT_TOKEN. If the
-    # env is "live" or "staging" and the token is empty, refuse to boot.
-    import os
-    env_name = (os.getenv("ENV") or "").strip().lower()
-    if env_name in {"live", "staging"} and not getattr(cfg, "DIRECT_TRADE_INTENT_TOKEN", ""):
-        errors.append(
-            f"ENV='{env_name}' requires DIRECT_TRADE_INTENT_TOKEN to be set. "
-            "Refusing to boot — direct-trades HTTP endpoint would be ungated."
-        )
+    if errors and cfg.STRICT_CONFIG:
+        raise RuntimeError("Autotrader V1 startup validation failed: " + "; ".join(errors))
 
-    # ------------------------------------------------------------------
-    # 6. Multi-worker order-execution-cap warning (Batch 9)
-    # ------------------------------------------------------------------
-    # The per-symbol order-rate cap in order_executor is a per-process,
-    # in-memory dict guarded by an asyncio.Lock. Multi-worker uvicorn lets
-    # the effective cap scale linearly with worker count — a 6/min cap with
-    # WORKERS=2 silently becomes 12/min globally. Surface this loudly so the
-    # operator either drops to a single worker for the order-execution path
-    # or builds a Redis/SQL-backed cross-process limiter.
-    workers = int(os.getenv("WORKERS", "1") or "1")
-    if workers > 1 and getattr(cfg, "AUTOPILOT_MODE", "OFF") in ("PAPER", "LIVE"):
-        msg = (
-            f"WORKERS={workers} with autopilot active and an in-process "
-            "order-rate cap. Effective cap scales linearly with worker count; "
-            "build a cross-process limiter (Redis / SQL counter) before LIVE "
-            "or pin WORKERS=1 for the order-execution process."
-        )
-        if env_name == "live":
-            # In live, this is a hard refusal — over-trading on a doubled cap
-            # is account-threatening.
-            errors.append(msg)
-        else:
-            warnings.append(msg)
-
-    # ------------------------------------------------------------------
-    # Summary log
-    # ------------------------------------------------------------------
-    log.info("=== Trading Platform Startup ===")
-    log.info("version  : %s", cfg.APP_VERSION)
-    log.info("autopilot: %s", getattr(cfg, "AUTOPILOT_MODE", "OFF"))
-    log.info("mode     : %s", "PAPER" if cfg.IS_PAPER else "LIVE")
-    log.info("sim_mode : %s", "ON" if cfg.SIM_MODE else "OFF")
-    log.info("ibkr_port: %d", cfg.IBKR_PORT)
-    log.info("database : %s", cfg.DB_PATH)
-    log.info("strict   : %s", cfg.STRICT_CONFIG)
-
-    for w in warnings:
-        log.warning("STARTUP WARNING: %s", w)
-
-    for e in errors:
-        log.error("STARTUP ERROR: %s", e)
-
-    if errors:
-        log.error(
-            "Startup validation failed with %d error(s).", len(errors)
-        )
-        if cfg.STRICT_CONFIG:
-            log.error("STRICT_CONFIG=true — exiting to force a clean restart.")
-            sys.exit(1)
-
+    log.info(
+        "Autotrader V1 ready version=%s environment=%s execution_enabled=false",
+        cfg.APP_VERSION,
+        cfg.APP_ENV,
+    )
     return StartupResult(errors=errors, warnings=warnings)
