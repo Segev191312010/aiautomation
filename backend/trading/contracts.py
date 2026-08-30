@@ -59,6 +59,112 @@ class DecisionOutcome(str, Enum):
     SUBMITTED = "submitted"
 
 
+class ShadowSessionState(str, Enum):
+    DISABLED = "disabled"
+    IDLE = "idle"
+    PREFLIGHT = "preflight"
+    OPENING_RANGE = "opening_range"
+    SCANNING = "scanning"
+    EVALUATING = "evaluating"
+    MONITORING = "monitoring"
+    FINALIZING = "finalizing"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+
+
+class ShadowRuntimeConfig(BaseModel):
+    """Immutable, non-secret identity for one local shadow runtime."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tws_host: Literal["127.0.0.1"] = "127.0.0.1"
+    tws_port: Literal[7497] = 7497
+    paper_account_id: str = Field(min_length=1, max_length=64)
+    client_id: int = Field(ge=0)
+    model_id: str = Field(min_length=1, max_length=128)
+    prompt_id: str = Field(min_length=1, max_length=128)
+    calendar_id: str = Field(min_length=1, max_length=128)
+    calendar_version: str = Field(min_length=1, max_length=128)
+    commission_policy_id: str = Field(min_length=1, max_length=128)
+    commission_policy_version: int = Field(ge=1)
+    max_candidates: Literal[20] = 20
+    max_ai_calls: Literal[20] = 20
+    max_ai_cost_usd: Decimal = Decimal("5")
+
+    @field_validator(
+        "paper_account_id",
+        "model_id",
+        "prompt_id",
+        "calendar_id",
+        "calendar_version",
+        "commission_policy_id",
+    )
+    @classmethod
+    def validate_runtime_identity(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("shadow runtime identity values must be non-empty")
+        return normalized
+
+    @field_validator("max_ai_cost_usd")
+    @classmethod
+    def validate_ai_cost_limit(cls, value: Decimal) -> Decimal:
+        if not value.is_finite() or value != Decimal("5"):
+            raise ValueError("shadow AI session cost limit must be exactly 5 USD")
+        return value
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self)
+
+
+class ShadowSessionRecord(BaseModel):
+    """Revisioned state record consumed by the durable shadow-session FSM."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    run_id: str | None = None
+    source_sha: str = Field(min_length=7, max_length=64, pattern=r"^[0-9a-f]+$")
+    session_date: date
+    state: ShadowSessionState = ShadowSessionState.DISABLED
+    revision: int = Field(default=0, ge=0)
+    evidence_eligible: bool = False
+    block_reason: str | None = Field(default=None, max_length=500)
+    transitioned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    closed_at: datetime | None = None
+
+    @field_validator("transitioned_at", "closed_at")
+    @classmethod
+    def validate_session_timestamps(cls, value: datetime | None) -> datetime | None:
+        return require_aware(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_state_shape(self) -> Self:
+        terminal = self.state in {ShadowSessionState.COMPLETED, ShadowSessionState.BLOCKED}
+        reason = self.block_reason.strip() if self.block_reason else None
+        if terminal != (self.closed_at is not None):
+            raise ValueError("terminal shadow session states require closed_at")
+        if self.state == ShadowSessionState.BLOCKED:
+            if reason is None or self.evidence_eligible:
+                raise ValueError("blocked shadow sessions require a reason and are ineligible")
+        elif self.block_reason is not None:
+            raise ValueError("only blocked shadow sessions may carry a block reason")
+        if self.state == ShadowSessionState.COMPLETED:
+            if not self.evidence_eligible or self.run_id is None:
+                raise ValueError("completed shadow sessions require an eligible run")
+        elif self.evidence_eligible:
+            raise ValueError("only completed shadow sessions may be evidence eligible")
+        if self.state in {
+            ShadowSessionState.OPENING_RANGE,
+            ShadowSessionState.SCANNING,
+            ShadowSessionState.EVALUATING,
+            ShadowSessionState.MONITORING,
+            ShadowSessionState.FINALIZING,
+        } and self.run_id is None:
+            raise ValueError("active shadow session states require a run_id")
+        return self
+
+
 def _is_ed25519_signature(value: str) -> bool:
     if len(value) == 128:
         try:
@@ -296,6 +402,49 @@ class ScannerRun(BaseModel):
         return require_aware(value) if value is not None else None
 
 
+class RawScannerResult(BaseModel):
+    """Lossless IBKR scanner rank plus its canonical one-based rank."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scanner_run_id: str = Field(min_length=1)
+    request_id: int = Field(ge=0)
+    raw_rank: int = Field(ge=0, le=49)
+    normalized_rank: int = Field(ge=1, le=50)
+    con_id: int = Field(gt=0)
+    symbol: str
+    security_type: str = Field(min_length=1, max_length=16)
+    currency: str = Field(min_length=3, max_length=3)
+    exchange: str = Field(min_length=1, max_length=32)
+    primary_exchange: str | None = Field(default=None, max_length=32)
+    received_at: datetime
+    source: Literal["ibkr"] = "ibkr"
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_scanner_symbol(cls, value: str) -> str:
+        return normalize_symbols((value,))[0]
+
+    @field_validator("security_type", "currency", "exchange", "primary_exchange")
+    @classmethod
+    def normalize_scanner_fields(cls, value: str | None) -> str | None:
+        return value.strip().upper() if value is not None else None
+
+    @field_validator("received_at")
+    @classmethod
+    def validate_scanner_received_at(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @model_validator(mode="after")
+    def validate_rank_pair(self) -> Self:
+        if self.normalized_rank != self.raw_rank + 1:
+            raise ValueError("normalized scanner rank must equal raw rank plus one")
+        return self
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self)
+
+
 class Candidate(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -371,24 +520,39 @@ class QuoteSnapshot(BaseModel):
     bid: Decimal = Field(gt=0)
     ask: Decimal = Field(gt=0)
     observed_at: datetime
+    bid_observed_at: datetime | None = None
+    ask_observed_at: datetime | None = None
     min_tick: Decimal = Field(gt=0)
+    request_id: int | None = Field(default=None, ge=0)
+    source: Literal["ibkr"] = "ibkr"
+    data_mode: Literal["live"] = "live"
 
-    @field_validator("observed_at")
+    @field_validator("observed_at", "bid_observed_at", "ask_observed_at")
     @classmethod
-    def validate_observed_at(cls, value: datetime) -> datetime:
-        return require_aware(value)
+    def validate_observed_at(cls, value: datetime | None) -> datetime | None:
+        return require_aware(value) if value is not None else None
 
     @model_validator(mode="after")
-    def validate_quote(self) -> "QuoteSnapshot":
+    def validate_quote(self) -> Self:
         if self.ask < self.bid:
             raise ValueError("ask must not be below bid")
+        bid_time = self.bid_observed_at or self.observed_at
+        ask_time = self.ask_observed_at or self.observed_at
+        if bid_time > self.observed_at or ask_time > self.observed_at:
+            raise ValueError("quote side timestamps cannot follow the snapshot time")
+        object.__setattr__(self, "bid_observed_at", bid_time)
+        object.__setattr__(self, "ask_observed_at", ask_time)
         return self
 
     def age_seconds(self, now: datetime | None = None) -> Decimal:
         """Return the non-negative age used by quote admission checks."""
         observed_now = (now or datetime.now(timezone.utc))
         observed_now = require_aware(observed_now)
-        age = Decimal(str((observed_now - self.observed_at).total_seconds()))
+        oldest_side = min(
+            self.bid_observed_at or self.observed_at,
+            self.ask_observed_at or self.observed_at,
+        )
+        age = Decimal(str((observed_now - oldest_side).total_seconds()))
         return age
 
     def is_fresh(
@@ -423,6 +587,43 @@ class QuoteSnapshot(BaseModel):
         return fingerprint_payload(self)
 
 
+class RuleSetupProvenance(BaseModel):
+    """Complete causal IBKR inputs used to derive one immutable setup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    opening_bar_fingerprints: tuple[str, str, str]
+    atr_bar_fingerprints: tuple[str, ...] = Field(min_length=14)
+    breakout_bar_fingerprint: str = Field(min_length=64, max_length=64)
+    quote_fingerprint: str = Field(min_length=64, max_length=64)
+    candidate_input_fingerprint: str = Field(min_length=64, max_length=64)
+    source: Literal["ibkr"] = "ibkr"
+
+    @field_validator(
+        "opening_bar_fingerprints",
+        "atr_bar_fingerprints",
+    )
+    @classmethod
+    def validate_bar_digests(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(len(value) != 64 or any(character not in "0123456789abcdef" for character in value) for value in values):
+            raise ValueError("causal bar fingerprints must be lowercase SHA-256 digests")
+        return values
+
+    @field_validator(
+        "breakout_bar_fingerprint",
+        "quote_fingerprint",
+        "candidate_input_fingerprint",
+    )
+    @classmethod
+    def validate_causal_digest(cls, value: str) -> str:
+        if any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("causal fingerprints must be lowercase SHA-256 digests")
+        return value
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self)
+
+
 class RuleSetup(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -439,6 +640,7 @@ class RuleSetup(BaseModel):
     target_price: Decimal = Field(gt=0)
     bar_fingerprints: tuple[str, ...] = Field(min_length=1)
     quote_fingerprint: str = Field(min_length=64, max_length=64)
+    causal_provenance: RuleSetupProvenance | None = None
     detected_at: datetime
 
     @field_validator("symbol")
@@ -455,6 +657,18 @@ class RuleSetup(BaseModel):
     def validate_prices(self) -> "RuleSetup":
         if not self.stop_price < self.entry_limit < self.target_price:
             raise ValueError("rule setup must satisfy stop < entry < target")
+        if self.causal_provenance is not None:
+            provenance = self.causal_provenance
+            if provenance.quote_fingerprint != self.quote_fingerprint:
+                raise ValueError("causal provenance must match the setup quote")
+            used_bars = set(self.bar_fingerprints)
+            required_bars = {
+                *provenance.opening_bar_fingerprints,
+                *provenance.atr_bar_fingerprints,
+                provenance.breakout_bar_fingerprint,
+            }
+            if not required_bars.issubset(used_bars):
+                raise ValueError("setup bar fingerprints must contain every causal bar")
         return self
 
     def fingerprint(self) -> str:
@@ -483,6 +697,224 @@ class AIReview(BaseModel):
 
     def fingerprint(self) -> str:
         return fingerprint_payload(self)
+
+
+class RawAccountPosition(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    paper_account_id: str = Field(min_length=1, max_length=64)
+    con_id: int = Field(gt=0)
+    symbol: str
+    quantity: Decimal
+    market_price: Decimal = Field(gt=0)
+    market_value: Decimal
+    average_cost: Decimal = Field(ge=0)
+    unrealized_pnl: Decimal
+    realized_pnl: Decimal
+    currency: Literal["USD"] = "USD"
+    observed_at: datetime
+    source: Literal["ibkr"] = "ibkr"
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_position_symbol(cls, value: str) -> str:
+        return normalize_symbols((value,))[0]
+
+    @field_validator(
+        "quantity",
+        "market_price",
+        "market_value",
+        "average_cost",
+        "unrealized_pnl",
+        "realized_pnl",
+    )
+    @classmethod
+    def validate_position_decimals(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("account position decimals must be finite")
+        return value
+
+    @field_validator("observed_at")
+    @classmethod
+    def validate_position_time(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+
+class RawOpenOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    paper_account_id: str = Field(min_length=1, max_length=64)
+    client_id: int = Field(ge=0)
+    order_id: int = Field(ge=0)
+    perm_id: int = Field(ge=0)
+    con_id: int = Field(gt=0)
+    symbol: str
+    action: Literal["BUY", "SELL"]
+    total_quantity: Decimal = Field(gt=0)
+    filled_quantity: Decimal = Field(ge=0)
+    remaining_quantity: Decimal = Field(ge=0)
+    order_type: str = Field(min_length=1, max_length=32)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    stop_price: Decimal | None = Field(default=None, gt=0)
+    status: str = Field(min_length=1, max_length=64)
+    order_ref: str | None = Field(default=None, max_length=128)
+    parent_order_id: int | None = Field(default=None, ge=0)
+    oca_group: str | None = Field(default=None, max_length=128)
+    observed_at: datetime
+    source: Literal["ibkr"] = "ibkr"
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_order_symbol(cls, value: str) -> str:
+        return normalize_symbols((value,))[0]
+
+    @field_validator("total_quantity", "filled_quantity", "remaining_quantity")
+    @classmethod
+    def validate_order_quantity(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("open-order quantities must be finite")
+        return value
+
+    @field_validator("observed_at")
+    @classmethod
+    def validate_order_time(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @model_validator(mode="after")
+    def validate_order_quantities(self) -> Self:
+        if self.filled_quantity + self.remaining_quantity != self.total_quantity:
+            raise ValueError("filled and remaining quantity must equal total quantity")
+        return self
+
+    @property
+    def signed_total_quantity(self) -> Decimal:
+        return self.total_quantity if self.action == "BUY" else -self.total_quantity
+
+
+class RawExecution(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    paper_account_id: str = Field(min_length=1, max_length=64)
+    client_id: int = Field(ge=0)
+    execution_id: str = Field(min_length=1, max_length=128)
+    order_id: int = Field(ge=0)
+    perm_id: int = Field(ge=0)
+    con_id: int = Field(gt=0)
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    quantity: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    cumulative_quantity: Decimal = Field(gt=0)
+    average_price: Decimal = Field(gt=0)
+    executed_at: datetime
+    source: Literal["ibkr"] = "ibkr"
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_execution_symbol(cls, value: str) -> str:
+        return normalize_symbols((value,))[0]
+
+    @field_validator("quantity", "price", "cumulative_quantity", "average_price")
+    @classmethod
+    def validate_execution_decimals(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("execution decimals must be finite")
+        return value
+
+    @field_validator("executed_at")
+    @classmethod
+    def validate_execution_time(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @property
+    def signed_quantity(self) -> Decimal:
+        return self.quantity if self.side == "BUY" else -self.quantity
+
+
+class AccountSnapshot(BaseModel):
+    """Raw, fingerprinted PAPER account truth captured from IBKR."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fingerprint: str = ""
+    paper_account_id: str = Field(min_length=1, max_length=64)
+    client_id: int = Field(ge=0)
+    observed_at: datetime
+    net_liquidation: Decimal = Field(gt=0)
+    available_funds: Decimal
+    realized_day_pnl: Decimal
+    unrealized_pnl: Decimal
+    positions: tuple[RawAccountPosition, ...] = ()
+    open_orders: tuple[RawOpenOrder, ...] = ()
+    executions: tuple[RawExecution, ...] = ()
+    source: Literal["ibkr"] = "ibkr"
+
+    @field_validator("observed_at")
+    @classmethod
+    def validate_account_time(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @field_validator(
+        "net_liquidation", "available_funds", "realized_day_pnl", "unrealized_pnl"
+    )
+    @classmethod
+    def validate_account_decimals(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("account decimals must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def validate_account_scope(self) -> Self:
+        children = (*self.positions, *self.open_orders, *self.executions)
+        if any(item.paper_account_id != self.paper_account_id for item in children):
+            raise ValueError("account snapshot children must match the PAPER account")
+        if any(
+            item.client_id != self.client_id
+            for item in (*self.open_orders, *self.executions)
+        ):
+            raise ValueError("account snapshot order data must match the client ID")
+        if len({item.order_id for item in self.open_orders}) != len(self.open_orders):
+            raise ValueError("account snapshot open order IDs must be unique")
+        if len({item.execution_id for item in self.executions}) != len(self.executions):
+            raise ValueError("account snapshot execution IDs must be unique")
+        payload = self.model_dump(mode="json", exclude={"fingerprint"})
+        expected = fingerprint_payload(payload)
+        if self.fingerprint and self.fingerprint != expected:
+            raise ValueError("account fingerprint must match immutable snapshot fields")
+        object.__setattr__(self, "fingerprint", expected)
+        return self
+
+
+class ShadowReconciliationReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    account_fingerprint: str = Field(min_length=64, max_length=64)
+    status: Literal["clear", "blocked"]
+    unknown_position_con_ids: tuple[int, ...] = ()
+    unknown_order_ids: tuple[int, ...] = ()
+    unknown_execution_ids: tuple[str, ...] = ()
+    mismatches: tuple[str, ...] = ()
+    observed_at: datetime
+
+    @field_validator("observed_at")
+    @classmethod
+    def validate_shadow_reconciliation_time(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @model_validator(mode="after")
+    def validate_reconciliation_shape(self) -> Self:
+        has_findings = any(
+            (
+                self.unknown_position_con_ids,
+                self.unknown_order_ids,
+                self.unknown_execution_ids,
+                self.mismatches,
+            )
+        )
+        if (self.status == "blocked") != has_findings:
+            raise ValueError("shadow reconciliation status must match its findings")
+        return self
 
 
 class PositionExposure(BaseModel):
@@ -536,6 +968,50 @@ class PortfolioSnapshot(BaseModel):
         if "fingerprint" not in updates:
             values.pop("fingerprint", None)
         return type(self).model_validate(values)
+
+
+class CommissionPolicy(BaseModel):
+    """Versioned local commission schedule used only for modelled outcomes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1, max_length=128)
+    version: int = Field(ge=1)
+    currency: Literal["USD"] = "USD"
+    effective_from: date
+    commission_per_share_usd: Decimal = Field(ge=0)
+    minimum_commission_usd: Decimal = Field(ge=0)
+    maximum_commission_pct_of_trade_value: Decimal = Field(gt=0, le=100)
+    sell_fee_per_share_usd: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @field_validator(
+        "commission_per_share_usd",
+        "minimum_commission_usd",
+        "maximum_commission_pct_of_trade_value",
+        "sell_fee_per_share_usd",
+    )
+    @classmethod
+    def validate_commission_decimals(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("commission values must be finite")
+        return value
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self)
+
+    def fee_for(self, *, side: Literal["BUY", "SELL"], quantity: int, price: Decimal) -> Decimal:
+        if quantity < 1 or not price.is_finite() or price <= 0:
+            raise ValueError("commission inputs must be positive and finite")
+        trade_value = Decimal(quantity) * price
+        base = max(
+            self.minimum_commission_usd,
+            Decimal(quantity) * self.commission_per_share_usd,
+        )
+        cap = trade_value * self.maximum_commission_pct_of_trade_value / Decimal("100")
+        commission = min(base, cap)
+        if side == "SELL":
+            commission += Decimal(quantity) * self.sell_fee_per_share_usd
+        return commission
 
 
 class RiskPolicy(BaseModel):
@@ -710,6 +1186,129 @@ class Decision(BaseModel):
                 raise ValueError("data or rule rejection cannot contain AI or risk decisions")
 
         return self
+
+
+class ModelledFill(BaseModel):
+    """A shadow-only fill estimate that can never represent a broker fill."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    kind: Literal["MODELLED"] = "MODELLED"
+    run_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    setup_fingerprint: str = Field(min_length=64, max_length=64)
+    quote_fingerprint: str = Field(min_length=64, max_length=64)
+    commission_policy_fingerprint: str = Field(min_length=64, max_length=64)
+    side: Literal["BUY", "SELL"]
+    reason: Literal["entry", "stop", "target", "session_close"]
+    quantity: int = Field(gt=0)
+    reference_price: Decimal = Field(gt=0)
+    modelled_price: Decimal = Field(gt=0)
+    slippage_bps: Decimal = Decimal("5")
+    commission_usd: Decimal = Field(ge=0)
+    filled_at: datetime
+    rule_only_baseline: bool = False
+    source: Literal["modelled_from_ibkr"] = "modelled_from_ibkr"
+
+    @field_validator(
+        "reference_price", "modelled_price", "slippage_bps", "commission_usd"
+    )
+    @classmethod
+    def validate_fill_decimals(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("modelled fill decimals must be finite")
+        return value
+
+    @field_validator("slippage_bps")
+    @classmethod
+    def validate_fixed_slippage(cls, value: Decimal) -> Decimal:
+        if value != Decimal("5"):
+            raise ValueError("shadow fill slippage must be exactly 5 bps")
+        return value
+
+    @field_validator("filled_at")
+    @classmethod
+    def validate_fill_time(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @model_validator(mode="after")
+    def validate_fill_direction(self) -> Self:
+        if (self.reason == "entry") != (self.side == "BUY"):
+            raise ValueError("entry fills must buy and exit fills must sell")
+        return self
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self)
+
+
+class ShadowSessionReceipt(BaseModel):
+    """Immutable daily receipt for a completed or blocked real-data session."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    run_id: str = Field(min_length=1)
+    source_sha: str = Field(min_length=7, max_length=64, pattern=r"^[0-9a-f]+$")
+    session_date: date
+    state: Literal[ShadowSessionState.COMPLETED, ShadowSessionState.BLOCKED]
+    evidence_eligible: bool
+    strategy_id: str = Field(min_length=1)
+    strategy_version: int = Field(ge=1)
+    policy_fingerprints: dict[str, str] = Field(min_length=1)
+    runtime_config_fingerprint: str = Field(min_length=64, max_length=64)
+    commission_policy_fingerprint: str = Field(min_length=64, max_length=64)
+    calendar_id: str = Field(min_length=1, max_length=128)
+    calendar_version: str = Field(min_length=1, max_length=128)
+    scanner_result_count: int = Field(ge=0, le=50)
+    admitted_candidate_count: int = Field(ge=0, le=20)
+    terminal_decision_count: int = Field(ge=0, le=20)
+    modelled_fill_count: int = Field(ge=0)
+    decision_digest: str = Field(min_length=64, max_length=64)
+    replay_digest: str = Field(min_length=64, max_length=64)
+    data_provenance_digest: str = Field(min_length=64, max_length=64)
+    errors: tuple[str, ...] = ()
+    started_at: datetime
+    closed_at: datetime
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("started_at", "closed_at", "created_at")
+    @classmethod
+    def validate_receipt_times(cls, value: datetime) -> datetime:
+        return require_aware(value)
+
+    @field_validator(
+        "runtime_config_fingerprint",
+        "commission_policy_fingerprint",
+        "decision_digest",
+        "replay_digest",
+        "data_provenance_digest",
+    )
+    @classmethod
+    def validate_receipt_digest(cls, value: str) -> str:
+        if any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("session receipt fingerprints must be lowercase SHA-256 digests")
+        return value
+
+    @model_validator(mode="after")
+    def validate_receipt_shape(self) -> Self:
+        if self.closed_at < self.started_at or self.created_at < self.closed_at:
+            raise ValueError("session receipt timestamps must be ordered")
+        if self.admitted_candidate_count > self.scanner_result_count:
+            raise ValueError("admitted candidates cannot exceed scanner results")
+        if any(not error.strip() for error in self.errors):
+            raise ValueError("session receipt errors must be non-empty")
+        if self.state == ShadowSessionState.COMPLETED:
+            if not self.evidence_eligible or self.errors:
+                raise ValueError("completed receipts must be eligible and error-free")
+            if self.terminal_decision_count != self.admitted_candidate_count:
+                raise ValueError("completed receipts require one terminal decision per candidate")
+        elif self.evidence_eligible or not self.errors:
+            raise ValueError("blocked receipts must be ineligible and explain the failure")
+        return self
+
+    def fingerprint(self) -> str:
+        return fingerprint_payload(self)
 
 
 class AuthorityReceipt(BaseModel):
