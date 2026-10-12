@@ -521,6 +521,10 @@ class ShadowRunSession:
     def decisions(self) -> dict[str, Decision]:
         return dict(self._decisions)
 
+    @property
+    def candidates(self) -> tuple[Candidate, ...]:
+        return tuple(self._candidates.values())
+
     def pending(self) -> tuple[Candidate, ...]:
         return tuple(
             candidate

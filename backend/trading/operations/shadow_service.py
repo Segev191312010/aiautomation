@@ -1,0 +1,231 @@
+"""Composition root for real-data shadow sessions and the unattended daemon.
+
+Shadow mode reads IBKR market data and the PAPER account, asks Claude for a
+review, and records decisions. It holds no order client and cannot submit.
+"""
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from hashlib import sha256
+import logging
+import os
+from pathlib import Path
+import socket
+import subprocess
+
+from trading.contracts import RiskPolicy, ShadowRuntimeConfig
+from trading.intelligence.anthropic_transport import (
+    AnthropicMessagesTransport,
+    build_anthropic_client,
+)
+from trading.intelligence.prompts import review_prompt
+from trading.intelligence.review_provider import ReviewSessionLimits, StructuredAIReviewProvider
+from trading.market.ibkr_boundary import PaperIBKRMarketData
+from trading.market.tws_actor import (
+    PAPER_TWS_HOST,
+    TWSActorConfig,
+    TWSPaperActor,
+    documented_line_allocation,
+)
+from trading.operations.keychain import read_anthropic_api_key
+from trading.orchestration import RepositoryBackedShadowRunner, ShadowPipeline
+from trading.orchestration.session_runner import (
+    SessionAborted,
+    SessionReport,
+    ShadowSessionRunner,
+    ensure_orb_strategy,
+)
+from trading.policies import ExecutionPolicy, OpeningRangeBreakoutPolicy
+from trading.scheduler.sessions import (
+    MARKET_TIMEZONE,
+    MarketSession,
+    market_session,
+    next_market_session,
+)
+
+logger = logging.getLogger("autotrader.shadow.service")
+
+# Connect early enough to finish the handshake and preflight before the scan.
+CONNECT_LEAD = timedelta(minutes=5)
+# The raw volume unit reported by the pinned ibapi client for US stocks.
+# Defaults to shares; the real-TWS probe confirms it against the TWS display.
+IBKR_API_VOLUME_MULTIPLIER = Decimal("1")
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+Clock = Callable[[], datetime]
+Sleeper = Callable[[float], Awaitable[None]]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def source_sha(repo_root: Path = REPO_ROOT) -> str:
+    """The exact code a run used; uncommitted changes are marked, not hidden."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=no"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown-source"
+    return f"{head}-dirty" if dirty else head
+
+
+def policy_fingerprints(config: ShadowRuntimeConfig, policy: RiskPolicy) -> dict[str, str]:
+    return {
+        "risk": policy.fingerprint(),
+        "opening_range_breakout": OpeningRangeBreakoutPolicy().fingerprint(),
+        "execution": ExecutionPolicy().fingerprint(),
+        "review_prompt": sha256(review_prompt(config.prompt_id).encode("utf-8")).hexdigest(),
+        "review_model": sha256(config.model_id.encode("utf-8")).hexdigest(),
+        "runtime_config": config.fingerprint(),
+    }
+
+
+def session_to_run(now: datetime) -> MarketSession:
+    """Today's session while its entry window is still open, else the next one."""
+    today = market_session(now.astimezone(MARKET_TIMEZONE).date())
+    if today is not None and now < today.entry_cutoff_at:
+        return today
+    return next_market_session(now)
+
+
+async def run_shadow_session(
+    *,
+    config: ShadowRuntimeConfig,
+    owner_id: str,
+    session: MarketSession,
+    clock: Clock = _utc_now,
+    sleep: Sleeper = asyncio.sleep,
+) -> SessionReport:
+    """Run one real-data session end to end against the local PAPER TWS."""
+    strategy = await ensure_orb_strategy(owner_id=owner_id)
+    policy = RiskPolicy()
+    run_id = f"shadow-{strategy.strategy_id[:8]}-{session.session_date.isoformat()}"
+    limits = ReviewSessionLimits(
+        max_calls=config.max_ai_calls, max_cost_usd=config.max_ai_cost_usd
+    )
+    api_key = read_anthropic_api_key()
+    provider = StructuredAIReviewProvider(
+        transport=AnthropicMessagesTransport(
+            client=build_anthropic_client(
+                api_key=api_key, timeout_seconds=limits.timeout_seconds
+            ),
+            system_prompt=review_prompt(config.prompt_id),
+        ),
+        model_id=config.model_id,
+        prompt_version=config.prompt_id,
+        limits=limits,
+        session_id=run_id,
+    )
+    actor = TWSPaperActor(
+        TWSActorConfig(account=config.paper_account_id, client_id=config.data_client_id),
+        capacity_checker=documented_line_allocation,
+    )
+    market = PaperIBKRMarketData(
+        actor=actor,
+        host=PAPER_TWS_HOST,
+        volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
+    )
+
+    async def reconnect() -> None:
+        if actor.connected:
+            return
+        await actor.disconnect()
+        await actor.connect()
+        logger.info("reconnected to TWS")
+
+    await _sleep_until(session.scanner_at - CONNECT_LEAD, clock=clock, sleep=sleep)
+    await actor.connect()
+    try:
+        preflight = await actor.preflight(required_data_lines=config.max_candidates)
+        if not preflight.ready:
+            raise SessionAborted("TWS preflight failed: " + "; ".join(preflight.reasons))
+        runner = ShadowSessionRunner(
+            market=market,
+            read_account=actor.account_snapshot,
+            runner=RepositoryBackedShadowRunner(
+                pipeline=ShadowPipeline(proposal_provider=provider), clock=clock
+            ),
+            clock=clock,
+            sleep=sleep,
+            reconnect=reconnect,
+            max_candidates=config.max_candidates,
+            holder_id=f"{socket.gethostname()}:{os.getpid()}",
+        )
+        report = await runner.run(
+            session=session,
+            strategy=strategy,
+            policy=policy,
+            source_sha=source_sha(),
+            policy_fingerprints=policy_fingerprints(config, policy),
+            run_id=run_id,
+        )
+        usage = provider.usage
+        logger.info(
+            "session %s finished: %s; AI calls=%d cost=$%s",
+            session.session_date.isoformat(),
+            report.summary(),
+            usage.calls,
+            usage.cost_usd,
+        )
+        return report
+    finally:
+        await actor.disconnect()
+
+
+async def run_shadow_daemon(
+    *,
+    config_loader: Callable[[], ShadowRuntimeConfig],
+    owner_id: str,
+    clock: Clock = _utc_now,
+    sleep: Sleeper = asyncio.sleep,
+    max_sessions: int | None = None,
+) -> None:
+    """Run every trading session forever; one failed day never stops the next."""
+    completed = 0
+    while max_sessions is None or completed < max_sessions:
+        session = session_to_run(clock())
+        logger.info("next session %s", session.session_date.isoformat())
+        try:
+            # Reload each day so config edits apply without restarting the daemon.
+            config = config_loader()
+            await run_shadow_session(
+                config=config, owner_id=owner_id, session=session, clock=clock, sleep=sleep
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("session %s failed", session.session_date.isoformat())
+        completed += 1
+        await _sleep_until(session.entry_cutoff_at, clock=clock, sleep=sleep)
+
+
+async def _sleep_until(moment: datetime, *, clock: Clock, sleep: Sleeper) -> None:
+    remaining = (moment.astimezone(timezone.utc) - clock()).total_seconds()
+    if remaining > 0:
+        await sleep(remaining)
+
+
+__all__ = [
+    "IBKR_API_VOLUME_MULTIPLIER",
+    "policy_fingerprints",
+    "run_shadow_daemon",
+    "run_shadow_session",
+    "session_to_run",
+    "source_sha",
+]
