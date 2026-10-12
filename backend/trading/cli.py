@@ -9,12 +9,17 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 import sys
+from typing import TYPE_CHECKING
 
 import aiosqlite
 
 from config import cfg
 from db.core import init_db
 from trading.storage.runtime_fence import SQLitePaperKillStore
+
+if TYPE_CHECKING:
+    from trading.market.screener import SweepResult
+    from trading.market.universe import ImportReport, QualificationReport
 
 
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
@@ -65,6 +70,37 @@ def _parser() -> argparse.ArgumentParser:
     )
     agent = shadow_actions.add_parser("agent", help="manage the launchd agent that runs the daemon")
     agent.add_argument("agent_action", choices=("install", "enable", "disable", "status"))
+
+    universe = domains.add_parser("universe", help="watchlist universe (market data only, no orders)")
+    universe_actions = universe.add_subparsers(dest="action", required=True)
+    universe_import = universe_actions.add_parser(
+        "import", help="resolve a TradingView watchlist export to IBKR contracts"
+    )
+    universe_import.add_argument("path", type=Path, help="comma/newline separated EXCHANGE:SYMBOL list")
+    universe_qualify = universe_actions.add_parser(
+        "qualify", help="price/liquidity qualification of the universe for one session"
+    )
+    universe_qualify.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        default=None,
+        help="session date (YYYY-MM-DD); defaults to today's or the next session",
+    )
+
+    screener = domains.add_parser("screener", help="live screener (market data only, no orders)")
+    screener_actions = screener.add_subparsers(dest="action", required=True)
+    screener_run = screener_actions.add_parser(
+        "run", help="sweep the qualified universe 08:00-16:00 ET on trading days"
+    )
+    screener_run.add_argument(
+        "--interval", type=float, default=60.0, help="seconds between sweep starts (default 60)"
+    )
+    screener_run.add_argument("--once", action="store_true", help="run one sweep now and exit")
+    screener_run.add_argument(
+        "--watchlist-only",
+        action="store_true",
+        help="do not merge movers from IBKR scans (HOT_BY_VOLUME, TOP_PERC_GAIN, MOST_ACTIVE)",
+    )
     return parser
 
 
@@ -161,10 +197,123 @@ def _shadow_runtime(arguments: argparse.Namespace) -> int:
         return 1
 
 
+def _interactive_screener_logger() -> logging.Logger:
+    from trading.operations.logging import configure_shadow_logging
+
+    logger = configure_shadow_logging()
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(console)
+    return logging.getLogger("autotrader.shadow.screener")
+
+
+def _print_import(report: ImportReport) -> None:
+    print(f"watchlist symbols: {report.parsed} (duplicates skipped: {len(report.duplicates)})")
+    print(f"resolved:          {report.resolved}")
+    print(f"  via retry without exchange hint: {', '.join(report.used_fallback) or 'none'}")
+    print(f"unresolved:        {len(report.unresolved)}")
+    for row in report.unresolved:
+        label = f"{row.listing_exchange}:{row.symbol}" if row.listing_exchange else row.symbol
+        print(f"  {label}: {row.last_error}")
+    print(f"removed (no longer in export): {', '.join(report.removed) or 'none'}")
+
+
+def _print_qualification(report: QualificationReport) -> None:
+    print(f"session {report.session_date.isoformat()}: {report.instruments} resolved instruments")
+    print(f"  requested now: {report.requested}  already final: {report.skipped}")
+    print(f"  qualified: {report.qualified}")
+    for reason, count in report.rejected:
+        print(f"  not qualified ({reason}): {count}")
+    print(f"  transient errors (retried next run): {len(report.errors)}")
+    for symbol, reason in report.errors[:20]:
+        print(f"    {symbol}: {reason}")
+
+
+def _print_sweep(result: SweepResult, *, top: int = 10) -> None:
+    payload = result.payload
+    print(
+        f"sweep {payload.session_date} observed {payload.observed_at}: "
+        f"universe {payload.universe_size}, qualified {payload.qualified}, "
+        f"quoted {payload.quoted}, errors {payload.errors}, {payload.sweep_seconds:.1f} s"
+    )
+    hot = [row for row in payload.rows if row.hot][:top]
+    print(f"{'hot':>3}  {'symbol':<7} {'last':>9} {'chg%':>7} {'gap%':>7} {'rvol':>6} {'score':>7}  source")
+    for row in hot:
+        print(
+            f"{row.hot_rank:>3}  {row.symbol:<7} {row.last or '-':>9} {row.change_pct or '-':>7} "
+            f"{row.gap_pct or '-':>7} {row.rvol or '-':>6} {row.score:>7}  {row.source}"
+        )
+    scan_rows = [row.symbol for row in payload.rows if row.source == "ibkr_scan"]
+    print(f"IBKR scan additions: {', '.join(scan_rows) or 'none'}")
+    for sample in result.error_samples:
+        print(f"  error: {sample}")
+
+
+def _market_data_command(arguments: argparse.Namespace) -> int:
+    """Universe import/qualify and the live screener; market data only."""
+    from datetime import datetime, timezone
+
+    from trading.market.tws_actor import TWSCompetingSessionError
+    from trading.operations import screener_service as service
+    from trading.operations.settings import load_shadow_runtime_config
+
+    logger = _interactive_screener_logger()
+    original_db_path = cfg.DB_PATH
+    requested_db_path = getattr(arguments, "db_path", None)
+    if requested_db_path is not None:
+        cfg.DB_PATH = str(requested_db_path.expanduser())
+
+    async def command() -> int:
+        await init_db()
+        config = load_shadow_runtime_config()
+        if arguments.domain == "universe" and arguments.action == "import":
+            _print_import(await service.import_universe(arguments.path, runtime_config=config))
+            return 0
+        if arguments.domain == "universe":
+            session_date = arguments.date or service.screener_session_date(
+                datetime.now(timezone.utc)
+            )
+            _print_qualification(
+                await service.qualify_session(session_date, runtime_config=config)
+            )
+            return 0
+        if arguments.once:
+            qualification, sweep = await service.run_screener_once(
+                runtime_config=config, include_scans=not arguments.watchlist_only
+            )
+            _print_qualification(qualification)
+            _print_sweep(sweep)
+            return 0
+        await service.run_screener(
+            runtime_config=config,
+            interval_seconds=arguments.interval,
+            include_scans=not arguments.watchlist_only,
+        )
+        return 0
+
+    label = f"{arguments.domain} {arguments.action}"
+    try:
+        return asyncio.run(command())
+    except KeyboardInterrupt:
+        return 130
+    except TWSCompetingSessionError as exc:
+        logger.error("%s (%s)", service.COMPETING_SESSION_MESSAGE, exc)
+        print(f"error: {service.COMPETING_SESSION_MESSAGE}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - reported without secrets
+        logger.exception("%s failed", label)
+        print(f"error: {label} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        cfg.DB_PATH = original_db_path
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run an explicitly requested local operator command."""
 
     arguments = _parser().parse_args(argv)
+    if arguments.domain in {"universe", "screener"}:
+        return _market_data_command(arguments)
     if arguments.domain == "shadow" and arguments.action in {"run", "daemon"}:
         return _shadow_runtime(arguments)
     if arguments.domain == "shadow" and arguments.action == "agent":

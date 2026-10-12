@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
+import re
 import threading
 from typing import Any, Protocol
 
@@ -19,6 +20,7 @@ from trading.market.ibkr_boundary import (
     IBKRTradeBar,
     ScannerRequest,
 )
+from trading.market.snapshots import MarketSnapshot, MarketSnapshotError
 from trading.contracts import AccountSnapshot, QuoteSnapshot, RawAccountPosition
 
 PAPER_TWS_HOST = "127.0.0.1"
@@ -35,6 +37,39 @@ REAL_TIME_MARKET_DATA = 1
 # The API exposes no line-count query; quotes here hold one line at a time.
 DEFAULT_MARKET_DATA_LINES = 100
 DAILY_HISTORY_DURATION = "2 M"
+# "No market data during competing live session": the owner's username is
+# logged in elsewhere (phone/web) and that session owns the data lines.
+COMPETING_SESSION_ERROR_CODE = 10197
+# Historical-data services report the same condition as free text.
+_COMPETING_SESSION_TEXT_CODES = frozenset({162, 165})
+_COMPETING_SESSION_TEXT = "different ip address"
+_TWS_ERROR_REPORT = re.compile(r"^TWS error (-?\d+): (.*)$", re.DOTALL)
+# Streaming tick types collected by market_snapshot (IBKR TickType ids).
+_TICK_BID = 1
+_TICK_ASK = 2
+_TICK_LAST = 4
+_TICK_HIGH = 6
+_TICK_LOW = 7
+_TICK_VOLUME = 8
+_TICK_CLOSE = 9
+_TICK_OPEN = 14
+_SNAPSHOT_PRICE_TICKS = frozenset(
+    {_TICK_BID, _TICK_ASK, _TICK_LAST, _TICK_HIGH, _TICK_LOW, _TICK_CLOSE, _TICK_OPEN}
+)
+# Once price, prior close and volume are present, the rest of TWS's initial
+# tick burst (open/high/low) normally lands within milliseconds; wait at most
+# this long for it rather than publishing rows without session statistics.
+MARKET_SNAPSHOT_SETTLE_SECONDS = 0.25
+# A fresh subscription takes ~0.5-1.2 s to deliver its first ticks, but TWS
+# serves subscriptions in parallel (live 2026-10-12: 16 concurrent streams
+# finished in 2.1 s). Batches hold this many lines of the 100 allocated.
+MAX_SNAPSHOT_LINES = 10
+# Each stream is two messages (request + cancel); spacing starts 50 ms apart
+# keeps a batch under TWS's 50 messages/second client limit.
+SNAPSHOT_START_INTERVAL_SECONDS = 0.05
+# Scans the live screener may merge; the frozen ORB scan() is unaffected.
+SCREENER_SCAN_CODES = frozenset({"HOT_BY_VOLUME", "TOP_PERC_GAIN", "MOST_ACTIVE"})
+SCREENER_SCAN_ROWS = 50
 
 
 class TWSActorError(RuntimeError):
@@ -51,6 +86,27 @@ class TWSConnectionError(TWSActorError):
 
 class TWSRequestError(TWSActorError):
     """TWS rejected or failed a market-data request."""
+
+
+class TWSCompetingSessionError(TWSRequestError):
+    """Market data is blocked because the IBKR login is active elsewhere."""
+
+
+def is_competing_session_error(code: int, message: str) -> bool:
+    """Whether a TWS error means another login session holds the market data."""
+    if code == COMPETING_SESSION_ERROR_CODE:
+        return True
+    return code in _COMPETING_SESSION_TEXT_CODES and _COMPETING_SESSION_TEXT in message.lower()
+
+
+def is_competing_session_report(report: str | None) -> bool:
+    """Recognize the actor's ``TWS error <code>: <message>`` text, e.g. in a bar batch."""
+    if not report:
+        return False
+    match = _TWS_ERROR_REPORT.match(report.strip())
+    if match is None:
+        return False
+    return is_competing_session_error(int(match.group(1)), match.group(2))
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +244,18 @@ class _PendingQuote:
     data_type: int | None = None
 
 
+@dataclass
+class _PendingMarketSnapshot:
+    # ``ready``: real-time confirmed with a price, prior close and volume.
+    # ``complete``: every collected tick is present; no settle wait needed.
+    ready: asyncio.Future[None]
+    complete: asyncio.Future[None]
+    con_id: int
+    data_type: int | None = None
+    prices: dict[int, Decimal] = field(default_factory=dict)
+    volume_raw: Decimal | None = None
+
+
 class _CallbackSink:
     """Translate official camelCase callbacks and test-double callbacks."""
 
@@ -236,6 +304,9 @@ class _CallbackSink:
     def tickPrice(self, request_id: int, tick_type: int, price: float, *args: Any) -> None:
         self.actor._on_tick_price(request_id, tick_type, price)
 
+    def tickSize(self, request_id: int, tick_type: int, size: Any, *args: Any) -> None:
+        self.actor._on_tick_size(request_id, tick_type, size)
+
     def marketDataType(self, request_id: int, data_type: int) -> None:
         self.actor._on_market_data_type(request_id, data_type)
 
@@ -261,6 +332,7 @@ class _CallbackSink:
     historical_data_end = historicalDataEnd
     historical_data_update = historicalDataUpdate
     tick_price = tickPrice
+    tick_size = tickSize
     market_data_type = marketDataType
     tick_snapshot_end = tickSnapshotEnd
 
@@ -318,6 +390,9 @@ def _official_client_factory(sink: _CallbackSink) -> TWSClient:
         def tickPrice(self, *args: Any) -> None:
             self._sink.tickPrice(*args)
 
+        def tickSize(self, *args: Any) -> None:
+            self._sink.tickSize(*args)
+
         def marketDataType(self, *args: Any) -> None:
             self._sink.marketDataType(*args)
 
@@ -349,6 +424,21 @@ def _official_scanner_factory(request: ScannerRequest) -> Any:
     return subscription
 
 
+def _official_screener_scan_factory(scan_code: str, number_of_rows: int) -> Any:
+    from ibapi.scanner import ScannerSubscription
+
+    subscription = ScannerSubscription()
+    subscription.instrument = "STK"
+    subscription.locationCode = "STK.US.MAJOR"
+    subscription.scanCode = scan_code
+    # "CORP" is IBKR's code for ordinary company shares (see the ORB factory).
+    subscription.stockTypeFilter = "CORP"
+    subscription.numberOfRows = number_of_rows
+    subscription.abovePrice = 10.0
+    subscription.belowPrice = 300.0
+    return subscription
+
+
 def _official_contract_factory(con_id: int) -> Any:
     from ibapi.contract import Contract
 
@@ -357,6 +447,19 @@ def _official_contract_factory(con_id: int) -> Any:
     contract.secType = "STK"
     contract.exchange = "SMART"
     contract.currency = "USD"
+    return contract
+
+
+def _official_symbol_contract_factory(symbol: str, primary_exchange: str | None) -> Any:
+    from ibapi.contract import Contract
+
+    contract = Contract()
+    contract.symbol = symbol
+    contract.secType = "STK"
+    contract.exchange = "SMART"
+    contract.currency = "USD"
+    if primary_exchange:
+        contract.primaryExchange = primary_exchange
     return contract
 
 
@@ -387,12 +490,18 @@ class TWSPaperActor:
         scanner_factory: Callable[[ScannerRequest], Any] | None = None,
         contract_factory: Callable[[int], Any] | None = None,
         capacity_checker: Callable[[int], Any] | None = None,
+        symbol_contract_factory: Callable[[str, str | None], Any] | None = None,
+        screener_scan_factory: Callable[[str, int], Any] | None = None,
     ) -> None:
         config.validate()
         self.config = config
         self._client_factory = client_factory or _official_client_factory
         self._scanner_factory = scanner_factory or _official_scanner_factory
         self._contract_factory = contract_factory or _official_contract_factory
+        self._symbol_contract_factory = (
+            symbol_contract_factory or _official_symbol_contract_factory
+        )
+        self._screener_scan_factory = screener_scan_factory or _official_screener_scan_factory
         self._capacity_checker = capacity_checker
         self._client: TWSClient | None = None
         self._callback_sink = _CallbackSink(self)
@@ -410,6 +519,7 @@ class TWSPaperActor:
         self._pending_daily: dict[int, _PendingDailyBars] = {}
         self._pending_details: dict[int, _PendingDetails] = {}
         self._pending_quotes: dict[int, _PendingQuote] = {}
+        self._pending_snapshots: dict[int, _PendingMarketSnapshot] = {}
         self._pending_account: _PendingAccount | None = None
         self._last_error: str | None = None
         self._callbacks_seen = 0
@@ -417,6 +527,11 @@ class TWSPaperActor:
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def last_error(self) -> str | None:
+        """Most recent non-informational TWS error text, for operator diagnostics."""
+        return self._last_error
 
     @property
     def managed_accounts(self) -> frozenset[str]:
@@ -488,6 +603,9 @@ class TWSPaperActor:
         self._pending_daily.clear()
         self._pending_details.clear()
         self._pending_quotes.clear()
+        for snapshot in tuple(self._pending_snapshots.values()):
+            self._fail_snapshot(snapshot, error)
+        self._pending_snapshots.clear()
         if self._pending_account is not None:
             self._set_future_exception(self._pending_account.future, error)
             self._pending_account = None
@@ -539,6 +657,35 @@ class TWSPaperActor:
             finally:
                 self._pending_scans.pop(request_id, None)
 
+    async def screener_scan(self, scan_code: str) -> tuple[IBKRScannerResult, ...]:
+        """One allowlisted $10-$300 US common-stock scan for the live screener.
+
+        Kept apart from ``scan()``, whose single frozen ORB request must not
+        change; rows are returned unfiltered for the caller to vet.
+        """
+        if scan_code not in SCREENER_SCAN_CODES:
+            raise TWSRequestError(f"scan code {scan_code!r} is not allowlisted for the screener")
+        self._require_connected()
+        async with self._request_gate:
+            request_id = await self._allocate_request_id()
+            pending = _PendingScan(asyncio.get_running_loop().create_future())
+            self._pending_scans[request_id] = pending
+            try:
+                subscription = self._screener_scan_factory(scan_code, SCREENER_SCAN_ROWS)
+                method = getattr(self._client, "reqScannerSubscription")
+                try:
+                    method(request_id, subscription, [], [])
+                except TypeError:
+                    method(request_id, subscription)
+                return await asyncio.wait_for(
+                    pending.future, timeout=self.config.request_timeout_seconds
+                )
+            except asyncio.TimeoutError as exc:
+                self._cancel_scanner(request_id)
+                raise TWSRequestError("TWS screener scan timed out") from exc
+            finally:
+                self._pending_scans.pop(request_id, None)
+
     async def contract_details(self, con_id: int) -> IBKRContractDetails:
         """Resolve one conId to its qualified details; ambiguity is an error."""
         if con_id <= 0:
@@ -551,6 +698,33 @@ class TWSPaperActor:
             try:
                 method = getattr(self._client, "reqContractDetails")
                 method(request_id, self._contract_factory(con_id))
+                return await asyncio.wait_for(
+                    pending.future, timeout=self.config.request_timeout_seconds
+                )
+            except asyncio.TimeoutError as exc:
+                raise TWSRequestError("TWS contract-details request timed out") from exc
+            finally:
+                self._pending_details.pop(request_id, None)
+
+    async def contract_details_for_symbol(
+        self, symbol: str, primary_exchange: str | None
+    ) -> IBKRContractDetails:
+        """Resolve a US stock symbol (SMART/USD) to exactly one contract.
+
+        ``primary_exchange`` narrows the listing; zero or several matches is
+        an error because a guessed contract would trade the wrong company.
+        """
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise TWSRequestError("symbol must be non-empty")
+        hint = primary_exchange.strip() if primary_exchange else None
+        self._require_connected()
+        async with self._request_gate:
+            request_id = await self._allocate_request_id()
+            pending = _PendingDetails(asyncio.get_running_loop().create_future(), 0)
+            self._pending_details[request_id] = pending
+            try:
+                method = getattr(self._client, "reqContractDetails")
+                method(request_id, self._symbol_contract_factory(symbol.strip(), hint or None))
                 return await asyncio.wait_for(
                     pending.future, timeout=self.config.request_timeout_seconds
                 )
@@ -699,6 +873,111 @@ class TWSPaperActor:
                 # The line is released on every path, including success.
                 self._cancel_market_data(request_id)
                 self._pending_quotes.pop(request_id, None)
+
+    async def market_snapshot(
+        self, con_id: int, *, timeout_seconds: float = 3.0
+    ) -> MarketSnapshot:
+        """Session statistics from a short-lived real-time stream (snapshot=False).
+
+        Resolves once real-time data is confirmed and a price (last, or bid
+        and ask), the prior close and volume are present, then waits at most
+        ``MARKET_SNAPSHOT_SETTLE_SECONDS`` for the remaining open/high/low
+        ticks. On timeout a confirmed price and prior close are still
+        returned; anything less is an error. The line is always released.
+        """
+        _validate_snapshot_request((con_id,), timeout_seconds)
+        self._require_connected()
+        async with self._request_gate:
+            return await self._stream_snapshot(con_id, timeout_seconds)
+
+    async def market_snapshots(
+        self,
+        con_ids: Sequence[int],
+        *,
+        timeout_seconds: float = 3.0,
+        max_in_flight: int = MAX_SNAPSHOT_LINES,
+    ) -> tuple[MarketSnapshot | TWSRequestError, ...]:
+        """``market_snapshot`` for many contracts over a bounded set of lines.
+
+        The whole batch is one gated request, so nothing else interleaves
+        with it. Results keep the input order; a per-contract failure is
+        returned in place, while a competing login or a lost connection
+        releases every open line and raises.
+        """
+        _validate_snapshot_request(con_ids, timeout_seconds)
+        if not 1 <= max_in_flight <= DEFAULT_MARKET_DATA_LINES:
+            raise TWSRequestError("max_in_flight must be between 1 and the line allocation")
+        self._require_connected()
+        async with self._request_gate:
+            loop = asyncio.get_running_loop()
+            lines = asyncio.Semaphore(max_in_flight)
+            start_lock = asyncio.Lock()
+            next_start = loop.time()
+
+            async def one(con_id: int) -> MarketSnapshot | TWSRequestError:
+                nonlocal next_start
+                async with lines:
+                    async with start_lock:
+                        delay = next_start - loop.time()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        next_start = loop.time() + SNAPSHOT_START_INTERVAL_SECONDS
+                    try:
+                        return await self._stream_snapshot(con_id, timeout_seconds)
+                    except (TWSCompetingSessionError, TWSConnectionError):
+                        raise
+                    except TWSRequestError as exc:
+                        return exc
+
+            tasks = [asyncio.create_task(one(con_id)) for con_id in con_ids]
+            try:
+                return tuple(await asyncio.gather(*tasks))
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+    async def _stream_snapshot(self, con_id: int, timeout_seconds: float) -> MarketSnapshot:
+        """One subscription; callers hold the request gate."""
+        request_id = await self._allocate_request_id()
+        loop = asyncio.get_running_loop()
+        pending = _PendingMarketSnapshot(loop.create_future(), loop.create_future(), con_id)
+        self._pending_snapshots[request_id] = pending
+        started = loop.time()
+        try:
+            method = getattr(self._client, "reqMktData")
+            method(request_id, self._contract_factory(con_id), "", False, False, [])
+            try:
+                await asyncio.wait_for(pending.ready, timeout=timeout_seconds)
+            except asyncio.TimeoutError as exc:
+                missing = _snapshot_missing(pending)
+                if missing:
+                    raise TWSRequestError(
+                        "TWS market snapshot timed out without " + ", ".join(missing)
+                    ) from exc
+                return self._build_market_snapshot(pending)
+            settle = min(
+                MARKET_SNAPSHOT_SETTLE_SECONDS, timeout_seconds - (loop.time() - started)
+            )
+            if not pending.complete.done() and settle > 0:
+                try:
+                    await asyncio.wait_for(pending.complete, timeout=settle)
+                except asyncio.TimeoutError:
+                    pass
+            elif pending.complete.done():
+                # Surfaces an error that arrived after the minimum data.
+                pending.complete.result()
+            return self._build_market_snapshot(pending)
+        finally:
+            # The line is released on every path, including success.
+            self._cancel_market_data(request_id)
+            self._pending_snapshots.pop(request_id, None)
+            for future in (pending.ready, pending.complete):
+                if not future.done():
+                    future.cancel()
+                elif not future.cancelled():
+                    future.exception()
 
     async def check_data_line_capacity(self, required_lines: int) -> DataLineCapacityReport:
         """Call the injected entitlement/capacity probe without assuming capacity."""
@@ -985,6 +1264,10 @@ class TWSPaperActor:
 
     def _on_tick_price(self, request_id: int, tick_type: int, price: float) -> None:
         self._callbacks_seen += 1
+        snapshot = self._pending_snapshots.get(request_id)
+        if snapshot is not None:
+            self._on_snapshot_price(snapshot, tick_type, price)
+            return
         pending = self._pending_quotes.get(request_id)
         if pending is None:
             return
@@ -1005,6 +1288,19 @@ class TWSPaperActor:
 
     def _on_market_data_type(self, request_id: int, data_type: int) -> None:
         self._callbacks_seen += 1
+        snapshot = self._pending_snapshots.get(request_id)
+        if snapshot is not None:
+            snapshot.data_type = data_type
+            if data_type != REAL_TIME_MARKET_DATA:
+                self._fail_snapshot(
+                    snapshot,
+                    TWSRequestError(
+                        "real-time market data is required; delayed/frozen data rejected"
+                    ),
+                )
+                return
+            self._update_snapshot(snapshot)
+            return
         pending = self._pending_quotes.get(request_id)
         if pending is None or pending.future.done():
             return
@@ -1016,6 +1312,68 @@ class TWSPaperActor:
             )
             return
         self._maybe_resolve_quote(pending)
+
+    def _on_tick_size(self, request_id: int, tick_type: int, size: Any) -> None:
+        self._callbacks_seen += 1
+        snapshot = self._pending_snapshots.get(request_id)
+        if snapshot is None or tick_type != _TICK_VOLUME:
+            return
+        try:
+            value = Decimal(str(size))
+        except Exception:
+            return
+        # IBKR sends -1 for "unknown"; that is absence, not zero volume.
+        if not value.is_finite() or value < 0:
+            return
+        snapshot.volume_raw = value
+        self._update_snapshot(snapshot)
+
+    def _on_snapshot_price(
+        self, snapshot: _PendingMarketSnapshot, tick_type: int, price: float
+    ) -> None:
+        if tick_type not in _SNAPSHOT_PRICE_TICKS:
+            return
+        try:
+            value = Decimal(str(price))
+        except Exception:
+            return
+        # IBKR sends -1/0 when a side or statistic is unavailable.
+        if not value.is_finite() or value <= 0:
+            return
+        snapshot.prices[tick_type] = value
+        self._update_snapshot(snapshot)
+
+    def _update_snapshot(self, snapshot: _PendingMarketSnapshot) -> None:
+        if snapshot.data_type != REAL_TIME_MARKET_DATA or _snapshot_missing(snapshot):
+            return
+        if snapshot.volume_raw is None:
+            return
+        self._set_future_result(snapshot.ready, None)
+        if _SNAPSHOT_PRICE_TICKS.issubset(snapshot.prices):
+            self._set_future_result(snapshot.complete, None)
+
+    def _fail_snapshot(self, snapshot: _PendingMarketSnapshot, error: Exception) -> None:
+        self._set_future_exception(snapshot.ready, error)
+        self._set_future_exception(snapshot.complete, error)
+
+    def _build_market_snapshot(self, snapshot: _PendingMarketSnapshot) -> MarketSnapshot:
+        prices = dict(snapshot.prices)
+        try:
+            return MarketSnapshot(
+                con_id=snapshot.con_id,
+                observed_at=datetime.now(timezone.utc),
+                prior_close=prices[_TICK_CLOSE],
+                last=prices.get(_TICK_LAST),
+                bid=prices.get(_TICK_BID),
+                ask=prices.get(_TICK_ASK),
+                open=prices.get(_TICK_OPEN),
+                day_high=prices.get(_TICK_HIGH),
+                day_low=prices.get(_TICK_LOW),
+                volume_raw=snapshot.volume_raw,
+            )
+        except (KeyError, MarketSnapshotError) as exc:
+            self._last_error = str(exc)
+            raise TWSRequestError("TWS market snapshot failed validation") from exc
 
     def _maybe_resolve_quote(self, pending: _PendingQuote) -> None:
         if (
@@ -1072,17 +1430,26 @@ class TWSPaperActor:
         if code in WARNING_CODE_RANGE:
             return
         self._last_error = f"TWS error {code}: {message}"
+        competing = is_competing_session_error(code, str(message))
+        error_type = TWSCompetingSessionError if competing else TWSRequestError
         if request_id == -1:
+            if competing:
+                # No stream can deliver data while another login holds it.
+                for snapshot in tuple(self._pending_snapshots.values()):
+                    self._fail_snapshot(snapshot, TWSCompetingSessionError(self._last_error))
             return
+        pending_snapshot = self._pending_snapshots.get(request_id)
+        if pending_snapshot is not None:
+            self._fail_snapshot(pending_snapshot, error_type(self._last_error))
         pending_scan = self._pending_scans.get(request_id)
         pending_bars = self._pending_bars.get(request_id)
         pending_daily = self._pending_daily.get(request_id)
         pending_details = self._pending_details.get(request_id)
         pending_quote = self._pending_quotes.get(request_id)
         if pending_scan is not None:
-            self._set_future_exception(pending_scan.future, TWSRequestError(self._last_error))
+            self._set_future_exception(pending_scan.future, error_type(self._last_error))
         if pending_details is not None:
-            self._set_future_exception(pending_details.future, TWSRequestError(self._last_error))
+            self._set_future_exception(pending_details.future, error_type(self._last_error))
         if pending_bars is not None:
             self._set_future_result(
                 pending_bars.future,
@@ -1104,7 +1471,7 @@ class TWSPaperActor:
                 ),
             )
         if pending_quote is not None:
-            self._set_future_exception(pending_quote.future, TWSRequestError(self._last_error))
+            self._set_future_exception(pending_quote.future, error_type(self._last_error))
 
     def _on_connection_closed(self) -> None:
         self._callbacks_seen += 1
@@ -1118,6 +1485,8 @@ class TWSPaperActor:
             *self._pending_quotes.values(),
         ):
             self._set_future_exception(pending.future, error)
+        for snapshot in tuple(self._pending_snapshots.values()):
+            self._fail_snapshot(snapshot, error)
 
     def _set_future_result(self, future: asyncio.Future[Any], value: Any) -> None:
         loop = self._loop
@@ -1245,6 +1614,29 @@ class TWSPaperActor:
             method = getattr(self._client, "cancelMktData", None)
             if callable(method):
                 method(request_id)
+
+
+def _validate_snapshot_request(con_ids: Sequence[int], timeout_seconds: float) -> None:
+    if any(
+        isinstance(con_id, bool) or not isinstance(con_id, int) or con_id <= 0
+        for con_id in con_ids
+    ):
+        raise TWSRequestError("con_id must be positive")
+    if not 0 < timeout_seconds < float("inf"):
+        raise TWSRequestError("timeout_seconds must be finite and positive")
+
+
+def _snapshot_missing(snapshot: _PendingMarketSnapshot) -> list[str]:
+    """What a snapshot still lacks before it may be returned at all."""
+    missing: list[str] = []
+    if snapshot.data_type != REAL_TIME_MARKET_DATA:
+        missing.append("real-time confirmation")
+    prices = snapshot.prices
+    if _TICK_LAST not in prices and not (_TICK_BID in prices and _TICK_ASK in prices):
+        missing.append("a last trade or bid/ask")
+    if _TICK_CLOSE not in prices:
+        missing.append("prior close")
+    return missing
 
 
 def _parse_ibkr_timestamp(value: Any) -> datetime:
