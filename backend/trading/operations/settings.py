@@ -16,7 +16,8 @@ _MAX_CONFIG_BYTES = 64 * 1024
 _SHADOW_KEYS = frozenset(
     {
         "paper_account_id",
-        "client_id",
+        "data_client_id",
+        "order_client_id",
         "model_id",
         "prompt_id",
         "calendar_id",

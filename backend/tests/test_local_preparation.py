@@ -9,7 +9,7 @@ from trading.market.tws_actor import DataLineCapacityReport, TWSPreflightReport
 
 
 def test_reachable_socket_does_not_authorize_orders(monkeypatch):
-    monkeypatch.setattr(readiness, "load_shadow_runtime_config", lambda: SimpleNamespace(client_id=17))
+    monkeypatch.setattr(readiness, "load_shadow_runtime_config", lambda: SimpleNamespace(data_client_id=17, order_client_id=18))
     calls = []
 
     def connect(address, timeout):
@@ -57,7 +57,9 @@ def test_cli_preflight_does_not_initialize_database(monkeypatch, capsys):
 
 @pytest.mark.asyncio
 async def test_broker_preflight_performs_official_handshake_without_authorizing(monkeypatch):
-    config = SimpleNamespace(paper_account_id="DU_TEST", client_id=17, max_candidates=20)
+    config = SimpleNamespace(
+        paper_account_id="DU_TEST", data_client_id=17, order_client_id=18, max_candidates=20
+    )
     monkeypatch.setattr(readiness, "load_shadow_runtime_config", lambda: config)
     monkeypatch.setattr(readiness, "check_local_preparation", lambda: {
         "kind": "local_preparation_only",

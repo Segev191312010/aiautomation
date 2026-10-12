@@ -32,7 +32,8 @@ HASH = "a" * 64
 def _runtime() -> ShadowRuntimeConfig:
     return ShadowRuntimeConfig(
         paper_account_id="DU1234567",
-        client_id=17,
+        data_client_id=17,
+        order_client_id=18,
         model_id="review-model",
         prompt_id="orb-review-v1",
         calendar_id="XNYS",
@@ -56,6 +57,8 @@ def test_shadow_runtime_contract_is_fixed_to_local_tws_and_bounded_ai() -> None:
         {"max_candidates": 21},
         {"max_ai_calls": 21},
         {"max_ai_cost_usd": "5.01"},
+        {"order_client_id": 17},
+        {"data_client_id": 0},
     ):
         with pytest.raises(ValidationError):
             ShadowRuntimeConfig.model_validate({**runtime.model_dump(), **update})

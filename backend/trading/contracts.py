@@ -80,7 +80,10 @@ class ShadowRuntimeConfig(BaseModel):
     tws_host: Literal["127.0.0.1"] = "127.0.0.1"
     tws_port: Literal[7497] = 7497
     paper_account_id: str = Field(min_length=1, max_length=64)
-    client_id: int = Field(ge=0)
+    # TWS accepts one connection per client ID, so market data and orders
+    # each need their own; they must never collide.
+    data_client_id: int = Field(ge=1)
+    order_client_id: int = Field(ge=1)
     model_id: str = Field(min_length=1, max_length=128)
     prompt_id: str = Field(min_length=1, max_length=128)
     calendar_id: str = Field(min_length=1, max_length=128)
@@ -112,6 +115,12 @@ class ShadowRuntimeConfig(BaseModel):
         if not value.is_finite() or value != Decimal("5"):
             raise ValueError("shadow AI session cost limit must be exactly 5 USD")
         return value
+
+    @model_validator(mode="after")
+    def validate_distinct_client_ids(self) -> Self:
+        if self.data_client_id == self.order_client_id:
+            raise ValueError("data and order client IDs must differ")
+        return self
 
     def fingerprint(self) -> str:
         return fingerprint_payload(self)

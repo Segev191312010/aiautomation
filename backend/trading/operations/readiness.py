@@ -30,8 +30,8 @@ def check_local_preparation() -> dict[str, object]:
     checks: list[ReadinessCheck] = []
     try:
         config = load_shadow_runtime_config()
-        if config.client_id <= 0:
-            raise ShadowSettingsError("dedicated client ID required")
+        if config.data_client_id <= 0 or config.order_client_id <= 0:
+            raise ShadowSettingsError("dedicated client IDs required")
     except (ShadowSettingsError, PathSecurityError, OSError):
         checks.append(ReadinessCheck(
             "configuration", "blocked",
@@ -82,7 +82,7 @@ async def check_shadow_preflight(
         return local
 
     actor = actor_factory(
-        TWSActorConfig(account=config.paper_account_id, client_id=config.client_id)
+        TWSActorConfig(account=config.paper_account_id, client_id=config.data_client_id)
     )
     try:
         await actor.connect()
