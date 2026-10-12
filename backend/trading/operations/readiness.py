@@ -11,7 +11,12 @@ from trading.market.tws_actor import (
     TWSActorConfig,
     TWSActorError,
     TWSPaperActor,
+    documented_line_allocation,
 )
+
+
+def _paper_actor(config: TWSActorConfig) -> TWSPaperActor:
+    return TWSPaperActor(config, capacity_checker=documented_line_allocation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +65,7 @@ def check_local_preparation() -> dict[str, object]:
 
 
 async def check_shadow_preflight(
-    *, actor_factory: Callable[[TWSActorConfig], TWSPaperActor] = TWSPaperActor
+    *, actor_factory: Callable[[TWSActorConfig], TWSPaperActor] = _paper_actor
 ) -> dict[str, object]:
     """Perform a read-only TWS handshake without requesting orders or market data."""
 
@@ -121,9 +126,9 @@ async def check_shadow_preflight(
         checks["data_line_capacity"] = ReadinessCheck(
             "data_line_capacity",
             "passed" if report.data_line_capacity.passed else "unverified",
-            "Capacity covers all admitted candidates."
+            "IBKR's documented baseline line allocation covers sequential quotes."
             if report.data_line_capacity.passed
-            else "Capacity for 20 simultaneous candidates is not yet independently verified.",
+            else "Market-data line capacity does not cover the candidate count.",
         )
     finally:
         await actor.disconnect()

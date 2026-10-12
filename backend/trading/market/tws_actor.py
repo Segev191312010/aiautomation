@@ -27,6 +27,10 @@ PACING_ERROR_CODES = frozenset({162, 165, 366, 420})
 # Two sessions of five-minute RTH bars: ATR(14) is available at the first
 # signal bar (09:50) from the prior session's history.
 INTRADAY_HISTORY_DURATION = "2 D"
+REAL_TIME_MARKET_DATA = 1
+# IBKR's documented baseline allocation of simultaneous market-data lines.
+# The API exposes no line-count query; quotes here hold one line at a time.
+DEFAULT_MARKET_DATA_LINES = 100
 DAILY_HISTORY_DURATION = "2 M"
 
 
@@ -165,8 +169,11 @@ class _PendingQuote:
     future: asyncio.Future[QuoteSnapshot]
     con_id: int
     min_tick: Decimal
+    request_id: int
     bid: Decimal | None = None
     ask: Decimal | None = None
+    bid_at: datetime | None = None
+    ask_at: datetime | None = None
     data_type: int | None = None
 
 
@@ -311,6 +318,22 @@ def _official_contract_factory(con_id: int) -> Any:
     return contract
 
 
+def documented_line_allocation(required_lines: int) -> DataLineCapacityReport:
+    """Capacity from IBKR's documented baseline; the API offers no line-count query.
+
+    Quotes hold a single streaming line at a time and release it immediately,
+    so the baseline covers any candidate count up to the allocation.
+    """
+    available = DEFAULT_MARKET_DATA_LINES
+    passed = required_lines <= available
+    return DataLineCapacityReport(
+        required_lines=required_lines,
+        available_lines=available,
+        passed=passed,
+        reason=None if passed else "required lines exceed the documented allocation",
+    )
+
+
 class TWSPaperActor:
     """One callback-owning, request-ID-owning local TWS PAPER actor."""
 
@@ -388,6 +411,11 @@ class TWSPaperActor:
             )
             if self.config.account not in self._managed_accounts:
                 raise TWSConnectionError("configured PAPER account was not returned by TWS")
+            # Ask TWS for live data explicitly; anything else is rejected per quote.
+            request_type = getattr(self._client, "reqMarketDataType", None)
+            if not callable(request_type):
+                raise TWSConnectionError("TWS client cannot request real-time market data")
+            request_type(REAL_TIME_MARKET_DATA)
         except Exception as exc:
             await self.disconnect()
             if isinstance(exc, TWSActorError):
@@ -557,7 +585,12 @@ class TWSPaperActor:
         min_tick: Decimal,
         max_age_seconds: Decimal = Decimal("2"),
     ) -> QuoteSnapshot:
-        """Return a fresh bid/ask snapshot only from confirmed live data."""
+        """Return a fresh bid/ask from a confirmed real-time stream.
+
+        A streaming request resolves as soon as both sides and the real-time
+        data type are present; snapshot requests can take ~11s to complete,
+        which would make every quote stale before it is used.
+        """
         if con_id <= 0:
             raise TWSRequestError("con_id must be positive")
         try:
@@ -570,7 +603,7 @@ class TWSPaperActor:
         async with self._request_gate:
             request_id = await self._allocate_request_id()
             pending = _PendingQuote(
-                asyncio.get_running_loop().create_future(), con_id, min_tick
+                asyncio.get_running_loop().create_future(), con_id, min_tick, request_id
             )
             self._pending_quotes[request_id] = pending
             try:
@@ -579,7 +612,7 @@ class TWSPaperActor:
                     request_id,
                     self._contract_factory(con_id),
                     "",
-                    True,
+                    False,
                     False,
                     [],
                 )
@@ -592,9 +625,10 @@ class TWSPaperActor:
                     raise TWSRequestError("TWS quote snapshot is stale")
                 return quote
             except asyncio.TimeoutError as exc:
-                self._cancel_market_data(request_id)
                 raise TWSRequestError("TWS quote snapshot timed out") from exc
             finally:
+                # The line is released on every path, including success.
+                self._cancel_market_data(request_id)
                 self._pending_quotes.pop(request_id, None)
 
     async def check_data_line_capacity(self, required_lines: int) -> DataLineCapacityReport:
@@ -811,23 +845,65 @@ class TWSPaperActor:
             return
         if not value.is_finite() or value <= 0:
             return
+        received = datetime.now(timezone.utc)
         if tick_type == 1:
-            pending.bid = value
+            pending.bid, pending.bid_at = value, received
         elif tick_type == 2:
-            pending.ask = value
+            pending.ask, pending.ask_at = value, received
+        else:
+            return
+        self._maybe_resolve_quote(pending)
 
     def _on_market_data_type(self, request_id: int, data_type: int) -> None:
         self._callbacks_seen += 1
         pending = self._pending_quotes.get(request_id)
-        if pending is not None:
-            pending.data_type = data_type
+        if pending is None or pending.future.done():
+            return
+        pending.data_type = data_type
+        if data_type != REAL_TIME_MARKET_DATA:
+            self._set_future_exception(
+                pending.future,
+                TWSRequestError("real-time market data is required; delayed/frozen data rejected"),
+            )
+            return
+        self._maybe_resolve_quote(pending)
+
+    def _maybe_resolve_quote(self, pending: _PendingQuote) -> None:
+        if (
+            pending.future.done()
+            or pending.data_type != REAL_TIME_MARKET_DATA
+            or pending.bid is None
+            or pending.ask is None
+        ):
+            return
+        self._resolve_quote(pending)
+
+    def _resolve_quote(self, pending: _PendingQuote) -> None:
+        try:
+            quote = QuoteSnapshot(
+                con_id=pending.con_id,
+                bid=pending.bid,
+                ask=pending.ask,
+                observed_at=datetime.now(timezone.utc),
+                bid_observed_at=pending.bid_at,
+                ask_observed_at=pending.ask_at,
+                min_tick=pending.min_tick,
+                request_id=pending.request_id,
+            )
+        except ValueError as exc:
+            self._last_error = str(exc)
+            self._set_future_exception(
+                pending.future, TWSRequestError("TWS quote snapshot failed validation")
+            )
+            return
+        self._set_future_result(pending.future, quote)
 
     def _on_tick_snapshot_end(self, request_id: int) -> None:
+        """A stream that ends before resolving explains why it could not."""
         self._callbacks_seen += 1
         pending = self._pending_quotes.get(request_id)
         if pending is None or pending.future.done():
             return
-        self._cancel_market_data(request_id)
         if pending.data_type != 1:
             self._set_future_exception(
                 pending.future,
@@ -840,22 +916,7 @@ class TWSPaperActor:
                 TWSRequestError("TWS quote snapshot did not contain bid and ask"),
             )
             return
-        try:
-            quote = QuoteSnapshot(
-                con_id=pending.con_id,
-                bid=pending.bid,
-                ask=pending.ask,
-                observed_at=datetime.now(timezone.utc),
-                min_tick=pending.min_tick,
-            )
-        except ValueError as exc:
-            self._set_future_exception(
-                pending.future,
-                TWSRequestError("TWS quote snapshot failed validation"),
-            )
-            self._last_error = str(exc)
-            return
-        self._set_future_result(pending.future, quote)
+        self._resolve_quote(pending)
 
     def _on_error(self, request_id: int, code: int, message: str) -> None:
         self._callbacks_seen += 1

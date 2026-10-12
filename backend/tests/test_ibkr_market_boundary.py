@@ -353,3 +353,38 @@ async def test_adapter_liquidity_rejects_history_for_another_contract():
     adapter = PaperIBKRMarketData(actor=DailyActor(), host="127.0.0.1")
     with pytest.raises(MarketDataQualityError, match="different contract"):
         await adapter.liquidity(con_id=101, session_date=date(2026, 9, 26))
+
+
+@pytest.mark.anyio
+async def test_adapter_quote_uses_contract_min_tick_and_checks_contract():
+    from trading.contracts import QuoteSnapshot
+
+    class QuoteActor(_Actor):
+        def __init__(self, quote_con_id: int):
+            super().__init__(scan_results=(_scanner_result(1),))
+            self.quote_con_id = quote_con_id
+            self.min_ticks = []
+
+        async def quote_snapshot(self, con_id, *, min_tick):
+            self.min_ticks.append(min_tick)
+            return QuoteSnapshot(
+                con_id=self.quote_con_id,
+                bid=Decimal("10"),
+                ask=Decimal("10.01"),
+                observed_at=datetime.now(timezone.utc),
+                min_tick=min_tick,
+            )
+
+    actor = QuoteActor(quote_con_id=1001)
+    adapter = PaperIBKRMarketData(actor=actor, host="127.0.0.1")
+    with pytest.raises(MarketDataQualityError, match="details were not loaded"):
+        await adapter.quote(con_id=1001)
+    await adapter.scanner_snapshot(scanner_run_id="scan-1")
+    quote = await adapter.quote(con_id=1001)
+    assert quote.min_tick == Decimal("0.01") and actor.min_ticks == [Decimal("0.01")]
+
+    wrong = QuoteActor(quote_con_id=999)
+    wrong_adapter = PaperIBKRMarketData(actor=wrong, host="127.0.0.1")
+    await wrong_adapter.scanner_snapshot(scanner_run_id="scan-1")
+    with pytest.raises(MarketDataQualityError, match="different contract"):
+        await wrong_adapter.quote(con_id=1001)

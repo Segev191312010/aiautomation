@@ -14,7 +14,7 @@ from hashlib import sha256
 import json
 from typing import Literal, Protocol
 
-from trading.contracts import Candidate, CompletedBar
+from trading.contracts import Candidate, CompletedBar, QuoteSnapshot
 
 
 PAPER_TWS_PORT = 7497
@@ -199,6 +199,9 @@ class IBKRConnectionActor(Protocol):
 
     async def daily_trade_bars(self, con_id: int) -> DailyBarBatch:
         """Return recent regular-session daily TRADES bars for one contract."""
+
+    async def quote_snapshot(self, con_id: int, *, min_tick: Decimal) -> QuoteSnapshot:
+        """Return a confirmed real-time bid/ask for one contract."""
 
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
@@ -546,6 +549,15 @@ class PaperIBKRMarketData:
             raise MarketDataQualityError("conId must be positive")
         batch = await self.actor.completed_trade_bars(con_id)
         return validate_completed_trade_bars(batch, now=now, max_age=self.bar_max_age)
+
+    async def quote(self, *, con_id: int) -> QuoteSnapshot:
+        """Real-time quote priced on the contract's own tick grid."""
+        if con_id <= 0:
+            raise MarketDataQualityError("conId must be positive")
+        quote = await self.actor.quote_snapshot(con_id, min_tick=self.min_tick(con_id))
+        if quote.con_id != con_id:
+            raise MarketDataQualityError("quote returned for a different contract")
+        return quote
 
     async def liquidity(self, *, con_id: int, session_date: date) -> LiquidityProfile:
         if con_id <= 0:

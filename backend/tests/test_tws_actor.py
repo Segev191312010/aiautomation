@@ -16,6 +16,7 @@ from trading.market.tws_actor import (
     TWSRequestError,
     DataLineCapacityReport,
     TWSPaperActor,
+    documented_line_allocation,
 )
 
 
@@ -39,7 +40,13 @@ class FakeTWSClient:
         self.history_calls: list[tuple[object, ...]] = []
         self.cancelled_scanners: list[int] = []
         self.cancelled_history: list[int] = []
+        self.cancelled_quotes: list[int] = []
+        self.market_data_type_requests: list[int] = []
+        self.quote_calls: list[tuple[object, ...]] = []
         self.disconnected = False
+
+    def reqMarketDataType(self, data_type: int) -> None:
+        self.market_data_type_requests.append(data_type)
 
     def connect(self, host: str, port: int, client_id: int) -> None:
         self.connect_calls.append((host, port, client_id))
@@ -116,6 +123,8 @@ class FakeTWSClient:
         self.cancelled_history.append(request_id)
 
     def reqMktData(self, *args: object) -> None:
+        # A streaming subscription: no snapshot-end callback is ever sent.
+        self.quote_calls.append(args)
         request_id = int(args[0])
         if self.quote_data_type is not None:
             self.callbacks.marketDataType(request_id, self.quote_data_type)
@@ -123,10 +132,9 @@ class FakeTWSClient:
             self.callbacks.tickPrice(request_id, 1, float(self.quote_bid))
         if self.quote_ask is not None:
             self.callbacks.tickPrice(request_id, 2, float(self.quote_ask))
-        self.callbacks.tickSnapshotEnd(request_id)
 
     def cancelMktData(self, request_id: int) -> None:
-        return None
+        self.cancelled_quotes.append(request_id)
 
     def disconnect(self) -> None:
         self.disconnected = True
@@ -185,6 +193,7 @@ async def test_connect_validates_identity_and_allocates_callback_request_ids() -
 
     assert client is not None
     assert client.connect_calls == [(PAPER_TWS_HOST, PAPER_TWS_PORT, 17)]
+    assert client.market_data_type_requests == [1]
     assert actor.connected is True
     assert actor.managed_accounts == frozenset({"DU123456"})
     assert actor.callbacks_seen >= 2
@@ -280,15 +289,17 @@ async def test_quote_snapshot_requires_live_data_and_fresh_bid_ask() -> None:
     assert quote.ask == Decimal("100.25")
     assert quote.min_tick == Decimal("0.01")
     assert quote.is_fresh(now=datetime.now(timezone.utc))
+    assert quote.bid_observed_at is not None and quote.ask_observed_at is not None
     assert client is not None
     assert client.history_calls == []
+    # Streaming request (snapshot=False) and the line is released after use.
+    assert client.quote_calls[0][3] is False
+    assert client.cancelled_quotes == [client.quote_calls[0][0]]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("data_type", [2, 3, 4, None])
-async def test_quote_snapshot_rejects_frozen_delayed_or_unconfirmed_data(
-    data_type: int | None,
-) -> None:
+@pytest.mark.parametrize("data_type", [2, 3, 4])
+async def test_quote_snapshot_rejects_frozen_or_delayed_data(data_type: int) -> None:
     def factory(callbacks):
         return FakeTWSClient(callbacks, quote_data_type=data_type)
 
@@ -299,17 +310,17 @@ async def test_quote_snapshot_rejects_frozen_delayed_or_unconfirmed_data(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["bid", "ask"])
-async def test_quote_snapshot_requires_both_sides(missing: str) -> None:
-    values = {"quote_bid": "100", "quote_ask": "100.25"}
-    values[f"quote_{missing}"] = None
-
+@pytest.mark.parametrize(
+    "overrides",
+    [{"quote_data_type": None}, {"quote_bid": None}, {"quote_ask": None}],
+)
+async def test_quote_without_confirmed_type_or_both_sides_never_resolves(overrides) -> None:
     def factory(callbacks):
-        return FakeTWSClient(callbacks, **values)
+        return FakeTWSClient(callbacks, **overrides)
 
     actor = TWSPaperActor(config(), client_factory=factory)
     await actor.connect()
-    with pytest.raises(TWSRequestError, match="bid and ask"):
+    with pytest.raises(TWSRequestError, match="timed out"):
         await actor.quote_snapshot(101, min_tick=Decimal("0.01"))
 
 
@@ -414,3 +425,9 @@ async def test_daily_bars_request_rth_sessions_and_parse_session_dates() -> None
     assert [bar.session_date.isoformat() for bar in batch.bars] == ["2026-10-08", "2026-10-09"]
     assert batch.bars[1].close == Decimal("101")
     assert batch.bars[1].volume == Decimal("5000")
+
+
+def test_documented_line_allocation_covers_candidate_counts_up_to_baseline() -> None:
+    assert documented_line_allocation(20).passed is True
+    assert documented_line_allocation(20).available_lines == 100
+    assert documented_line_allocation(101).passed is False
