@@ -62,8 +62,28 @@ class FakeTWSClient:
             stockType="COMMON",
             primaryExchange="NASDAQ",
         )
-        self.callbacks.scannerData(request_id, 1, SimpleNamespace(contract=contract))
+        # IBKR scanner ranks are zero-based.
+        self.callbacks.scannerData(request_id, 0, SimpleNamespace(contract=contract))
+        incomplete = SimpleNamespace(conId=202, symbol="", currency="USD", secType="STK")
+        self.callbacks.scannerData(request_id, 1, SimpleNamespace(contract=incomplete))
         self.callbacks.scannerDataEnd(request_id)
+
+    def reqContractDetails(self, request_id: int, contract: object) -> None:
+        con_id = int(getattr(contract, "conId"))
+        if con_id != 404:
+            details = SimpleNamespace(
+                contract=SimpleNamespace(
+                    conId=con_id,
+                    symbol="AAPL",
+                    currency="USD",
+                    secType="STK",
+                    primaryExchange="NASDAQ",
+                ),
+                minTick=0.01,
+                stockType="COMMON",
+            )
+            self.callbacks.contractDetails(request_id, details)
+        self.callbacks.contractDetailsEnd(request_id)
 
     def cancelScannerSubscription(self, request_id: int) -> None:
         self.cancelled_scanners.append(request_id)
@@ -165,6 +185,9 @@ async def test_connect_validates_identity_and_allocates_callback_request_ids() -
     results = await actor.scan(ScannerRequest())
     assert results[0].con_id == 101
     assert results[0].symbol == "AAPL"
+    assert (results[0].raw_rank, results[0].rank) == (0, 1)
+    # An incomplete row is surfaced for boundary rejection, not a failed scan.
+    assert results[1].con_id == 202 and results[1].symbol == ""
     assert client.scanner_calls[0][0] == 900
     assert client.cancelled_scanners == [900]
 
@@ -347,3 +370,18 @@ async def test_disconnect_fails_closed_and_does_not_implicitly_reconnect() -> No
     assert actor.connected is False
     with pytest.raises(TWSConnectionError):
         await actor.completed_trade_bars(101)
+
+
+@pytest.mark.asyncio
+async def test_contract_details_resolve_min_tick_and_primary_exchange() -> None:
+    actor = TWSPaperActor(config(), client_factory=lambda callbacks: FakeTWSClient(callbacks))
+    await actor.connect()
+
+    details = await actor.contract_details(101)
+
+    assert details.con_id == 101
+    assert details.primary_exchange == "NASDAQ"
+    assert details.stock_type == "COMMON"
+    assert details.min_tick == Decimal("0.01")
+    with pytest.raises(TWSRequestError, match="missing or ambiguous"):
+        await actor.contract_details(404)

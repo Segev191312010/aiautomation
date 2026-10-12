@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from trading.market.ibkr_boundary import (
     BarBatch,
+    IBKRContractDetails,
     IBKRScannerResult,
     IBKRTradeBar,
     ScannerRequest,
@@ -140,6 +141,13 @@ class _PendingBars:
 
 
 @dataclass
+class _PendingDetails:
+    future: asyncio.Future[IBKRContractDetails]
+    con_id: int
+    details: list[Any] = field(default_factory=list)
+
+
+@dataclass
 class _PendingQuote:
     future: asyncio.Future[QuoteSnapshot]
     con_id: int
@@ -166,6 +174,12 @@ class _CallbackSink:
 
     def scannerDataEnd(self, request_id: int) -> None:
         self.actor._on_scanner_end(request_id)
+
+    def contractDetails(self, request_id: int, details: Any) -> None:
+        self.actor._on_contract_details(request_id, details)
+
+    def contractDetailsEnd(self, request_id: int) -> None:
+        self.actor._on_contract_details_end(request_id)
 
     def historicalData(self, request_id: int, bar: Any) -> None:
         self.actor._on_historical_data(request_id, bar)
@@ -195,6 +209,8 @@ class _CallbackSink:
     managed_accounts = managedAccounts
     scanner_data = scannerData
     scanner_data_end = scannerDataEnd
+    contract_details = contractDetails
+    contract_details_end = contractDetailsEnd
     historical_data = historicalData
     historical_data_end = historicalDataEnd
     historical_data_update = historicalDataUpdate
@@ -225,6 +241,12 @@ def _official_client_factory(sink: _CallbackSink) -> TWSClient:
 
         def scannerDataEnd(self, value: int) -> None:
             self._sink.scannerDataEnd(value)
+
+        def contractDetails(self, *args: Any) -> None:
+            self._sink.contractDetails(*args)
+
+        def contractDetailsEnd(self, *args: Any) -> None:
+            self._sink.contractDetailsEnd(*args)
 
         def historicalData(self, *args: Any) -> None:
             self._sink.historicalData(*args)
@@ -307,6 +329,7 @@ class TWSPaperActor:
         self._request_gate = asyncio.Lock()
         self._pending_scans: dict[int, _PendingScan] = {}
         self._pending_bars: dict[int, _PendingBars] = {}
+        self._pending_details: dict[int, _PendingDetails] = {}
         self._pending_quotes: dict[int, _PendingQuote] = {}
         self._last_error: str | None = None
         self._callbacks_seen = 0
@@ -370,11 +393,13 @@ class TWSPaperActor:
         for pending in (
             *self._pending_scans.values(),
             *self._pending_bars.values(),
+            *self._pending_details.values(),
             *self._pending_quotes.values(),
         ):
             self._set_future_exception(pending.future, error)
         self._pending_scans.clear()
         self._pending_bars.clear()
+        self._pending_details.clear()
         self._pending_quotes.clear()
         self._run_thread = None
 
@@ -423,6 +448,26 @@ class TWSPaperActor:
                 raise TWSRequestError("TWS scanner request timed out") from exc
             finally:
                 self._pending_scans.pop(request_id, None)
+
+    async def contract_details(self, con_id: int) -> IBKRContractDetails:
+        """Resolve one conId to its qualified details; ambiguity is an error."""
+        if con_id <= 0:
+            raise TWSRequestError("con_id must be positive")
+        self._require_connected()
+        async with self._request_gate:
+            request_id = await self._allocate_request_id()
+            pending = _PendingDetails(asyncio.get_running_loop().create_future(), con_id)
+            self._pending_details[request_id] = pending
+            try:
+                method = getattr(self._client, "reqContractDetails")
+                method(request_id, self._contract_factory(con_id))
+                return await asyncio.wait_for(
+                    pending.future, timeout=self.config.request_timeout_seconds
+                )
+            except asyncio.TimeoutError as exc:
+                raise TWSRequestError("TWS contract-details request timed out") from exc
+            finally:
+                self._pending_details.pop(request_id, None)
 
     async def completed_trade_bars(self, con_id: int) -> BarBatch:
         """Resolve only after historicalDataEnd, never from an update callback."""
@@ -618,6 +663,42 @@ class TWSPaperActor:
         else:
             pending.results.append(result)
 
+    def _on_contract_details(self, request_id: int, details: Any) -> None:
+        self._callbacks_seen += 1
+        pending = self._pending_details.get(request_id)
+        if pending is not None and not pending.future.done():
+            pending.details.append(details)
+
+    def _on_contract_details_end(self, request_id: int) -> None:
+        self._callbacks_seen += 1
+        pending = self._pending_details.get(request_id)
+        if pending is None or pending.future.done():
+            return
+        if len(pending.details) != 1:
+            self._set_future_exception(
+                pending.future,
+                TWSRequestError("TWS contract details were missing or ambiguous"),
+            )
+            return
+        raw = pending.details[0]
+        contract = getattr(raw, "contract", None)
+        try:
+            details = IBKRContractDetails(
+                con_id=int(getattr(contract, "conId")),
+                symbol=str(getattr(contract, "symbol", "") or ""),
+                currency=str(getattr(contract, "currency", "") or ""),
+                security_type=str(getattr(contract, "secType", "") or ""),
+                stock_type=str(getattr(raw, "stockType", "") or ""),
+                primary_exchange=str(getattr(contract, "primaryExchange", "") or ""),
+                min_tick=Decimal(str(getattr(raw, "minTick"))),
+            )
+        except Exception:
+            self._set_future_exception(
+                pending.future, TWSRequestError("TWS contract details were malformed")
+            )
+            return
+        self._set_future_result(pending.future, details)
+
     def _on_scanner_end(self, request_id: int) -> None:
         self._callbacks_seen += 1
         pending = self._pending_scans.get(request_id)
@@ -716,9 +797,12 @@ class TWSPaperActor:
             return
         pending_scan = self._pending_scans.get(request_id)
         pending_bars = self._pending_bars.get(request_id)
+        pending_details = self._pending_details.get(request_id)
         pending_quote = self._pending_quotes.get(request_id)
         if pending_scan is not None:
             self._set_future_exception(pending_scan.future, TWSRequestError(self._last_error))
+        if pending_details is not None:
+            self._set_future_exception(pending_details.future, TWSRequestError(self._last_error))
         if pending_bars is not None:
             self._set_future_result(
                 pending_bars.future,
@@ -739,6 +823,7 @@ class TWSPaperActor:
         for pending in (
             *self._pending_scans.values(),
             *self._pending_bars.values(),
+            *self._pending_details.values(),
             *self._pending_quotes.values(),
         ):
             self._set_future_exception(pending.future, error)
@@ -794,19 +879,34 @@ class TWSPaperActor:
             self._loop.call_soon_threadsafe(event.set)
 
     def _scanner_result(self, rank: int, details: Any) -> IBKRScannerResult | Exception:
+        """Translate IBKR's zero-based rank; leave missing fields empty for row rejection."""
         contract = getattr(details, "contract", details)
+
+        def text(name: str) -> str:
+            value = getattr(contract, name, "")
+            return "" if value is None else str(value)
+
         try:
-            return IBKRScannerResult(
-                con_id=int(getattr(contract, "conId")),
-                symbol=str(getattr(contract, "symbol")),
-                currency=str(getattr(contract, "currency")),
-                security_type=str(getattr(contract, "secType")),
-                stock_type=str(getattr(contract, "stockType", "COMMON")),
-                primary_exchange=str(getattr(contract, "primaryExchange")),
-                rank=int(rank),
-            )
-        except (AttributeError, TypeError, ValueError):
-            return TWSRequestError("TWS scanner callback has incomplete contract identity")
+            raw_rank = int(rank)
+        except (TypeError, ValueError):
+            return TWSRequestError("TWS scanner callback has an invalid rank")
+        if raw_rank < 0:
+            return TWSRequestError("TWS scanner callback has a negative rank")
+        try:
+            con_id = int(getattr(contract, "conId", 0) or 0)
+        except (TypeError, ValueError):
+            con_id = 0
+        return IBKRScannerResult(
+            con_id=con_id,
+            symbol=text("symbol"),
+            currency=text("currency"),
+            security_type=text("secType"),
+            stock_type=str(getattr(details, "stockType", "") or text("stockType")),
+            primary_exchange=text("primaryExchange"),
+            rank=raw_rank + 1,
+            raw_rank=raw_rank,
+            exchange=text("exchange"),
+        )
 
     @staticmethod
     def _trade_bar(raw: Any, *, con_id: int) -> IBKRTradeBar:

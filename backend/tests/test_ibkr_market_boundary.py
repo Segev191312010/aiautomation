@@ -10,6 +10,7 @@ from trading.market.ibkr_boundary import (
     BarBatch,
     ConnectionConfigurationError,
     IBKRConnectionActor,
+    IBKRContractDetails,
     IBKRScannerResult,
     IBKRTradeBar,
     MarketDataQualityError,
@@ -21,15 +22,22 @@ from trading.market.ibkr_boundary import (
 )
 
 
-def _scanner_result(rank: int, *, currency: str = "USD") -> IBKRScannerResult:
+def _scanner_result(
+    rank: int,
+    *,
+    currency: str = "USD",
+    stock_type: str = "COMMON",
+    primary_exchange: str = "NASDAQ",
+) -> IBKRScannerResult:
     return IBKRScannerResult(
         con_id=1000 + rank,
         symbol=f"STK{rank}",
         currency=currency,
         security_type="STK",
-        stock_type="COMMON",
-        primary_exchange="NASDAQ",
+        stock_type=stock_type,
+        primary_exchange=primary_exchange,
         rank=rank,
+        raw_rank=rank - 1,
     )
 
 
@@ -50,10 +58,37 @@ def _bar(**overrides) -> IBKRTradeBar:
     return IBKRTradeBar(**values)
 
 
+def _details(
+    con_id: int,
+    *,
+    stock_type: str = "COMMON",
+    primary_exchange: str = "NASDAQ",
+    min_tick: str = "0.01",
+) -> IBKRContractDetails:
+    return IBKRContractDetails(
+        con_id=con_id,
+        symbol="X",
+        currency="USD",
+        security_type="STK",
+        stock_type=stock_type,
+        primary_exchange=primary_exchange,
+        min_tick=Decimal(min_tick),
+    )
+
+
 class _Actor:
-    def __init__(self, *, scanner_supported: bool = True, batch: BarBatch | None = None):
+    def __init__(
+        self,
+        *,
+        scanner_supported: bool = True,
+        batch: BarBatch | None = None,
+        scan_results: tuple[IBKRScannerResult, ...] | None = None,
+        details: dict[int, IBKRContractDetails] | None = None,
+    ):
         self.scanner_supported = scanner_supported
         self.batch = batch or BarBatch(bars=(_bar(),))
+        self.scan_results = scan_results
+        self.details = details
         self.scanner_requests = []
         self.bar_requests = []
 
@@ -62,7 +97,16 @@ class _Actor:
         return self.scanner_supported
 
     async def scan(self, request):
+        if self.scan_results is not None:
+            return self.scan_results
         return tuple(_scanner_result(rank) for rank in range(1, 4))
+
+    async def contract_details(self, con_id):
+        if self.details is not None:
+            if con_id not in self.details:
+                raise RuntimeError("no details")
+            return self.details[con_id]
+        return _details(con_id)
 
     async def completed_trade_bars(self, con_id):
         self.bar_requests.append(con_id)
@@ -112,12 +156,61 @@ async def test_unsupported_scanner_blocks_snapshot():
         await adapter.initialize()
 
 
-def test_unsupported_scanner_identity_fails_closed():
-    with pytest.raises(ScannerDataError, match="USD"):
+def test_unusable_scanner_rows_are_rejected_individually():
+    snapshot = qualify_scanner_results(
+        (
+            _scanner_result(1, currency="CAD"),
+            _scanner_result(2, primary_exchange=""),
+            _scanner_result(3, stock_type="ETF"),
+            _scanner_result(4),
+        ),
+        scanner_run_id="scan-1",
+    )
+
+    reasons = [record.rejection_reason for record in snapshot.records]
+    assert reasons == ["not_usd_contract", "missing_primary_exchange", "not_common_stock", None]
+    assert [candidate.rank for candidate in snapshot.admitted_candidates] == [4]
+
+
+def test_broken_ranking_still_fails_the_whole_scan():
+    with pytest.raises(ScannerDataError, match="duplicate scanner rank"):
         qualify_scanner_results(
-            (_scanner_result(1, currency="CAD"),),
+            (_scanner_result(1), _scanner_result(1)),
             scanner_run_id="scan-1",
         )
+    mismatched = IBKRScannerResult(
+        con_id=5, symbol="X", currency="USD", security_type="STK",
+        stock_type="COMMON", primary_exchange="NYSE", rank=1, raw_rank=1,
+    )
+    with pytest.raises(ScannerDataError, match="raw IBKR rank"):
+        qualify_scanner_results((mismatched,), scanner_run_id="scan-1")
+
+
+@pytest.mark.anyio
+async def test_snapshot_qualifies_rows_from_contract_details():
+    scan = (
+        _scanner_result(1, primary_exchange="", stock_type=""),
+        _scanner_result(2, primary_exchange=""),
+        _scanner_result(3, stock_type=""),
+    )
+    details = {
+        1001: _details(1001, stock_type="", primary_exchange="NYSE", min_tick="0.01"),
+        1003: _details(1003, stock_type="ETF"),
+    }
+    adapter = PaperIBKRMarketData(
+        actor=_Actor(scan_results=scan, details=details), host="127.0.0.1"
+    )
+
+    snapshot = await adapter.scanner_snapshot(scanner_run_id="scan-1")
+
+    by_rank = {record.source.rank: record for record in snapshot.records}
+    # Exchange filled from details; the request's COMMON filter stands when TWS omits stockType.
+    assert by_rank[1].admitted and by_rank[1].candidate.primary_exchange == "NYSE"
+    assert by_rank[2].rejection_reason == "contract_details_unavailable"
+    assert by_rank[3].rejection_reason == "not_common_stock"
+    assert adapter.min_tick(1001) == Decimal("0.01")
+    with pytest.raises(MarketDataQualityError):
+        adapter.min_tick(1002)
 
 
 @pytest.mark.anyio

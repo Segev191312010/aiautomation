@@ -7,7 +7,7 @@ boundary validates its outputs before they reach scanner or rule code.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -62,7 +62,12 @@ DEFAULT_SCANNER_REQUEST = ScannerRequest()
 
 @dataclass(frozen=True)
 class IBKRScannerResult:
-    """Raw scanner identity and source rank returned by the connection actor."""
+    """Scanner identity returned by the connection actor.
+
+    ``rank`` is one-based; ``raw_rank`` keeps IBKR's zero-based source rank when
+    the actor supplied it. Missing identity fields arrive as empty strings so
+    the boundary can reject the row instead of the whole scan.
+    """
 
     con_id: int
     symbol: str
@@ -71,6 +76,21 @@ class IBKRScannerResult:
     stock_type: str
     primary_exchange: str
     rank: int
+    raw_rank: int | None = None
+    exchange: str = ""
+
+
+@dataclass(frozen=True)
+class IBKRContractDetails:
+    """Qualified contract facts needed before a scanner row becomes a candidate."""
+
+    con_id: int
+    symbol: str
+    currency: str
+    security_type: str
+    stock_type: str
+    primary_exchange: str
+    min_tick: Decimal
 
 
 @dataclass(frozen=True)
@@ -142,6 +162,9 @@ class IBKRConnectionActor(Protocol):
     async def completed_trade_bars(self, con_id: int) -> BarBatch:
         """Return only the recent five-minute bar batch for one contract."""
 
+    async def contract_details(self, con_id: int) -> IBKRContractDetails:
+        """Return qualified contract details for one conId."""
+
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
@@ -149,21 +172,21 @@ def _require_aware(value: datetime, field_name: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _validate_scanner_identity(result: IBKRScannerResult) -> None:
+def _scanner_identity_rejection(result: IBKRScannerResult) -> str | None:
+    """Return a stable rejection code for one unusable row, or None."""
     if result.con_id <= 0:
-        raise ScannerDataError("scanner result has an invalid conId")
+        return "invalid_con_id"
     if not result.symbol.strip():
-        raise ScannerDataError("scanner result has an empty symbol")
-    if result.currency.upper() != "USD":
-        raise ScannerDataError("scanner result is not a USD contract")
-    if result.security_type.upper() != "STK":
-        raise ScannerDataError("scanner result is not a stock contract")
-    if result.stock_type.upper() != "COMMON":
-        raise ScannerDataError("scanner result is not a common stock")
+        return "empty_symbol"
+    if result.currency.strip().upper() != "USD":
+        return "not_usd_contract"
+    if result.security_type.strip().upper() != "STK":
+        return "not_stock_contract"
+    if result.stock_type.strip().upper() != "COMMON":
+        return "not_common_stock"
     if not result.primary_exchange.strip():
-        raise ScannerDataError("scanner result has no primary exchange")
-    if result.rank < 1:
-        raise ScannerDataError("scanner rank must be positive")
+        return "missing_primary_exchange"
+    return None
 
 
 def qualify_scanner_results(
@@ -171,6 +194,7 @@ def qualify_scanner_results(
     *,
     scanner_run_id: str,
     request: ScannerRequest = DEFAULT_SCANNER_REQUEST,
+    unqualified_con_ids: frozenset[int] = frozenset(),
 ) -> ScannerSnapshot:
     """Retain every source result while admitting at most 50 valid candidates."""
     if not scanner_run_id.strip():
@@ -185,13 +209,33 @@ def qualify_scanner_results(
     admitted: list[Candidate] = []
 
     for result in ordered:
-        _validate_scanner_identity(result)
-        if result.con_id in seen_con_ids:
-            raise ScannerDataError(f"duplicate scanner conId: {result.con_id}")
+        # Rank identity is the integrity of the whole scan: a broken ranking
+        # cannot be repaired row by row, so it still fails the snapshot.
+        if result.rank < 1:
+            raise ScannerDataError("scanner rank must be positive")
+        if result.raw_rank is not None and result.rank != result.raw_rank + 1:
+            raise ScannerDataError("scanner rank must equal the raw IBKR rank plus one")
         if result.rank in seen_ranks:
             raise ScannerDataError(f"duplicate scanner rank: {result.rank}")
-        seen_con_ids.add(result.con_id)
         seen_ranks.add(result.rank)
+
+        if result.con_id > 0 and result.con_id in unqualified_con_ids:
+            rejection: str | None = "contract_details_unavailable"
+        else:
+            rejection = _scanner_identity_rejection(result)
+        if rejection is None and result.con_id in seen_con_ids:
+            rejection = "duplicate_con_id"
+        if rejection is not None:
+            records.append(
+                ScannerRecord(
+                    source=result,
+                    candidate=None,
+                    admitted=False,
+                    rejection_reason=rejection,
+                )
+            )
+            continue
+        seen_con_ids.add(result.con_id)
 
         if result.rank > MAX_ADMITTED_CANDIDATES or len(admitted) >= MAX_ADMITTED_CANDIDATES:
             records.append(
@@ -319,6 +363,9 @@ class PaperIBKRMarketData:
     port: int = PAPER_TWS_PORT
     bar_max_age: timedelta = DEFAULT_BAR_MAX_AGE
     _scanner_ready: bool = field(default=False, init=False, repr=False)
+    _contract_details: dict[int, IBKRContractDetails] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.host.strip():
@@ -341,7 +388,60 @@ class PaperIBKRMarketData:
         if not self._scanner_ready:
             await self.initialize()
         results = await self.actor.scan(DEFAULT_SCANNER_REQUEST)
-        return qualify_scanner_results(results, scanner_run_id=scanner_run_id)
+        qualified: list[IBKRScannerResult] = []
+        unqualified: set[int] = set()
+        for result in results:
+            enriched = await self._qualify_contract(result)
+            if enriched is None:
+                unqualified.add(result.con_id)
+                qualified.append(result)
+            else:
+                qualified.append(enriched)
+        return qualify_scanner_results(
+            qualified,
+            scanner_run_id=scanner_run_id,
+            unqualified_con_ids=frozenset(unqualified),
+        )
+
+    def min_tick(self, con_id: int) -> Decimal:
+        """Minimum price increment from the contract details of a scanned row."""
+        details = self._contract_details.get(con_id)
+        if details is None:
+            raise MarketDataQualityError("contract details were not loaded for this conId")
+        return details.min_tick
+
+    async def _qualify_contract(self, result: IBKRScannerResult) -> IBKRScannerResult | None:
+        """Fill exchange and stock type from contract details; never invent identity.
+
+        Scanner rows frequently omit ``primaryExchange``. The frozen request's
+        COMMON filter stands when TWS omits ``stockType`` in both places; any
+        explicit non-COMMON type still rejects the row downstream.
+        """
+        if result.con_id <= 0:
+            return result
+        try:
+            details = await self.actor.contract_details(result.con_id)
+        except Exception:
+            return None
+        if (
+            details.con_id != result.con_id
+            or not details.min_tick.is_finite()
+            or details.min_tick <= 0
+        ):
+            return None
+        self._contract_details[result.con_id] = details
+        stock_type = (
+            details.stock_type.strip()
+            or result.stock_type.strip()
+            or DEFAULT_SCANNER_REQUEST.stock_type_filter
+        )
+        return replace(
+            result,
+            stock_type=stock_type,
+            primary_exchange=details.primary_exchange.strip() or result.primary_exchange.strip(),
+            currency=details.currency.strip() or result.currency,
+            security_type=details.security_type.strip() or result.security_type,
+        )
 
     async def completed_bars(
         self,
