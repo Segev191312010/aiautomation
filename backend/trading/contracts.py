@@ -209,7 +209,11 @@ def normalize_symbols(values: tuple[str, ...]) -> tuple[str, ...]:
         raise ValueError("symbols must be non-empty US equity tickers")
     if len(set(normalized)) != len(normalized):
         raise ValueError("symbols must be unique")
-    if any(not value.replace(".", "").replace("-", "").isalnum() for value in normalized):
+    if any(
+        not value.replace(".", "").replace("-", "").replace(" ", "").isalnum()
+        or "  " in value
+        for value in normalized
+    ):
         raise ValueError("symbols contain unsupported characters")
     return normalized
 
