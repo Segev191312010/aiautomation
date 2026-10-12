@@ -1,4 +1,4 @@
-"""Secret-safe macOS Keychain access for the Anthropic setup-review key."""
+"""Secret-safe macOS Keychain access for the Anthropic review key and Telegram bot token."""
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -9,6 +9,10 @@ from typing import Protocol
 
 ANTHROPIC_KEYCHAIN_SERVICE = "com.maccabi.autotrader-v1.anthropic"
 ANTHROPIC_KEYCHAIN_ACCOUNT = "anthropic-api-key"
+# Stored with /usr/bin/security add-generic-password, so the same binary can
+# read it back under launchd without an interactive Keychain prompt.
+TELEGRAM_KEYCHAIN_SERVICE = "com.maccabi.autotrader-v1.telegram"
+TELEGRAM_KEYCHAIN_ACCOUNT = "telegram-bot-token"
 
 
 class KeychainReadError(RuntimeError):
@@ -64,11 +68,21 @@ def read_anthropic_api_key(reader: MacOSKeychainReader | None = None) -> str:
     )
 
 
+def read_telegram_bot_token(reader: MacOSKeychainReader | None = None) -> str:
+    return (reader or MacOSKeychainReader()).read(
+        service=TELEGRAM_KEYCHAIN_SERVICE,
+        account=TELEGRAM_KEYCHAIN_ACCOUNT,
+    )
+
+
 __all__ = [
     "KeychainCommandRunner",
     "KeychainReadError",
     "MacOSKeychainReader",
     "ANTHROPIC_KEYCHAIN_ACCOUNT",
     "ANTHROPIC_KEYCHAIN_SERVICE",
+    "TELEGRAM_KEYCHAIN_ACCOUNT",
+    "TELEGRAM_KEYCHAIN_SERVICE",
     "read_anthropic_api_key",
+    "read_telegram_bot_token",
 ]
