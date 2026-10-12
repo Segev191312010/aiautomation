@@ -1,4 +1,4 @@
-"""Secret-safe macOS Keychain access for the OpenAI shadow-review key."""
+"""Secret-safe macOS Keychain access for the Anthropic setup-review key."""
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -7,8 +7,8 @@ import subprocess
 from typing import Protocol
 
 
-OPENAI_KEYCHAIN_SERVICE = "com.maccabi.autotrader-v1.openai"
-OPENAI_KEYCHAIN_ACCOUNT = "openai-api-key"
+ANTHROPIC_KEYCHAIN_SERVICE = "com.maccabi.autotrader-v1.anthropic"
+ANTHROPIC_KEYCHAIN_ACCOUNT = "anthropic-api-key"
 
 
 class KeychainReadError(RuntimeError):
@@ -57,10 +57,10 @@ class MacOSKeychainReader:
         return secret
 
 
-def read_openai_api_key(reader: MacOSKeychainReader | None = None) -> str:
+def read_anthropic_api_key(reader: MacOSKeychainReader | None = None) -> str:
     return (reader or MacOSKeychainReader()).read(
-        service=OPENAI_KEYCHAIN_SERVICE,
-        account=OPENAI_KEYCHAIN_ACCOUNT,
+        service=ANTHROPIC_KEYCHAIN_SERVICE,
+        account=ANTHROPIC_KEYCHAIN_ACCOUNT,
     )
 
 
@@ -68,7 +68,7 @@ __all__ = [
     "KeychainCommandRunner",
     "KeychainReadError",
     "MacOSKeychainReader",
-    "OPENAI_KEYCHAIN_ACCOUNT",
-    "OPENAI_KEYCHAIN_SERVICE",
-    "read_openai_api_key",
+    "ANTHROPIC_KEYCHAIN_ACCOUNT",
+    "ANTHROPIC_KEYCHAIN_SERVICE",
+    "read_anthropic_api_key",
 ]
