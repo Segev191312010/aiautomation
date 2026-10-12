@@ -11,11 +11,15 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-from typing import Literal
+from decimal import Decimal
+from typing import Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from trading.contracts import ReconciliationReport, require_aware
+
+if TYPE_CHECKING:
+    from trading.execution.tws_paper_transport import BrokerReconciliationSnapshot
 
 
 LegType = Literal["parent", "stop", "target"]
@@ -38,7 +42,78 @@ FindingCode = Literal[
     "partial_fill_unprotected",
     "oca_inconsistent",
     "unexpected_order",
+    "identity_mismatch",
+    "unexpected_position",
+    "unexpected_execution",
+    "missing_protection",
 ]
+
+
+class SnapshotExpectedLeg(BaseModel):
+    """Immutable broker identity for one persisted bracket leg."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    leg_id: str = Field(min_length=1, max_length=256)
+    leg_type: LegType
+    broker_order_id: int = Field(gt=0)
+    parent_order_id: int | None = Field(default=None, gt=0)
+    perm_id: str | None = Field(default=None, max_length=256)
+    order_ref: str = Field(min_length=1, max_length=256)
+    oca_group: str | None = Field(default=None, max_length=256)
+    quantity: int = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    transmit: bool
+    state: OrderState
+
+
+class SnapshotBracketExpectation(BaseModel):
+    """Full stored identity used to compare a fresh TWS snapshot."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    group_id: str = Field(min_length=1, max_length=256)
+    owner_id: str = Field(min_length=1, max_length=256)
+    account: str = Field(min_length=1, max_length=256)
+    client_id: int = Field(gt=0)
+    symbol: str = Field(min_length=1, max_length=32)
+    con_id: int = Field(gt=0)
+    primary_exchange: str = Field(min_length=1, max_length=64)
+    currency: Literal["USD"]
+    security_type: Literal["STK"]
+    quantity: int = Field(gt=0)
+    oca_group: str = Field(min_length=1, max_length=256)
+    state: Literal["staged", "submitted", "filled", "canceled", "failed", "manual_intervention"]
+    legs: tuple[SnapshotExpectedLeg, ...]
+
+    @property
+    def active(self) -> bool:
+        return self.state in {"staged", "submitted", "filled", "manual_intervention"}
+
+
+class SnapshotReconciliationFinding(BaseModel):
+    """One fail-closed mismatch from a current TWS snapshot."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: FindingCode
+    group_id: str | None = Field(default=None, max_length=256)
+    order_id: int | None = Field(default=None, gt=0)
+    detail: str = Field(min_length=1, max_length=256)
+
+
+class SnapshotReconciliationAnalysis(BaseModel):
+    """Account-wide comparison result; only a clear result may unblock startup."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["clear", "blocked"]
+    findings: tuple[SnapshotReconciliationFinding, ...]
+    observed_at: datetime
+
+    @property
+    def blocking(self) -> bool:
+        return self.status == "blocked"
 
 
 class BrokerEventNormalizationError(ValueError):
@@ -464,6 +539,229 @@ def analyze_reconciliation(
     )
 
 
+def analyze_broker_snapshot(
+    expectations: Iterable[SnapshotBracketExpectation],
+    snapshot: "BrokerReconciliationSnapshot",
+    *,
+    expected_account: str,
+    expected_client_id: int,
+) -> SnapshotReconciliationAnalysis:
+    """Compare a fresh account snapshot with durable bracket intent.
+
+    This function is deliberately conservative. It reports uncertainty and
+    never changes an order, a ledger row, or an execution fence.
+    """
+
+    expected_groups = tuple(expectations)
+    findings: list[SnapshotReconciliationFinding] = []
+
+    def add(
+        code: FindingCode,
+        detail: str,
+        *,
+        group_id: str | None = None,
+        order_id: int | None = None,
+    ) -> None:
+        findings.append(
+            SnapshotReconciliationFinding(
+                code=code, group_id=group_id, order_id=order_id, detail=detail
+            )
+        )
+
+    groups_by_id: dict[str, SnapshotBracketExpectation] = {}
+    groups_by_con_id: dict[int, list[SnapshotBracketExpectation]] = defaultdict(list)
+    legs_by_order_id: dict[int, tuple[SnapshotBracketExpectation, SnapshotExpectedLeg]] = {}
+    for group in expected_groups:
+        if group.owner_id.strip() == "" or group.account != expected_account:
+            add("identity_mismatch", "persisted bracket account scope is invalid", group_id=group.group_id)
+        if group.client_id != expected_client_id:
+            add("identity_mismatch", "persisted bracket client scope is invalid", group_id=group.group_id)
+        if group.group_id in groups_by_id:
+            add("identity_mismatch", "duplicate persisted bracket group identity", group_id=group.group_id)
+        groups_by_id[group.group_id] = group
+        groups_by_con_id[group.con_id].append(group)
+        leg_types = {leg.leg_type for leg in group.legs}
+        if leg_types != {"parent", "target", "stop"} or len(group.legs) != 3:
+            add("identity_mismatch", "persisted bracket does not contain exactly three legs", group_id=group.group_id)
+        for leg in group.legs:
+            if leg.broker_order_id in legs_by_order_id:
+                add(
+                    "identity_mismatch",
+                    "broker order ID is reused by multiple persisted legs",
+                    group_id=group.group_id,
+                    order_id=leg.broker_order_id,
+                )
+            legs_by_order_id[leg.broker_order_id] = (group, leg)
+
+    open_orders_by_id: dict[int, object] = {}
+    for order in snapshot.open_orders:
+        if order.order_id in open_orders_by_id:
+            add("duplicate_event", "duplicate open order in broker snapshot", order_id=order.order_id)
+            continue
+        open_orders_by_id[order.order_id] = order
+        expected_pair = legs_by_order_id.get(order.order_id)
+        if expected_pair is None:
+            add("unexpected_order", "broker open order has no persisted bracket leg", order_id=order.order_id)
+            continue
+        group, leg = expected_pair
+        expected_side = "BUY" if leg.leg_type == "parent" else "SELL"
+        expected_order_type = "STP" if leg.leg_type == "stop" else "LMT"
+        observed_price = order.auxiliary_price if leg.leg_type == "stop" else order.limit_price
+        expected_parent = None if leg.leg_type == "parent" else next(
+            (item.broker_order_id for item in group.legs if item.leg_type == "parent"), None
+        )
+        expected_oca = None if leg.leg_type == "parent" else group.oca_group
+        expected_transmit = leg.leg_type == "stop"
+        if (
+            order.account != expected_account
+            or order.client_id != expected_client_id
+            or order.con_id != group.con_id
+            or order.symbol != group.symbol
+            or order.security_type != group.security_type
+            or order.primary_exchange != group.primary_exchange
+            or order.currency != group.currency
+            or order.order_ref != leg.order_ref
+            or (leg.perm_id is not None and order.perm_id != leg.perm_id)
+            or order.quantity != Decimal(leg.quantity)
+            or order.side != expected_side
+            or order.order_type != expected_order_type
+            or observed_price != leg.price
+            or (order.parent_order_id or None) != expected_parent
+            or order.oca_group != expected_oca
+            or order.transmit != expected_transmit
+            or order.tif != "DAY"
+            or order.outside_rth is not False
+            or (leg.leg_type != "parent" and order.oca_type != 1)
+        ):
+            add(
+                "identity_mismatch",
+                "broker open order does not match persisted bracket intent",
+                group_id=group.group_id,
+                order_id=order.order_id,
+            )
+
+    executions_by_order_id: dict[int, list[object]] = defaultdict(list)
+    for execution in snapshot.executions:
+        expected_pair = legs_by_order_id.get(execution.order_id)
+        if expected_pair is None:
+            add(
+                "unexpected_execution",
+                "broker execution has no persisted bracket leg",
+                order_id=execution.order_id,
+            )
+            continue
+        group, leg = expected_pair
+        executions_by_order_id[execution.order_id].append(execution)
+        if (
+            execution.account != expected_account
+            or execution.con_id != group.con_id
+            or execution.symbol != group.symbol
+            or execution.security_type != group.security_type
+            or execution.currency != group.currency
+            or (leg.perm_id is not None and execution.perm_id != leg.perm_id)
+            or execution.shares <= 0
+        ):
+            add(
+                "identity_mismatch",
+                "broker execution does not match persisted bracket intent",
+                group_id=group.group_id,
+                order_id=execution.order_id,
+            )
+
+    positive_positions: dict[int, object] = {}
+    for position in snapshot.positions:
+        if position.quantity == 0:
+            continue
+        if position.account != expected_account:
+            add("unexpected_position", "broker position belongs to another account")
+            continue
+        matching_groups = groups_by_con_id.get(position.con_id, [])
+        if len(matching_groups) != 1:
+            add(
+                "unexpected_position",
+                "broker position does not map to exactly one persisted bracket",
+            )
+            continue
+        group = matching_groups[0]
+        positive_positions[position.con_id] = position
+        if (
+            position.quantity < 0
+            or position.symbol != group.symbol
+            or position.security_type != group.security_type
+            or position.currency != group.currency
+            or (
+                position.primary_exchange
+                and position.primary_exchange != group.primary_exchange
+            )
+        ):
+            add(
+                "identity_mismatch",
+                "broker position does not match persisted bracket identity",
+                group_id=group.group_id,
+            )
+
+    for group in expected_groups:
+        open_group_orders = {
+            leg.leg_type: open_orders_by_id[leg.broker_order_id]
+            for leg in group.legs
+            if leg.broker_order_id in open_orders_by_id
+        }
+        executed_legs = {
+            leg.leg_type
+            for leg in group.legs
+            if executions_by_order_id.get(leg.broker_order_id)
+        }
+        if not group.active:
+            if open_group_orders:
+                add(
+                    "unexpected_order",
+                    "terminal bracket still has open broker orders",
+                    group_id=group.group_id,
+                )
+            continue
+        if "parent" not in open_group_orders and "parent" not in executed_legs:
+            add(
+                "missing_order",
+                "active bracket parent is absent from open orders and executions",
+                group_id=group.group_id,
+            )
+        position = positive_positions.get(group.con_id)
+        if position is not None:
+            if "parent" not in executed_legs:
+                add(
+                    "identity_mismatch",
+                    "open position lacks a matching persisted parent execution",
+                    group_id=group.group_id,
+                )
+            stop = open_group_orders.get("stop")
+            if stop is None or stop.quantity < position.quantity:
+                add(
+                    "missing_protection",
+                    "open position is not fully covered by the persisted protective stop",
+                    group_id=group.group_id,
+                )
+        elif executed_legs and "parent" in executed_legs and not ({"stop", "target"} & executed_legs):
+            add(
+                "identity_mismatch",
+                "parent execution has no matching position or protective exit execution",
+                group_id=group.group_id,
+            )
+        if "parent" in open_group_orders:
+            for leg_type in ("target", "stop"):
+                if leg_type not in open_group_orders:
+                    add(
+                        "missing_order",
+                        f"active bracket {leg_type} is absent while parent remains open",
+                        group_id=group.group_id,
+                    )
+
+    return SnapshotReconciliationAnalysis(
+        status="blocked" if findings else "clear",
+        findings=tuple(findings),
+        observed_at=snapshot.observed_at,
+    )
+
+
 reconcile = analyze_reconciliation
 normalize_event = normalize_broker_event
 
@@ -472,6 +770,11 @@ __all__ = [
     "BrokerEvent",
     "BrokerEventNormalizationError",
     "BracketExpectation",
+    "SnapshotBracketExpectation",
+    "SnapshotExpectedLeg",
+    "SnapshotReconciliationAnalysis",
+    "SnapshotReconciliationFinding",
+    "analyze_broker_snapshot",
     "ReconciliationAnalysis",
     "ReconciliationFinding",
     "analyze_reconciliation",

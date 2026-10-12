@@ -7,7 +7,9 @@ from decimal import Decimal
 import aiosqlite
 import pytest
 
+from config import cfg
 from trading.contracts import Decision, DecisionOutcome, FixedUniverse, RuleCondition, StrategySpec
+from trading.storage.bracket_ledger import SQLiteBracketLedger
 from trading.storage.migrations import MIGRATIONS, Migration, apply_migrations
 from trading.storage.repository import record_decision
 
@@ -246,8 +248,10 @@ async def test_migration_creates_non_overwriting_recovery_backup(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_immutable_authority_and_policy_rows_and_bracket_checks(tmp_path):
-    database = await _connect(tmp_path / "integrity.db")
+async def test_immutable_authority_and_policy_rows_and_bracket_checks(tmp_path, monkeypatch):
+    path = tmp_path / "integrity.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(path))
+    database = await _connect(path)
     try:
         strategy_id, run_id, candidate_id = await _seed_run_and_candidate(database)
         await database.execute(
@@ -305,21 +309,45 @@ async def test_immutable_authority_and_policy_rows_and_bracket_checks(tmp_path):
             """
             INSERT INTO autotrader_bracket_groups
             (id, owner_id, run_id, candidate_id, risk_reservation_id, execution_key, account,
-             client_id, symbol, quantity, entry_price, stop_price, target_price, state, created_at, updated_at)
+             client_id, symbol, con_id, primary_exchange, currency, security_type,
+             quantity, entry_price, stop_price, target_price, oca_group, state, created_at, updated_at)
             VALUES ('group-1', 'owner-a', ?, ?, 'reservation-1', 'exec-1', 'paper-account', 17,
-                    'AAPL', 10, '100', '99', NULL, 'staged', ?, ?)
+                    'AAPL', 123, 'NASDAQ', 'USD', 'STK', 10, '100', '99', '102', 'oca-1', 'staged', ?, ?)
             """,
             (run_id, candidate_id, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
         )
+        await database.executemany(
+            """INSERT INTO autotrader_bracket_legs
+            (id, group_id, leg_type, broker_order_id, parent_order_id, perm_id, order_ref,
+             oca_group, quantity, price, transmit, state)
+            VALUES (?, 'group-1', ?, ?, ?, NULL, ?, ?, 10, ?, ?, 'staged')""",
+            (
+                ("leg-parent", "parent", "100", None, "group-1:parent", None, "100", 0),
+                ("leg-target", "target", "101", "100", "group-1:target", "oca-1", "102", 0),
+                ("leg-stop", "stop", "102", "100", "group-1:stop", "oca-1", "99", 1),
+            ),
+        )
         await database.commit()
+        loaded = await SQLiteBracketLedger().load_reconciliation_expectations(
+            owner_id="owner-a", account="paper-account", client_id=17
+        )
+        assert len(loaded) == 1
+        assert loaded[0].con_id == 123
+        assert tuple(leg.leg_type for leg in loaded[0].legs) == ("parent", "target", "stop")
+        with pytest.raises(aiosqlite.IntegrityError, match="immutable"):
+            await database.execute(
+                "UPDATE autotrader_bracket_groups SET account='DU_OTHER' WHERE id='group-1'"
+            )
+        await database.rollback()
         with pytest.raises(aiosqlite.IntegrityError):
             await database.execute(
                 """
                 INSERT INTO autotrader_bracket_groups
                 (id, owner_id, run_id, candidate_id, risk_reservation_id, execution_key, account,
-                 client_id, symbol, quantity, entry_price, stop_price, target_price, state, created_at, updated_at)
+                 client_id, symbol, con_id, primary_exchange, currency, security_type,
+                 quantity, entry_price, stop_price, target_price, state, created_at, updated_at)
                 VALUES ('group-2', 'owner-a', ?, ?, 'reservation-1', 'exec-2', 'paper-account', 17,
-                        'AAPL', 10, '100', '101', NULL, 'staged', ?, ?)
+                        'AAPL', 123, 'NASDAQ', 'USD', 'STK', 10, '100', '101', NULL, 'staged', ?, ?)
                 """,
                 (run_id, candidate_id, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
             )

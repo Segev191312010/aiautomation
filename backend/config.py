@@ -6,10 +6,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from trading.operations.paths import UserPaths
+
 load_dotenv()
 
 DEFAULT_DEV_JWT_SECRET = "autotrader-v1-development-secret"
-DEFAULT_DB_PATH = str(Path(__file__).resolve().parent / "trading_bot.db")
+DEFAULT_DB_PATH = str(UserPaths.current().database_file)
 
 
 class Config:

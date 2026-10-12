@@ -150,10 +150,18 @@ def test_orb_rejects_incomplete_opening_range_and_does_not_use_later_bars():
             close="101",
         )
     )
-    result = _evaluate(bars)
-    assert result.setup is not None
-    assert result.breakout_bar is not None
-    assert result.breakout_bar.interval_start_utc == datetime(
+    pending = _evaluate(bars)
+    assert pending.setup is None
+    assert pending.rejection_reason == "NO_SIGNAL_YET"
+
+    completed = _evaluate(
+        bars,
+        quote=_quote(observed_at=datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)),
+        now=datetime(2026, 1, 5, 15, 0, 1, tzinfo=timezone.utc),
+    )
+    assert completed.setup is not None
+    assert completed.breakout_bar is not None
+    assert completed.breakout_bar.interval_start_utc == datetime(
         2026, 1, 5, 14, 55, tzinfo=timezone.utc
     )
 
@@ -223,14 +231,14 @@ def test_wilder_atr_is_deterministic_and_requires_rth_history():
         wilder_atr([*bars[:-1], bars[-1].model_copy(update={"rth": False})])
 
 
-def test_orb_build_wrapper_raises_on_missing_signal():
+def test_orb_build_wrapper_reports_pending_signal_before_cutoff():
     bars = _session_bars()
     bars[-1] = _bar(
         datetime(2026, 1, 5, 14, 50, tzinfo=timezone.utc),
         high="100.4",
         close="100.4",
     )
-    with pytest.raises(ORBError, match="no_breakout_before_cutoff"):
+    with pytest.raises(ORBError, match="NO_SIGNAL_YET"):
         build_orb_setup(
             candidate=_candidate(),
             bars=bars,
@@ -243,3 +251,28 @@ def test_orb_build_wrapper_raises_on_missing_signal():
             average_dollar_volume="25000000",
             now=datetime(2026, 1, 5, 14, 55, 1, tzinfo=timezone.utc),
         )
+
+
+def test_orb_closes_pending_signal_at_cutoff():
+    bars = _session_bars()
+    bars[-1] = _bar(
+        datetime(2026, 1, 5, 14, 50, tzinfo=timezone.utc),
+        high="100.4",
+        close="100.4",
+    )
+    result = _evaluate(
+        bars,
+        quote=_quote(observed_at=datetime(2026, 1, 5, 17, 0, tzinfo=timezone.utc)),
+        now=datetime(2026, 1, 5, 17, 0, tzinfo=timezone.utc),
+    )
+    assert result.rejection_reason == "no_breakout_before_cutoff"
+
+
+def test_orb_ignores_bars_that_have_not_completed_as_of_evaluation():
+    result = _evaluate(
+        _session_bars(),
+        quote=_quote(observed_at=datetime(2026, 1, 5, 14, 54, tzinfo=timezone.utc)),
+        now=datetime(2026, 1, 5, 14, 54, tzinfo=timezone.utc),
+    )
+    assert result.rejection_reason == "NO_SIGNAL_YET"
+    assert result.setup is None

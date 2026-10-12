@@ -2,7 +2,10 @@
 
 from trading.scheduler.decision_keys import decision_key
 from trading.scheduler.lease import (
+    DEFAULT_LEASE_RENEW_INTERVAL,
+    DEFAULT_LEASE_TTL,
     LeaseClaim,
+    LeaseHeartbeat,
     LeaseLostError,
     acquire_lease,
     get_lease,
@@ -11,6 +14,8 @@ from trading.scheduler.lease import (
     require_lease,
 )
 from trading.scheduler.sessions import (
+    MARKET_CALENDAR_ID,
+    MARKET_CALENDAR_VERSION,
     MARKET_TIMEZONE,
     MarketSession,
     is_market_holiday,
@@ -19,8 +24,13 @@ from trading.scheduler.sessions import (
 )
 
 __all__ = [
+    "DEFAULT_LEASE_RENEW_INTERVAL",
+    "DEFAULT_LEASE_TTL",
     "LeaseClaim",
+    "LeaseHeartbeat",
     "LeaseLostError",
+    "MARKET_CALENDAR_ID",
+    "MARKET_CALENDAR_VERSION",
     "MARKET_TIMEZONE",
     "MarketSession",
     "acquire_lease",

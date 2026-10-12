@@ -13,13 +13,16 @@ from uuid import uuid4
 import aiosqlite
 
 from trading.contracts import FixedUniverse, StrategySpec
+from trading.storage.broker_inbox import BROKER_INBOX_SCHEMA, BROKER_SESSION_SCHEMA
 from trading.storage.schema import (
     AUTHORITY_RECEIPT_ATTESTATION_SCHEMA_STATEMENTS,
     AUTHORITY_SCHEMA_STATEMENTS,
     EXECUTION_HARDENING_SCHEMA_STATEMENTS,
+    EXECUTION_QUALIFIED_IDENTITY_SCHEMA_STATEMENTS,
     EXECUTION_SCHEMA_STATEMENTS,
     MIGRATION_LEDGER_STATEMENTS,
     RUN_SCHEMA_STATEMENTS,
+    SHADOW_RUNTIME_SCHEMA_STATEMENTS,
     STRATEGY_SCHEMA_STATEMENTS,
 )
 
@@ -228,6 +231,77 @@ async def _execution_hardening_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, EXECUTION_HARDENING_SCHEMA_STATEMENTS)
 
 
+async def _shadow_runtime_ledger(db: aiosqlite.Connection) -> None:
+    ai_call_columns = await _table_columns(db, "autotrader_ai_calls")
+    additions = (
+        ("prompt_hash", "TEXT NULL"),
+        ("pricing_hash", "TEXT NULL"),
+        ("input_tokens", "INTEGER NULL CHECK(input_tokens IS NULL OR input_tokens >= 0)"),
+        ("output_tokens", "INTEGER NULL CHECK(output_tokens IS NULL OR output_tokens >= 0)"),
+        (
+            "cached_input_tokens",
+            "INTEGER NULL CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0)",
+        ),
+    )
+    for column, declaration in additions:
+        if column not in ai_call_columns:
+            await db.execute(
+                f"ALTER TABLE autotrader_ai_calls ADD COLUMN {column} {declaration}"
+            )
+    await _execute_all(db, SHADOW_RUNTIME_SCHEMA_STATEMENTS)
+
+
+async def _broker_inbox(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, BROKER_INBOX_SCHEMA)
+
+
+async def _broker_sessions(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, BROKER_SESSION_SCHEMA)
+
+
+async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
+    columns = await _table_columns(db, "autotrader_bracket_groups")
+    additions = (
+        ("con_id", "INTEGER NULL"),
+        ("primary_exchange", "TEXT NULL"),
+        ("currency", "TEXT NULL"),
+        ("security_type", "TEXT NULL"),
+    )
+    for column, declaration in additions:
+        if column not in columns:
+            await db.execute(
+                f"ALTER TABLE autotrader_bracket_groups ADD COLUMN {column} {declaration}"
+            )
+    await db.execute(
+        """UPDATE autotrader_bracket_groups
+        SET con_id=(SELECT candidate.con_id FROM autotrader_candidates candidate
+                    WHERE candidate.id=autotrader_bracket_groups.candidate_id),
+            primary_exchange=(SELECT json_extract(candidate.contract_json, '$.primary_exchange')
+                              FROM autotrader_candidates candidate
+                              WHERE candidate.id=autotrader_bracket_groups.candidate_id),
+            currency=(SELECT json_extract(candidate.contract_json, '$.currency')
+                      FROM autotrader_candidates candidate
+                      WHERE candidate.id=autotrader_bracket_groups.candidate_id),
+            security_type=(SELECT json_extract(candidate.contract_json, '$.security_type')
+                           FROM autotrader_candidates candidate
+                           WHERE candidate.id=autotrader_bracket_groups.candidate_id)
+        WHERE con_id IS NULL"""
+    )
+    async with db.execute(
+        """SELECT COUNT(*) FROM autotrader_bracket_groups
+        WHERE con_id IS NULL OR con_id <= 0
+           OR primary_exchange IS NULL OR trim(primary_exchange)=''
+           OR currency IS NULL OR currency != 'USD'
+           OR security_type IS NULL OR security_type != 'STK'"""
+    ) as cursor:
+        unresolved = int((await cursor.fetchone())[0])
+    if unresolved:
+        raise RuntimeError(
+            "qualified bracket identity could not be recovered; PAPER reconciliation is blocked"
+        )
+    await _execute_all(db, EXECUTION_QUALIFIED_IDENTITY_SCHEMA_STATEMENTS)
+
+
 MIGRATIONS = (
     Migration(
         1,
@@ -270,6 +344,19 @@ MIGRATIONS = (
         "v1-paper-execution-hardening-20260827",
         _execution_hardening_ledger,
         EXECUTION_HARDENING_SCHEMA_STATEMENTS,
+    ),
+    Migration(
+        7,
+        "shadow-runtime-ledger",
+        "v1-shadow-runtime-ledger-20260831",
+        _shadow_runtime_ledger,
+        SHADOW_RUNTIME_SCHEMA_STATEMENTS,
+    ),
+    Migration(8, "broker-observation-inbox", "v1-broker-inbox-20260907", _broker_inbox, BROKER_INBOX_SCHEMA),
+    Migration(9, "broker-session-ledger", "v1-broker-sessions-20260908", _broker_sessions, BROKER_SESSION_SCHEMA),
+    Migration(
+        10, "qualified-bracket-identity", "v1-qualified-bracket-identity-20260908",
+        _qualified_bracket_identity, EXECUTION_QUALIFIED_IDENTITY_SCHEMA_STATEMENTS,
     ),
 )
 

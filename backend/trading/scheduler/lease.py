@@ -1,6 +1,8 @@
 """Transactional durable leader leases; leases do not grant trade authority."""
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -9,6 +11,10 @@ import aiosqlite
 
 class LeaseLostError(RuntimeError):
     """Raised when a scheduler no longer owns its fencing token."""
+
+
+DEFAULT_LEASE_TTL = timedelta(seconds=90)
+DEFAULT_LEASE_RENEW_INTERVAL = timedelta(seconds=30)
 
 
 @dataclass(frozen=True)
@@ -188,3 +194,100 @@ async def require_lease(
         or current.expires_at <= observed_at
     ):
         raise LeaseLostError(f"scheduler lease lost: {claim.name}")
+
+
+class LeaseHeartbeat:
+    """Renew one fenced lease in the background and surface loss synchronously."""
+
+    def __init__(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        claim: LeaseClaim,
+        ttl: timedelta = DEFAULT_LEASE_TTL,
+        renew_interval: timedelta = DEFAULT_LEASE_RENEW_INTERVAL,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        _validate_inputs(claim.name, claim.holder_id, ttl)
+        if renew_interval <= timedelta(0) or renew_interval >= ttl:
+            raise ValueError("lease renew_interval must be positive and shorter than ttl")
+        _utc(clock())
+        self._db = db
+        self._claim = claim
+        self._ttl = ttl
+        self._renew_interval = renew_interval
+        self._clock = clock
+        self._sleep = sleep
+        self._task: asyncio.Task[None] | None = None
+        self._failure: BaseException | None = None
+
+    @property
+    def claim(self) -> LeaseClaim:
+        return self._claim
+
+    async def __aenter__(self) -> "LeaseHeartbeat":
+        if self._task is not None:
+            raise RuntimeError("lease heartbeat cannot be entered twice")
+        self._task = asyncio.create_task(
+            self._run(), name=f"lease-heartbeat:{self._claim.name}"
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, traceback
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if exc is None:
+            self.raise_if_lost()
+
+    def raise_if_lost(self) -> None:
+        if self._failure is None:
+            return
+        if isinstance(self._failure, LeaseLostError):
+            raise self._failure
+        raise LeaseLostError(f"scheduler lease renewal failed: {self._claim.name}") from self._failure
+
+    async def require(self, *, now: datetime | None = None) -> None:
+        self.raise_if_lost()
+        await require_lease(self._db, claim=self._claim, now=now)
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                await self._sleep(self._renew_interval.total_seconds())
+                renewed = await renew_lease(
+                    self._db,
+                    claim=self._claim,
+                    ttl=self._ttl,
+                    now=_utc(self._clock()),
+                )
+                if renewed is None:
+                    self._failure = LeaseLostError(
+                        f"scheduler lease lost: {self._claim.name}"
+                    )
+                    return
+                self._claim = renewed
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            self._failure = exc
+
+
+__all__ = [
+    "DEFAULT_LEASE_RENEW_INTERVAL",
+    "DEFAULT_LEASE_TTL",
+    "LeaseClaim",
+    "LeaseHeartbeat",
+    "LeaseLostError",
+    "acquire_lease",
+    "get_lease",
+    "release_lease",
+    "renew_lease",
+    "require_lease",
+]

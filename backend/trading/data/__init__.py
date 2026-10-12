@@ -5,6 +5,8 @@ from trading.data.repositories import (
     DuplicateRecordError,
     FeatureRepository,
     RawBarRepository,
+    RawScannerRepository,
+    RawScannerResultRepository,
     RunRepository,
     ScannerRunRepository,
 )
@@ -14,6 +16,8 @@ __all__ = [
     "DuplicateRecordError",
     "FeatureRepository",
     "RawBarRepository",
+    "RawScannerRepository",
+    "RawScannerResultRepository",
     "RunRepository",
     "ScannerRunRepository",
 ]

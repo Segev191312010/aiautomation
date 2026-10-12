@@ -23,7 +23,7 @@ from trading.scheduler.decision_keys import decision_key
 
 
 HASH = "a" * 64
-NOW = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 2, 17, 0, tzinfo=timezone.utc)
 
 
 def _strategy() -> StrategyRecord:

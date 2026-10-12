@@ -7,11 +7,20 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from zoneinfo import ZoneInfo
 
-from trading.contracts import Candidate, CompletedBar, QuoteSnapshot, RuleSetup, require_aware
+from trading.contracts import (
+    Candidate,
+    CompletedBar,
+    QuoteSnapshot,
+    RuleSetup,
+    RuleSetupProvenance,
+    fingerprint_payload,
+    require_aware,
+)
 
 NEW_YORK = ZoneInfo("America/New_York")
 UTC = timezone.utc
 QUOTE_MAX_AGE_SECONDS = Decimal("2")
+NO_SIGNAL_YET = "NO_SIGNAL_YET"
 _BPS = Decimal("10000")
 
 
@@ -181,6 +190,7 @@ def evaluate_orb(
     strategy_version: int,
     reference_price: Decimal | int | str,
     average_dollar_volume: Decimal | int | str,
+    candidate_input_fingerprint: str | None = None,
     now: datetime | None = None,
     config: ORBConfig = ORBConfig(),
 ) -> ORBResult:
@@ -245,18 +255,25 @@ def evaluate_orb(
         if bar.rth
         and opening_end <= bar.interval_start_utc
         and bar.interval_end_utc <= cutoff
+        and bar.interval_end_utc <= now_utc
         and bar.interval_start_utc.astimezone(NEW_YORK).date() == session_date
     ]
     breakout = next((bar for bar in signal_bars if bar.close > opening_high), None)
     if breakout is None:
         return ORBResult(
             setup=None,
-            rejection_reason="no_breakout_before_cutoff",
+            rejection_reason=(
+                NO_SIGNAL_YET if now_utc < cutoff else "no_breakout_before_cutoff"
+            ),
             opening_range_high=opening_high,
             opening_range_low=opening_low,
         )
 
-    history = [bar for bar in ordered if bar.rth and bar.interval_end_utc <= breakout.interval_end_utc]
+    history = [
+        bar
+        for bar in ordered
+        if bar.rth and bar.interval_end_utc <= breakout.interval_end_utc
+    ]
     try:
         atr = wilder_atr(history, period=config.atr_period)
         entry_raw = max(breakout.close, quote.ask)
@@ -284,6 +301,20 @@ def evaluate_orb(
             quote.min_tick,
             ROUND_CEILING,
         )
+        opening_fingerprints = tuple(bar.fingerprint() for bar in opening)
+        atr_fingerprints = tuple(bar.fingerprint() for bar in history)
+        breakout_fingerprint = breakout.fingerprint()
+        quote_fingerprint = quote.fingerprint()
+        input_fingerprint = candidate_input_fingerprint or fingerprint_payload(
+            {
+                "candidate": fingerprint_payload(candidate),
+                "reference_price": str(reference_price),
+                "average_dollar_volume": str(average_dollar_volume),
+            }
+        )
+        causal_bars = tuple(
+            dict.fromkeys((*opening_fingerprints, *atr_fingerprints, breakout_fingerprint))
+        )
         setup = RuleSetup(
             run_id=run_id,
             candidate_id=candidate.id,
@@ -296,8 +327,15 @@ def evaluate_orb(
             entry_limit=entry_limit,
             stop_price=stop_price,
             target_price=target_price,
-            bar_fingerprints=tuple(bar.fingerprint() for bar in (*opening, breakout)),
-            quote_fingerprint=quote.fingerprint(),
+            bar_fingerprints=causal_bars,
+            quote_fingerprint=quote_fingerprint,
+            causal_provenance=RuleSetupProvenance(
+                opening_bar_fingerprints=opening_fingerprints,
+                atr_bar_fingerprints=atr_fingerprints,
+                breakout_bar_fingerprint=breakout_fingerprint,
+                quote_fingerprint=quote_fingerprint,
+                candidate_input_fingerprint=input_fingerprint,
+            ),
             detected_at=breakout.interval_end_utc,
         )
     except (ORBError, ValueError, InvalidOperation) as exc:
@@ -323,3 +361,15 @@ def build_orb_setup(**kwargs: object) -> RuleSetup:
     if result.setup is None:
         raise ORBError(result.rejection_reason or "ORB setup unavailable")
     return result.setup
+
+
+__all__ = [
+    "NO_SIGNAL_YET",
+    "ORBConfig",
+    "ORBError",
+    "ORBResult",
+    "build_orb_setup",
+    "evaluate_orb",
+    "qualify_candidate",
+    "wilder_atr",
+]

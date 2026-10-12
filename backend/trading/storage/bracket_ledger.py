@@ -7,6 +7,7 @@ to repair an unsafe bracket.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 
@@ -21,6 +22,10 @@ from trading.execution.ibkr_paper import (
 )
 from trading.contracts import TradeIntent
 from trading.execution.ibkr_paper import PaperSubmissionContext
+from trading.execution.reconciliation import (
+    SnapshotBracketExpectation,
+    SnapshotExpectedLeg,
+)
 
 
 def _timestamp() -> str:
@@ -55,9 +60,10 @@ class SQLiteBracketLedger:
                 """
                 INSERT INTO autotrader_bracket_groups
                 (id, owner_id, run_id, candidate_id, risk_reservation_id, execution_key,
-                 account, client_id, symbol, quantity, entry_price, stop_price, target_price,
+                 account, client_id, symbol, con_id, primary_exchange, currency, security_type,
+                 quantity, entry_price, stop_price, target_price,
                  oca_group, state, manual_intervention_reason, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', NULL, ?, ?)
                 """,
                 (
                     group.id,
@@ -69,6 +75,10 @@ class SQLiteBracketLedger:
                     group.account,
                     group.client_id,
                     group.symbol,
+                    group.context.con_id,
+                    group.context.primary_exchange,
+                    group.context.currency,
+                    group.context.security_type,
                     group.quantity,
                     str(group.entry_price),
                     str(group.stop_price),
@@ -197,6 +207,106 @@ class SQLiteBracketLedger:
                 "SELECT 1 FROM autotrader_bracket_groups WHERE execution_key=?", (execution_key,)
             ) as cursor:
                 return await cursor.fetchone() is not None
+
+    async def load_reconciliation_expectations(
+        self, *, owner_id: str, account: str, client_id: int
+    ) -> tuple[SnapshotBracketExpectation, ...]:
+        """Load complete immutable broker identities for restart comparison."""
+        if not owner_id.strip() or not account.strip() or client_id <= 0:
+            raise ValueError("bracket reconciliation scope is invalid")
+        async with transaction() as db:
+            async with db.execute(
+                """SELECT id, owner_id, account, client_id, symbol, con_id,
+                          primary_exchange, currency, security_type, quantity,
+                          oca_group, state
+                   FROM autotrader_bracket_groups
+                   WHERE owner_id=? AND account=? AND client_id=?
+                   ORDER BY created_at, id""",
+                (owner_id, account, client_id),
+            ) as cursor:
+                groups = await cursor.fetchall()
+            async with db.execute(
+                """SELECT leg.group_id, leg.id, leg.leg_type, leg.broker_order_id,
+                          leg.parent_order_id, leg.perm_id, leg.order_ref,
+                          leg.oca_group, leg.quantity, leg.price, leg.transmit,
+                          leg.state
+                   FROM autotrader_bracket_legs leg
+                   JOIN autotrader_bracket_groups bracket ON bracket.id=leg.group_id
+                   WHERE bracket.owner_id=? AND bracket.account=? AND bracket.client_id=?
+                   ORDER BY bracket.created_at, bracket.id,
+                            CASE leg.leg_type WHEN 'parent' THEN 0 WHEN 'target' THEN 1 ELSE 2 END""",
+                (owner_id, account, client_id),
+            ) as cursor:
+                leg_rows = await cursor.fetchall()
+        legs_by_group: dict[str, list[SnapshotExpectedLeg]] = {}
+        for row in leg_rows:
+            (
+                group_id,
+                leg_id,
+                leg_type,
+                broker_order_id,
+                parent_order_id,
+                perm_id,
+                order_ref,
+                oca_group,
+                quantity,
+                price,
+                transmit,
+                state,
+            ) = row
+            if broker_order_id is None or price is None:
+                raise RuntimeError("persisted bracket leg identity is incomplete")
+            legs_by_group.setdefault(str(group_id), []).append(
+                SnapshotExpectedLeg(
+                    leg_id=str(leg_id),
+                    leg_type=str(leg_type),
+                    broker_order_id=int(broker_order_id),
+                    parent_order_id=(
+                        None if parent_order_id is None else int(parent_order_id)
+                    ),
+                    perm_id=None if perm_id is None else str(perm_id),
+                    order_ref=str(order_ref),
+                    oca_group=None if oca_group is None else str(oca_group),
+                    quantity=int(quantity),
+                    price=Decimal(str(price)),
+                    transmit=bool(transmit),
+                    state=str(state),
+                )
+            )
+        expectations: list[SnapshotBracketExpectation] = []
+        for row in groups:
+            (
+                group_id,
+                stored_owner,
+                stored_account,
+                stored_client_id,
+                symbol,
+                con_id,
+                primary_exchange,
+                currency,
+                security_type,
+                quantity,
+                oca_group,
+                state,
+            ) = row
+            expectations.append(
+                SnapshotBracketExpectation(
+                    group_id=str(group_id),
+                    owner_id=str(stored_owner),
+                    account=str(stored_account),
+                    client_id=int(stored_client_id),
+                    symbol=str(symbol),
+                    con_id=int(con_id),
+                    primary_exchange=str(primary_exchange),
+                    currency=str(currency),
+                    security_type=str(security_type),
+                    quantity=int(quantity),
+                    oca_group=str(oca_group),
+                    state=str(state),
+                    legs=tuple(legs_by_group.get(str(group_id), ())),
+                )
+            )
+        return tuple(expectations)
 
     async def fence(self, *, reason: str) -> None:
         if not reason.strip():

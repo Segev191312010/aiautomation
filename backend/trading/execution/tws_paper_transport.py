@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import threading
+from uuid import uuid4
 from typing import Any, Protocol, TypeAlias
 
 from trading.execution.ibkr_paper import BrokerLegReceipt
@@ -91,8 +92,11 @@ class OpenOrderEvent:
     """Typed observation of an IBKR ``openOrder`` callback."""
 
     order_id: int
+    con_id: int
     symbol: str
     security_type: str
+    primary_exchange: str
+    currency: str
     side: str
     order_type: str
     quantity: Decimal
@@ -102,8 +106,12 @@ class OpenOrderEvent:
     transmit: bool
     oca_group: str | None
     account: str | None
+    client_id: int | None
     order_ref: str | None
     perm_id: str | None
+    tif: str | None
+    outside_rth: bool | None
+    oca_type: int | None
     status: str | None
     received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -143,6 +151,10 @@ class ExecutionEvent:
     request_id: int
     execution_id: str
     order_id: int
+    con_id: int
+    symbol: str
+    security_type: str
+    currency: str
     perm_id: str | None
     account: str | None
     shares: Decimal
@@ -155,6 +167,25 @@ class ExecutionEvent:
         object.__setattr__(
             self, "received_at", self.received_at.astimezone(timezone.utc)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PositionEvent:
+    """Typed account position observed during reconciliation."""
+
+    account: str
+    con_id: int
+    symbol: str
+    security_type: str
+    primary_exchange: str
+    currency: str
+    quantity: Decimal
+    average_cost: Decimal
+    received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self) -> None:
+        _require_aware_timestamp(self.received_at)
+        object.__setattr__(self, "received_at", self.received_at.astimezone(timezone.utc))
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,9 +221,26 @@ BrokerEvent: TypeAlias = (
     OpenOrderEvent
     | OrderStatusEvent
     | ExecutionEvent
+    | PositionEvent
     | BrokerErrorEvent
     | ConnectionClosedEvent
 )
+
+
+class BrokerObservationStore(Protocol):
+    async def begin_session(
+        self, *, session_id: str, owner_id: str, account: str, client_id: int,
+    ) -> None: ...
+
+    async def append(
+        self, *, session_id: str, sequence: int, owner_id: str,
+        account: str, client_id: int, event: BrokerEvent,
+    ) -> None: ...
+
+    async def close_session(
+        self, *, session_id: str, owner_id: str, account: str, client_id: int,
+        requires_reconciliation: bool,
+    ) -> None: ...
 
 
 class TWSClient(Protocol):
@@ -203,6 +251,14 @@ class TWSClient(Protocol):
     def run(self) -> Any: ...
 
     def placeOrder(self, order_id: int, contract: Any, order: Any) -> Any: ...
+
+    def reqAllOpenOrders(self) -> Any: ...
+
+    def reqPositions(self) -> Any: ...
+
+    def cancelPositions(self) -> Any: ...
+
+    def reqExecutions(self, request_id: int, execution_filter: Any) -> Any: ...
 
 
 class _CallbackSink:
@@ -248,6 +304,18 @@ class _CallbackSink:
     def execDetails(self, request_id: int, contract: Any, execution: Any) -> None:
         self._transport._on_execution(request_id, contract, execution)
 
+    def openOrderEnd(self) -> None:
+        self._transport._on_open_order_end()
+
+    def position(self, account: str, contract: Any, position: Any, average_cost: Any) -> None:
+        self._transport._on_position(account, contract, position, average_cost)
+
+    def positionEnd(self) -> None:
+        self._transport._on_position_end()
+
+    def execDetailsEnd(self, request_id: int) -> None:
+        self._transport._on_execution_end(request_id)
+
     def error(self, request_id: int, code: int, message: str, *args: Any) -> None:
         self._transport._on_error(request_id, code, message)
 
@@ -287,6 +355,18 @@ def _official_client_factory(sink: _CallbackSink) -> TWSClient:
         def execDetails(self, *args: Any) -> None:
             self._sink.execDetails(*args)
 
+        def openOrderEnd(self) -> None:
+            self._sink.openOrderEnd()
+
+        def position(self, *args: Any) -> None:
+            self._sink.position(*args)
+
+        def positionEnd(self) -> None:
+            self._sink.positionEnd()
+
+        def execDetailsEnd(self, request_id: int) -> None:
+            self._sink.execDetailsEnd(request_id)
+
         def error(self, *args: Any) -> None:
             self._sink.error(*args)
 
@@ -301,6 +381,8 @@ def _official_contract_factory(order: Any) -> Any:
 
     contract = Contract()
     contract.symbol = str(order.symbol)
+    contract.conId = order.con_id
+    contract.primaryExchange = order.primary_exchange
     contract.secType = "STK"
     contract.exchange = "SMART"
     contract.currency = "USD"
@@ -329,16 +411,34 @@ def _official_order_factory(order: Any) -> Any:
     return broker_order
 
 
+def _official_execution_filter_factory(account: str, client_id: int) -> Any:
+    from ibapi.execution import ExecutionFilter
+
+    execution_filter = ExecutionFilter()
+    execution_filter.acctCode = account
+    execution_filter.clientId = client_id
+    return execution_filter
+
+
 @dataclass
 class _PendingSubmission:
     future: asyncio.Future[BrokerLegReceipt]
+    expected_order: Any
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerReconciliationSnapshot:
+    open_orders: tuple[OpenOrderEvent, ...]
+    positions: tuple[PositionEvent, ...]
+    executions: tuple[ExecutionEvent, ...]
+    observed_at: datetime
 
 
 class TWSPaperTransport:
     """Explicit local TWS PAPER order transport with no implicit I/O."""
 
     _ACCEPTED_STATUSES = frozenset(
-        {"ApiPending", "PendingSubmit", "PreSubmitted", "Submitted", "Filled", "PartiallyFilled"}
+        {"PreSubmitted", "Submitted"}
     )
     _REJECTED_STATUSES = frozenset(
         {"ApiCancelled", "Cancelled", "Inactive", "Rejected"}
@@ -351,27 +451,168 @@ class TWSPaperTransport:
         client_factory: Callable[[_CallbackSink], TWSClient] | None = None,
         contract_factory: Callable[[Any], Any] | None = None,
         order_factory: Callable[[Any], Any] | None = None,
+        execution_filter_factory: Callable[[str, int], Any] | None = None,
+        observation_store: BrokerObservationStore | None = None,
+        owner_id: str | None = None,
     ) -> None:
         config.validate()
+        if (observation_store is None) != (owner_id is None) or (owner_id is not None and not owner_id.strip()):
+            raise TWSConfigurationError("observation store and owner must be configured together")
         self.config = config
         self._client_factory = client_factory or _official_client_factory
         self._contract_factory = contract_factory or _official_contract_factory
         self._order_factory = order_factory or _official_order_factory
+        self._execution_filter_factory = execution_filter_factory or _official_execution_filter_factory
         self._sink = _CallbackSink(self)
         self._client: TWSClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._run_thread: threading.Thread | None = None
         self._connected = False
+        self._execution_blocked = False
         self._handshake_event: asyncio.Event | None = None
         self._accounts_event: asyncio.Event | None = None
+        self._open_orders_end: asyncio.Event | None = None
+        self._positions_end: asyncio.Event | None = None
+        self._executions_end: dict[int, asyncio.Event] = {}
+        self._next_request_id = 1_000_000 + config.client_id * 1_000
         self._managed_accounts: frozenset[str] = frozenset()
         self._next_order_id: int | None = None
         self._reserved_order_ids: set[int] = set()
         self._submitted_order_ids: set[int] = set()
         self._submitted_order_refs: set[str] = set()
         self._pending: dict[int, _PendingSubmission] = {}
+        self._expected_orders: dict[int, Any] = {}
         self._events: list[BrokerEvent] = []
         self._state_lock = threading.RLock()
+        self._observation_session = str(uuid4())
+        self._persisted_observations = 0
+        self._observation_lock = asyncio.Lock()
+        self._observation_owner: str | None = None
+        self._observation_store = observation_store
+        self._configured_owner = owner_id
+        self._writer_task: asyncio.Task[None] | None = None
+        self._writer_stop = asyncio.Event()
+        self._session_started = False
+        self._session_closed = False
+        self._disconnecting = False
+        self._snapshot_lock = asyncio.Lock()
+        self._snapshot_poisoned = False
+
+    async def _flush_observations(self) -> None:
+        if self._observation_store is None or self._configured_owner is None:
+            raise TWSSubmissionError("durable observation storage is required for submission")
+        await self.persist_observations(self._observation_store, owner_id=self._configured_owner)
+
+    async def _write_observations(self) -> None:
+        try:
+            while not self._writer_stop.is_set():
+                await self._flush_observations()
+                try:
+                    await asyncio.wait_for(self._writer_stop.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass
+            await self._flush_observations()
+        except BaseException:
+            self._block_execution()
+            raise
+
+    async def _start_observation_writer(self) -> None:
+        if self._writer_task is not None:
+            raise TWSSubmissionError("observation writer cannot be restarted")
+        await self._flush_observations()
+        self._writer_task = asyncio.create_task(self._write_observations())
+
+    async def persist_observations(self, store: BrokerObservationStore, *, owner_id: str) -> int:
+        """Persist buffered callbacks in order; failed writes never advance the cursor."""
+        if not owner_id.strip():
+            raise ValueError("observation owner is required")
+        async with self._observation_lock:
+            if self._observation_owner is not None and self._observation_owner != owner_id:
+                self._block_execution()
+                raise ValueError("observation session owner cannot change")
+            self._observation_owner = owner_id
+            observations = self.events
+            try:
+                for sequence in range(self._persisted_observations, len(observations)):
+                    await store.append(
+                        session_id=self._observation_session, sequence=sequence,
+                        owner_id=owner_id, account=self.config.account,
+                        client_id=self.config.client_id, event=observations[sequence],
+                    )
+                    self._persisted_observations = sequence + 1
+            except BaseException:
+                self._block_execution()
+                raise
+            return self._persisted_observations
+
+    async def request_reconciliation_snapshot(self) -> BrokerReconciliationSnapshot:
+        """Request complete read-only broker snapshots; never clear a fence."""
+        async with self._snapshot_lock:
+            return await self._request_reconciliation_snapshot()
+
+    async def _request_reconciliation_snapshot(self) -> BrokerReconciliationSnapshot:
+        if self._snapshot_poisoned:
+            raise TWSSubmissionError(
+                "reconciliation snapshot channel is incomplete; a fresh connection is required"
+            )
+        self._require_observation_ready()
+        client = self._client
+        if client is None:
+            raise TWSHandshakeError("TWS client is disconnected")
+        start = len(self.events)
+        self._open_orders_end = asyncio.Event()
+        self._positions_end = asyncio.Event()
+        with self._state_lock:
+            request_id = self._next_request_id
+            self._next_request_id += 1
+        executions_end = asyncio.Event()
+        self._executions_end[request_id] = executions_end
+        try:
+            client.reqAllOpenOrders()
+            client.reqPositions()
+            client.reqExecutions(
+                request_id,
+                self._execution_filter_factory(self.config.account, self.config.client_id),
+            )
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self._open_orders_end.wait(),
+                    self._positions_end.wait(),
+                    executions_end.wait(),
+                ),
+                timeout=self.config.handshake_timeout_seconds,
+            )
+        except BaseException as exc:
+            self._snapshot_poisoned = True
+            self._block_execution()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise TWSSubmissionError("broker reconciliation snapshot failed") from exc
+        finally:
+            self._executions_end.pop(request_id, None)
+            try:
+                client.cancelPositions()
+            except Exception:
+                self._snapshot_poisoned = True
+                self._block_execution()
+        end = len(self.events)
+        observations = self.events[start:end]
+        await self._flush_observations()
+        open_orders = tuple(event for event in observations if isinstance(event, OpenOrderEvent))
+        positions = tuple(event for event in observations if isinstance(event, PositionEvent))
+        executions = tuple(
+            event for event in observations
+            if isinstance(event, ExecutionEvent) and event.request_id == request_id
+        )
+        if any(event.account != self.config.account for event in (*open_orders, *positions, *executions)):
+            self._block_execution()
+            raise TWSSubmissionError("broker reconciliation returned an unexpected account")
+        return BrokerReconciliationSnapshot(
+            open_orders=open_orders,
+            positions=positions,
+            executions=executions,
+            observed_at=datetime.now(timezone.utc),
+        )
 
     @property
     def identity(self) -> TWSOrderTransportIdentity:
@@ -398,12 +639,22 @@ class TWSPaperTransport:
     async def connect(self) -> None:
         """Open an explicit connection and verify next ID plus PAPER account."""
         self.config.validate()
+        if self._execution_blocked:
+            raise TWSHandshakeError("transport requires independent reconciliation before replacement")
         if self._connected:
             return
         self._loop = asyncio.get_running_loop()
         self._handshake_event = asyncio.Event()
         self._accounts_event = asyncio.Event()
         try:
+            if self._observation_store is not None and self._configured_owner is not None:
+                await self._observation_store.begin_session(
+                    session_id=self._observation_session,
+                    owner_id=self._configured_owner,
+                    account=self.config.account,
+                    client_id=self.config.client_id,
+                )
+                self._session_started = True
             self._client = self._client_factory(self._sink)
             self._client.connect(self.config.host, self.config.port, self.config.client_id)
             run = getattr(self._client, "run", None)
@@ -423,6 +674,8 @@ class TWSPaperTransport:
             )
             if self.config.account not in self._managed_accounts:
                 raise TWSHandshakeError("configured PAPER account was not returned by TWS")
+            if self._observation_store is not None:
+                await self._start_observation_writer()
         except asyncio.TimeoutError as exc:
             await self.disconnect()
             raise TWSHandshakeError("TWS PAPER handshake timed out") from exc
@@ -434,17 +687,76 @@ class TWSPaperTransport:
 
     async def disconnect(self) -> None:
         """Close the explicit connection and invalidate unsubmitted IDs."""
+        if self._session_closed and self._client is None:
+            self._block_execution()
+            return
+        was_blocked = self._execution_blocked
+        self._disconnecting = True
         self._connected = False
         client, self._client = self._client, None
+        client_error: BaseException | None = None
         if client is not None:
             try:
                 client.disconnect()
-            except Exception:
-                pass
+            except BaseException as exc:
+                client_error = exc
+                self._block_execution()
+        thread = self._run_thread
+        thread_quiesced = True
+        if thread is not None and thread is not threading.current_thread():
+            await asyncio.to_thread(thread.join, min(self.config.handshake_timeout_seconds, 2.0))
+            thread_quiesced = not thread.is_alive()
+            if not thread_quiesced:
+                self._block_execution()
         self._next_order_id = None
         self._reserved_order_ids.clear()
-        self._run_thread = None
+        self._run_thread = None if thread_quiesced else thread
         self._fail_pending(TWSPaperTransportError("TWS PAPER transport disconnected"))
+        self._writer_stop.set()
+        writer_error: BaseException | None = None
+        if self._writer_task is not None:
+            try:
+                await self._writer_task
+            except BaseException as exc:
+                writer_error = exc
+                self._block_execution()
+        elif self._session_started and self._observation_store is not None:
+            try:
+                await self._flush_observations()
+            except BaseException as exc:
+                writer_error = exc
+                self._block_execution()
+        requires_reconciliation = (
+            bool(self._expected_orders)
+            or was_blocked
+            or self._execution_blocked
+            or client_error is not None
+            or writer_error is not None
+            or not thread_quiesced
+        )
+        if (
+            self._session_started
+            and not self._session_closed
+            and self._observation_store is not None
+        ):
+            try:
+                await self._observation_store.close_session(
+                    session_id=self._observation_session,
+                    owner_id=self._configured_owner,
+                    account=self.config.account,
+                    client_id=self.config.client_id,
+                    requires_reconciliation=requires_reconciliation,
+                )
+                self._session_closed = True
+            except BaseException as exc:
+                self._block_execution()
+                writer_error = writer_error or exc
+        self._block_execution()
+        self._disconnecting = False
+        if client_error is not None or writer_error is not None or not thread_quiesced:
+            raise TWSPaperTransportError(
+                "TWS shutdown was not clean; reconciliation is required"
+            ) from (writer_error or client_error)
 
     def reserve_order_ids(self, count: int) -> tuple[int, ...]:
         """Reserve contiguous IDs only after the TWS handshake completed."""
@@ -467,6 +779,7 @@ class TWSPaperTransport:
         self._validate_identity(account=account, client_id=client_id)
         self._require_ready()
         self._validate_order(order)
+        await self._flush_observations()
         order_id = int(order.order_id)
         with self._state_lock:
             if order_id not in self._reserved_order_ids:
@@ -484,25 +797,40 @@ class TWSPaperTransport:
         loop = self._loop
         if loop is None:
             raise TWSHandshakeError("TWS event loop is not initialized")
-        pending = _PendingSubmission(loop.create_future())
+        pending = _PendingSubmission(loop.create_future(), order)
         self._pending[order_id] = pending
+        self._expected_orders[order_id] = order
         try:
             contract = self._contract_factory(order)
             broker_order = self._order_factory(order)
+            broker_order.account = self.config.account
             client = self._client
             if client is None:
                 raise TWSHandshakeError("TWS client is disconnected")
-            client.placeOrder(order_id, contract, broker_order)
-            return await asyncio.wait_for(
+            with self._state_lock:
+                if self._execution_blocked:
+                    raise TWSSubmissionError("broker uncertainty blocks new orders")
+                client.placeOrder(order_id, contract, broker_order)
+            receipt = await asyncio.wait_for(
                 pending.future, timeout=self.config.acknowledgement_timeout_seconds
             )
+            await self._flush_observations()
+            if self._execution_blocked:
+                raise TWSSubmissionError("broker uncertainty blocks submission acknowledgement")
+            return receipt
         except asyncio.TimeoutError as exc:
+            self._block_execution()
             raise TWSSubmissionError(
                 "broker acknowledgement timed out; order state requires reconciliation"
             ) from exc
         except TWSPaperTransportError:
+            self._block_execution()
+            raise
+        except asyncio.CancelledError:
+            self._block_execution()
             raise
         except Exception as exc:
+            self._block_execution()
             raise TWSSubmissionError("TWS placeOrder failed") from exc
         finally:
             self._pending.pop(order_id, None)
@@ -534,10 +862,17 @@ class TWSPaperTransport:
         cancel(order_id)
 
     def _require_ready(self) -> None:
+        if self._execution_blocked:
+            raise TWSSubmissionError("broker uncertainty requires reconciliation; new orders blocked")
+        self._require_observation_ready()
+
+    def _require_observation_ready(self) -> None:
         if not self._connected or self._client is None:
             raise TWSHandshakeError("connect() must complete before order transport use")
         if self._next_order_id is None:
             raise TWSHandshakeError("TWS handshake did not provide an order ID")
+        if self._writer_task is None or self._writer_task.done():
+            raise TWSSubmissionError("active durable observation writer is required")
 
     def _validate_identity(self, *, account: str, client_id: int) -> None:
         if account != self.config.account or client_id != self.config.client_id:
@@ -550,6 +885,12 @@ class TWSPaperTransport:
 
     @classmethod
     def _validate_order(cls, order: Any) -> None:
+        con_id = getattr(order, "con_id", None)
+        if not isinstance(con_id, int) or isinstance(con_id, bool) or con_id <= 0:
+            raise TWSSubmissionError("qualified stock con_id is required")
+        primary_exchange = getattr(order, "primary_exchange", None)
+        if not isinstance(primary_exchange, str) or not primary_exchange.strip():
+            raise TWSSubmissionError("qualified stock primary exchange is required")
         leg_type = getattr(order, "leg_type", None)
         if leg_type not in {"parent", "target", "stop"}:
             raise TWSSubmissionError("order leg_type must be parent, target, or stop")
@@ -606,8 +947,11 @@ class TWSPaperTransport:
         status = _optional_text(getattr(order_state, "status", None))
         event = OpenOrderEvent(
             order_id=int(order_id),
+            con_id=_optional_int(getattr(contract, "conId", None)) or 0,
             symbol=_optional_text(getattr(contract, "symbol", None)) or "",
             security_type=_optional_text(getattr(contract, "secType", None)) or "",
+            primary_exchange=_optional_text(getattr(contract, "primaryExchange", None)) or "",
+            currency=_optional_text(getattr(contract, "currency", None)) or "",
             side=_optional_text(getattr(order, "action", None)) or "",
             order_type=_optional_text(getattr(order, "orderType", None)) or "",
             quantity=_decimal(getattr(order, "totalQuantity", 0)) or Decimal("0"),
@@ -617,11 +961,53 @@ class TWSPaperTransport:
             transmit=bool(getattr(order, "transmit", False)),
             oca_group=_optional_text(getattr(order, "ocaGroup", None)),
             account=_optional_text(getattr(order, "account", None)),
+            client_id=_optional_int(getattr(order, "clientId", None)),
             order_ref=_optional_text(getattr(order, "orderRef", None)),
             perm_id=_optional_id(getattr(order, "permId", None)),
+            tif=_optional_text(getattr(order, "tif", None)),
+            outside_rth=(
+                bool(getattr(order, "outsideRth"))
+                if getattr(order, "outsideRth", None) is not None
+                else None
+            ),
+            oca_type=_optional_int(getattr(order, "ocaType", None)),
             status=status,
         )
         self._append_event(event)
+        pending = self._pending.get(event.order_id)
+        if status in {"Filled", "PartiallyFilled"}:
+            self._block_execution()
+        expected = pending.expected_order if pending is not None else self._expected_orders.get(event.order_id)
+        if expected is None:
+            self._block_execution()
+            return
+        price = event.limit_price if expected.order_type == "LMT" else event.auxiliary_price
+        if (
+            event.account != self.config.account
+            or event.order_ref != expected.order_ref
+            or event.con_id != expected.con_id
+            or event.primary_exchange != expected.primary_exchange
+            or event.symbol != expected.symbol
+            or event.security_type != "STK"
+            or event.currency != "USD"
+            or event.quantity != expected.quantity
+            or event.side != expected.side
+            or event.order_type != expected.order_type
+            or price != expected.price
+            or (event.parent_order_id or 0) != (expected.parent_order_id or 0)
+            or event.oca_group != expected.oca_group
+            or event.transmit != expected.transmit
+            or event.tif != "DAY"
+            or event.outside_rth is not False
+            or event.client_id != self.config.client_id
+            or (expected.oca_group is not None and event.oca_type != 1)
+        ):
+            self._block_execution()
+            if pending is not None:
+                self._set_future_exception(
+                    pending.future, TWSSubmissionError("broker acknowledgement does not match staged intent")
+                )
+            return
         if status in self._ACCEPTED_STATUSES:
             self._resolve_submission(
                 event.order_id,
@@ -633,6 +1019,7 @@ class TWSPaperTransport:
                 ),
             )
         elif status in self._REJECTED_STATUSES:
+            self._block_execution()
             self._resolve_submission(
                 event.order_id,
                 BrokerLegReceipt(
@@ -668,17 +1055,14 @@ class TWSPaperTransport:
             client_id=_optional_int(client_id),
         )
         self._append_event(event)
-        if event.status in self._ACCEPTED_STATUSES:
-            self._resolve_submission(
-                event.order_id,
-                BrokerLegReceipt(
-                    order_id=event.order_id,
-                    accepted=True,
-                    state="accepted",
-                    perm_id=event.perm_id,
-                ),
-            )
-        elif event.status in self._REJECTED_STATUSES:
+        if (
+            event.order_id not in self._expected_orders
+            or event.client_id != self.config.client_id
+            or event.filled > 0
+        ):
+            self._block_execution()
+        if event.status in self._REJECTED_STATUSES:
+            self._block_execution()
             self._resolve_submission(
                 event.order_id,
                 BrokerLegReceipt(
@@ -691,10 +1075,15 @@ class TWSPaperTransport:
             )
 
     def _on_execution(self, request_id: int, contract: Any, execution: Any) -> None:
+        self._block_execution()
         event = ExecutionEvent(
             request_id=int(request_id),
             execution_id=_optional_text(getattr(execution, "execId", None)) or "",
             order_id=_optional_int(getattr(execution, "orderId", None)) or 0,
+            con_id=_optional_int(getattr(contract, "conId", None)) or 0,
+            symbol=_optional_text(getattr(contract, "symbol", None)) or "",
+            security_type=_optional_text(getattr(contract, "secType", None)) or "",
+            currency=_optional_text(getattr(contract, "currency", None)) or "",
             perm_id=_optional_id(getattr(execution, "permId", None)),
             account=_optional_text(getattr(execution, "acctNumber", None)),
             shares=_decimal(getattr(execution, "shares", 0)) or Decimal("0"),
@@ -703,9 +1092,43 @@ class TWSPaperTransport:
         )
         self._append_event(event)
 
+    def _on_position(
+        self, account: str, contract: Any, position: Any, average_cost: Any,
+    ) -> None:
+        event = PositionEvent(
+            account=str(account),
+            con_id=_optional_int(getattr(contract, "conId", None)) or 0,
+            symbol=_optional_text(getattr(contract, "symbol", None)) or "",
+            security_type=_optional_text(getattr(contract, "secType", None)) or "",
+            primary_exchange=_optional_text(getattr(contract, "primaryExchange", None)) or "",
+            currency=_optional_text(getattr(contract, "currency", None)) or "",
+            quantity=_decimal(position) or Decimal("0"),
+            average_cost=_decimal(average_cost) or Decimal("0"),
+        )
+        self._append_event(event)
+        if (
+            event.account != self.config.account
+            or event.con_id <= 0
+            or not event.symbol
+            or not event.security_type
+            or not event.currency
+        ):
+            self._block_execution()
+
+    def _on_open_order_end(self) -> None:
+        self._signal_event(self._open_orders_end)
+
+    def _on_position_end(self) -> None:
+        self._signal_event(self._positions_end)
+
+    def _on_execution_end(self, request_id: int) -> None:
+        self._signal_event(self._executions_end.get(int(request_id)))
+
     def _on_error(self, request_id: int, code: int, message: str) -> None:
         event = BrokerErrorEvent(request_id=int(request_id), code=int(code), message=str(message))
         self._append_event(event)
+        if request_id in self._expected_orders or code in {1100, 1101, 1102, 1300, 502, 504}:
+            self._block_execution()
         if request_id in self._pending:
             self._resolve_submission(
                 request_id,
@@ -719,12 +1142,18 @@ class TWSPaperTransport:
 
     def _on_connection_closed(self) -> None:
         self._connected = False
+        if not self._disconnecting:
+            self._block_execution()
         self._append_event(ConnectionClosedEvent())
         self._fail_pending(TWSPaperTransportError("TWS PAPER connection closed"))
 
     def _append_event(self, event: BrokerEvent) -> None:
         with self._state_lock:
             self._events.append(event)
+
+    def _block_execution(self) -> None:
+        with self._state_lock:
+            self._execution_blocked = True
 
     def _resolve_submission(self, order_id: int, receipt: BrokerLegReceipt) -> None:
         pending = self._pending.get(order_id)

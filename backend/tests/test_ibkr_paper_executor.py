@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from unittest.mock import AsyncMock
 
 from trading.contracts import TradeIntent
 from trading.execution.ibkr_paper import (
@@ -16,6 +18,7 @@ from trading.execution.ibkr_paper import (
     PaperSubmissionContext,
     PaperTransportIdentity,
     StagedBrokerOrder,
+    ManualInterventionRequired,
 )
 from trading.receipt_signing import Ed25519ReceiptSigner, Ed25519ReceiptVerifier
 from trading.runtime import PaperPreflight, PaperRuntimeController, PaperRuntimeError, PaperRuntimeIdentity
@@ -206,3 +209,82 @@ async def test_executor_rejects_any_transport_identity_other_than_local_paper() 
         IBKRTwsPaperExecutor(
             transport=transport, ledger=RecordingLedger(), runtime=await runtime()
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_leg", ["parent", "target", "stop"])
+async def test_uncertain_submission_preserves_broker_orders(monkeypatch, failed_leg):
+    controller = await runtime()
+    monkeypatch.setattr(controller, "require_paper_submission", AsyncMock())
+    transport = RecordingTransport()
+    ledger = RecordingLedger()
+    cancel = AsyncMock()
+    monkeypatch.setattr(transport, "cancel_order", cancel)
+    update_leg = AsyncMock()
+    fence = AsyncMock()
+    monkeypatch.setattr(ledger, "update_leg", update_leg)
+    monkeypatch.setattr(ledger, "fence", fence)
+
+    async def submit(order, **kwargs):
+        transport.submissions.append(order)
+        if order.leg_type == failed_leg:
+            raise TimeoutError("unknown broker outcome")
+        return BrokerLegReceipt(order_id=order.order_id, accepted=True, state="accepted")
+
+    monkeypatch.setattr(transport, "submit_order", submit)
+    executor = IBKRTwsPaperExecutor(transport=transport, ledger=ledger, runtime=controller)
+    with pytest.raises(ManualInterventionRequired):
+        await executor.submit(intent=intent(), context=context())
+    cancel.assert_not_awaited()
+    fence.assert_awaited_once()
+    assert all(call.kwargs["state"] != "canceled" for call in update_leg.await_args_list)
+    assert all(order.con_id == 101 and order.primary_exchange == "NASDAQ" for order in transport.submissions)
+
+
+@pytest.mark.asyncio
+async def test_global_fence_attempted_when_group_write_fails(monkeypatch):
+    ledger = RecordingLedger()
+    monkeypatch.setattr(ledger, "update_group", AsyncMock(side_effect=OSError("disk failure")))
+    fence = AsyncMock()
+    monkeypatch.setattr(ledger, "fence", fence)
+    executor = IBKRTwsPaperExecutor(transport=RecordingTransport(), ledger=ledger, runtime=await runtime())
+    with pytest.raises(ManualInterventionRequired):
+        await executor._fence("group", owner_id="owner", reason="uncertain")
+    fence.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_qualified_contract_reaches_official_factory():
+    from trading.execution.tws_paper_transport import _official_contract_factory
+
+    executor = IBKRTwsPaperExecutor(transport=RecordingTransport(), ledger=RecordingLedger(), runtime=await runtime())
+    group, legs = executor._build_records(intent=intent(), context=context(), observed_at=datetime.now(timezone.utc))
+    order = executor._to_broker_order(group=group, legs=legs, leg=legs[0])
+    contract = _official_contract_factory(order)
+    assert contract.conId == 101
+    assert contract.primaryExchange == "NASDAQ"
+    assert contract.currency == "USD"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_transmit_fences_without_removing_protection(monkeypatch):
+    controller = await runtime()
+    monkeypatch.setattr(controller, "require_paper_submission", AsyncMock())
+    transport = RecordingTransport()
+    cancel = AsyncMock()
+    monkeypatch.setattr(transport, "cancel_order", cancel)
+    ledger = RecordingLedger()
+    fence = AsyncMock()
+    monkeypatch.setattr(ledger, "fence", fence)
+
+    async def update_group(group_id, **kwargs):
+        if kwargs["state"] == "submitted":
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(ledger, "update_group", update_group)
+    executor = IBKRTwsPaperExecutor(transport=transport, ledger=ledger, runtime=controller)
+    with pytest.raises(ManualInterventionRequired):
+        await executor.submit(intent=intent(), context=context())
+    assert [order.transmit for order in transport.submissions] == [False, False, True]
+    fence.assert_awaited_once()
+    cancel.assert_not_awaited()

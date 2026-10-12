@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from collections.abc import Sequence
 from pathlib import Path
 import sys
@@ -32,6 +33,11 @@ def _parser() -> argparse.ArgumentParser:
 
     status = actions.add_parser("status", help="show the PAPER kill-switch state")
     status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+
+    shadow = domains.add_parser("shadow", help="inspect local shadow preparation")
+    shadow_actions = shadow.add_subparsers(dest="action", required=True)
+    preflight = shadow_actions.add_parser("preflight", help="read-only preparation checks; does not enable orders")
+    preflight.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
 
@@ -61,7 +67,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run an explicitly requested local PAPER control command."""
 
     arguments = _parser().parse_args(argv)
+    if arguments.domain == "shadow":
+        from trading.operations.readiness import check_shadow_preflight
+
+        report = asyncio.run(check_shadow_preflight())
+        if arguments.json_output:
+            print(json.dumps(report, indent=2))
+        else:
+            print("Local preparation only — not a completed broker preflight")
+            for check in report["checks"]:
+                print(f"{check['name']}: {check['status']} — {check['detail']}")
+            print("Orders: BLOCKED")
+        return 2
     return asyncio.run(_execute(arguments))
 
 
 __all__ = ["main"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -8,7 +8,7 @@ called.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -86,6 +86,8 @@ class StagedBrokerOrder:
     leg_type: BracketLegType
     symbol: str
     side: Literal["BUY", "SELL"]
+    con_id: int
+    primary_exchange: str
     order_type: Literal["LMT", "STP"]
     quantity: int
     price: Decimal
@@ -268,7 +270,11 @@ class IBKRTwsPaperExecutor:
         acknowledged: list[BracketLegRecord] = []
         try:
             await self._ledger.stage(group, legs)
-        except Exception as exc:
+        except BaseException as exc:
+            await self._fence(
+                group.id, owner_id=context.owner_id,
+                reason="staged bracket was not durably persisted",
+            )
             raise ManualInterventionRequired(
                 group.id, "staged bracket was not durably persisted"
             ) from exc
@@ -293,7 +299,6 @@ class IBKRTwsPaperExecutor:
                 )
                 acknowledged.append(accepted_leg)
         except BaseException as exc:
-            await self._cancel_known_staged(legs, owner_id=context.owner_id)
             await self._fence(
                 group.id,
                 owner_id=context.owner_id,
@@ -307,7 +312,7 @@ class IBKRTwsPaperExecutor:
             await self._ledger.update_group(
                 group.id, owner_id=context.owner_id, state="submitted"
             )
-        except Exception as exc:
+        except BaseException as exc:
             await self._fence(
                 group.id,
                 owner_id=context.owner_id,
@@ -386,6 +391,8 @@ class IBKRTwsPaperExecutor:
             order_ref=leg.order_ref,
             leg_type=leg.leg_type,
             symbol=group.symbol,
+            con_id=group.context.con_id,
+            primary_exchange=group.context.primary_exchange,
             side="BUY" if leg.leg_type == "parent" else "SELL",
             order_type="LMT" if leg.leg_type in {"parent", "target"} else "STP",
             quantity=leg.quantity,
@@ -395,20 +402,9 @@ class IBKRTwsPaperExecutor:
             oca_group=leg.oca_group,
         )
 
-    async def _cancel_known_staged(
-        self, legs: Sequence[BracketLegRecord], *, owner_id: str
-    ) -> None:
-        for leg in reversed(legs):
-            try:
-                await self._transport.cancel_order(
-                    leg.broker_order_id, account=self._paper_account, client_id=self._client_id
-                )
-                await self._ledger.update_leg(leg.id, owner_id=owner_id, state="canceled")
-            except BaseException:
-                continue
-
     async def _fence(self, group_id: str, *, owner_id: str, reason: str) -> None:
         self._runtime.block(reason=reason)
+        persistence_error: BaseException | None = None
         try:
             await self._ledger.update_group(
                 group_id,
@@ -416,11 +412,16 @@ class IBKRTwsPaperExecutor:
                 state="manual_intervention",
                 reason=reason,
             )
+        except BaseException as exc:
+            persistence_error = exc
+        try:
             await self._ledger.fence(reason=reason)
-        except Exception as exc:
+        except BaseException as exc:
+            persistence_error = exc
+        if persistence_error is not None:
             raise ManualInterventionRequired(
                 group_id, "execution fence could not be persisted"
-            ) from exc
+            ) from persistence_error
 
     @staticmethod
     def _validate_intent(intent: TradeIntent, *, observed_at: datetime) -> None:

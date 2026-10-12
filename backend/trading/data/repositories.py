@@ -14,7 +14,14 @@ from typing import Mapping
 import aiosqlite
 
 from db.core import get_db, transaction
-from trading.contracts import Candidate, CompletedBar, Run, ScannerRun, fingerprint_payload
+from trading.contracts import (
+    Candidate,
+    CompletedBar,
+    RawScannerResult,
+    Run,
+    ScannerRun,
+    fingerprint_payload,
+)
 
 
 class DuplicateRecordError(ValueError):
@@ -189,6 +196,29 @@ class ScannerRunRepository:
             started_at=datetime.fromisoformat(str(row[5])),
             completed_at=datetime.fromisoformat(str(row[6])) if row[6] else None,
         )
+
+
+class RawScannerResultRepository:
+    """Data-plane facade for immutable zero-based scanner callback rows."""
+
+    async def save(self, result: RawScannerResult) -> RawScannerResult:
+        from trading.storage.shadow_ledger import SQLiteShadowLedger
+
+        return await SQLiteShadowLedger().save_raw_scanner_result(result)
+
+    async def save_many(
+        self, results: tuple[RawScannerResult, ...]
+    ) -> tuple[RawScannerResult, ...]:
+        from trading.storage.shadow_ledger import SQLiteShadowLedger
+
+        return await SQLiteShadowLedger().save_raw_scanner_results(results)
+
+    async def list_for_scanner(
+        self, scanner_run_id: str
+    ) -> tuple[RawScannerResult, ...]:
+        from trading.storage.shadow_ledger import SQLiteShadowLedger
+
+        return await SQLiteShadowLedger().list_raw_scanner_results(scanner_run_id)
 
 
 class CandidateRepository:
@@ -457,7 +487,12 @@ __all__ = [
     "FeatureRepository",
     "FeatureSnapshot",
     "RawBarRepository",
+    "RawScannerResultRepository",
+    "RawScannerRepository",
     "RunRepository",
     "RunScopedBarRepository",
     "ScannerRunRepository",
 ]
+
+
+RawScannerRepository = RawScannerResultRepository

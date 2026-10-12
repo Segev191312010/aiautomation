@@ -27,11 +27,14 @@ from trading.data import (
 )
 from trading.orchestration.pipeline import CandidateInput, ShadowPipeline
 from trading.scheduler import (
+    DEFAULT_LEASE_RENEW_INTERVAL,
+    DEFAULT_LEASE_TTL,
     LeaseClaim,
+    LeaseHeartbeat,
     LeaseLostError,
     acquire_lease,
+    market_session,
     release_lease,
-    require_lease,
 )
 from trading.storage.repository import record_decision
 
@@ -153,17 +156,23 @@ class RepositoryBackedShadowRunner:
         run_repository: RunRepository | None = None,
         scanner_repository: ScannerRunRepository | None = None,
         candidate_repository: CandidateRepository | None = None,
-        lease_ttl: timedelta = timedelta(minutes=5),
+        lease_ttl: timedelta = DEFAULT_LEASE_TTL,
+        lease_renew_interval: timedelta = DEFAULT_LEASE_RENEW_INTERVAL,
         clock: Callable[[], datetime] = _now,
     ) -> None:
         if lease_ttl <= timedelta(0):
             raise ValueError("lease_ttl must be positive")
+        if lease_renew_interval <= timedelta(0) or lease_renew_interval >= lease_ttl:
+            raise ValueError(
+                "lease_renew_interval must be positive and shorter than lease_ttl"
+            )
         _utc(clock())
         self._pipeline = pipeline
         self._runs = run_repository or RunRepository()
         self._scanners = scanner_repository or ScannerRunRepository()
         self._candidates = candidate_repository or CandidateRepository()
         self._lease_ttl = lease_ttl
+        self._lease_renew_interval = lease_renew_interval
         self._clock = clock
 
     async def execute(
@@ -202,55 +211,85 @@ class RepositoryBackedShadowRunner:
             if claim is None:
                 raise ShadowLeaseUnavailableError(f"shadow lease is busy: {name}")
             try:
-                await self._materialize(
-                    run=run,
-                    scanner_run=scanner_run,
-                    candidates=tuple(item.candidate for item in candidates),
-                    observed_at=observed_at,
-                )
-                stored_decisions = await self._existing_decisions(
-                    run=run,
-                    candidates=candidates,
-                )
-                already_completed = await self._set_running(
-                    run=run,
-                    stored_status=stored_decisions,
-                    candidate_count=len(candidates),
-                )
-
-                async def guarded_recorder(*, decision: Decision, owner_id: str) -> None:
-                    await require_lease(lease_db, claim=claim, now=_utc(self._clock()))
-                    await _record_decision_idempotent(decision=decision, owner_id=owner_id)
-
-                pipeline = ShadowPipeline(
-                    proposal_provider=self._pipeline.proposal_provider,
-                    decision_recorder=guarded_recorder,
-                    orb_config=self._pipeline.orb_config,
-                )
-                decisions = await pipeline.run(
-                    run_id=run.id,
-                    strategy=strategy,
-                    candidates=candidates,
-                    portfolio=portfolio,
-                    policy=policy,
-                    session_date=run.session_date,
-                    now=observed_at,
-                    existing_decisions=stored_decisions,
-                )
-                await require_lease(lease_db, claim=claim, now=_utc(self._clock()))
-                self._assert_complete(candidates=candidates, decisions=decisions)
-                if not already_completed:
-                    await _mark_run_status(
-                        run_id=run.id,
-                        owner_id=run.owner_id,
-                        status="completed",
-                        allowed_statuses=("running",),
-                        closed_at=_utc(self._clock()),
+                async with LeaseHeartbeat(
+                    lease_db,
+                    claim=claim,
+                    ttl=self._lease_ttl,
+                    renew_interval=self._lease_renew_interval,
+                    clock=self._clock,
+                ) as heartbeat:
+                    await self._materialize(
+                        run=run,
+                        scanner_run=scanner_run,
+                        candidates=tuple(item.candidate for item in candidates),
+                        observed_at=observed_at,
                     )
-                return decisions
+                    stored_decisions = await self._existing_decisions(
+                        run=run,
+                        candidates=candidates,
+                    )
+                    already_completed = await self._set_running(
+                        run=run,
+                        stored_status=stored_decisions,
+                        candidate_count=len(candidates),
+                    )
+
+                    async def guarded_recorder(*, decision: Decision, owner_id: str) -> None:
+                        await heartbeat.require(now=_utc(self._clock()))
+                        await _record_decision_idempotent(
+                            decision=decision, owner_id=owner_id
+                        )
+
+                    pipeline = ShadowPipeline(
+                        proposal_provider=self._pipeline.proposal_provider,
+                        decision_recorder=guarded_recorder,
+                        orb_config=self._pipeline.orb_config,
+                    )
+                    decisions = await pipeline.run(
+                        run_id=run.id,
+                        strategy=strategy,
+                        candidates=candidates,
+                        portfolio=portfolio,
+                        policy=policy,
+                        session_date=run.session_date,
+                        now=observed_at,
+                        existing_decisions=stored_decisions,
+                    )
+                    await heartbeat.require(now=_utc(self._clock()))
+                    complete = self._is_complete(
+                        candidates=candidates, decisions=decisions
+                    )
+                    session = market_session(run.session_date)
+                    if session is None:
+                        raise ShadowPersistenceConflictError(
+                            "shadow run session date is not an XNYS trading session"
+                        )
+                    cutoff_reached = observed_at >= session.entry_cutoff_at.astimezone(
+                        timezone.utc
+                    )
+                    if cutoff_reached and not complete:
+                        self._assert_complete(candidates=candidates, decisions=decisions)
+                    if complete and not already_completed:
+                        await _mark_run_status(
+                            run_id=run.id,
+                            owner_id=run.owner_id,
+                            status="completed",
+                            allowed_statuses=("running",),
+                            closed_at=_utc(self._clock()),
+                        )
+                    return decisions
             except BaseException:
                 try:
-                    await require_lease(lease_db, claim=claim, now=_utc(self._clock()))
+                    heartbeat_claim = claim
+                    if "heartbeat" in locals():
+                        heartbeat_claim = heartbeat.claim
+                    from trading.scheduler import require_lease
+
+                    await require_lease(
+                        lease_db,
+                        claim=heartbeat_claim,
+                        now=_utc(self._clock()),
+                    )
                 except LeaseLostError:
                     pass
                 else:
@@ -266,7 +305,12 @@ class RepositoryBackedShadowRunner:
                         pass
                 raise
             finally:
-                await release_lease(lease_db, claim=claim, now=_utc(self._clock()))
+                release_claim = claim
+                if "heartbeat" in locals():
+                    release_claim = heartbeat.claim
+                await release_lease(
+                    lease_db, claim=release_claim, now=_utc(self._clock())
+                )
 
     async def _materialize(
         self,
@@ -384,6 +428,16 @@ class RepositoryBackedShadowRunner:
             raise ShadowPersistenceConflictError(
                 "shadow pipeline did not produce one terminal decision per candidate"
             )
+
+    @staticmethod
+    def _is_complete(
+        *,
+        candidates: Sequence[CandidateInput],
+        decisions: Sequence[Decision],
+    ) -> bool:
+        expected = {item.candidate.id for item in candidates}
+        actual = {decision.candidate_id for decision in decisions}
+        return actual == expected and len(decisions) == len(expected)
 
     @staticmethod
     def _validate_inputs(

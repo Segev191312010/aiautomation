@@ -239,6 +239,206 @@ RUN_SCHEMA_STATEMENTS = (
     """,
 )
 
+
+SHADOW_RUNTIME_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_raw_scanner_results (
+        id TEXT PRIMARY KEY,
+        scanner_run_id TEXT NOT NULL,
+        request_id INTEGER NOT NULL CHECK(request_id >= 0),
+        raw_rank INTEGER NOT NULL CHECK(raw_rank BETWEEN 0 AND 49),
+        normalized_rank INTEGER NOT NULL CHECK(normalized_rank BETWEEN 1 AND 50),
+        con_id INTEGER NOT NULL CHECK(con_id > 0),
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        fingerprint TEXT UNIQUE NOT NULL,
+        received_at TEXT NOT NULL,
+        CHECK(normalized_rank = raw_rank + 1),
+        UNIQUE(scanner_run_id, raw_rank),
+        UNIQUE(scanner_run_id, con_id),
+        FOREIGN KEY(scanner_run_id) REFERENCES autotrader_scanner_runs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_quote_snapshots (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        con_id INTEGER NOT NULL CHECK(con_id > 0),
+        observed_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        fingerprint TEXT UNIQUE NOT NULL,
+        UNIQUE(run_id, candidate_id),
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY(candidate_id) REFERENCES autotrader_candidates(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_account_snapshots (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NULL,
+        paper_account_id TEXT NOT NULL,
+        client_id INTEGER NOT NULL CHECK(client_id >= 0),
+        observed_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        fingerprint TEXT UNIQUE NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_shadow_reconciliation_reports (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NULL,
+        account_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('clear','blocked')),
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        observed_at TEXT NOT NULL,
+        UNIQUE(account_fingerprint),
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE SET NULL,
+        FOREIGN KEY(account_fingerprint) REFERENCES autotrader_account_snapshots(fingerprint)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_modelled_fills (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        candidate_id TEXT NOT NULL,
+        fill_fingerprint TEXT UNIQUE NOT NULL,
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        filled_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE CASCADE,
+        FOREIGN KEY(candidate_id) REFERENCES autotrader_candidates(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_shadow_control (
+        name TEXT PRIMARY KEY CHECK(name='shadow'),
+        enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+        reason TEXT NULL,
+        revision INTEGER NOT NULL CHECK(revision >= 0),
+        updated_at TEXT NOT NULL,
+        CHECK((enabled=1 AND reason IS NULL) OR (enabled=0 AND reason IS NOT NULL))
+    )
+    """,
+    """
+    INSERT OR IGNORE INTO autotrader_shadow_control
+    (name, enabled, reason, revision, updated_at)
+    VALUES (
+        'shadow', 0, 'shadow runtime has not been enabled', 0,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_shadow_sessions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NULL,
+        source_sha TEXT NOT NULL,
+        session_date TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN (
+            'disabled','idle','preflight','opening_range','scanning','evaluating',
+            'monitoring','finalizing','completed','blocked'
+        )),
+        revision INTEGER NOT NULL CHECK(revision >= 0),
+        evidence_eligible INTEGER NOT NULL CHECK(evidence_eligible IN (0,1)),
+        block_reason TEXT NULL,
+        transitioned_at TEXT NOT NULL,
+        closed_at TEXT NULL,
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        UNIQUE(source_sha, session_date),
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS autotrader_one_open_shadow_session
+    ON autotrader_shadow_sessions((1))
+    WHERE state NOT IN ('completed','blocked')
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_shadow_session_receipts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT UNIQUE NOT NULL,
+        source_sha TEXT NOT NULL,
+        session_date TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('completed','blocked')),
+        evidence_eligible INTEGER NOT NULL CHECK(evidence_eligible IN (0,1)),
+        receipt_fingerprint TEXT UNIQUE NOT NULL,
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS autotrader_ai_session_usage (
+        run_id TEXT PRIMARY KEY,
+        calls INTEGER NOT NULL CHECK(calls >= 0),
+        cost_usd TEXT NOT NULL CHECK(
+            CAST(cost_usd AS REAL) >= 0 AND CAST(cost_usd AS REAL) < 1e308
+        ),
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES autotrader_runs(id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_raw_scanner_results_no_update
+    BEFORE UPDATE ON autotrader_raw_scanner_results
+    BEGIN SELECT RAISE(ABORT, 'raw scanner results are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_raw_scanner_results_no_delete
+    BEFORE DELETE ON autotrader_raw_scanner_results
+    BEGIN SELECT RAISE(ABORT, 'raw scanner results are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_quote_snapshots_no_update
+    BEFORE UPDATE ON autotrader_quote_snapshots
+    BEGIN SELECT RAISE(ABORT, 'quote snapshots are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_quote_snapshots_no_delete
+    BEFORE DELETE ON autotrader_quote_snapshots
+    BEGIN SELECT RAISE(ABORT, 'quote snapshots are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_account_snapshots_no_update
+    BEFORE UPDATE ON autotrader_account_snapshots
+    BEGIN SELECT RAISE(ABORT, 'account snapshots are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_account_snapshots_no_delete
+    BEFORE DELETE ON autotrader_account_snapshots
+    BEGIN SELECT RAISE(ABORT, 'account snapshots are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_shadow_reconciliation_reports_no_update
+    BEFORE UPDATE ON autotrader_shadow_reconciliation_reports
+    BEGIN SELECT RAISE(ABORT, 'shadow reconciliation reports are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_shadow_reconciliation_reports_no_delete
+    BEFORE DELETE ON autotrader_shadow_reconciliation_reports
+    BEGIN SELECT RAISE(ABORT, 'shadow reconciliation reports are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_modelled_fills_no_update
+    BEFORE UPDATE ON autotrader_modelled_fills
+    BEGIN SELECT RAISE(ABORT, 'modelled fills are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_modelled_fills_no_delete
+    BEFORE DELETE ON autotrader_modelled_fills
+    BEGIN SELECT RAISE(ABORT, 'modelled fills are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_shadow_session_receipts_no_update
+    BEFORE UPDATE ON autotrader_shadow_session_receipts
+    BEGIN SELECT RAISE(ABORT, 'shadow session receipts are immutable'); END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS autotrader_shadow_session_receipts_no_delete
+    BEFORE DELETE ON autotrader_shadow_session_receipts
+    BEGIN SELECT RAISE(ABORT, 'shadow session receipts are immutable'); END
+    """,
+)
+
 AUTHORITY_SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS autotrader_scheduler_leases (
@@ -463,4 +663,55 @@ EXECUTION_HARDENING_SCHEMA_STATEMENTS = (
         updated_at TEXT NOT NULL
     )
     """,
+)
+
+EXECUTION_QUALIFIED_IDENTITY_SCHEMA_STATEMENTS = (
+    """CREATE UNIQUE INDEX IF NOT EXISTS autotrader_unique_broker_order_id
+    ON autotrader_bracket_legs(broker_order_id)
+    WHERE broker_order_id IS NOT NULL""",
+    """CREATE TRIGGER IF NOT EXISTS autotrader_bracket_group_qualified_identity_required
+    BEFORE INSERT ON autotrader_bracket_groups
+    WHEN NEW.con_id IS NULL OR NEW.con_id <= 0
+      OR NEW.primary_exchange IS NULL OR trim(NEW.primary_exchange)=''
+      OR NEW.currency IS NULL OR NEW.currency != 'USD'
+      OR NEW.security_type IS NULL OR NEW.security_type != 'STK'
+    BEGIN SELECT RAISE(ABORT, 'qualified bracket identity is required'); END""",
+    """CREATE TRIGGER IF NOT EXISTS autotrader_bracket_group_qualified_identity_immutable
+    BEFORE UPDATE OF owner_id, run_id, candidate_id, risk_reservation_id,
+                     execution_key, account, client_id, symbol, con_id,
+                     primary_exchange, currency, security_type, quantity,
+                     entry_price, stop_price, target_price, oca_group, created_at
+    ON autotrader_bracket_groups
+    WHEN NEW.owner_id IS NOT OLD.owner_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.candidate_id IS NOT OLD.candidate_id
+      OR NEW.risk_reservation_id IS NOT OLD.risk_reservation_id
+      OR NEW.execution_key IS NOT OLD.execution_key
+      OR NEW.account IS NOT OLD.account
+      OR NEW.client_id IS NOT OLD.client_id
+      OR NEW.symbol IS NOT OLD.symbol
+      OR NEW.con_id IS NOT OLD.con_id
+      OR NEW.primary_exchange IS NOT OLD.primary_exchange
+      OR NEW.currency IS NOT OLD.currency
+      OR NEW.security_type IS NOT OLD.security_type
+      OR NEW.quantity IS NOT OLD.quantity
+      OR NEW.entry_price IS NOT OLD.entry_price
+      OR NEW.stop_price IS NOT OLD.stop_price
+      OR NEW.target_price IS NOT OLD.target_price
+      OR NEW.oca_group IS NOT OLD.oca_group
+      OR NEW.created_at IS NOT OLD.created_at
+    BEGIN SELECT RAISE(ABORT, 'bracket intent is immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS autotrader_bracket_leg_intent_immutable
+    BEFORE UPDATE OF group_id, leg_type, broker_order_id, order_ref, oca_group,
+                     quantity, price, transmit
+    ON autotrader_bracket_legs
+    WHEN NEW.group_id IS NOT OLD.group_id
+      OR NEW.leg_type IS NOT OLD.leg_type
+      OR NEW.broker_order_id IS NOT OLD.broker_order_id
+      OR NEW.order_ref IS NOT OLD.order_ref
+      OR NEW.oca_group IS NOT OLD.oca_group
+      OR NEW.quantity IS NOT OLD.quantity
+      OR NEW.price IS NOT OLD.price
+      OR NEW.transmit IS NOT OLD.transmit
+    BEGIN SELECT RAISE(ABORT, 'bracket leg intent is immutable'); END""",
 )

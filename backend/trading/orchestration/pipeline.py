@@ -24,7 +24,7 @@ from trading.contracts import (
 )
 from trading.engine import AutotraderEngine
 from trading.intelligence.provider import TradeProposalProvider
-from trading.rules.orb import ORBConfig, evaluate_orb
+from trading.rules.orb import NO_SIGNAL_YET, ORBConfig, evaluate_orb
 from trading.scheduler.decision_keys import decision_key
 from trading.storage.repository import record_decision
 
@@ -229,10 +229,13 @@ class ShadowPipeline:
                 strategy_version=strategy.version,
                 reference_price=item.reference_price,
                 average_dollar_volume=item.average_dollar_volume,
+                candidate_input_fingerprint=snapshot_fingerprint,
                 now=now,
                 config=self._orb_config,
             )
             if orb_result.setup is None:
+                if orb_result.rejection_reason == NO_SIGNAL_YET:
+                    continue
                 outcome = (
                     DecisionOutcome.DATA_BLOCKED
                     if _is_data_rejection(orb_result.rejection_reason or "")

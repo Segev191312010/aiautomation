@@ -25,6 +25,11 @@ _MAX_RESPONSE_CHARS = 10000
 class AITransportResponse:
     output: str | Mapping[str, object]
     cost_usd: Decimal
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    prompt_hash: str | None = None
+    pricing_hash: str | None = None
 
 
 class AIReviewTransport(Protocol):
@@ -59,6 +64,27 @@ class ReviewSessionUsage:
     cost_usd: Decimal
 
 
+class AIReviewPersistencePort(Protocol):
+    """Durable hooks implemented by the storage owner for one shadow session."""
+
+    async def load_usage(self, *, run_id: str) -> ReviewSessionUsage: ...
+
+    async def persist_usage(self, *, run_id: str, usage: ReviewSessionUsage) -> None: ...
+
+    async def persist_review(
+        self,
+        *,
+        run_id: str,
+        candidate_id: str,
+        review: AIReview,
+        prompt_hash: str,
+        pricing_hash: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int,
+    ) -> None: ...
+
+
 class StructuredAIReviewProvider:
     """Convert untrusted model output into bounded ``AIReview`` records."""
 
@@ -69,11 +95,17 @@ class StructuredAIReviewProvider:
         model_id: str,
         prompt_version: str,
         limits: ReviewSessionLimits | None = None,
+        session_id: str | None = None,
+        persistence: AIReviewPersistencePort | None = None,
+        prompt_hash: str | None = None,
+        pricing_hash: str | None = None,
     ) -> None:
         if not model_id or not model_id.strip():
             raise ValueError("model_id is required")
         if not prompt_version or not prompt_version.strip():
             raise ValueError("prompt_version is required")
+        if persistence is not None and (session_id is None or not session_id.strip()):
+            raise ValueError("durable AI usage requires a shadow session_id")
         self._transport = transport
         self._model_id = model_id
         self._prompt_version = prompt_version
@@ -81,6 +113,14 @@ class StructuredAIReviewProvider:
         self._calls = 0
         self._cost_usd = Decimal("0")
         self._lock = asyncio.Lock()
+        self._session_id = session_id
+        self._persistence = persistence
+        self._usage_loaded = False
+        self._prompt_hash = prompt_hash or getattr(transport, "prompt_hash", None)
+        self._pricing_hash = pricing_hash or getattr(transport, "pricing_hash", None)
+        for name, digest in (("prompt_hash", self._prompt_hash), ("pricing_hash", self._pricing_hash)):
+            if digest is not None and not self._is_digest(digest):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
 
     @property
     def usage(self) -> ReviewSessionUsage:
@@ -89,12 +129,18 @@ class StructuredAIReviewProvider:
     async def propose_trade(self, *, setup: RuleSetup) -> AIReview:
         """Review a setup; failures abstain and never become rules-only approval."""
         async with self._lock:
+            await self._load_usage(setup)
             if self._calls >= self._limits.max_calls:
-                return self._blocked_review(setup=setup, reason="call_limit_exhausted")
+                review = self._blocked_review(setup=setup, reason="call_limit_exhausted")
+                await self._persist_review(setup=setup, review=review, response=None)
+                return review
             if self._cost_usd >= self._limits.max_cost_usd:
-                return self._blocked_review(setup=setup, reason="budget_exhausted")
+                review = self._blocked_review(setup=setup, reason="budget_exhausted")
+                await self._persist_review(setup=setup, review=review, response=None)
+                return review
 
             self._calls += 1
+            await self._persist_usage(setup)
             started = time.monotonic()
             try:
                 response = await asyncio.wait_for(
@@ -107,27 +153,36 @@ class StructuredAIReviewProvider:
                 )
             except asyncio.TimeoutError:
                 logger.warning("AI review timed out")
-                return self._blocked_review(setup=setup, reason="provider_timeout")
+                review = self._blocked_review(setup=setup, reason="provider_timeout")
+                await self._persist_review(setup=setup, review=review, response=None)
+                return review
             except Exception:
                 logger.warning("AI review provider unavailable")
-                return self._blocked_review(setup=setup, reason="provider_unavailable")
+                review = self._blocked_review(setup=setup, reason="provider_unavailable")
+                await self._persist_review(setup=setup, review=review, response=None)
+                return review
 
             latency_ms = max(0, int((time.monotonic() - started) * 1000))
             cost = self._response_cost(response)
             if cost is None:
-                return self._blocked_review(
+                review = self._blocked_review(
                     setup=setup,
                     reason="invalid_provider_response",
                     latency_ms=latency_ms,
                 )
+                await self._persist_review(setup=setup, review=review, response=None)
+                return review
             self._cost_usd += cost
+            await self._persist_usage(setup)
             if self._cost_usd > self._limits.max_cost_usd:
-                return self._blocked_review(
+                review = self._blocked_review(
                     setup=setup,
                     reason="budget_exceeded",
                     latency_ms=latency_ms,
                     cost_usd=cost,
                 )
+                await self._persist_review(setup=setup, review=review, response=response)
+                return review
 
             payload = self._parse_output(response.output)
             if (
@@ -135,13 +190,15 @@ class StructuredAIReviewProvider:
                 or not _REQUIRED_REVIEW_FIELDS.issubset(payload)
                 or not set(payload).issubset(_REVIEW_FIELDS)
             ):
-                return self._blocked_review(
+                review = self._blocked_review(
                     setup=setup,
                     reason="invalid_response_schema",
                     latency_ms=latency_ms,
                     cost_usd=cost,
                     response_hash=self._hash_output(response.output),
                 )
+                await self._persist_review(setup=setup, review=review, response=response)
+                return review
             try:
                 review = AIReview(
                     setup_fingerprint=setup.fingerprint(),
@@ -155,14 +212,65 @@ class StructuredAIReviewProvider:
                     cost_usd=cost,
                 )
             except (ValidationError, TypeError, ValueError):
-                return self._blocked_review(
+                review = self._blocked_review(
                     setup=setup,
                     reason="invalid_response_schema",
                     latency_ms=latency_ms,
                     cost_usd=cost,
                     response_hash=self._hash_output(response.output),
                 )
+                await self._persist_review(setup=setup, review=review, response=response)
+                return review
+            await self._persist_review(setup=setup, review=review, response=response)
             return review
+
+    async def _load_usage(self, setup: RuleSetup) -> None:
+        if self._session_id is not None and setup.run_id != self._session_id:
+            raise ValueError("AI review setup does not belong to the bound shadow session")
+        if self._persistence is None or self._usage_loaded:
+            return
+        usage = await self._persistence.load_usage(run_id=setup.run_id)
+        if usage.calls < 0 or not usage.cost_usd.is_finite() or usage.cost_usd < 0:
+            raise ValueError("persisted AI session usage is invalid")
+        self._calls = usage.calls
+        self._cost_usd = usage.cost_usd
+        self._usage_loaded = True
+
+    async def _persist_usage(self, setup: RuleSetup) -> None:
+        if self._persistence is not None:
+            await self._persistence.persist_usage(run_id=setup.run_id, usage=self.usage)
+
+    async def _persist_review(
+        self,
+        *,
+        setup: RuleSetup,
+        review: AIReview,
+        response: AITransportResponse | None,
+    ) -> None:
+        if self._persistence is None:
+            return
+        prompt_hash = (response.prompt_hash if response is not None else None) or self._prompt_hash
+        pricing_hash = (response.pricing_hash if response is not None else None) or self._pricing_hash
+        if not self._is_digest(prompt_hash) or not self._is_digest(pricing_hash):
+            raise ValueError("durable AI reviews require prompt and pricing hashes")
+        await self._persistence.persist_review(
+            run_id=setup.run_id,
+            candidate_id=setup.candidate_id,
+            review=review,
+            prompt_hash=prompt_hash,
+            pricing_hash=pricing_hash,
+            input_tokens=response.input_tokens if response is not None else 0,
+            output_tokens=response.output_tokens if response is not None else 0,
+            cached_input_tokens=response.cached_input_tokens if response is not None else 0,
+        )
+
+    @staticmethod
+    def _is_digest(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        )
 
     @staticmethod
     def _response_cost(response: object) -> Decimal | None:
@@ -227,6 +335,7 @@ class StructuredAIReviewProvider:
 
 
 __all__ = [
+    "AIReviewPersistencePort",
     "AIReviewTransport",
     "AITransportResponse",
     "ReviewSessionLimits",
