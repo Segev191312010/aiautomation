@@ -47,7 +47,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.general_limit = general_limit
         self.auth_limit = auth_limit
         self.window = window
-        self._hits: dict[str, list[float]] = defaultdict(list)
+        # Auth and general traffic are counted separately: a polling dashboard
+        # must not exhaust the login budget, and login attempts must not hide
+        # inside general traffic.
+        self._hits: dict[tuple[str, str], list[float]] = defaultdict(list)
         self._lock = Lock()
 
     async def dispatch(self, request: Request, call_next):
@@ -55,14 +58,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         now = time.time()
 
+        bucket = "auth" if "/auth/" in path else "general"
+        key = (ip, bucket)
+        limit = self.auth_limit if bucket == "auth" else self.general_limit
+
         with self._lock:
             # Evict timestamps outside the current window
-            self._hits[ip] = [t for t in self._hits[ip] if now - t < self.window]
+            self._hits[key] = [t for t in self._hits[key] if now - t < self.window]
 
-            limit = self.auth_limit if "/auth/" in path else self.general_limit
-
-            if len(self._hits[ip]) >= limit:
-                oldest = self._hits[ip][0]
+            if len(self._hits[key]) >= limit:
+                oldest = self._hits[key][0]
                 retry_after = max(int(self.window - (now - oldest)), 1)
                 log.warning(
                     "rate_limit_exceeded ip=%s path=%s limit=%d", ip, path, limit
@@ -73,7 +78,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": str(retry_after)},
                 )
 
-            self._hits[ip].append(now)
+            self._hits[key].append(now)
 
         return await call_next(request)
 

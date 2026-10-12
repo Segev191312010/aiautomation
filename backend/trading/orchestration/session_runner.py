@@ -49,6 +49,7 @@ from trading.scheduler.sessions import MarketSession
 logger = logging.getLogger("autotrader.shadow.session")
 
 ORB_STRATEGY_NAME = "ORB_V1"
+MOMO_STRATEGY_NAME = "MOMO_HOD_V1"
 BAR_INTERVAL = timedelta(minutes=5)
 # Poll a few seconds after each bar closes so IBKR has finalized that bar.
 POLL_DELAY_AFTER_BAR_CLOSE = timedelta(seconds=5)
@@ -67,6 +68,9 @@ class SessionMarketData(Protocol):
 
 
 AccountReader = Callable[[], Awaitable[AccountSnapshot]]
+CandidateSource = Callable[
+    [Run], Awaitable[tuple[ScannerRun, tuple[Candidate, ...], dict[int, LiquidityProfile]]]
+]
 Sleeper = Callable[[float], Awaitable[None]]
 Reconnector = Callable[[], Awaitable[None]]
 
@@ -120,8 +124,27 @@ def orb_strategy_spec() -> StrategySpec:
     )
 
 
-async def ensure_orb_strategy(*, owner_id: str) -> StrategyRecord:
-    """Return the owner's ORB_V1 strategy, creating and promoting it to SHADOW."""
+def momo_strategy_spec() -> StrategySpec:
+    """MOMO_HOD_V1's catalogue entry; the executable rules are ``MomoConfig``."""
+    return StrategySpec(
+        name=MOMO_STRATEGY_NAME,
+        universe=ScannerUniverse(
+            scanner_policy_id="owner-watchlist-hotlist",
+            scanner_policy_version=1,
+            scanner_policy_hash=fingerprint_payload({"source": "screener_hotlist", "top": 35}),
+        ),
+        conditions=(RuleCondition(feature="close", operator="gte", value=Decimal("10")),),
+        rationale=(
+            "Long-only new high of day on volume: a 5-minute close above the day's "
+            "prior high, above VWAP, with elevated bar and day volume, 10:00-15:00 ET; "
+            "stop one ATR(14) below entry, 2R target. Authoritative rules: "
+            "trading/rules/momo.py MomoConfig."
+        ),
+    )
+
+
+async def ensure_strategy(*, owner_id: str, spec: StrategySpec) -> StrategyRecord:
+    """Return the owner's strategy named ``spec.name``, creating it in SHADOW."""
     from trading.storage.repository import (
         create_strategy,
         list_strategies,
@@ -131,12 +154,12 @@ async def ensure_orb_strategy(*, owner_id: str) -> StrategyRecord:
     existing = [
         record
         for record in await list_strategies(owner_id=owner_id)
-        if record.spec.name == ORB_STRATEGY_NAME
+        if record.spec.name == spec.name
         and record.state in {StrategyState.SHADOW, StrategyState.PAPER}
     ]
     if existing:
         return max(existing, key=lambda record: record.version)
-    record = await create_strategy(spec=orb_strategy_spec(), owner_id=owner_id, actor=owner_id)
+    record = await create_strategy(spec=spec, owner_id=owner_id, actor=owner_id)
     for target in (StrategyState.BACKTESTING, StrategyState.SHADOW):
         record = await transition_strategy(
             strategy_id=record.strategy_id,
@@ -145,10 +168,14 @@ async def ensure_orb_strategy(*, owner_id: str) -> StrategyRecord:
             expected_revision=record.revision,
             target=target,
             actor=owner_id,
-            reason="ORB_V1 bootstrap for real-data shadow sessions",
+            reason=f"{spec.name} bootstrap for real-data sessions",
         )
     return record
 
+
+async def ensure_orb_strategy(*, owner_id: str) -> StrategyRecord:
+    """Return the owner's ORB_V1 strategy, creating and promoting it to SHADOW."""
+    return await ensure_strategy(owner_id=owner_id, spec=orb_strategy_spec())
 
 class ShadowSessionRunner:
     """One trading day of real-data shadow decisions."""
@@ -181,7 +208,15 @@ class ShadowSessionRunner:
         source_sha: str,
         policy_fingerprints: dict[str, str],
         run_id: str | None = None,
+        candidate_source: CandidateSource | None = None,
+        window_start: datetime | None = None,
     ) -> SessionReport:
+        """Run one strategy session.
+
+        Without ``candidate_source`` candidates come from the 09:45 IBKR scan;
+        with it (e.g. the screener hot list) they are taken when the strategy's
+        window opens, and liquidity is seeded from the source.
+        """
         session_date = session.session_date
         run = Run(
             id=run_id or f"shadow-{strategy.strategy_id[:8]}-{session_date.isoformat()}",
@@ -194,10 +229,17 @@ class ShadowSessionRunner:
             mode=EngineMode.SHADOW,
         )
         report = SessionReport(run_id=run.id, session_date=session_date)
-        await self._sleep_until(session.scanner_at)
-        scanner_run, candidates = await self._scan(run)
+        liquidity: dict[int, LiquidityProfile] = {}
+        if candidate_source is None:
+            await self._sleep_until(session.scanner_at)
+            scanner_run, candidates = await self._scan(run)
+        else:
+            if window_start is not None:
+                await self._sleep_until(window_start - BAR_INTERVAL)
+            scanner_run, candidates, liquidity = await candidate_source(run)
         report.candidates = len(candidates)
-        logger.info("scanner admitted %d candidates", len(candidates))
+        logger.info("%s admitted %d candidates", scanner_run.parameters.get("source", "scanner"),
+                    len(candidates))
 
         async with self._runner.open_session(
             run=run,
@@ -209,9 +251,8 @@ class ShadowSessionRunner:
             now=self._now(),
         ) as shadow:
             latest: dict[str, CandidateInput] = {}
-            liquidity: dict[int, LiquidityProfile] = {}
             cutoff = shadow.cutoff
-            poll_at = self._first_poll(session)
+            poll_at = self._first_poll(session, window_start)
             while poll_at < cutoff and shadow.pending():
                 await self._sleep_until(poll_at)
                 report.polls += 1
@@ -395,8 +436,13 @@ class ShadowSessionRunner:
         except Exception as exc:  # noqa: BLE001 - retried on the next request
             logger.warning("TWS reconnect failed: %s", type(exc).__name__)
 
-    def _first_poll(self, session: MarketSession) -> datetime:
-        return session.first_signal_at + POLL_DELAY_AFTER_BAR_CLOSE
+    def _first_poll(self, session: MarketSession, window_start: datetime | None = None) -> datetime:
+        """First bar close at or after the window opens, and not in the past."""
+        first = max(session.first_signal_at, window_start or session.first_signal_at)
+        now = self._now()
+        while first + POLL_DELAY_AFTER_BAR_CLOSE < now - BAR_INTERVAL:
+            first += BAR_INTERVAL
+        return first + POLL_DELAY_AFTER_BAR_CLOSE
 
     def _now(self) -> datetime:
         return self._clock().astimezone(timezone.utc)
@@ -415,10 +461,13 @@ def _decision_symbol(shadow: ShadowRunSession, decision: Decision) -> str:
 
 
 __all__ = [
+    "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
     "SessionAborted",
     "SessionReport",
     "ShadowSessionRunner",
     "ensure_orb_strategy",
+    "ensure_strategy",
+    "momo_strategy_spec",
     "orb_strategy_spec",
 ]

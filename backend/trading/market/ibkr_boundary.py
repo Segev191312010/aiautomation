@@ -505,6 +505,17 @@ class PaperIBKRMarketData:
             unqualified_con_ids=frozenset(unqualified),
         )
 
+    async def load_contract(self, con_id: int) -> IBKRContractDetails:
+        """Qualify one known conId (e.g. from the watchlist universe) for quotes."""
+        cached = self._contract_details.get(con_id)
+        if cached is not None:
+            return cached
+        details = await self.actor.contract_details(con_id)
+        if details.con_id != con_id or not details.min_tick.is_finite() or details.min_tick <= 0:
+            raise MarketDataQualityError("contract details do not match the requested conId")
+        self._contract_details[con_id] = details
+        return details
+
     def min_tick(self, con_id: int) -> Decimal:
         """Minimum price increment from the contract details of a scanned row."""
         details = self._contract_details.get(con_id)
