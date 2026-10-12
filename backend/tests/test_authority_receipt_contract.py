@@ -191,7 +191,7 @@ async def test_attestation_migration_is_idempotent(tmp_path):
             "SELECT version, checksum, applied_at FROM autotrader_schema_migrations ORDER BY version"
         ) as cursor:
             second_run = await cursor.fetchall()
-        assert [row[0] for row in second_run] == list(range(1, 12))
+        assert [row[0] for row in second_run] == list(range(1, 13))
         assert second_run == first_run
     finally:
         await database.close()

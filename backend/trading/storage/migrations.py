@@ -26,6 +26,7 @@ from trading.storage.schema import (
     STRATEGY_SCHEMA_STATEMENTS,
 )
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
+from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
 
 
 MigrationApply = Callable[[aiosqlite.Connection], Awaitable[None]]
@@ -264,6 +265,10 @@ async def _live_market_universe(db: aiosqlite.Connection) -> None:
     await _execute_all(db, LIVE_MARKET_SCHEMA)
 
 
+async def _manual_orders_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, MANUAL_ORDERS_SCHEMA)
+
+
 async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
     columns = await _table_columns(db, "autotrader_bracket_groups")
     additions = (
@@ -366,6 +371,10 @@ MIGRATIONS = (
     Migration(
         11, "live-market-universe", "v1-live-market-universe-20261012",
         _live_market_universe, LIVE_MARKET_SCHEMA,
+    ),
+    Migration(
+        12, "manual-orders-ledger", "v1-manual-orders-ledger-20261012",
+        _manual_orders_ledger, MANUAL_ORDERS_SCHEMA,
     ),
 )
 
