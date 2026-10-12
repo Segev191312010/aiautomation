@@ -43,6 +43,7 @@ from trading.market.ibkr_boundary import (
 from trading.orchestration.persistence import RepositoryBackedShadowRunner, ShadowRunSession
 from trading.orchestration.pipeline import CandidateInput
 from trading.risk.portfolio import portfolio_from_account
+from trading.rules.orb import qualify_candidate
 from trading.scheduler.sessions import MarketSession
 
 logger = logging.getLogger("autotrader.shadow.session")
@@ -161,18 +162,14 @@ class ShadowSessionRunner:
         clock: Callable[[], datetime],
         sleep: Sleeper = asyncio.sleep,
         reconnect: Reconnector | None = None,
-        max_candidates: int = 20,
         holder_id: str | None = None,
     ) -> None:
-        if max_candidates < 1:
-            raise ValueError("max_candidates must be positive")
         self._market = market
         self._read_account = read_account
         self._runner = runner
         self._clock = clock
         self._sleep = sleep
         self._reconnect = reconnect
-        self._max_candidates = max_candidates
         self._holder_id = holder_id or f"session-runner:{uuid4()}"
 
     async def run(
@@ -257,7 +254,6 @@ class ShadowSessionRunner:
             "scan_code": snapshot.request.scan_code,
             "location": snapshot.request.location,
             "rows": snapshot.request.number_of_rows,
-            "max_candidates": self._max_candidates,
             "raw_results": len(snapshot.records),
             "rejections": dict(
                 Counter(
@@ -276,9 +272,11 @@ class ShadowSessionRunner:
             started_at=started,
             completed_at=self._now(),
         )
+        # Every admitted row (at most 50) becomes a candidate with a decision;
+        # price and liquidity rejections are cheap and recorded at first poll.
         candidates = tuple(
             sorted(snapshot.admitted_candidates, key=lambda candidate: candidate.rank)
-        )[: self._max_candidates]
+        )
         return scanner_run, candidates
 
     async def _poll(
@@ -307,6 +305,24 @@ class ShadowSessionRunner:
                     await self._recover_connection()
                     continue
                 liquidity[candidate.con_id] = profile
+            if qualify_candidate(
+                candidate,
+                reference_price=profile.reference_price,
+                average_dollar_volume=profile.average_dollar_volume,
+            ):
+                # Price/liquidity rejection is decided before any bar request.
+                await shadow.assess(
+                    CandidateInput(
+                        candidate=candidate,
+                        bars=(),
+                        quote=None,
+                        reference_price=profile.reference_price,
+                        average_dollar_volume=profile.average_dollar_volume,
+                    ),
+                    portfolio=portfolio,
+                    now=self._now(),
+                )
+                continue
             try:
                 bars = await self._market.completed_bars(con_id=candidate.con_id, now=self._now())
             except Exception as exc:  # noqa: BLE001 - pending until the next poll

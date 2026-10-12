@@ -50,9 +50,10 @@ logger = logging.getLogger("autotrader.shadow.service")
 
 # Connect early enough to finish the handshake and preflight before the scan.
 CONNECT_LEAD = timedelta(minutes=5)
-# The raw volume unit reported by the pinned ibapi client for US stocks.
-# Defaults to shares; the real-TWS probe confirms it against the TWS display.
-IBKR_API_VOLUME_MULTIPLIER = Decimal("1")
+# ibapi 9.81 reports US-stock volume in round lots of 100 shares. Verified
+# 2026-10-12 by the TWS probe: AAPL daily bars returned ~500k against ~50M
+# shares actually traded.
+IBKR_API_VOLUME_MULTIPLIER = Decimal("100")
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 Clock = Callable[[], datetime]
@@ -164,7 +165,6 @@ async def run_shadow_session(
             clock=clock,
             sleep=sleep,
             reconnect=reconnect,
-            max_candidates=config.max_candidates,
             holder_id=f"{socket.gethostname()}:{os.getpid()}",
         )
         report = await runner.run(

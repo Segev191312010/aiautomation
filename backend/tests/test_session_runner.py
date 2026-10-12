@@ -55,6 +55,7 @@ class FakeMarket:
     def __init__(self, clock):
         self.clock = clock
         self.quotes: list[int] = []
+        self.bar_requests: set[int] = set()
 
     async def scanner_snapshot(self, *, scanner_run_id):
         results = tuple(
@@ -68,11 +69,14 @@ class FakeMarket:
                 rank=rank,
                 raw_rank=rank - 1,
             )
-            for rank, (symbol, con_id) in enumerate((("AAPL", 101), ("MSFT", 102), ("NVDA", 103)), 1)
+            for rank, (symbol, con_id) in enumerate(
+                (("AAPL", 101), ("MSFT", 102), ("NVDA", 103), ("PENY", 104)), 1
+            )
         )
         return qualify_scanner_results(results, scanner_run_id=scanner_run_id)
 
     async def completed_bars(self, *, con_id, now):
+        self.bar_requests.add(con_id)
         if con_id == 103:
             raise RuntimeError("pacing violation")
         prior_open = OPEN - timedelta(days=1)
@@ -103,7 +107,7 @@ class FakeMarket:
     async def liquidity(self, *, con_id, session_date):
         return LiquidityProfile(
             con_id=con_id,
-            reference_price=Decimal("103"),
+            reference_price=Decimal("1.36") if con_id == 104 else Decimal("103"),
             average_dollar_volume=Decimal("25000000"),
             sessions_used=20,
             last_session_date=session_date - timedelta(days=1),
@@ -185,12 +189,14 @@ async def test_simulated_day_decides_every_candidate(tmp_path, monkeypatch):
         policy_fingerprints={"risk": RiskPolicy().fingerprint()},
     )
 
-    assert report.candidates == 3
+    assert report.candidates == 4
     assert dict(report.outcomes) == {
         "shadow_accepted": 1,
-        "rule_rejected": 1,
+        "rule_rejected": 2,
         "data_blocked": 1,
     }
+    # The penny stock is rejected on price before any bar request.
+    assert 104 not in market.bar_requests
     # Quotes are requested only at the breakout, never for quiet candidates.
     assert market.quotes == [101]
     assert provider.calls == 1
@@ -198,7 +204,7 @@ async def test_simulated_day_decides_every_candidate(tmp_path, monkeypatch):
     assert report.polls == 26
     assert clock["now"] >= datetime(2026, 8, 27, 16, 0, tzinfo=timezone.utc)
     stored = await list_decisions(owner_id="demo", run_id=report.run_id)
-    assert len(stored) == 3
+    assert len(stored) == 4
 
 
 @pytest.mark.anyio

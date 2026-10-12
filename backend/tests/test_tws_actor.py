@@ -508,3 +508,23 @@ async def test_account_snapshot_blocks_on_non_us_stock_positions_or_missing_valu
     await actor.connect()
     with pytest.raises(TWSRequestError, match="NetLiquidation"):
         await actor.account_snapshot()
+
+
+@pytest.mark.asyncio
+async def test_informational_warnings_on_a_request_do_not_fail_it() -> None:
+    def factory(callbacks):
+        client = FakeTWSClient(callbacks)
+        original = client.reqMktData
+
+        def with_warning(*args):
+            # Seen live: fractional-size trimming warning tagged with the quote's reqId.
+            callbacks.error(int(args[0]), 2176, "Trimmed value 309196.24531 to 309196")
+            original(*args)
+
+        client.reqMktData = with_warning
+        return client
+
+    actor = TWSPaperActor(config(), client_factory=factory)
+    await actor.connect()
+    quote = await actor.quote_snapshot(101, min_tick=Decimal("0.01"))
+    assert quote.bid == Decimal("100")

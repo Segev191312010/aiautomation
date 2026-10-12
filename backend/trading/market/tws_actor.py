@@ -24,6 +24,9 @@ from trading.contracts import AccountSnapshot, QuoteSnapshot, RawAccountPosition
 PAPER_TWS_HOST = "127.0.0.1"
 PAPER_TWS_PORT = 7497
 PACING_ERROR_CODES = frozenset({162, 165, 366, 420})
+# IBKR codes 2100-2199 are informational warnings (farm status, fractional-size
+# trimming) and may carry a request ID; they never fail the request.
+WARNING_CODE_RANGE = range(2100, 2200)
 # Two sessions of five-minute RTH bars: ATR(14) is available at the first
 # signal bar (09:50) from the prior session's history.
 INTRADAY_HISTORY_DURATION = "2 D"
@@ -1062,6 +1065,8 @@ class TWSPaperActor:
 
     def _on_error(self, request_id: int, code: int, message: str) -> None:
         self._callbacks_seen += 1
+        if code in WARNING_CODE_RANGE:
+            return
         self._last_error = f"TWS error {code}: {message}"
         if request_id == -1:
             return
