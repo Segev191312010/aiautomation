@@ -1,4 +1,4 @@
-"""Compose scanner data, ORB rules, AI review, and risk into terminal decisions."""
+"""Compose scanner data, strategy rules, AI review, and risk into terminal decisions."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -24,18 +24,18 @@ from trading.contracts import (
 )
 from trading.engine import AutotraderEngine
 from trading.intelligence.provider import TradeProposalProvider
-from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED, ORBConfig, evaluate_orb
+from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
+from trading.rules.strategy import (
+    ORBStrategy,
+    StrategyEvaluator,
+    entry_window_utc,
+    is_data_rejection,
+)
 from trading.scheduler.decision_keys import decision_key
 from trading.storage.repository import record_decision
 
 
 DecisionRecorder = Callable[..., Awaitable[None]]
-_DATA_REJECTION_PREFIXES = (
-    "bar_",
-    "quote_",
-    "opening_range_",
-    "insufficient_atr_history",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,16 +108,9 @@ class CandidateInput:
         )
 
 
-def _is_data_rejection(reason: str) -> bool:
-    return reason == "no bars supplied" or reason.startswith(_DATA_REJECTION_PREFIXES)
-
-
-def entry_cutoff_utc(session_date: date, config: ORBConfig) -> datetime:
-    from trading.rules.orb import NEW_YORK
-
-    return datetime.combine(session_date, config.entry_cutoff, tzinfo=NEW_YORK).astimezone(
-        timezone.utc
-    )
+def entry_cutoff_utc(session_date: date, strategy: StrategyEvaluator) -> datetime:
+    """No setup may be built for ``strategy`` at or after this moment."""
+    return entry_window_utc(strategy, session_date)[1]
 
 
 def _session_day(session_date: date | datetime) -> date:
@@ -169,12 +162,14 @@ class ShadowPipeline:
         *,
         proposal_provider: TradeProposalProvider,
         decision_recorder: DecisionRecorder = record_decision,
-        orb_config: ORBConfig = ORBConfig(),
+        strategy: StrategyEvaluator = ORBStrategy(),
         mode: EngineMode = EngineMode.SHADOW,
     ) -> None:
+        if not isinstance(strategy, StrategyEvaluator):
+            raise TypeError("strategy must implement StrategyEvaluator")
         self._proposal_provider = proposal_provider
         self._decision_recorder = decision_recorder
-        self._orb_config = orb_config
+        self._strategy = strategy
         self._mode = mode
 
         async def defer_recording(**_: object) -> None:
@@ -187,8 +182,8 @@ class ShadowPipeline:
         return self._proposal_provider
 
     @property
-    def orb_config(self) -> ORBConfig:
-        return self._orb_config
+    def strategy(self) -> StrategyEvaluator:
+        return self._strategy
 
     @property
     def mode(self) -> EngineMode:
@@ -255,10 +250,10 @@ class ShadowPipeline:
     ) -> Assessment:
         """Assess one candidate; record and return a decision only when terminal.
 
-        Before the entry cutoff, missing or transiently bad data leaves the
-        candidate pending so a later poll can still see its breakout. At or
-        after the cutoff every outcome is terminal and no new setup is built,
-        so no entry can be created after the cutoff.
+        Before the strategy's entry cutoff, missing or transiently bad data and
+        retryable rejections leave the candidate pending so a later poll can
+        still see its signal. At or after the cutoff every outcome is terminal
+        and no new setup is built, so no entry can be created after the cutoff.
         """
         session_day = _session_day(session_date)
         observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -274,7 +269,7 @@ class ShadowPipeline:
                 raise ValueError("existing decision belongs to a different run or strategy")
             return Assessment(decision=prior)
 
-        cutoff_passed = observed >= entry_cutoff_utc(session_day, self._orb_config)
+        cutoff_passed = observed >= entry_cutoff_utc(session_day, self._strategy)
         snapshot_fingerprint = item.fingerprint()
         key = decision_key(
             strategy_id=strategy.strategy_id,
@@ -293,7 +288,7 @@ class ShadowPipeline:
             await self._record(decision, strategy.owner_id)
             return Assessment(decision=decision)
 
-        orb_result = evaluate_orb(
+        result = self._strategy.evaluate(
             candidate=item.candidate,
             bars=item.bars,
             quote=None if cutoff_passed else item.quote,
@@ -305,24 +300,29 @@ class ShadowPipeline:
             average_dollar_volume=item.average_dollar_volume,
             candidate_input_fingerprint=snapshot_fingerprint,
             now=observed,
-            config=self._orb_config,
         )
-        if orb_result.setup is None:
-            reason = orb_result.rejection_reason or ""
-            if reason == NO_SIGNAL_YET:
-                return Assessment(decision=None, pending_reason=reason)
+        if result.setup is None:
+            reason = result.rejection_reason or ""
             if reason == QUOTE_REQUIRED:
                 if cutoff_passed:
-                    # The breakout was never priced inside the entry window.
+                    # The signal was never priced inside the entry window.
                     return await terminal(DecisionOutcome.DATA_BLOCKED)
                 return Assessment(decision=None, needs_quote=True, pending_reason=reason)
-            if _is_data_rejection(reason):
+            if is_data_rejection(reason):
                 if not cutoff_passed:
                     return Assessment(decision=None, pending_reason=reason)
                 return await terminal(DecisionOutcome.DATA_BLOCKED)
+            if not cutoff_passed and (reason == NO_SIGNAL_YET or result.retryable):
+                return Assessment(decision=None, pending_reason=reason)
             return await terminal(DecisionOutcome.RULE_REJECTED)
 
-        setup = orb_result.setup
+        setup = result.setup
+        self._require_strategy_setup(
+            setup=setup,
+            run_id=run_id,
+            candidate=item.candidate,
+            cutoff_passed=cutoff_passed,
+        )
         try:
             review = await self._proposal_provider.propose_trade(setup=setup)
             if (
@@ -411,6 +411,26 @@ class ShadowPipeline:
 
     async def _record(self, decision: Decision, owner_id: str) -> None:
         await self._decision_recorder(decision=decision, owner_id=owner_id)
+
+    def _require_strategy_setup(
+        self,
+        *,
+        setup: RuleSetup,
+        run_id: str,
+        candidate: Candidate,
+        cutoff_passed: bool,
+    ) -> None:
+        # Strategies are pluggable, so the window and identity are re-checked
+        # here before a setup can reach review, risk, or a recorded decision.
+        if cutoff_passed:
+            raise ValueError("strategy built a setup at or after its entry cutoff")
+        if (
+            setup.strategy_kind != self._strategy.strategy_kind
+            or setup.run_id != run_id
+            or setup.candidate_id != candidate.id
+            or setup.symbol != candidate.symbol
+        ):
+            raise ValueError("strategy setup does not belong to the assessed candidate")
 
     @staticmethod
     def _terminal_decision(

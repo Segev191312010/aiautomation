@@ -8,6 +8,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
+import re
 from typing import Annotated, Any, Literal, Mapping, Self
 from uuid import uuid4
 
@@ -600,12 +601,17 @@ class QuoteSnapshot(BaseModel):
         return fingerprint_payload(self)
 
 
+ORB_STRATEGY_KIND = "orb"
+_SETUP_LEVEL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
 class RuleSetupProvenance(BaseModel):
     """Complete causal IBKR inputs used to derive one immutable setup."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    opening_bar_fingerprints: tuple[str, str, str]
+    # Required for ORB setups (enforced by RuleSetup); other kinds have no opening range.
+    opening_bar_fingerprints: tuple[str, str, str] | None = None
     atr_bar_fingerprints: tuple[str, ...] = Field(min_length=14)
     breakout_bar_fingerprint: str = Field(min_length=64, max_length=64)
     quote_fingerprint: str = Field(min_length=64, max_length=64)
@@ -617,7 +623,9 @@ class RuleSetupProvenance(BaseModel):
         "atr_bar_fingerprints",
     )
     @classmethod
-    def validate_bar_digests(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+    def validate_bar_digests(cls, values: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if values is None:
+            return None
         if any(len(value) != 64 or any(character not in "0123456789abcdef" for character in value) for value in values):
             raise ValueError("causal bar fingerprints must be lowercase SHA-256 digests")
         return values
@@ -644,13 +652,19 @@ class RuleSetup(BaseModel):
     candidate_id: str
     strategy_id: str
     strategy_version: int = Field(ge=1)
+    # Names the rule set that derived the setup; the review prompt and the
+    # meaning of ``levels`` depend on it.
+    strategy_kind: str = Field(default=ORB_STRATEGY_KIND, pattern=r"^[a-z][a-z0-9_]{0,31}$")
     symbol: str
-    opening_range_high: Decimal = Field(gt=0)
-    opening_range_low: Decimal = Field(gt=0)
+    # Required for ORB setups; other kinds carry their context in ``levels``.
+    opening_range_high: Decimal | None = Field(default=None, gt=0)
+    opening_range_low: Decimal | None = Field(default=None, gt=0)
     atr: Decimal = Field(gt=0)
     entry_limit: Decimal = Field(gt=0)
     stop_price: Decimal = Field(gt=0)
     target_price: Decimal = Field(gt=0)
+    # Reviewer context only: sizing and order fields never read these values.
+    levels: dict[str, Decimal] = Field(default_factory=dict, max_length=16)
     bar_fingerprints: tuple[str, ...] = Field(min_length=1)
     quote_fingerprint: str = Field(min_length=64, max_length=64)
     causal_provenance: RuleSetupProvenance | None = None
@@ -666,17 +680,29 @@ class RuleSetup(BaseModel):
     def validate_detected_at(cls, value: datetime) -> datetime:
         return require_aware(value)
 
+    @field_validator("levels")
+    @classmethod
+    def validate_level_names(cls, value: dict[str, Decimal]) -> dict[str, Decimal]:
+        if any(_SETUP_LEVEL_NAME.fullmatch(name) is None for name in value):
+            raise ValueError("setup level names must be lowercase identifiers")
+        return value
+
     @model_validator(mode="after")
     def validate_prices(self) -> "RuleSetup":
         if not self.stop_price < self.entry_limit < self.target_price:
             raise ValueError("rule setup must satisfy stop < entry < target")
+        is_orb = self.strategy_kind == ORB_STRATEGY_KIND
+        if is_orb and (self.opening_range_high is None or self.opening_range_low is None):
+            raise ValueError("ORB setups require the opening range high and low")
         if self.causal_provenance is not None:
             provenance = self.causal_provenance
             if provenance.quote_fingerprint != self.quote_fingerprint:
                 raise ValueError("causal provenance must match the setup quote")
+            if is_orb and provenance.opening_bar_fingerprints is None:
+                raise ValueError("ORB setup provenance requires the opening bar fingerprints")
             used_bars = set(self.bar_fingerprints)
             required_bars = {
-                *provenance.opening_bar_fingerprints,
+                *(provenance.opening_bar_fingerprints or ()),
                 *provenance.atr_bar_fingerprints,
                 provenance.breakout_bar_fingerprint,
             }
@@ -686,6 +712,10 @@ class RuleSetup(BaseModel):
 
     def fingerprint(self) -> str:
         return fingerprint_payload(self)
+
+    def __hash__(self) -> int:
+        # The generated frozen-model hash cannot hash the ``levels`` dict.
+        return hash(self.fingerprint())
 
 
 class AIReview(BaseModel):

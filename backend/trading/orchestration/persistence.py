@@ -298,7 +298,7 @@ class RepositoryBackedShadowRunner:
                     pipeline = ShadowPipeline(
                         proposal_provider=self._pipeline.proposal_provider,
                         decision_recorder=guarded_recorder,
-                        orb_config=self._pipeline.orb_config,
+                        strategy=self._pipeline.strategy,
                         mode=self._pipeline.mode,
                     )
                     yield ShadowRunSession(
@@ -309,7 +309,7 @@ class RepositoryBackedShadowRunner:
                         pipeline=pipeline,
                         decisions=stored_decisions,
                         completed=already_completed,
-                        cutoff=entry_cutoff_utc(run.session_date, self._pipeline.orb_config),
+                        cutoff=entry_cutoff_utc(run.session_date, pipeline.strategy),
                         heartbeat=heartbeat,
                         clock=self._clock,
                     )

@@ -23,8 +23,43 @@ the requested JSON: decision, confidence between 0 and 1, and a short rationale 
 that names the specific values behind your decision."""
 
 
+MOMO_REVIEW_V1 = """\
+You review one long-only intraday momentum setup (strategy_kind "momo_hod") for \
+a US common stock during regular trading hours. Deterministic code has already \
+detected the signal on the latest completed five-minute bar: it closed above \
+every earlier high of the session and above the session VWAP, its volume was at \
+least 1.5 times the session's average bar volume, and the session's relative \
+volume was at least 2. Code then computed the entry limit, a stop one ATR(14) \
+below entry, and a 2R target. Risk sizing, account limits, and order submission \
+are owned by deterministic code and are not your concern.
+
+This setup has no opening range. Its levels are reference values only: \
+prior_day_high is the previous session's high; vwap is the session VWAP through \
+the signal bar; signal_bar_volume and avg_bar_volume are the signal bar's volume \
+and the mean volume of the session's earlier bars, in shares; rvol is the \
+session's volume so far relative to the average day's pace.
+
+Decide PROPOSE if the setup is a reasonable trade as specified, or ABSTAIN if \
+anything about it looks unsound: for example an entry stretched far above vwap \
+relative to the stop distance, an entry just below prior_day_high that leaves \
+the target beyond it, a stop that is implausibly tight or wide, a volume surge \
+too thin to support the move, or internally inconsistent prices or levels. When \
+the evidence is ambiguous, ABSTAIN.
+
+You cannot change any price, quantity, symbol, or order field. Respond only with \
+the requested JSON: decision, confidence between 0 and 1, and a short rationale \
+that names the specific values behind your decision."""
+
+
 REVIEW_PROMPTS: dict[str, str] = {
     "orb-review-v1": ORB_REVIEW_V1,
+    "momo-review-v1": MOMO_REVIEW_V1,
+}
+# Each prompt describes exactly one rule set; reviewing another kind's setup
+# with it would ask the model to judge levels the setup does not carry.
+REVIEW_PROMPT_STRATEGY_KINDS: dict[str, str] = {
+    "orb-review-v1": "orb",
+    "momo-review-v1": "momo_hod",
 }
 
 
@@ -35,4 +70,21 @@ def review_prompt(prompt_id: str) -> str:
         raise ValueError(f"unknown review prompt id: {prompt_id!r}") from exc
 
 
-__all__ = ["ORB_REVIEW_V1", "REVIEW_PROMPTS", "review_prompt"]
+def review_prompt_for(prompt_id: str, *, strategy_kind: str) -> str:
+    """Return the prompt only when it was written for ``strategy_kind`` setups."""
+    prompt = review_prompt(prompt_id)
+    if REVIEW_PROMPT_STRATEGY_KINDS.get(prompt_id) != strategy_kind:
+        raise ValueError(
+            f"review prompt {prompt_id!r} does not describe {strategy_kind!r} setups"
+        )
+    return prompt
+
+
+__all__ = [
+    "MOMO_REVIEW_V1",
+    "ORB_REVIEW_V1",
+    "REVIEW_PROMPTS",
+    "REVIEW_PROMPT_STRATEGY_KINDS",
+    "review_prompt",
+    "review_prompt_for",
+]
