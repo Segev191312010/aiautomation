@@ -9,6 +9,7 @@ from db.core import init_db
 from middleware import RateLimitMiddleware, RequestLogMiddleware, SecurityHeadersMiddleware
 from routers.auth import router as auth_router
 from routers.autotrader_routes import router as autotrader_router
+from routers.live_routes import router as live_router
 from startup import validate_startup
 
 
@@ -25,6 +26,7 @@ app.add_middleware(RequestLogMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.include_router(auth_router)
 app.include_router(autotrader_router)
+app.include_router(live_router)
 
 
 @app.get("/api/health")
