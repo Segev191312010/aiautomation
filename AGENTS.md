@@ -2,7 +2,8 @@
 
 ## Product Boundary
 - `backend/trading/` is the only trading-domain implementation.
-- Current authority is `backtest` and `shadow` only.
+- Current authority is `backtest` and `shadow`; `paper` unlocks only through the
+  supervised drill and owner-signed receipt defined in `plans/AUTOTRADER_V1_SPEC.md`.
 - No environment variable may enable PAPER or LIVE execution.
 - AI providers may return typed proposals; deterministic code owns risk and lifecycle decisions.
 - Broker execution remains a protocol boundary until evidence-backed PAPER work is approved.
@@ -20,8 +21,9 @@
 - Remove superseded production code and its obsolete tests together.
 - Do not reintroduce deleted legacy modules or compatibility exports.
 - Keep one implementation per concern and one canonical application entry point.
-- Do not edit `.env`, `*.db`, or `docs/paper_review_protocol.md` without explicit owner instruction.
-- Do not add PAPER/LIVE execution, broker credentials, or model authority without explicit human approval.
+- Do not edit `.env`, `*.db`, or `docs/archive/` without explicit owner instruction.
+- Do not add LIVE execution, broker credentials, or model authority without explicit human approval.
+  PAPER execution follows the approved Milestone A plan; LIVE has no V1 path.
 - Do not commit, push, or rewrite Git history unless the owner asks.
 
 ## Collaboration

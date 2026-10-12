@@ -70,7 +70,7 @@ The first command runs backend tests, frontend typecheck/build/tests, and skips 
 - Docker writes the V1 database to `/data/autotrader_v1.db`.
 - Local runtime defaults to `backend/trading_bot.db` only for compatibility with the preserved local file; use `DB_PATH` for a new V1 database.
 - `.env` and SQLite files are local artifacts and are never committed.
-- `docs/paper_review_protocol.md` is preserved owner work from the retired system and is not a current V1 runbook.
+- `docs/archive/` holds owner work from the retired system (including the old TradingView/Claude paper runbook); it is not a current V1 contract.
 
 ## Next Work
 

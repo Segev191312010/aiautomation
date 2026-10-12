@@ -19,7 +19,7 @@
 
 ## Preserved Local Artifacts
 - `.env` files and SQLite databases remain outside source control.
-- `docs/paper_review_protocol.md` remains untouched because it contains owner changes; it is not a current V1 contract.
+- The retired TradingView/Claude paper runbook, with owner changes, is archived at `docs/archive/paper_review_protocol_tv_claude_2026.md`; it is not a current V1 contract.
 - Removed dirty worktrees are recoverable from `/Users/salomon/aiautomation-rebuild-freeze-20260826`.
 
 ## Authority

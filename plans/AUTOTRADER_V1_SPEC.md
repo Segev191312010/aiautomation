@@ -12,13 +12,18 @@ copying its authority into this engine.
 - Assets: US listed common stocks only; long entries only.
 - Trading session: regular US market hours only.
 - Entries: limit orders only.
-- Protection: every accepted entry has a broker-native stop and an optional
-  broker-native target. The engine does not run a server-side exit strategy.
+- Protection: every accepted entry has a broker-native GTC stop and target in
+  one OCA group, so protection survives an engine crash. The only engine-driven
+  exits are session-end safety actions: unfilled entries are cancelled at the
+  entry cutoff, and open positions are flattened 15 minutes before the session
+  close by repricing the existing target order (never a second sell order).
 - Moderate pilot limits: at most three open positions, at most 0.5% of net
   liquidation value at risk per trade, and a 2% daily-loss circuit breaker.
 - Engine modes: `backtest`, `shadow`, and `paper`.
-- Current release authority: `backtest` and `shadow` only. `paper` requires the
-  separately reviewed adapter, operational evidence, and an authority receipt.
+- Current release authority: `backtest` and `shadow`. `paper` requires the
+  reviewed adapter, a passed supervised PAPER drill, and an owner-signed
+  authority receipt. The PAPER account is a sandbox: its gate proves mechanical
+  safety, not strategy profitability.
 - LIVE has no V1 runtime type, transition, approval, route, or configuration.
 
 ## Strategy Lifecycle
@@ -44,20 +49,26 @@ events, and never retry or repair an unknown order state automatically.
 
 ## Authority Boundaries
 
-- AI may review an immutable deterministic setup only.
+- AI may review an immutable deterministic setup only. The V1 reviewer is the
+  Anthropic Claude API; any failure, refusal, or budget exhaustion is ABSTAIN.
 - The deterministic risk engine owns all size, exposure, loss, price, and
   universe limits.
 - The lifecycle service owns optimistic, version-bound status transitions.
 - PAPER activation requires a receipt bound to the build SHA, evidence digest,
-  strategy and policy versions, PAPER account, client ID, expiry, and owner
-  approval. Environment variables alone cannot enable it.
+  strategy and policy versions, PAPER account, data and order client IDs,
+  expiry (at most 30 days), and owner approval. Environment variables alone
+  cannot enable it.
+- The PAPER account must be an IBKR paper account (`DU` prefix), and every
+  account TWS reports as managed must also be a paper account.
 - The execution adapter owns order submission only after lifecycle and risk
   checks approve the exact intent.
 
 ## Evidence Required Before Authority Increases
 
-PAPER authority needs SHA-bound artifacts for deterministic replay,
-chronological walk-forward folds, decision completeness, PAPER lifecycle and
-recovery drills, broker reconciliation, and the V1 authority gate. This
-specification does not authorize PAPER execution by itself. LIVE is outside V1
-and has no implementation path in this codebase.
+PAPER authority needs a SHA-bound supervised drill record proving order IDs,
+permIds, orderRefs, OCA linkage, acknowledgement matching, a fill, the
+session-end flatten, and restart reconciliation, plus the owner-signed receipt.
+Strategy-quality evidence (replay, walk-forward folds, profit factor, drawdown)
+is collected during PAPER and is a prerequisite for any future real-money
+authority, which remains outside V1. LIVE has no implementation path in this
+codebase.

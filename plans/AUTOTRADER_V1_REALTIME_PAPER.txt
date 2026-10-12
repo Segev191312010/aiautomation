@@ -8,7 +8,8 @@ paths are forbidden.
 LOCKED RUNTIME CONTRACT
 - Engine native host: 127.0.0.1.
 - TWS port: 7497 only.
-- One configured PAPER account and one dedicated client ID.
+- One configured PAPER (DU-prefixed) account and two dedicated client IDs:
+  one for market data, one for orders. They must differ.
 - Runtime and evidence accept only real IBKR live streaming data or real IBKR
   historical bars. Delayed, frozen, stale, incomplete, duplicate, malformed,
   or pacing-failed data blocks the session.
@@ -16,8 +17,8 @@ LOCKED RUNTIME CONTRACT
   reject them.
 - PAPER execution requires a signed receipt; real-data shadow does not.
 - A PAPER receipt binds build SHA, evidence digest, strategy and policy hashes,
-  PAPER account, client ID, owner approval, issue time, and expiry. Expiry is
-  the close of the fifth US trading session after issue.
+  PAPER account, data and order client IDs, owner approval, issue time, and
+  expiry. Expiry is at most 30 days after issue.
 - TWS auto-start requires a valid receipt, healthy preflight, clean
   reconciliation, a healthy scheduler, and no kill state.
 
@@ -74,7 +75,8 @@ RTP-03 SCHEDULER, AI, AND RISK
   candidate. Restart must reuse stable decision identity and never duplicate.
 - Run ScannerRun -> Candidate -> CompletedBar/Quote -> RuleSetup -> AIReview
   -> RiskApproval -> Decision.
-- Enforce JSON-schema AI output, a maximum of 20 calls and 5 USD per session.
+- Use the Anthropic Claude API with schema-validated output. Enforce a
+  maximum of 20 calls and 5 USD per session.
   Invalid, unavailable, slow, or over-budget AI becomes AI_BLOCKED; there is
   no rules-only fallback.
 - Create single-use 15-second risk approvals and atomically reserve exposure.
@@ -89,19 +91,26 @@ RTP-04 PAPER AUTHORITY AND EXECUTION
 - IBKRTwsPaperExecutor persists the group, legs, reservation, idempotency key,
   owner, and correlations before broker submission.
 - Bracket order sequence: parent Transmit=False, target Transmit=False, stop
-  Transmit=True last; target and stop share an OCA group.
-- Unknown, rejected, duplicate, partial, timed-out, or mismatched state is
-  MANUAL_INTERVENTION. It fences entries and never auto-retries, repairs, or
-  force-closes positions.
+  Transmit=True last; target and stop share an OCA group. Entry is DAY; stop
+  and target are GTC so protection survives an engine crash.
+- Session-end safety: cancel unfilled entries at the entry cutoff; flatten
+  open positions at close minus 15 minutes (half-day aware) by repricing the
+  existing target order to a marketable limit. Never submit a second sell.
+- Expected lifecycle events (entry fill, partial fill, target/stop fill, OCA
+  sibling cancel) are normal transitions. Unknown, rejected, duplicate,
+  timed-out, or mismatched state is MANUAL_INTERVENTION. It fences entries and
+  never auto-retries or repairs.
 
 RTP-05 SHADOW, DRILL, AND PAPER CANARY
 - Shadow uses only real IBKR data. Modelled analytics are explicitly labelled:
   buy at ask plus 5 bps, sell at bid minus 5 bps, plus a frozen commission
   policy. Modelled fills are never broker-fill evidence.
-- PAPER eligibility requires ten complete real-data RTH shadow sessions, at
-  least 100 terminal decisions, 30 modelled fills, replay equality, complete
-  decisions, PF >= 1.20, max drawdown <= 3 percent, and AI expectancy at least
-  95 percent of the rule-only baseline.
+- PAPER eligibility (owner decision 2026-10-12, light gate): one complete
+  real-data shadow session reviewed by the owner, the execution-safety review,
+  and the supervised drill below. The strategy-quality thresholds (ten
+  sessions, 100 decisions, PF >= 1.20, max drawdown <= 3 percent, AI
+  expectancy >= 95 percent of rule-only) are measured during PAPER and gate
+  any future real-money work, not PAPER.
 - A real PAPER drill must prove order IDs, permIds, orderRefs, OCA linkage,
   restart reconciliation, sibling cancellation, and an observed protected
   partial fill.
