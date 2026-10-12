@@ -125,7 +125,7 @@ class RiskReservationRepository:
         risk_budget = portfolio.net_liquidation * policy.max_risk_per_trade_pct / Decimal("100")
         position_budget = portfolio.net_liquidation * policy.max_position_notional_pct / Decimal("100")
         total_budget = portfolio.net_liquidation * policy.max_total_notional_pct / Decimal("100")
-        daily_loss = max(Decimal("0"), -portfolio.realized_day_pnl)
+        daily_loss = portfolio.daily_loss
         if daily_loss >= portfolio.net_liquidation * policy.max_daily_loss_pct / Decimal("100"):
             raise ReservationError("daily loss limit reached")
         if intent.risk_amount > risk_budget:

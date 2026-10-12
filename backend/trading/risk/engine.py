@@ -52,7 +52,7 @@ def size_and_evaluate_trade(
     if len(portfolio.positions) + len(portfolio.pending_symbols) >= policy.max_open_positions:
         codes.append("max_open_positions_reached")
 
-    daily_loss = max(Decimal("0"), -portfolio.realized_day_pnl)
+    daily_loss = portfolio.daily_loss
     if daily_loss >= _percent_amount(portfolio.net_liquidation, policy.max_daily_loss_pct):
         codes.append("daily_loss_limit_reached")
 

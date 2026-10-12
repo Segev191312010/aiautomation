@@ -43,10 +43,29 @@ class FakeTWSClient:
         self.cancelled_quotes: list[int] = []
         self.market_data_type_requests: list[int] = []
         self.quote_calls: list[tuple[object, ...]] = []
+        self.account_values = {
+            "NetLiquidation": "100000",
+            "AvailableFunds": "90000",
+            "RealizedPnL": "-250",
+            "UnrealizedPnL": "-100",
+        }
+        self.portfolio_rows: list[tuple[object, ...]] = []
+        self.account_requests: list[tuple[bool, str]] = []
         self.disconnected = False
 
     def reqMarketDataType(self, data_type: int) -> None:
         self.market_data_type_requests.append(data_type)
+
+    def reqAccountUpdates(self, subscribe: bool, account: str) -> None:
+        self.account_requests.append((subscribe, account))
+        if not subscribe:
+            return
+        for key, value in self.account_values.items():
+            self.callbacks.updateAccountValue(key, value, "BASE", account)
+        self.callbacks.updateAccountValue("NetLiquidation", "1", "EUR", account)
+        for row in self.portfolio_rows:
+            self.callbacks.updatePortfolio(*row)
+        self.callbacks.accountDownloadEnd(account)
 
     def connect(self, host: str, port: int, client_id: int) -> None:
         self.connect_calls.append((host, port, client_id))
@@ -431,3 +450,61 @@ def test_documented_line_allocation_covers_candidate_counts_up_to_baseline() -> 
     assert documented_line_allocation(20).passed is True
     assert documented_line_allocation(20).available_lines == 100
     assert documented_line_allocation(101).passed is False
+
+
+def _stock(con_id: int, symbol: str, *, sec_type: str = "STK", currency: str = "USD"):
+    return SimpleNamespace(conId=con_id, symbol=symbol, secType=sec_type, currency=currency)
+
+
+@pytest.mark.asyncio
+async def test_account_snapshot_reads_base_values_and_us_stock_positions() -> None:
+    client: FakeTWSClient | None = None
+
+    def factory(callbacks):
+        nonlocal client
+        client = FakeTWSClient(callbacks)
+        client.portfolio_rows = [
+            (_stock(101, "AAPL"), 10, 150.0, 1500.0, 140.0, 100.0, 0.0, "DU123456"),
+            (_stock(102, "MSFT"), 0, 300.0, 0.0, 0.0, 0.0, 25.0, "DU123456"),
+            (_stock(103, "OTHER"), 5, 10.0, 50.0, 9.0, 5.0, 0.0, "DU999999"),
+        ]
+        return client
+
+    actor = TWSPaperActor(config(), client_factory=factory)
+    await actor.connect()
+    snapshot = await actor.account_snapshot()
+
+    assert snapshot.paper_account_id == "DU123456"
+    assert snapshot.net_liquidation == Decimal("100000")
+    assert snapshot.realized_day_pnl == Decimal("-250")
+    assert snapshot.unrealized_pnl == Decimal("-100")
+    # Closed (zero) rows and other accounts are not exposure.
+    assert [position.symbol for position in snapshot.positions] == ["AAPL"]
+    assert client is not None
+    assert client.account_requests == [(True, "DU123456"), (False, "DU123456")]
+
+
+@pytest.mark.asyncio
+async def test_account_snapshot_blocks_on_non_us_stock_positions_or_missing_values() -> None:
+    def with_option(callbacks):
+        client = FakeTWSClient(callbacks)
+        client.portfolio_rows = [
+            (_stock(201, "SPY", sec_type="OPT"), 1, 2.0, 200.0, 2.0, 0.0, 0.0, "DU123456"),
+        ]
+        return client
+
+    actor = TWSPaperActor(config(), client_factory=with_option)
+    await actor.connect()
+    with pytest.raises(TWSRequestError, match="outside US stocks"):
+        await actor.account_snapshot()
+
+    def missing_net_liq(callbacks):
+        client = FakeTWSClient(callbacks)
+        client.portfolio_rows = []
+        client.account_values = {"AvailableFunds": "1", "RealizedPnL": "0", "UnrealizedPnL": "0"}
+        return client
+
+    actor = TWSPaperActor(config(), client_factory=missing_net_liq)
+    await actor.connect()
+    with pytest.raises(TWSRequestError, match="NetLiquidation"):
+        await actor.account_snapshot()

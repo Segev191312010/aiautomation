@@ -937,10 +937,23 @@ class PortfolioSnapshot(BaseModel):
     observed_at: datetime
     net_liquidation: Decimal = Field(gt=0)
     realized_day_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
     positions: tuple[PositionExposure, ...] = ()
     pending_symbols: tuple[str, ...] = ()
     reserved_risk: Decimal = Field(default=Decimal("0"), ge=0)
     reserved_notional: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @property
+    def daily_loss(self) -> Decimal:
+        """Loss counted by the circuit breaker: realized plus open losses.
+
+        Unrealized gains never offset realized losses, so an open winner
+        cannot buy back trading capacity the breaker already spent.
+        """
+        return max(
+            Decimal("0"),
+            -(self.realized_day_pnl + min(Decimal("0"), self.unrealized_pnl)),
+        )
 
     @field_validator("observed_at")
     @classmethod

@@ -19,7 +19,7 @@ from trading.market.ibkr_boundary import (
     IBKRTradeBar,
     ScannerRequest,
 )
-from trading.contracts import QuoteSnapshot
+from trading.contracts import AccountSnapshot, QuoteSnapshot, RawAccountPosition
 
 PAPER_TWS_HOST = "127.0.0.1"
 PAPER_TWS_PORT = 7497
@@ -158,6 +158,14 @@ class _PendingDailyBars:
 
 
 @dataclass
+class _PendingAccount:
+    future: asyncio.Future[AccountSnapshot]
+    values: dict[tuple[str, str], str] = field(default_factory=dict)
+    positions: list[RawAccountPosition] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
 class _PendingDetails:
     future: asyncio.Future[IBKRContractDetails]
     con_id: int
@@ -201,6 +209,18 @@ class _CallbackSink:
     def contractDetailsEnd(self, request_id: int) -> None:
         self.actor._on_contract_details_end(request_id)
 
+    def updateAccountValue(self, key: str, value: str, currency: str, account: str) -> None:
+        self.actor._on_account_value(key, value, currency, account)
+
+    def updatePortfolio(self, contract: Any, position: Any, *args: Any) -> None:
+        self.actor._on_portfolio(contract, position, *args)
+
+    def accountDownloadEnd(self, account: str) -> None:
+        self.actor._on_account_download_end(account)
+
+    def updateAccountTime(self, *args: Any) -> None:
+        return None
+
     def historicalData(self, request_id: int, bar: Any) -> None:
         self.actor._on_historical_data(request_id, bar)
 
@@ -230,6 +250,9 @@ class _CallbackSink:
     scanner_data = scannerData
     scanner_data_end = scannerDataEnd
     contract_details = contractDetails
+    update_account_value = updateAccountValue
+    update_portfolio = updatePortfolio
+    account_download_end = accountDownloadEnd
     contract_details_end = contractDetailsEnd
     historical_data = historicalData
     historical_data_end = historicalDataEnd
@@ -264,6 +287,18 @@ def _official_client_factory(sink: _CallbackSink) -> TWSClient:
 
         def contractDetails(self, *args: Any) -> None:
             self._sink.contractDetails(*args)
+
+        def updateAccountValue(self, *args: Any) -> None:
+            self._sink.updateAccountValue(*args)
+
+        def updatePortfolio(self, *args: Any) -> None:
+            self._sink.updatePortfolio(*args)
+
+        def accountDownloadEnd(self, *args: Any) -> None:
+            self._sink.accountDownloadEnd(*args)
+
+        def updateAccountTime(self, *args: Any) -> None:
+            self._sink.updateAccountTime(*args)
 
         def contractDetailsEnd(self, *args: Any) -> None:
             self._sink.contractDetailsEnd(*args)
@@ -368,6 +403,7 @@ class TWSPaperActor:
         self._pending_daily: dict[int, _PendingDailyBars] = {}
         self._pending_details: dict[int, _PendingDetails] = {}
         self._pending_quotes: dict[int, _PendingQuote] = {}
+        self._pending_account: _PendingAccount | None = None
         self._last_error: str | None = None
         self._callbacks_seen = 0
 
@@ -445,6 +481,9 @@ class TWSPaperActor:
         self._pending_daily.clear()
         self._pending_details.clear()
         self._pending_quotes.clear()
+        if self._pending_account is not None:
+            self._set_future_exception(self._pending_account.future, error)
+            self._pending_account = None
         self._run_thread = None
 
     def _require_connected(self) -> None:
@@ -577,6 +616,29 @@ class TWSPaperActor:
                 raise TWSRequestError("TWS daily-history request timed out") from exc
             finally:
                 self._pending_daily.pop(request_id, None)
+
+    async def account_snapshot(self) -> AccountSnapshot:
+        """One full account download: net liquidation, day P&L and positions.
+
+        Only US common-stock positions are representable; anything else in the
+        PAPER account blocks rather than being silently ignored by risk.
+        """
+        self._require_connected()
+        async with self._request_gate:
+            pending = _PendingAccount(asyncio.get_running_loop().create_future())
+            self._pending_account = pending
+            method = getattr(self._client, "reqAccountUpdates")
+            try:
+                method(True, self.config.account)
+                return await asyncio.wait_for(
+                    pending.future, timeout=self.config.request_timeout_seconds
+                )
+            except asyncio.TimeoutError as exc:
+                raise TWSRequestError("TWS account download timed out") from exc
+            finally:
+                self._pending_account = None
+                if self._client is not None:
+                    method(False, self.config.account)
 
     async def quote_snapshot(
         self,
@@ -744,6 +806,86 @@ class TWSPaperActor:
             self._set_future_exception(pending.future, result)
         else:
             pending.results.append(result)
+
+    def _on_account_value(self, key: str, value: str, currency: str, account: str) -> None:
+        self._callbacks_seen += 1
+        pending = self._pending_account
+        if pending is None or account != self.config.account:
+            return
+        pending.values[(str(key), str(currency))] = str(value)
+
+    def _on_portfolio(self, contract: Any, position: Any, *args: Any) -> None:
+        self._callbacks_seen += 1
+        pending = self._pending_account
+        if pending is None or pending.future.done():
+            return
+        # Official order: marketPrice, marketValue, averageCost, unrealizedPNL,
+        # realizedPNL, accountName.
+        if len(args) < 6 or str(args[5]) != self.config.account:
+            return
+        try:
+            quantity = Decimal(str(position))
+            if quantity == 0:
+                return
+            if (
+                str(getattr(contract, "secType", "")) != "STK"
+                or str(getattr(contract, "currency", "")) != "USD"
+            ):
+                pending.error = "PAPER account holds a position outside US stocks"
+                return
+            pending.positions.append(
+                RawAccountPosition(
+                    paper_account_id=self.config.account,
+                    con_id=int(getattr(contract, "conId")),
+                    symbol=str(getattr(contract, "symbol")),
+                    quantity=quantity,
+                    market_price=Decimal(str(args[0])),
+                    market_value=Decimal(str(args[1])),
+                    average_cost=Decimal(str(args[2])),
+                    unrealized_pnl=Decimal(str(args[3])),
+                    realized_pnl=Decimal(str(args[4])),
+                    observed_at=datetime.now(timezone.utc),
+                )
+            )
+        except Exception:
+            pending.error = "TWS portfolio callback was malformed"
+
+    def _on_account_download_end(self, account: str) -> None:
+        self._callbacks_seen += 1
+        pending = self._pending_account
+        if pending is None or pending.future.done() or account != self.config.account:
+            return
+        if pending.error is not None:
+            self._set_future_exception(pending.future, TWSRequestError(pending.error))
+            return
+
+        def amount(key: str) -> Decimal:
+            for currency in ("BASE", "USD"):
+                raw = pending.values.get((key, currency))
+                if raw is not None:
+                    return Decimal(raw)
+            raise TWSRequestError(f"TWS account download is missing {key}")
+
+        try:
+            snapshot = AccountSnapshot(
+                paper_account_id=self.config.account,
+                client_id=self.config.client_id,
+                observed_at=datetime.now(timezone.utc),
+                net_liquidation=amount("NetLiquidation"),
+                available_funds=amount("AvailableFunds"),
+                realized_day_pnl=amount("RealizedPnL"),
+                unrealized_pnl=amount("UnrealizedPnL"),
+                positions=tuple(pending.positions),
+            )
+        except TWSRequestError as exc:
+            self._set_future_exception(pending.future, exc)
+            return
+        except Exception:
+            self._set_future_exception(
+                pending.future, TWSRequestError("TWS account download failed validation")
+            )
+            return
+        self._set_future_result(pending.future, snapshot)
 
     def _on_contract_details(self, request_id: int, details: Any) -> None:
         self._callbacks_seen += 1
