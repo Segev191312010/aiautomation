@@ -18,9 +18,11 @@ from pydantic import ValidationError
 from tests.test_tws_actor import FakeTWSClient
 from trading.contracts import ShadowRuntimeConfig
 from trading.market import screener as screener_module
+from trading.market.context import CONTEXT_SYMBOLS, build_market_context, latest_market_context
 from trading.market.screener import (
     HOT_LIST_SIZE,
     TICK_VOLUME_MULTIPLIER,
+    ContextETFs,
     Observation,
     ScanMerge,
     ScreenerError,
@@ -38,6 +40,7 @@ from trading.market.screener import (
     run_sweep,
     scan_additions,
     scan_candidates,
+    with_market_context,
 )
 from trading.market.snapshots import MarketSnapshot
 from trading.market.tws_actor import (
@@ -47,7 +50,12 @@ from trading.market.tws_actor import (
     TWSPaperActor,
     TWSRequestError,
 )
-from trading.market.ibkr_boundary import DailyBarBatch, IBKRDailyBar, IBKRScannerResult
+from trading.market.ibkr_boundary import (
+    DailyBarBatch,
+    IBKRContractDetails,
+    IBKRDailyBar,
+    IBKRScannerResult,
+)
 from trading.market.universe import (
     DailyQualification,
     RequestPacer,
@@ -386,6 +394,8 @@ def test_price_text_keeps_cents_and_sub_penny_prints() -> None:
         lambda doc: doc["rows"][0].update(hot_rank=None),
         lambda doc: doc["rows"][1].update(change_pct="1.2.3"),
         lambda doc: doc.update(observed_at="2026-10-12T14:48:00"),
+        lambda doc: doc.update(market=5),
+        lambda doc: doc.update(market=["risk_on"]),
     ],
 )
 def test_payload_validation_rejects_contract_violations(mutate: Any) -> None:
@@ -393,6 +403,31 @@ def test_payload_validation_rejects_contract_violations(mutate: Any) -> None:
     mutate(document)
     with pytest.raises(ValidationError):
         ScreenerPayload.model_validate(document)
+
+
+def test_market_context_is_appended_without_touching_the_rest_of_the_payload() -> None:
+    base = live_aapl_payload()
+    context = build_market_context(
+        session_date=DAY,
+        observed_at=at(10, 48),
+        etf_snapshots={"SPY": snap(9001, last="100.4", observed=at(10, 48))},
+        watchlist_rows=[row.model_dump() for row in base.rows],
+    )
+
+    combined = with_market_context(base, context)
+
+    market_json = json.dumps(context.to_payload(), separators=(",", ":"))
+    assert combined.to_json() == base.to_json()[:-1] + ',"market":' + market_json + "}"
+    document = json.loads(combined.to_json())
+    assert list(document) == PAYLOAD_KEYS + ["market"]
+    assert document["market"]["breadth_up_pct"] == "50.00"
+    assert ScreenerPayload.model_validate_json(combined.to_json()) == combined
+    for other in (
+        replace(context, observed_at=at(10, 49)),
+        replace(context, session_date=DAY + timedelta(days=1)),
+    ):
+        with pytest.raises(ScreenerError, match="different sweep"):
+            with_market_context(base, other)
 
 
 # --- persistence and hot list --------------------------------------------------------
@@ -762,6 +797,230 @@ async def test_sweep_ranks_scan_additions_beside_the_watchlist(database) -> None
     assert sum(1 for row in payload.rows if row.con_id == 1) == 1
 
 
+# --- market context -------------------------------------------------------------------------
+
+ETF_IDS = {symbol: 9000 + index for index, (symbol, _) in enumerate(CONTEXT_SYMBOLS)}
+ETF_EXCHANGES = dict(CONTEXT_SYMBOLS)
+
+
+def etf_details(symbol: str, **overrides: Any) -> IBKRContractDetails:
+    values: dict[str, Any] = {
+        "con_id": ETF_IDS[symbol],
+        "symbol": symbol,
+        "currency": "USD",
+        "security_type": "STK",
+        "stock_type": "ETF",
+        "primary_exchange": ETF_EXCHANGES[symbol],
+        "min_tick": Decimal("0.01"),
+    }
+    values.update(overrides)
+    return IBKRContractDetails(**values)
+
+
+class FakeResolver:
+    """Resolves every context ETF unless an answer overrides it."""
+
+    def __init__(self, answers: dict[str, IBKRContractDetails | Exception] | None = None) -> None:
+        self.answers = dict(answers or {})
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def contract_details_for_symbol(
+        self, symbol: str, primary_exchange: str | None
+    ) -> IBKRContractDetails:
+        self.calls.append((symbol, primary_exchange))
+        answer = self.answers.get(symbol) or etf_details(symbol)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+@pytest.mark.asyncio
+async def test_context_etfs_resolve_once_and_retry_failures_after_the_wait(screener_logs) -> None:
+    clock = FakeClock(at(9, 0))
+    resolver = FakeResolver(
+        {
+            "QQQ": TWSRequestError("TWS contract-details request timed out"),
+            "XLRE": etf_details("XLRE", currency="CAD"),
+            "XLC": etf_details("XLC", con_id=ETF_IDS["XLK"]),
+        }
+    )
+    etfs = ContextETFs(resolver, clock=clock, retry_after=timedelta(minutes=15))
+
+    first = await etfs.resolve()
+
+    assert resolver.calls == list(CONTEXT_SYMBOLS)
+    assert [item.symbol for item in first] == [
+        symbol for symbol, _ in CONTEXT_SYMBOLS if symbol not in {"QQQ", "XLRE", "XLC"}
+    ]
+    warnings = [record.getMessage() for record in screener_logs if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert all(f"{symbol}@" in warnings[0] for symbol in ("QQQ", "XLRE", "XLC"))
+
+    resolver.calls.clear()
+    clock.now += timedelta(minutes=14)
+    assert await etfs.resolve() == first
+    assert resolver.calls == []
+
+    resolver.answers.clear()
+    clock.now += timedelta(minutes=1)
+    second = await etfs.resolve()
+    assert [symbol for symbol, _ in resolver.calls] == ["QQQ", "XLRE", "XLC"]
+    assert [item.symbol for item in second] == [symbol for symbol, _ in CONTEXT_SYMBOLS]
+    assert etfs.con_ids == frozenset(ETF_IDS.values())
+
+
+@pytest.mark.asyncio
+async def test_context_resolution_propagates_a_competing_login() -> None:
+    blocked = TWSCompetingSessionError("TWS error 10197: No market data during competing live session")
+    with pytest.raises(TWSCompetingSessionError):
+        await ContextETFs(FakeResolver({"SPY": blocked})).resolve()
+
+
+# Last prices against a prior close of 100; IWM's snapshot fails.
+ETF_LASTS = {
+    "SPY": "100.50",
+    "QQQ": "100.80",
+    "DIA": "100.20",
+    "XLK": "101.50",
+    "XLV": "99.00",
+    "XLF": "100.40",
+    "XLE": "100.10",
+    "XLY": "100.90",
+    "XLP": "99.80",
+    "XLI": "100.30",
+    "XLU": "99.50",
+    "XLB": "100.00",
+    "XLRE": "99.70",
+    "XLC": "101.10",
+}
+
+
+def etf_answers(observed: datetime) -> dict[int, MarketSnapshot | Exception]:
+    answers: dict[int, MarketSnapshot | Exception] = {
+        ETF_IDS[symbol]: snap(ETF_IDS[symbol], last=last, observed=observed)
+        for symbol, last in ETF_LASTS.items()
+    }
+    answers[ETF_IDS["IWM"]] = TWSRequestError("TWS market snapshot timed out without prior close")
+    return answers
+
+
+async def seed_context_universe() -> None:
+    """The owner's watchlist lists two context ETFs beside three stocks."""
+    listed = (("AAA", 1), ("BBB", 2), ("CCC", 3), ("XLE", ETF_IDS["XLE"]), ("SPY", 777))
+    await replace_universe_source("watchlist", [universe_row(symbol, con_id) for symbol, con_id in listed])
+    for symbol, con_id in listed:
+        await upsert_daily(daily(symbol, con_id))
+
+
+@pytest.mark.asyncio
+async def test_sweep_records_market_context_and_never_ranks_context_etfs(database, screener_logs) -> None:
+    await seed_context_universe()
+    observed = NOW.astimezone(ET)
+    answers = etf_answers(observed)
+    answers.update(
+        {
+            1: snap(1, last="104", observed=observed),
+            2: snap(2, last="101", observed=observed),
+            3: snap(3, last="100", observed=observed),
+            50: snap(50, last="110", observed=observed),
+        }
+    )
+    source = FakeScanSource(
+        answers,
+        {"TOP_PERC_GAIN": [scan_row(ETF_IDS["XLF"], "XLF", 1), scan_row(50, "MOVER", 2)]},
+        {50: history_batch(50)},
+    )
+    resolver = FakeResolver()
+
+    result = await run_sweep(
+        source,
+        session_date=DAY,
+        clock=lambda: NOW,
+        scan_merge=merge(source),
+        context_etfs=ContextETFs(resolver),
+    )
+
+    # The ETFs are snapshotted first, in their own batch, and never ranked.
+    assert source.batches == [[ETF_IDS[symbol] for symbol, _ in CONTEXT_SYMBOLS], [1, 2, 3, 50]]
+    assert source.history_calls == [50]
+    payload = result.payload
+    assert [row.symbol for row in payload.rows] == ["MOVER", "AAA", "BBB", "CCC"]
+    assert not {row.con_id for row in payload.rows} & set(ETF_IDS.values())
+    assert (payload.qualified, payload.quoted, payload.errors) == (4, 4, 0)
+
+    context = result.market_context
+    assert context is not None
+    assert payload.market == context.to_payload()
+    assert (context.session_date, context.observed_at) == (DAY, NOW)
+    # Breadth counts the watchlist stocks only, not the scan mover.
+    assert (context.advancers, context.decliners, context.breadth_up_pct) == (2, 0, Decimal("66.67"))
+    assert (context.spy_change_pct, context.qqq_change_pct, context.iwm_change_pct) == (
+        Decimal("0.50"),
+        Decimal("0.80"),
+        None,
+    )
+    assert context.regime == "risk_on"
+    assert context.summary == (
+        "Risk-on · S&P +0.5% · Nasdaq +0.8% · 2↑/0↓ · "
+        "Leading: Technology +1.5% · Lagging: Health Care -1.0%"
+    )
+    infos = [record.getMessage() for record in screener_logs if record.levelno == logging.INFO]
+    assert [message for message in infos if message.startswith("market ")] == [f"market {context.summary}"]
+    warnings = [record.getMessage() for record in screener_logs if record.levelno == logging.WARNING]
+    assert any(message.startswith("context ETF snapshot errors: IWM:") for message in warnings)
+
+    stored = await latest_snapshot(DAY)
+    assert stored == payload
+    assert await latest_market_context(DAY, now=NOW + timedelta(seconds=30)) == context
+    assert [row.symbol for row in await latest_hotlist(DAY)] == ["MOVER", "AAA", "BBB"]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_context_etfs_still_stay_out_of_the_rows(database) -> None:
+    await seed_context_universe()
+    observed = NOW.astimezone(ET)
+    source = FakeSnapshots({con_id: snap(con_id, observed=observed) for con_id in (1, 2, 3)})
+    failing = FakeResolver(
+        {symbol: TWSRequestError("No security definition has been found") for symbol, _ in CONTEXT_SYMBOLS}
+    )
+
+    result = await run_sweep(source, session_date=DAY, clock=lambda: NOW, context_etfs=ContextETFs(failing))
+
+    assert source.batches == [[1, 2, 3]]
+    assert [row.symbol for row in result.payload.rows] == ["AAA", "BBB", "CCC"]
+    context = result.market_context
+    assert context is not None and context.regime == "neutral"
+    assert context.summary.startswith("Neutral · S&P n/a · Nasdaq n/a · 3↑/0↓ · ")
+    assert result.payload.market == context.to_payload()
+
+
+@pytest.mark.asyncio
+async def test_sweep_without_context_etfs_omits_the_market_key(database) -> None:
+    await seed_screener_universe()
+    source = FakeSnapshots({con_id: snap(con_id) for con_id in (1, 2, 3, 4)})
+
+    result = await run_sweep(source, session_date=DAY, clock=lambda: NOW)
+
+    assert result.market_context is None and result.payload.market is None
+    assert "market" not in json.loads(result.payload.to_json())
+    assert await latest_market_context(DAY, now=NOW) is None
+
+
+@pytest.mark.asyncio
+async def test_competing_login_during_the_context_batch_aborts_the_sweep(database) -> None:
+    await seed_screener_universe()
+    answers = etf_answers(NOW)
+    answers[ETF_IDS["QQQ"]] = TWSCompetingSessionError(
+        "TWS error 10197: No market data during competing live session"
+    )
+    source = FakeSnapshots(answers)
+
+    with pytest.raises(TWSCompetingSessionError):
+        await run_sweep(source, session_date=DAY, clock=lambda: NOW, context_etfs=ContextETFs(FakeResolver()))
+    assert len(source.batches) == 1
+    assert await latest_snapshot(DAY) is None
+
+
 # --- service --------------------------------------------------------------------------------
 
 
@@ -828,6 +1087,7 @@ class FakeActor:
         self.connects = 0
         self.disconnects = 0
         self.history_calls: list[int] = []
+        self.detail_calls: list[str] = []
 
     async def connect(self) -> None:
         self.connects += 1
@@ -842,7 +1102,8 @@ class FakeActor:
         self.connected = False
 
     async def contract_details_for_symbol(self, symbol: str, primary_exchange: str | None) -> Any:
-        raise AssertionError("not used")
+        self.detail_calls.append(symbol)
+        return etf_details(symbol)
 
     async def daily_trade_bars(self, con_id: int) -> Any:
         self.history_calls.append(con_id)
@@ -948,11 +1209,15 @@ async def test_loop_idles_outside_the_window_in_bounded_chunks(database) -> None
 @pytest.mark.asyncio
 async def test_sweeps_repeat_on_the_interval(database) -> None:
     clock = FakeClock(at(10, 0))
+    actor = FakeActor(
+        connect_failures=1,
+        snapshot_failures=[TWSConnectionError("TWS connection closed")],
+    )
 
     sweeps = await service.run_screener(
         runtime_config=runtime_config(),
         interval_seconds=60,
-        actor_factory=lambda config: FakeActor(),
+        actor_factory=lambda config: actor,
         clock=clock,
         sleep=clock.sleep,
         monotonic=clock.monotonic,
@@ -960,7 +1225,11 @@ async def test_sweeps_repeat_on_the_interval(database) -> None:
     )
 
     assert sweeps == 3
-    assert clock.sleeps == [60.0, 60.0]
+    assert clock.sleeps == [5.0, 5.0, 60.0, 60.0]
+    # Resolved once for the process, across reconnects and sweeps.
+    assert actor.detail_calls == [symbol for symbol, _ in CONTEXT_SYMBOLS]
+    context = await latest_market_context(DAY, now=clock.now)
+    assert context is not None and context.observed_at == at(10, 2) + timedelta(seconds=10)
 
 
 # --- CLI ---------------------------------------------------------------------------------------
@@ -1025,6 +1294,10 @@ def test_cli_imports_qualifies_and_sweeps_once(cli_environment, capsys) -> None:
     assert "qualified 0, quoted 0, errors 0" in capsys.readouterr().out
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT count(*) FROM autotrader_screener_snapshots").fetchone()[0] == 1
+        stored = json.loads(db.execute("SELECT payload_json FROM autotrader_screener_snapshots").fetchone()[0])
+    # This TWS double knows no ETFs: the sweep continues without them.
+    assert stored["market"]["regime"] == "neutral"
+    assert stored["market"]["summary"].startswith("Neutral · S&P n/a · Nasdaq n/a")
 
 
 def test_cli_reports_a_competing_login_clearly(cli_environment, capsys, monkeypatch) -> None:

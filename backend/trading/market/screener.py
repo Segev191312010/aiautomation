@@ -3,24 +3,31 @@
 A sweep takes one short-lived streaming snapshot per qualified instrument,
 ranks the movers, and appends one ``screener.v1`` payload. The dashboard and
 strategies read only persisted payloads; ranking is pure so identical inputs
-always produce the identical hot list.
+always produce the identical hot list. With the context ETFs configured the
+payload also carries the sweep's ``market_context.v1`` document.
 """
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Sequence, Set
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 import json
 import logging
 import time
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from db.core import get_db, transaction
+from trading.market.context import (
+    CONTEXT_SYMBOL_SET,
+    CONTEXT_SYMBOLS,
+    MarketContext,
+    build_market_context,
+)
 from trading.market.ibkr_boundary import IBKRScannerResult
 from trading.market.snapshots import MarketSnapshot
 from trading.market.tws_actor import (
@@ -32,6 +39,8 @@ from trading.market.universe import (
     WATCHLIST_SOURCE,
     DailyHistorySource,
     RequestPacer,
+    SymbolResolver,
+    details_rejection,
     load_daily,
     qualify_contract,
 )
@@ -63,6 +72,10 @@ MAX_SCAN_ADDITIONS = 15
 # Daily-history requests are paced at one per second, so qualifying scan
 # symbols is bounded per sweep; qualified rows are reused all session.
 MAX_SCAN_QUALIFICATIONS_PER_SWEEP = 15
+# A context ETF that failed to resolve is retried this long after the
+# failure, so one transient error cannot leave the regime without SPY/QQQ
+# for the life of the process; resolved conIds are never re-requested.
+CONTEXT_RESOLVE_RETRY = timedelta(minutes=15)
 _ONE = Decimal("1")
 _HUNDRED = Decimal("100")
 
@@ -273,6 +286,10 @@ class ScreenerPayload(BaseModel):
     quoted: int = Field(ge=0)
     errors: int = Field(ge=0)
     rows: tuple[ScreenerRow, ...]
+    # The sweep's market_context.v1 document, absent on sweeps without one.
+    # Its own reader (trading.market.context) validates it, so a context
+    # problem can never make the hot list unreadable.
+    market: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_sweep(self) -> ScreenerPayload:
@@ -295,7 +312,11 @@ class ScreenerPayload(BaseModel):
         return self
 
     def to_json(self) -> str:
-        return json.dumps(self.model_dump(mode="json", by_alias=True), separators=(",", ":"))
+        # A sweep without market context serializes byte-for-byte as before.
+        exclude = {"market"} if self.market is None else None
+        return json.dumps(
+            self.model_dump(mode="json", by_alias=True, exclude=exclude), separators=(",", ":")
+        )
 
 
 def _fixed(value: Decimal | None, places: str) -> str | None:
@@ -370,6 +391,18 @@ def build_payload(
             "rows": [payload_row(item) for item in ranked],
         }
     )
+
+
+def with_market_context(payload: ScreenerPayload, context: MarketContext) -> ScreenerPayload:
+    """The payload with its own sweep's market context under ``market``."""
+    if (
+        context.session_date.isoformat() != payload.session_date
+        or utc_iso(context.observed_at) != payload.observed_at
+    ):
+        raise ScreenerError("market context belongs to a different sweep")
+    document = payload.model_dump(mode="json", by_alias=True)
+    document["market"] = context.to_payload()
+    return ScreenerPayload.model_validate(document)
 
 
 # --- persistence ------------------------------------------------------------------
@@ -616,6 +649,135 @@ async def universe_con_ids() -> frozenset[int]:
             return frozenset(int(str(raw[0])) for raw in await cursor.fetchall())
 
 
+# --- market context ETFs -------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ContextInstrument:
+    symbol: str
+    con_id: int
+
+
+class ContextETFs:
+    """The market-context ETFs' conIds, resolved once and cached in memory.
+
+    One instance lives as long as its screener process. A symbol that fails
+    to resolve is left out and retried ``retry_after`` later; a competing
+    login or lost connection propagates like any other sweep request.
+    """
+
+    def __init__(
+        self,
+        resolver: SymbolResolver,
+        *,
+        clock: Clock = _utc_now,
+        retry_after: timedelta = CONTEXT_RESOLVE_RETRY,
+    ) -> None:
+        if retry_after <= timedelta(0):
+            raise ValueError("retry_after must be positive")
+        self._resolver = resolver
+        self._clock = clock
+        self._retry_after = retry_after
+        self._con_ids: dict[str, int] = {}
+        self._failed_at: dict[str, datetime] = {}
+
+    @property
+    def con_ids(self) -> frozenset[int]:
+        return frozenset(self._con_ids.values())
+
+    def instruments(self) -> tuple[ContextInstrument, ...]:
+        """Resolved ETFs in ``CONTEXT_SYMBOLS`` order."""
+        return tuple(
+            ContextInstrument(symbol=symbol, con_id=self._con_ids[symbol])
+            for symbol, _ in CONTEXT_SYMBOLS
+            if symbol in self._con_ids
+        )
+
+    async def resolve(self) -> tuple[ContextInstrument, ...]:
+        """Resolve every ETF not yet cached and not inside its retry wait."""
+        failures: list[str] = []
+        resolved_now = 0
+        for symbol, exchange in CONTEXT_SYMBOLS:
+            if symbol in self._con_ids:
+                continue
+            now = self._clock()
+            failed_at = self._failed_at.get(symbol)
+            if failed_at is not None and now - failed_at < self._retry_after:
+                continue
+            problem: str | None
+            try:
+                details = await self._resolver.contract_details_for_symbol(symbol, exchange)
+            except (TWSCompetingSessionError, TWSConnectionError):
+                raise
+            except TWSRequestError as exc:
+                problem = str(exc)
+            else:
+                problem = details_rejection(details, symbol)
+                if problem is None and details.con_id in self._con_ids.values():
+                    problem = f"conId {details.con_id} already belongs to another context ETF"
+                if problem is None:
+                    self._con_ids[symbol] = details.con_id
+                    self._failed_at.pop(symbol, None)
+                    resolved_now += 1
+                    continue
+            self._failed_at[symbol] = now
+            failures.append(f"{symbol}@{exchange}: {problem}")
+        if resolved_now:
+            logger.info(
+                "context ETFs resolved: %d/%d", len(self._con_ids), len(CONTEXT_SYMBOLS)
+            )
+        if failures:
+            logger.warning(
+                "context ETFs unresolved, continuing without them (retry in %d min): %s",
+                int(self._retry_after.total_seconds() // 60),
+                "; ".join(failures),
+            )
+        return self.instruments()
+
+
+def without_context_etfs(
+    instruments: Sequence[ScreenerInstrument], con_ids: Set[int]
+) -> tuple[ScreenerInstrument, ...]:
+    """Context ETFs are market inputs, never screener rows or hot-list entries.
+
+    Matching the symbol as well keeps an ETF out even when its conId could
+    not be resolved this process.
+    """
+    return tuple(
+        item
+        for item in instruments
+        if item.con_id not in con_ids and item.symbol not in CONTEXT_SYMBOL_SET
+    )
+
+
+async def snapshot_context(
+    source: SnapshotSource, instruments: Sequence[ContextInstrument]
+) -> dict[str, MarketSnapshot]:
+    """One snapshot batch over the context ETFs; a failed ETF is left out.
+
+    A competing login or lost connection raises, as for the universe.
+    """
+    if not instruments:
+        return {}
+    results = await source.market_snapshots([item.con_id for item in instruments])
+    if len(results) != len(instruments):
+        raise ScreenerError("context snapshot batch returned a different number of results")
+    snapshots: dict[str, MarketSnapshot] = {}
+    failures: list[str] = []
+    for instrument, result in zip(instruments, results):
+        if isinstance(result, (TWSCompetingSessionError, TWSConnectionError)):
+            raise result
+        if isinstance(result, Exception):
+            failures.append(f"{instrument.symbol}: {result}")
+        elif result.con_id != instrument.con_id:
+            failures.append(f"{instrument.symbol}: snapshot returned for a different contract")
+        else:
+            snapshots[instrument.symbol] = result
+    if failures:
+        logger.warning("context ETF snapshot errors: %s", "; ".join(failures))
+    return snapshots
+
+
 # --- sweep --------------------------------------------------------------------------
 
 
@@ -630,6 +792,7 @@ class SweepResult:
     snapshot_id: str
     payload: ScreenerPayload
     error_samples: tuple[str, ...]
+    market_context: MarketContext | None = None
 
 
 async def run_sweep(
@@ -639,15 +802,23 @@ async def run_sweep(
     clock: Clock = _utc_now,
     monotonic: Callable[[], float] = time.monotonic,
     scan_merge: ScanMerge | None = None,
+    context_etfs: ContextETFs | None = None,
 ) -> SweepResult:
     """Snapshot every qualified instrument once, rank, and persist the sweep.
 
     With ``scan_merge`` the sweep also ranks up to 15 qualified IBKR scan
-    movers outside the stored universe. A competing login or lost connection
-    aborts without persisting: a partial sweep would rank a different
-    universe than the one that qualified.
+    movers outside the stored universe. With ``context_etfs`` it snapshots
+    the context ETFs first, in their own batch, and stores the market
+    context under ``market``; those ETFs never become rows. A competing
+    login or lost connection aborts without persisting: a partial sweep
+    would rank a different universe than the one that qualified.
     """
     universe_size, instruments = await load_screener_universe(session_date)
+    context_instruments: tuple[ContextInstrument, ...] = ()
+    if context_etfs is not None:
+        context_instruments = await context_etfs.resolve()
+    context_ids = frozenset(item.con_id for item in context_instruments)
+    instruments = without_context_etfs(instruments, context_ids)
     if not instruments:
         logger.warning(
             "no qualified instruments for %s; run `autotraderctl universe qualify`",
@@ -656,12 +827,18 @@ async def run_sweep(
     session = market_session(session_date)
     observed_at = clock()
     started = monotonic()
+    etf_snapshots: dict[str, MarketSnapshot] | None = None
+    if context_etfs is not None:
+        etf_snapshots = await snapshot_context(source, context_instruments)
     if scan_merge is not None:
-        additions = await scan_additions(
-            scan_merge,
-            session_date=session_date,
-            exclude=await universe_con_ids(),
-            clock=clock,
+        additions = without_context_etfs(
+            await scan_additions(
+                scan_merge,
+                session_date=session_date,
+                exclude=await universe_con_ids() | context_ids,
+                clock=clock,
+            ),
+            context_ids,
         )
         instruments = instruments + additions
         universe_size += len(additions)
@@ -709,6 +886,15 @@ async def run_sweep(
         errors=len(errors),
         ranked=ranked,
     )
+    context: MarketContext | None = None
+    if etf_snapshots is not None:
+        context = build_market_context(
+            session_date=session_date,
+            observed_at=observed_at,
+            etf_snapshots=etf_snapshots,
+            watchlist_rows=[row.model_dump() for row in payload.rows],
+        )
+        payload = with_market_context(payload, context)
     snapshot_id = await persist_snapshot(payload)
     logger.info(
         "sweep %s: qualified=%d quoted=%d errors=%d hot=%d seconds=%.1f",
@@ -719,16 +905,26 @@ async def run_sweep(
         sum(1 for row in payload.rows if row.hot),
         payload.sweep_seconds,
     )
+    if context is not None:
+        logger.info("market %s", context.summary)
     if errors:
         logger.warning("sweep snapshot errors (first 5): %s", "; ".join(errors[:5]))
-    return SweepResult(snapshot_id=snapshot_id, payload=payload, error_samples=tuple(errors[:10]))
+    return SweepResult(
+        snapshot_id=snapshot_id,
+        payload=payload,
+        error_samples=tuple(errors[:10]),
+        market_context=context,
+    )
 
 
 __all__ = [
+    "CONTEXT_RESOLVE_RETRY",
     "HOT_LIST_SIZE",
     "SCAN_CODES",
     "SCHEMA_VERSION",
     "TICK_VOLUME_MULTIPLIER",
+    "ContextETFs",
+    "ContextInstrument",
     "HotListRow",
     "Observation",
     "RankedObservation",
@@ -754,6 +950,9 @@ __all__ = [
     "run_sweep",
     "scan_additions",
     "scan_candidates",
+    "snapshot_context",
     "universe_con_ids",
     "utc_iso",
+    "with_market_context",
+    "without_context_etfs",
 ]

@@ -100,4 +100,106 @@ async def hotlist_candidates(
     return scanner_run, tuple(candidates), liquidity
 
 
-__all__ = ["HotListUnavailable", "hotlist_candidates"]
+GAP_MIN_PCT = Decimal("3")
+
+
+async def gap_candidates(
+    run: Run,
+    *,
+    now: datetime,
+    min_gap_pct: Decimal = GAP_MIN_PCT,
+    max_candidates: int = MAX_CANDIDATES,
+    max_age: timedelta = MAX_SNAPSHOT_AGE,
+) -> tuple[ScannerRun, tuple[Candidate, ...], dict[int, LiquidityProfile]]:
+    """Watchlist gappers from the newest sweep around the open.
+
+    Before 09:30 the sweep has no official open, so the pre-market move
+    (``change_pct`` vs prior close) stands in for the gap; the strategy itself
+    re-checks the real gap from the first regular-session bar.
+    """
+    session_date = run.session_date
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT id, observed_at, payload_json FROM autotrader_screener_snapshots
+               WHERE session_date = ? ORDER BY observed_at DESC LIMIT 1""",
+            (session_date.isoformat(),),
+        ) as cursor:
+            snapshot = await cursor.fetchone()
+        if snapshot is None:
+            raise HotListUnavailable("no screener snapshot for this session yet")
+        snapshot_id, observed_raw, payload_raw = snapshot
+        observed_at = datetime.fromisoformat(str(observed_raw)).astimezone(timezone.utc)
+        if now - observed_at > max_age:
+            raise HotListUnavailable(f"screener snapshot is {now - observed_at} old")
+
+        def gap_of(row: dict) -> Decimal | None:
+            for key in ("gap_pct", "change_pct"):
+                value = row.get(key)
+                if value not in (None, ""):
+                    return Decimal(str(value))
+            return None
+
+        rows = [
+            (gap, row)
+            for row in json.loads(str(payload_raw)).get("rows", [])
+            if row.get("source") == "watchlist"
+            and (gap := gap_of(row)) is not None
+            and gap >= min_gap_pct
+        ]
+        rows.sort(key=lambda item: (-item[0], str(item[1].get("symbol"))))
+        async with db.execute(
+            """SELECT con_id, prior_close, avg_dollar_volume FROM autotrader_universe_daily
+               WHERE session_date = ? AND qualified = 1""",
+            (session_date.isoformat(),),
+        ) as cursor:
+            daily = {int(con_id): (prior, adv) for con_id, prior, adv in await cursor.fetchall()}
+
+    scanner_run_id = f"{run.id}-gappers"
+    candidates: list[Candidate] = []
+    liquidity: dict[int, LiquidityProfile] = {}
+    for _gap, row in rows:
+        con_id = int(row["con_id"])
+        if con_id not in daily or len(candidates) >= max_candidates:
+            continue
+        prior_close, avg_dollar_volume = daily[con_id]
+        if prior_close is None or avg_dollar_volume is None:
+            continue
+        candidates.append(
+            Candidate(
+                id=f"{run.id}:{con_id}",
+                scanner_run_id=scanner_run_id,
+                con_id=con_id,
+                symbol=str(row["symbol"]),
+                primary_exchange=str(row.get("primary_exchange") or "SMART"),
+                rank=len(candidates) + 1,
+                admission_status="admitted",
+            )
+        )
+        liquidity[con_id] = LiquidityProfile(
+            con_id=con_id,
+            reference_price=Decimal(str(prior_close)),
+            average_dollar_volume=Decimal(str(avg_dollar_volume)),
+            sessions_used=20,
+            last_session_date=session_date - timedelta(days=1),
+        )
+    parameters: dict[str, object] = {
+        "source": "screener_gappers",
+        "snapshot_id": snapshot_id,
+        "snapshot_observed_at": observed_at.isoformat(),
+        "min_gap_pct": str(min_gap_pct),
+        "gappers": len(rows),
+        "admitted": len(candidates),
+    }
+    scanner_run = ScannerRun(
+        id=scanner_run_id,
+        run_id=run.id,
+        parameters=parameters,
+        parameters_fingerprint=fingerprint_payload(parameters),
+        status="completed",
+        started_at=observed_at,
+        completed_at=now,
+    )
+    return scanner_run, tuple(candidates), liquidity
+
+
+__all__ = ["HotListUnavailable", "gap_candidates", "hotlist_candidates"]

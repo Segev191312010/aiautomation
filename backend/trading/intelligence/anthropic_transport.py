@@ -1,9 +1,12 @@
 """Anthropic Claude Messages API transport for immutable setup reviews."""
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
 from hashlib import sha256
 import json
+import logging
 from typing import Any, Protocol
 
 from trading.contracts import RuleSetup, fingerprint_payload
@@ -11,10 +14,19 @@ from trading.intelligence.pricing import ModelPricing
 from trading.intelligence.review_provider import AITransportResponse
 
 
+logger = logging.getLogger("autotrader.shadow.review")
+
 DEFAULT_REVIEW_MODEL = "claude-opus-5-5"
 DEFAULT_REVIEW_EFFORT = "low"
 _MAX_TOKENS = 4096
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+# Market context is advisory: a missing, slow, malformed or oversized snapshot
+# is sent as {"available": false} and never fails or stalls the review. The
+# byte cap keeps a producer bug from inflating every review's input tokens.
+MarketContextProvider = Callable[[], Awaitable[Mapping[str, object] | None]]
+MARKET_CONTEXT_TIMEOUT_SECONDS = 2.0
+MAX_MARKET_CONTEXT_BYTES = 8192
 
 CLAUDE_OPUS_5_5_PRICING = ModelPricing(
     input_usd_per_million_tokens=Decimal("4"),
@@ -68,7 +80,10 @@ class AnthropicMessagesTransport:
         pricing: ModelPricing = CLAUDE_OPUS_5_5_PRICING,
         fallback_pricing: ModelPricing = FALLBACK_CEILING_PRICING,
         effort: str = DEFAULT_REVIEW_EFFORT,
+        context_provider: MarketContextProvider | None = None,
     ) -> None:
+        """``context_provider`` adds ``market_context`` to every request; without
+        it the request is byte-for-byte what it was before market context existed."""
         prompt = system_prompt.strip()
         if not prompt:
             raise ValueError("review system prompt is required")
@@ -79,6 +94,7 @@ class AnthropicMessagesTransport:
         self._pricing = pricing
         self._fallback_pricing = fallback_pricing
         self._effort = effort
+        self._context_provider = context_provider
         self._prompt_hash = sha256(prompt.encode("utf-8")).hexdigest()
         self._pricing_hash = fingerprint_payload(
             {
@@ -102,18 +118,17 @@ class AnthropicMessagesTransport:
         model_id: str,
         prompt_version: str,
     ) -> AITransportResponse:
-        payload = json.dumps(
-            {
-                "prompt_version": prompt_version,
-                "setup": setup.model_dump(mode="json"),
-                "constraints": {
-                    "allowed_decisions": ["PROPOSE", "ABSTAIN"],
-                    "order_fields_are_immutable": True,
-                },
+        request: dict[str, object] = {
+            "prompt_version": prompt_version,
+            "setup": setup.model_dump(mode="json"),
+            "constraints": {
+                "allowed_decisions": ["PROPOSE", "ABSTAIN"],
+                "order_fields_are_immutable": True,
             },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        }
+        if self._context_provider is not None:
+            request["market_context"] = await _market_context(self._context_provider)
+        payload = json.dumps(request, sort_keys=True, separators=(",", ":"))
         response = await self._client.messages.create(
             model=model_id,
             max_tokens=_MAX_TOKENS,
@@ -170,6 +185,45 @@ def build_anthropic_client(*, api_key: str, timeout_seconds: float) -> Anthropic
     return AsyncAnthropic(api_key=api_key, timeout=timeout_seconds, max_retries=1)
 
 
+def _context_unavailable() -> dict[str, object]:
+    return {"available": False}
+
+
+async def _market_context(provider: MarketContextProvider) -> dict[str, object]:
+    """The provider's snapshot as JSON-safe data, else ``{"available": false}``."""
+    try:
+        context = await asyncio.wait_for(provider(), timeout=MARKET_CONTEXT_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - advisory input; the review proceeds without it
+        logger.warning("market context unavailable for review: %s", type(exc).__name__)
+        return _context_unavailable()
+    if context is None:
+        return _context_unavailable()
+    if not isinstance(context, Mapping):
+        logger.warning(
+            "market context is a %s, not a mapping; sent as unavailable", type(context).__name__
+        )
+        return _context_unavailable()
+    try:
+        encoded = json.dumps(
+            dict(context), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "market context is not JSON-safe (%s); sent as unavailable", type(exc).__name__
+        )
+        return _context_unavailable()
+    size = len(encoded.encode("utf-8"))
+    if size > MAX_MARKET_CONTEXT_BYTES:
+        logger.warning(
+            "market context is %d bytes (limit %d); sent as unavailable",
+            size,
+            MAX_MARKET_CONTEXT_BYTES,
+        )
+        return _context_unavailable()
+    decoded: dict[str, object] = json.loads(encoded)
+    return decoded
+
+
 def _first_text(response: object) -> str | None:
     for block in getattr(response, "content", None) or ():
         if getattr(block, "type", None) == "text":
@@ -195,5 +249,8 @@ __all__ = [
     "DEFAULT_REVIEW_EFFORT",
     "DEFAULT_REVIEW_MODEL",
     "FALLBACK_CEILING_PRICING",
+    "MARKET_CONTEXT_TIMEOUT_SECONDS",
+    "MAX_MARKET_CONTEXT_BYTES",
+    "MarketContextProvider",
     "build_anthropic_client",
 ]

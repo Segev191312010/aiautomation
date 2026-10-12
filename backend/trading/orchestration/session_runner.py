@@ -49,7 +49,7 @@ from trading.scheduler.sessions import MarketSession
 logger = logging.getLogger("autotrader.shadow.session")
 
 ORB_STRATEGY_NAME = "ORB_V1"
-MOMO_STRATEGY_NAME = "MOMO_HOD_V1"
+MOMO_STRATEGY_NAME = "MOMO_HOD_V2"
 BAR_INTERVAL = timedelta(minutes=5)
 # Poll a few seconds after each bar closes so IBKR has finalized that bar.
 POLL_DELAY_AFTER_BAR_CLOSE = timedelta(seconds=5)
@@ -68,11 +68,16 @@ class SessionMarketData(Protocol):
 
 
 AccountReader = Callable[[], Awaitable[AccountSnapshot]]
+# Per-strategy bar source; GAP_GO needs pre-market bars merged with RTH history.
+BarsFetcher = Callable[[Candidate, datetime], Awaitable[tuple[CompletedBar, ...]]]
 CandidateSource = Callable[
     [Run], Awaitable[tuple[ScannerRun, tuple[Candidate, ...], dict[int, LiquidityProfile]]]
 ]
 Sleeper = Callable[[float], Awaitable[None]]
 Reconnector = Callable[[], Awaitable[None]]
+# ``(allowed, reason)``: asked once per poll; ``(False, reason)`` skips that
+# poll's assessments so candidates stay pending (e.g. MOMO in a risk-off market).
+EntryGate = Callable[[], Awaitable[tuple[bool, str]]]
 
 
 class SessionAborted(RuntimeError):
@@ -86,6 +91,7 @@ class SessionReport:
     candidates: int = 0
     outcomes: Counter[str] = field(default_factory=Counter)
     polls: int = 0
+    paused_polls: int = 0
     data_errors: int = 0
 
     def summary(self) -> dict[str, object]:
@@ -95,6 +101,7 @@ class SessionReport:
             "candidates": self.candidates,
             "outcomes": dict(self.outcomes),
             "polls": self.polls,
+            "paused_polls": self.paused_polls,
             "data_errors": self.data_errors,
         }
 
@@ -125,7 +132,7 @@ def orb_strategy_spec() -> StrategySpec:
 
 
 def momo_strategy_spec() -> StrategySpec:
-    """MOMO_HOD_V1's catalogue entry; the executable rules are ``MomoConfig``."""
+    """MOMO_HOD_V2's catalogue entry; the executable rules are ``MomoConfig``."""
     return StrategySpec(
         name=MOMO_STRATEGY_NAME,
         universe=ScannerUniverse(
@@ -136,9 +143,11 @@ def momo_strategy_spec() -> StrategySpec:
         conditions=(RuleCondition(feature="close", operator="gte", value=Decimal("10")),),
         rationale=(
             "Long-only new high of day on volume: a 5-minute close above the day's "
-            "prior high, above VWAP, with elevated bar and day volume, 10:00-15:00 ET; "
-            "stop one ATR(14) below entry, 2R target. Authoritative rules: "
-            "trading/rules/momo.py MomoConfig."
+            "prior high, above VWAP, with elevated bar and day volume, 10:00-15:00 ET. "
+            "V2 stop: the largest of 1.5x ATR(14), 0.6% of entry, and one tick below "
+            "the signal bar's low; 2R target. A signal is skipped, and may retry on a "
+            "later bar, when that stop exceeds 1.5% of entry or the entry is more than "
+            "4.5 ATR above VWAP. Authoritative rules: trading/rules/momo.py MomoConfig."
         ),
     )
 
@@ -190,7 +199,12 @@ class ShadowSessionRunner:
         sleep: Sleeper = asyncio.sleep,
         reconnect: Reconnector | None = None,
         holder_id: str | None = None,
+        entry_gate: EntryGate | None = None,
+        entry_gate_name: str = "entries",
+        bars_fetcher: BarsFetcher | None = None,
     ) -> None:
+        """``entry_gate`` may pause assessments poll by poll; ``entry_gate_name``
+        labels its log lines (``<name> paused: <reason>``)."""
         self._market = market
         self._read_account = read_account
         self._runner = runner
@@ -198,6 +212,11 @@ class ShadowSessionRunner:
         self._sleep = sleep
         self._reconnect = reconnect
         self._holder_id = holder_id or f"session-runner:{uuid4()}"
+        self._entry_gate = entry_gate
+        self._entry_gate_name = entry_gate_name
+        self._bars_fetcher = bars_fetcher
+        self._entries_paused = False
+        self._gate_failing = False
 
     async def run(
         self,
@@ -256,13 +275,18 @@ class ShadowSessionRunner:
             while poll_at < cutoff and shadow.pending():
                 await self._sleep_until(poll_at)
                 report.polls += 1
-                await self._poll(
-                    shadow=shadow,
-                    session_date=session_date,
-                    latest=latest,
-                    liquidity=liquidity,
-                    report=report,
-                )
+                if await self._entries_allowed():
+                    await self._poll(
+                        shadow=shadow,
+                        session_date=session_date,
+                        latest=latest,
+                        liquidity=liquidity,
+                        report=report,
+                    )
+                else:
+                    # Paused candidates stay pending; the cutoff sweep below
+                    # still makes every one of them terminal.
+                    report.paused_polls += 1
                 poll_at = poll_at + BAR_INTERVAL
             if shadow.pending():
                 await self._sleep_until(cutoff)
@@ -365,7 +389,12 @@ class ShadowSessionRunner:
                 )
                 continue
             try:
-                bars = await self._market.completed_bars(con_id=candidate.con_id, now=self._now())
+                if self._bars_fetcher is not None:
+                    bars = await self._bars_fetcher(candidate, self._now())
+                else:
+                    bars = await self._market.completed_bars(
+                        con_id=candidate.con_id, now=self._now()
+                    )
             except Exception as exc:  # noqa: BLE001 - pending until the next poll
                 report.data_errors += 1
                 logger.warning("bars unavailable for %s: %s", candidate.symbol, exc)
@@ -402,6 +431,39 @@ class ShadowSessionRunner:
                     "%s decided: %s", candidate.symbol, outcome.decision.outcome.value
                 )
 
+    async def _entries_allowed(self) -> bool:
+        """Ask the entry gate; each pause, resume or gate failure is logged once.
+
+        The gate only adds caution on top of the rules and the risk engine, so
+        a gate that raises or answers malformed never blocks entries.
+        """
+        if self._entry_gate is None:
+            return True
+        name = self._entry_gate_name
+        try:
+            answer = await self._entry_gate()
+            allowed, reason = answer
+            if not isinstance(allowed, bool):
+                raise TypeError("entry gate must answer (bool, str)")
+        except Exception as exc:  # noqa: BLE001 - fail open, see docstring
+            if not self._gate_failing:
+                logger.warning(
+                    "%s entry gate failed (%s); entries allowed until it recovers",
+                    name,
+                    type(exc).__name__,
+                )
+            self._gate_failing = True
+            allowed, reason = True, f"entry gate failed ({type(exc).__name__})"
+        else:
+            if self._gate_failing:
+                logger.info("%s entry gate recovered", name)
+            self._gate_failing = False
+        paused = not allowed
+        if paused != self._entries_paused:
+            self._entries_paused = paused
+            logger.warning("%s %s: %s", name, "paused" if paused else "resumed", reason)
+        return allowed
+
     async def _portfolio(self, shadow: ShadowRunSession) -> PortfolioSnapshot | None:
         """Broker truth plus this run's accepted shadow entries as pending exposure."""
         try:
@@ -437,8 +499,12 @@ class ShadowSessionRunner:
             logger.warning("TWS reconnect failed: %s", type(exc).__name__)
 
     def _first_poll(self, session: MarketSession, window_start: datetime | None = None) -> datetime:
-        """First bar close at or after the window opens, and not in the past."""
-        first = max(session.first_signal_at, window_start or session.first_signal_at)
+        """First bar close at or after the window opens, and not in the past.
+
+        A strategy with its own window (GAP_GO opens at 09:35) polls from that
+        window; scan-driven ORB keeps the session's first signal bar (09:50).
+        """
+        first = window_start if window_start is not None else session.first_signal_at
         now = self._now()
         while first + POLL_DELAY_AFTER_BAR_CLOSE < now - BAR_INTERVAL:
             first += BAR_INTERVAL
@@ -463,6 +529,7 @@ def _decision_symbol(shadow: ShadowRunSession, decision: Decision) -> str:
 __all__ = [
     "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
+    "EntryGate",
     "SessionAborted",
     "SessionReport",
     "ShadowSessionRunner",

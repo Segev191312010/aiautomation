@@ -19,6 +19,7 @@ from trading.market.ibkr_boundary import (
     IBKRScannerResult,
     IBKRTradeBar,
     ScannerRequest,
+    is_regular_session_bar,
 )
 from trading.market.snapshots import MarketSnapshot, MarketSnapshotError
 from trading.contracts import AccountSnapshot, QuoteSnapshot, RawAccountPosition
@@ -32,6 +33,14 @@ WARNING_CODE_RANGE = range(2100, 2200)
 # Two sessions of five-minute RTH bars: ATR(14) is available at the first
 # signal bar (09:50) from the prior session's history.
 INTRADAY_HISTORY_DURATION = "2 D"
+# Today's five-minute bars outside regular hours too (useRTH=0): pre-market
+# from 04:00 ET, the regular session, and after-hours.
+EXTENDED_HISTORY_DURATION = "1 D"
+INTRADAY_BAR_SIZE = "5 mins"
+_RTH_ONLY = 1
+_ALL_HOURS = 0
+# formatDate=2: bar timestamps arrive as UTC epoch seconds.
+_EPOCH_DATES = 2
 REAL_TIME_MARKET_DATA = 1
 # IBKR's documented baseline allocation of simultaneous market-data lines.
 # The API exposes no line-count query; quotes here hold one line at a time.
@@ -735,6 +744,30 @@ class TWSPaperActor:
 
     async def completed_trade_bars(self, con_id: int) -> BarBatch:
         """Resolve only after historicalDataEnd, never from an update callback."""
+        return await self._intraday_trade_bars(
+            con_id,
+            duration=INTRADAY_HISTORY_DURATION,
+            use_rth=_RTH_ONLY,
+            timeout_message="TWS historical-data request timed out",
+        )
+
+    async def extended_trade_bars(self, con_id: int) -> BarBatch:
+        """Today's five-minute TRADES bars including pre-market and after-hours.
+
+        Same completion rule as ``completed_trade_bars``; each bar's ``rth``
+        flag comes from the XNYS calendar, so callers can tell pre-market bars
+        from regular-session ones.
+        """
+        return await self._intraday_trade_bars(
+            con_id,
+            duration=EXTENDED_HISTORY_DURATION,
+            use_rth=_ALL_HOURS,
+            timeout_message="TWS extended-hours history request timed out",
+        )
+
+    async def _intraday_trade_bars(
+        self, con_id: int, *, duration: str, use_rth: int, timeout_message: str
+    ) -> BarBatch:
         if con_id <= 0:
             raise TWSRequestError("con_id must be positive")
         self._require_connected()
@@ -749,11 +782,11 @@ class TWSPaperActor:
                     request_id,
                     contract,
                     "",
-                    INTRADAY_HISTORY_DURATION,
-                    "5 mins",
+                    duration,
+                    INTRADAY_BAR_SIZE,
                     "TRADES",
-                    1,
-                    2,
+                    use_rth,
+                    _EPOCH_DATES,
                     False,
                     [],
                 )
@@ -762,7 +795,7 @@ class TWSPaperActor:
                 )
             except asyncio.TimeoutError as exc:
                 self._cancel_historical(request_id)
-                raise TWSRequestError("TWS historical-data request timed out") from exc
+                raise TWSRequestError(timeout_message) from exc
             finally:
                 self._pending_bars.pop(request_id, None)
 
@@ -1571,16 +1604,19 @@ class TWSPaperActor:
     @staticmethod
     def _trade_bar(raw: Any, *, con_id: int) -> IBKRTradeBar:
         start = _parse_ibkr_timestamp(getattr(raw, "date"))
+        end = start + timedelta(minutes=5)
         return IBKRTradeBar(
             con_id=int(getattr(raw, "conId", getattr(raw, "con_id", con_id))),
             interval_start_utc=start,
-            interval_end_utc=start + timedelta(minutes=5),
+            interval_end_utc=end,
             open=Decimal(str(getattr(raw, "open"))),
             high=Decimal(str(getattr(raw, "high"))),
             low=Decimal(str(getattr(raw, "low"))),
             close=Decimal(str(getattr(raw, "close"))),
             volume=Decimal(str(getattr(raw, "volume"))),
-            rth=True,
+            # From the calendar, never from the request: the same parser serves
+            # RTH-only and all-hours requests, and strategies split on this flag.
+            rth=is_regular_session_bar(start, end),
             bar_type="TRADES",
             delayed=False,
             frozen=False,

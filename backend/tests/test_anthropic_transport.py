@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 import subprocess
 from types import SimpleNamespace
@@ -114,6 +115,8 @@ async def test_request_is_schema_constrained_with_fallback_and_immutable_setup()
     payload = json.loads(call["messages"][0]["content"])
     assert payload["constraints"]["order_fields_are_immutable"] is True
     assert payload["setup"]["entry_limit"] == "100.10"
+    # Without a context provider (ORB) the request carries no market context.
+    assert set(payload) == {"constraints", "prompt_version", "setup"}
 
 
 @pytest.mark.asyncio
@@ -190,6 +193,15 @@ def test_prompt_registry_rejects_unknown_ids():
     assert review_prompt("orb-review-v1") == ORB_REVIEW_V1
     with pytest.raises(ValueError):
         review_prompt("orb-review-v0")
+
+
+def test_orb_review_v1_text_never_changes():
+    # Recorded ORB reviews name orb-review-v1; ORB reviews carry no market context.
+    assert (
+        sha256(ORB_REVIEW_V1.encode("utf-8")).hexdigest()
+        == "7776a8930f7ee0ad043d45835545e9ef03d446780286b19a68047286304aebc4"
+    )
+    assert "market_context" not in ORB_REVIEW_V1
 
 
 def test_pricing_counts_cache_reads_and_writes_separately():

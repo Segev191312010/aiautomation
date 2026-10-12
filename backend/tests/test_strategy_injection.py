@@ -86,7 +86,9 @@ def _momo_bars(count: int = 13, *, signal: bool = True) -> tuple[CompletedBar, .
     start = _et(SESSION, 9, 30)
     today = [_bar(MOMO_CON_ID, start + BAR * index) for index in range(count - 1)]
     last = start + BAR * (count - 1)
-    breakout = {"open_price": "100.2", "high": "101.2", "low": "100.1", "close": "101"}
+    # A 101.1 high keeps ATR(14) at 1.007, so the MOMO_HOD_V2 stop (1.5 ATR)
+    # stays inside its 1.5%-of-entry cap.
+    breakout = {"open_price": "100.2", "high": "101.1", "low": "100.1", "close": "101"}
     today.append(
         _bar(MOMO_CON_ID, last, volume="2000", **breakout) if signal else _bar(MOMO_CON_ID, last)
     )
@@ -284,6 +286,8 @@ async def test_momo_pipeline_requests_a_quote_then_accepts_the_setup():
         "signal_bar_volume",
         "avg_bar_volume",
         "rvol",
+        "stop_distance",
+        "vwap_extension_atr",
     }
     assert accepted.decision.setup_fingerprint == setup.fingerprint()
     assert accepted.decision.risk is not None and accepted.decision.risk.approved is True

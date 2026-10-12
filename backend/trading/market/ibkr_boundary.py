@@ -10,9 +10,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from functools import lru_cache
 from hashlib import sha256
 import json
 from typing import Literal, Protocol
+from zoneinfo import ZoneInfo
 
 from trading.contracts import Candidate, CompletedBar, QuoteSnapshot
 
@@ -20,9 +22,14 @@ from trading.contracts import Candidate, CompletedBar, QuoteSnapshot
 PAPER_TWS_PORT = 7497
 MAX_ADMITTED_CANDIDATES = 50
 DEFAULT_BAR_MAX_AGE = timedelta(seconds=30)
+# Outside the regular session a thin name may not trade for minutes, so the
+# newest extended-hours bar may be this old and still be current evidence.
+EXTENDED_HOURS_BAR_MAX_AGE = timedelta(minutes=15)
 LIQUIDITY_LOOKBACK_SESSIONS = 20
 # Most recent prior session may be at most this old (covers long holiday weekends).
 MAX_DAILY_HISTORY_GAP = timedelta(days=5)
+_NEW_YORK = ZoneInfo("America/New_York")
+_BAR_INTERVAL = timedelta(minutes=5)
 
 
 class MarketDataBoundaryError(ValueError):
@@ -200,6 +207,13 @@ class IBKRConnectionActor(Protocol):
     async def completed_trade_bars(self, con_id: int) -> BarBatch:
         """Return only the recent five-minute bar batch for one contract."""
 
+    async def extended_trade_bars(self, con_id: int) -> BarBatch:
+        """Return today's five-minute bars including pre-market and after-hours.
+
+        Each bar's ``rth`` flag comes from the XNYS calendar, so pre-market
+        bars are distinguishable from regular-session bars.
+        """
+
     async def contract_details(self, con_id: int) -> IBKRContractDetails:
         """Return qualified contract details for one conId."""
 
@@ -214,6 +228,51 @@ def _require_aware(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise MarketDataQualityError(f"{field_name} must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+@lru_cache(maxsize=64)
+def regular_session_bounds(session_date: date) -> tuple[datetime, datetime] | None:
+    """XNYS regular-session ``(open, close)`` in UTC; ``None`` on a closed date.
+
+    The close is the scheduled one, so a half day ends at 13:00 ET.
+    """
+    from trading.scheduler.sessions import market_session
+
+    session = market_session(session_date)
+    if session is None:
+        return None
+    return session.opens_at.astimezone(timezone.utc), session.closes_at.astimezone(timezone.utc)
+
+
+def is_regular_session_bar(start: datetime, end: datetime) -> bool:
+    """Whether ``[start, end)`` lies wholly inside its New York date's regular session.
+
+    Derived from the pinned calendar rather than trusted from the request, so
+    pre-market, after-hours, holiday and post-half-day bars are never RTH.
+    """
+    start_utc = _require_aware(start, "interval_start_utc")
+    end_utc = _require_aware(end, "interval_end_utc")
+    bounds = regular_session_bounds(start_utc.astimezone(_NEW_YORK).date())
+    if bounds is None:
+        return False
+    opens_at, closes_at = bounds
+    return opens_at <= start_utc and end_utc <= closes_at
+
+
+def extended_hours_bar_max_age(observed_at: datetime, *, regular_max_age: timedelta) -> timedelta:
+    """Freshness allowance for the newest bar of an extended-hours batch.
+
+    The strict regular-session rule applies once the session's first bar has
+    completed and until the close; before that (pre-market, including the
+    still-forming 09:30 bar) and after it, the newest bar may be minutes old.
+    """
+    observed = _require_aware(observed_at, "now")
+    bounds = regular_session_bounds(observed.astimezone(_NEW_YORK).date())
+    if bounds is not None:
+        opens_at, closes_at = bounds
+        if opens_at + _BAR_INTERVAL <= observed <= closes_at:
+            return regular_max_age
+    return max(regular_max_age, EXTENDED_HOURS_BAR_MAX_AGE)
 
 
 def _scanner_identity_rejection(result: IBKRScannerResult) -> str | None:
@@ -571,6 +630,27 @@ class PaperIBKRMarketData:
         received = [_require_aware(bar.received_at, "received_at") for bar in batch.bars]
         observed_at = max([_require_aware(now, "now"), *received])
         return validate_completed_trade_bars(batch, now=observed_at, max_age=self.bar_max_age)
+
+    async def extended_bars(
+        self,
+        *,
+        con_id: int,
+        now: datetime,
+    ) -> tuple[CompletedBar, ...]:
+        """Today's completed bars including pre-market, validated like ``completed_bars``.
+
+        Observed at receipt and with the forming bar dropped; only the
+        freshness allowance differs (``extended_hours_bar_max_age``).
+        """
+        if con_id <= 0:
+            raise MarketDataQualityError("conId must be positive")
+        batch = await self.actor.extended_trade_bars(con_id)
+        if any(bar.con_id != con_id for bar in batch.bars):
+            raise MarketDataQualityError("extended-hours bars returned for a different contract")
+        received = [_require_aware(bar.received_at, "received_at") for bar in batch.bars]
+        observed_at = max([_require_aware(now, "now"), *received])
+        max_age = extended_hours_bar_max_age(observed_at, regular_max_age=self.bar_max_age)
+        return validate_completed_trade_bars(batch, now=observed_at, max_age=max_age)
 
     async def quote(self, *, con_id: int) -> QuoteSnapshot:
         """Real-time quote priced on the contract's own tick grid."""

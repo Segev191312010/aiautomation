@@ -1,9 +1,16 @@
-"""Pure, long-only new-high-of-day momentum rules (MOMO_HOD_V1).
+"""Pure, long-only new-high-of-day momentum rules (MOMO_HOD_V2).
 
 The latest completed five-minute RTH bar signals when it closes above every
 earlier high of the session and above session VWAP, on a bar-volume surge,
 while the session's relative volume is elevated. Only that latest bar may
 signal: a breakout is priced at its own bar close or never.
+
+V2 (after the 2026-10-12 PAPER day) sizes the stop to survive normal noise: a
+1x ATR(14) five-minute stop on BF B was 8 cents (0.3%) and was hit within 90
+seconds. The stop distance is now the largest of 1.5x ATR(14), 0.6% of entry,
+and one tick below the signal bar's low; a signal whose stop would exceed 1.5%
+of entry, or whose entry sits more than 4.5 ATR above VWAP (FIGS was 6.6), is
+skipped for now and a later bar may still qualify.
 """
 from __future__ import annotations
 
@@ -42,15 +49,24 @@ from trading.rules.strategy import (
 )
 
 MOMO_STRATEGY_KIND = "momo_hod"
+# The rule-set identity behind ``MomoConfig.fingerprint()``; the strategy
+# catalogue names its MOMO strategy after it.
+MOMO_RULES_VERSION = "MOMO_HOD_V2"
 NO_SIGNAL_BEFORE_CUTOFF = "no_signal_before_cutoff"
+# Retryable skips of a priced signal: a later bar may still qualify, so the
+# candidate stays pending until the entry cutoff.
+EXTENDED_ABOVE_VWAP = "extended_above_vwap"
+STOP_TOO_WIDE = "stop_too_wide"
 UTC = timezone.utc
 _REGULAR_OPEN = time(9, 30)
 _FIRST_BAR_CLOSE = time(9, 35)
 _REGULAR_CLOSE = time(16, 0)
 _REGULAR_SESSION_MINUTES = Decimal("390")
 _BPS = Decimal("10000")
+_PERCENT = Decimal("100")
 _VWAP_QUANTUM = Decimal("0.0001")
 _RVOL_QUANTUM = Decimal("0.01")
+_EXTENSION_QUANTUM = Decimal("0.01")
 _SHARE_QUANTUM = Decimal("1")
 
 SessionCloseLookup = Callable[[date], datetime | None]
@@ -63,7 +79,13 @@ class MomoConfig:
     # On an early close the cutoff moves in so entries keep this much runway.
     close_buffer: timedelta = timedelta(hours=1)
     atr_period: int = 14
-    stop_atr_multiple: Decimal = Decimal("1")
+    # Stop distance = max(stop_atr_multiple x ATR, min_stop_pct % of entry,
+    # entry - signal-bar low + one tick); wider than max_stop_pct % is skipped.
+    stop_atr_multiple: Decimal = Decimal("1.5")
+    min_stop_pct: Decimal = Decimal("0.6")
+    max_stop_pct: Decimal = Decimal("1.5")
+    # Entry minus session VWAP, in ATRs, above which a signal is a chase.
+    max_vwap_extension_atr: Decimal = Decimal("4.5")
     target_reward_risk: Decimal = Decimal("2")
     min_rvol: Decimal = Decimal("2.0")
     bar_volume_multiple: Decimal = Decimal("1.5")
@@ -87,6 +109,9 @@ class MomoConfig:
             raise ValueError("atr_period and min_prior_bars must be positive")
         for name in (
             "stop_atr_multiple",
+            "min_stop_pct",
+            "max_stop_pct",
+            "max_vwap_extension_atr",
             "target_reward_risk",
             "min_rvol",
             "bar_volume_multiple",
@@ -103,6 +128,12 @@ class MomoConfig:
                 raise ValueError(f"{name} must be finite and non-negative")
         if self.stop_atr_multiple <= 0 or self.target_reward_risk < 2:
             raise ValueError("stop multiple must be positive and target must be at least 2R")
+        # A floor at or above the cap would skip every signal; a cap of 100%
+        # or more would admit a stop at or below zero.
+        if not self.min_stop_pct < self.max_stop_pct < _PERCENT:
+            raise ValueError("stop bounds must satisfy min_stop_pct < max_stop_pct < 100")
+        if self.max_vwap_extension_atr <= 0:
+            raise ValueError("max_vwap_extension_atr must be positive")
         # rvol divides by price and average dollar volume; both must be positive.
         if (
             self.volume_multiplier <= 0
@@ -118,6 +149,7 @@ class MomoConfig:
         return fingerprint_payload(
             {
                 "strategy_kind": MOMO_STRATEGY_KIND,
+                "rules_version": MOMO_RULES_VERSION,
                 **{item.name: str(getattr(self, item.name)) for item in fields(self)},
             }
         )
@@ -266,6 +298,22 @@ def _prior_session_high(completed: Sequence[CompletedBar], session_date: date) -
     if not by_day:
         return None
     return max(bar.high for bar in by_day[max(by_day)])
+
+
+def _stop_distance(
+    *, entry: Decimal, atr: Decimal, signal: CompletedBar, tick: Decimal, config: MomoConfig
+) -> Decimal:
+    """Per-share stop distance before tick rounding.
+
+    The stop must clear normal five-minute noise (the ATR multiple), never be
+    a token percentage of price, and sit below the bar that produced the
+    signal, so a retest of that bar's low does not stop the trade out.
+    """
+    return max(
+        atr * config.stop_atr_multiple,
+        entry * config.min_stop_pct / _PERCENT,
+        entry - signal.low + tick,
+    )
 
 
 def _rejected(
@@ -436,9 +484,17 @@ def _price_signal(
             return _rejected(
                 "bar_prior_session_missing", retryable=True, bar=signal, metrics=metrics, atr=atr
             )
-        stop_price = _round_to_tick(
-            entry_limit - (atr * config.stop_atr_multiple), quote.min_tick, ROUND_FLOOR
+        # Both skips below are retryable: a later, calmer bar may still qualify.
+        if entry_limit - metrics.vwap > atr * config.max_vwap_extension_atr:
+            return _rejected(
+                EXTENDED_ABOVE_VWAP, retryable=True, bar=signal, metrics=metrics, atr=atr
+            )
+        stop_distance = _stop_distance(
+            entry=entry_limit, atr=atr, signal=signal, tick=quote.min_tick, config=config
         )
+        if stop_distance > entry_limit * config.max_stop_pct / _PERCENT:
+            return _rejected(STOP_TOO_WIDE, retryable=True, bar=signal, metrics=metrics, atr=atr)
+        stop_price = _round_to_tick(entry_limit - stop_distance, quote.min_tick, ROUND_FLOOR)
         if stop_price <= 0:
             return _rejected(
                 "stop_price_not_positive", retryable=False, bar=signal, metrics=metrics, atr=atr
@@ -447,6 +503,8 @@ def _price_signal(
             return _rejected(
                 "stop_distance_not_positive", retryable=False, bar=signal, metrics=metrics, atr=atr
             )
+        # 2R on the tick-rounded stop, so the bracket never falls below the
+        # risk policy's minimum reward-to-risk after rounding.
         target_price = _round_to_tick(
             entry_limit + (entry_limit - stop_price) * config.target_reward_risk,
             quote.min_tick,
@@ -483,6 +541,10 @@ def _price_signal(
                     _SHARE_QUANTUM, rounding=ROUND_HALF_EVEN
                 ),
                 "rvol": metrics.rvol.quantize(_RVOL_QUANTUM, rounding=ROUND_HALF_EVEN),
+                "stop_distance": entry_limit - stop_price,
+                "vwap_extension_atr": ((entry_limit - metrics.vwap) / atr).quantize(
+                    _EXTENSION_QUANTUM, rounding=ROUND_HALF_EVEN
+                ),
             },
             bar_fingerprints=tuple(dict.fromkeys((*atr_fingerprints, signal_fingerprint))),
             quote_fingerprint=quote_fingerprint,
@@ -511,7 +573,7 @@ def _price_signal(
 
 
 class MomoStrategy:
-    """MOMO_HOD_V1 behind the strategy boundary.
+    """MOMO_HOD_V2 behind the strategy boundary.
 
     The XNYS calendar supplies the scheduled close by default, so a half day
     moves the cutoff in rather than letting entries run into the close.
@@ -574,8 +636,11 @@ class MomoStrategy:
 
 
 __all__ = [
+    "EXTENDED_ABOVE_VWAP",
+    "MOMO_RULES_VERSION",
     "MOMO_STRATEGY_KIND",
     "NO_SIGNAL_BEFORE_CUTOFF",
+    "STOP_TOO_WIDE",
     "MomoConfig",
     "MomoResult",
     "MomoStrategy",

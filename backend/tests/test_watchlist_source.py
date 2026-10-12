@@ -85,3 +85,37 @@ async def test_stale_or_missing_snapshot_is_refused(tmp_path, monkeypatch):
     await _seed(NOW - timedelta(minutes=30))
     with pytest.raises(HotListUnavailable, match="old"):
         await hotlist_candidates(_run(), now=NOW)
+
+
+@pytest.mark.anyio
+async def test_gappers_use_gap_or_premarket_change_and_skip_scan_rows(tmp_path, monkeypatch):
+    from config import cfg
+    from db.core import get_db, init_db
+    from trading.orchestration.watchlist_source import gap_candidates
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "g.db"))
+    await init_db()
+    rows = [
+        {"symbol": "AAA", "con_id": 1, "source": "watchlist", "gap_pct": None, "change_pct": "4.5"},
+        {"symbol": "BBB", "con_id": 2, "source": "watchlist", "gap_pct": "6.0", "change_pct": "1.0"},
+        {"symbol": "CCC", "con_id": 3, "source": "watchlist", "gap_pct": "2.0", "change_pct": "2.5"},
+        {"symbol": "DDD", "con_id": 4, "source": "ibkr_scan", "gap_pct": "9.0", "change_pct": "9.0"},
+    ]
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO autotrader_screener_snapshots VALUES (?,?,?,?)",
+            ("snap-g", "2026-10-12", (NOW - timedelta(minutes=1)).isoformat(), json.dumps({"rows": rows})),
+        )
+        for con_id in (1, 2, 3, 4):
+            await db.execute(
+                "INSERT INTO autotrader_universe_daily VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("2026-10-12", con_id, f"S{con_id}", "50.00", "1000000", "90000000", None, 1, None, "t"),
+            )
+        await db.commit()
+
+    scanner_run, candidates, liquidity = await gap_candidates(_run(), now=NOW)
+
+    # Largest gap first; pre-market change stands in for a missing gap; scan rows excluded.
+    assert [c.symbol for c in candidates] == ["BBB", "AAA"]
+    assert scanner_run.parameters["source"] == "screener_gappers"
+    assert set(liquidity) == {1, 2}

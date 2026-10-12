@@ -1,4 +1,8 @@
-"""MOMO_HOD_V1: new high of day on volume, priced only on the latest bar."""
+"""MOMO_HOD_V2: new high of day on volume, priced only on the latest bar.
+
+The V2 stop rules (stop width, VWAP extension) and the real 2026-10-12
+replays live in test_momo_v2.py.
+"""
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
@@ -8,7 +12,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from trading.contracts import Candidate, CompletedBar, QuoteSnapshot
-from trading.intelligence.prompts import MOMO_REVIEW_V1, ORB_REVIEW_V1, review_prompt_for
+from trading.intelligence.prompts import (
+    MOMO_REVIEW_V1,
+    MOMO_REVIEW_V2,
+    ORB_REVIEW_V1,
+    review_prompt_for,
+)
 from trading.rules import (
     MOMO_STRATEGY_KIND,
     NO_SIGNAL_BEFORE_CUTOFF,
@@ -30,8 +39,9 @@ PRIOR = date(2026, 1, 2)
 BAR = timedelta(minutes=5)
 # The 10:30-10:35 ET bar: twelve earlier session bars.
 SIGNAL_BARS = 13
-# Wilder ATR(14): every true range is 1 except the signal bar's 1.2.
-SIGNAL_ATR = (Decimal("13") + Decimal("1.2")) / Decimal("14")
+# Wilder ATR(14): every true range is 1 except the signal bar's 1.1. The V2
+# stop (1.5 ATR = 1.51) then stays inside the 1.5%-of-entry cap (1.515 at 101).
+SIGNAL_ATR = (Decimal("13") + Decimal("1.1")) / Decimal("14")
 
 
 def _et(day: date, hour: int, minute: int, second: int = 0) -> datetime:
@@ -83,7 +93,7 @@ def _today(
     start = _et(day, 9, 30)
     bars = [_bar(start + BAR * index) for index in range(count - 1)]
     shape = (
-        {"open_price": "100.2", "high": "101.2", "low": "100.1", "close": "101", "volume": "2000"}
+        {"open_price": "100.2", "high": "101.1", "low": "100.1", "close": "101", "volume": "2000"}
         if signal
         else {}
     )
@@ -163,7 +173,7 @@ def test_new_high_above_vwap_on_volume_asks_for_a_quote_then_builds_the_setup():
     assert pending.rejection_reason == QUOTE_REQUIRED and pending.retryable is True
     assert pending.evaluated_bar == bars[-1]
     assert pending.session_high == Decimal("100.5")
-    assert pending.vwap == Decimal("4204600") / Decimal("42000")
+    assert pending.vwap == Decimal("4204400") / Decimal("42000")
     assert pending.avg_bar_volume == Decimal("1000")
     # 1.4M shares by 10:35 against 250k shares/day paced over 65 of 390 minutes.
     assert pending.rvol == Decimal("33.6")
@@ -175,14 +185,18 @@ def test_new_high_above_vwap_on_volume_asks_for_a_quote_then_builds_the_setup():
     assert setup.opening_range_high is None and setup.opening_range_low is None
     assert setup.atr == SIGNAL_ATR
     assert setup.entry_limit == Decimal("101.00")
-    assert setup.stop_price == Decimal("99.98")
-    assert setup.target_price == Decimal("103.04")
+    # V2: 1.5 ATR (1.5107) beats 0.6% of entry (0.606) and the signal low
+    # (0.91), and rounds down to 99.48; the target is 2R on that 1.52 stop.
+    assert setup.stop_price == Decimal("99.48")
+    assert setup.target_price == Decimal("104.04")
     assert setup.levels == {
         "prior_day_high": Decimal("101"),
-        "vwap": Decimal("100.1095"),
+        "vwap": Decimal("100.1048"),
         "signal_bar_volume": Decimal("200000"),
         "avg_bar_volume": Decimal("100000"),
         "rvol": Decimal("33.60"),
+        "stop_distance": Decimal("1.52"),
+        "vwap_extension_atr": Decimal("0.89"),
     }
     assert setup.detected_at == bars[-1].interval_end_utc
     provenance = setup.causal_provenance
@@ -347,10 +361,11 @@ def test_atr_stop_and_target_round_outward_on_the_quote_tick():
     result = _evaluate(bars, quote=quote)
     setup = result.setup
     assert setup is not None and result.atr == SIGNAL_ATR
-    # Entry rounds up, the stop rounds down, and the 2R target rounds up.
+    # Entry rounds up, the stop rounds down (101.05 - 1.5107 = 99.539), and
+    # the 2R target rounds up.
     assert setup.entry_limit == Decimal("101.05")
-    assert setup.stop_price == Decimal("100.00")
-    assert setup.target_price == Decimal("103.15")
+    assert setup.stop_price == Decimal("99.50")
+    assert setup.target_price == Decimal("104.15")
     assert setup.target_price - setup.entry_limit >= Decimal("2") * (
         setup.entry_limit - setup.stop_price
     )
@@ -439,8 +454,10 @@ def test_review_prompt_explains_every_level_and_is_bound_to_its_strategy_kind():
     bars = _signal_bars()
     setup = _evaluate(bars, quote=_quote(_after(bars))).setup
     assert setup is not None
-    assert MOMO_STRATEGY_KIND in MOMO_REVIEW_V1
-    assert all(name in MOMO_REVIEW_V1 for name in setup.levels)
+    assert MOMO_STRATEGY_KIND in MOMO_REVIEW_V2
+    assert all(name in MOMO_REVIEW_V2 for name in setup.levels)
+    assert review_prompt_for("momo-review-v2", strategy_kind=setup.strategy_kind) == MOMO_REVIEW_V2
+    # V1 stays registered, unchanged, so recorded reviews remain attributable.
     assert review_prompt_for("momo-review-v1", strategy_kind=setup.strategy_kind) == MOMO_REVIEW_V1
     assert review_prompt_for("orb-review-v1", strategy_kind="orb") == ORB_REVIEW_V1
     # An ORB prompt reviewing a momentum setup would judge an opening range it lacks.
