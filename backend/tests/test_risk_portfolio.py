@@ -70,3 +70,17 @@ def test_unrealized_gains_never_offset_realized_losses(realized, unrealized, los
         unrealized_pnl=Decimal(unrealized),
     )
     assert portfolio.daily_loss == Decimal(loss)
+
+
+def test_positions_the_engine_did_not_open_are_ignored_but_net_liq_is_whole_account():
+    foreign = _position("100", symbol="TSLA")
+    account = _account(foreign, realized="-9000", unrealized="-8000")
+
+    portfolio = portfolio_from_account(account, owned_con_ids=frozenset())
+
+    assert portfolio.positions == ()
+    assert portfolio.daily_loss == Decimal("0")
+    assert portfolio.net_liquidation == Decimal("100000")
+
+    owned = portfolio_from_account(account, owned_con_ids=frozenset({101}))
+    assert [item.symbol for item in owned.positions] == ["TSLA"]

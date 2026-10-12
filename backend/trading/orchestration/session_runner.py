@@ -378,7 +378,10 @@ class ShadowSessionRunner:
                 }
             )
         )
-        return portfolio_from_account(account, pending_symbols=accepted)
+        # Shadow opens no broker positions, so none in the account are its own.
+        return portfolio_from_account(
+            account, owned_con_ids=frozenset(), pending_symbols=accepted
+        )
 
     def _fallback_portfolio(self) -> PortfolioSnapshot:
         # Only used for the cutoff sweep, which never builds a setup or sizes.
