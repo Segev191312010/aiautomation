@@ -1,16 +1,18 @@
 """Read-only projections for the local live-monitor dashboard.
 
-These GET routes only read the decision ledger, the screener snapshots, and the
-temporary PAPER bridge state file. They expose no order, cancel, or authority
+These GET routes only read the decision ledger, the screener snapshots (and
+their market context), the owner's manual-order ledger, and the temporary
+PAPER bridge state files. They expose no order, cancel, or authority
 operation: the dashboard is a monitor, never a control surface.
 """
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
+import logging
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -21,12 +23,40 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from auth import User, get_current_user
 from db.core import get_db
 from trading.contracts import Decision
+from trading.market.context import INDEX_SYMBOLS, MarketContext, MarketContextError
 from trading.operations.paths import UserPaths
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session, next_market_session
 
 
+log = logging.getLogger(__name__)
+
 SCREENER_SCHEMA = "screener.v1"
 BRIDGE_STATE_FILENAME = "paper_bridge_state.json"
+# The bridge writes one state file per New York session date here and mirrors
+# the newest to BRIDGE_STATE_FILENAME for older readers.
+BRIDGE_STATE_DIRNAME = "bridge"
+MANUAL_ORDERS_TABLE = "autotrader_manual_orders"
+MANUAL_ORDER_COLUMNS = (
+    "id",
+    "created_at",
+    "updated_at",
+    "source",
+    "raw_text",
+    "action",
+    "symbol",
+    "quantity",
+    "order_type",
+    "limit_price",
+    "stop_price",
+    "status",
+    "reject_code",
+    "error",
+    "filled_qty",
+    "avg_fill_price",
+)
+# The id the owner types in Telegram (``/cancel a3f9c2``); a test pins it to
+# trading.execution.manual_orders.SHORT_ID_LENGTH without importing it here.
+MANUAL_ORDER_SHORT_ID_LENGTH = 6
 RATIONALE_PREVIEW_CHARS = 160
 RULE_REJECTED_REASON = "Rules: no qualifying setup (price/liquidity/no breakout)"
 DATA_BLOCKED_REASON = "Market data unavailable in time"
@@ -63,8 +93,13 @@ def live_clock() -> Clock:
 
 
 def bridge_state_path() -> Path:
-    """Location of the temporary PAPER bridge state file; tests override it."""
+    """The bridge's legacy single-file state mirror; tests override it."""
     return UserPaths.current().data_directory / BRIDGE_STATE_FILENAME
+
+
+def bridge_state_directory() -> Path:
+    """Directory of the bridge's per-session state files; tests override it."""
+    return UserPaths.current().data_directory / BRIDGE_STATE_DIRNAME
 
 
 router = APIRouter(
@@ -76,6 +111,7 @@ router = APIRouter(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 ClockDependency = Annotated[Clock, Depends(live_clock)]
 BridgePathDependency = Annotated[Path, Depends(bridge_state_path)]
+BridgeDirectoryDependency = Annotated[Path, Depends(bridge_state_directory)]
 
 
 class _View(BaseModel):
@@ -159,6 +195,61 @@ class BridgeOrder(_View):
     avg_exit_price: str | None
     exit_reason: str | None
     realized_pnl: str | None
+
+
+class MarketIndexChange(_View):
+    symbol: str
+    change_pct: str | None
+
+
+class MarketSectorChange(_View):
+    sector: str
+    change_pct: str
+
+
+class MarketContextView(_View):
+    """Today's newest market_context.v1 document; percentages are decimal strings."""
+
+    available: Literal[True] = True
+    snapshot_id: str
+    session_date: date
+    observed_at: str
+    age_seconds: float | None
+    regime: Literal["risk_on", "neutral", "risk_off"]
+    summary: str
+    indexes: list[MarketIndexChange]
+    breadth_up_pct: str | None
+    advancers: int
+    decliners: int
+    median_change_pct: str | None
+    sector_leaders: list[MarketSectorChange]
+    sector_laggards: list[MarketSectorChange]
+
+
+class MarketContextUnavailable(_View):
+    available: Literal[False] = False
+
+
+class ManualOrder(_View):
+    """One row of the owner's manual-order ledger, as stored (status passes through)."""
+
+    id: str
+    short_id: str
+    created_at: str
+    updated_at: str | None
+    source: str | None
+    raw_text: str | None
+    action: str | None
+    symbol: str | None
+    quantity: str | None
+    order_type: str | None
+    limit_price: str | None
+    stop_price: str | None
+    status: str
+    reject_code: str | None
+    error: str | None
+    filled_qty: str | None
+    avg_fill_price: str | None
 
 
 class BridgeStateUnreadable(RuntimeError):
@@ -454,12 +545,13 @@ def _parse_bridge_entry(decision_id: str, entry: dict[str, Any]) -> BridgeEntry:
     )
 
 
-def parse_bridge_state(raw: str) -> list[BridgeEntry]:
-    """Parse ``{"submitted": {decision_id: entry}}`` from bridge v1 or v2.
+def parse_bridge_state(raw: str, *, session_day: date | None = None) -> list[BridgeEntry]:
+    """Parse ``{"submitted": {decision_id: entry}}`` from bridge v1, v2 or v3.
 
-    v1 entries hold ``parent``/``symbol``/``skipped``; v2 entries add the
-    bracket lifecycle (``status``, fills, exits, realized P&L). An entry is
-    only reported as transmitted when it carries a broker parent order id.
+    v1 entries hold ``parent``/``symbol``/``skipped``; v2 and v3 entries add
+    the bracket lifecycle (``status``, fills, exits, realized P&L). An entry
+    is only reported as transmitted when it carries a broker parent order id.
+    With ``session_day`` a document naming another session is refused.
     """
     try:
         document = json.loads(raw)
@@ -468,21 +560,41 @@ def parse_bridge_state(raw: str) -> list[BridgeEntry]:
     submitted = document.get("submitted") if isinstance(document, dict) else None
     if not isinstance(submitted, dict):
         raise BridgeStateUnreadable("PAPER bridge state file has no submitted map")
+    stored_day = document.get("session_date")
+    if session_day is not None and stored_day is not None and stored_day != session_day.isoformat():
+        raise BridgeStateUnreadable(
+            f"PAPER bridge state file for {session_day.isoformat()} holds session {stored_day}"
+        )
     return [
         _parse_bridge_entry(str(decision_id), value if isinstance(value, dict) else {})
         for decision_id, value in submitted.items()
     ]
 
 
-def read_bridge_state(path: Path) -> list[BridgeEntry] | None:
-    """Return parsed entries, or ``None`` when the bridge has never run."""
+def read_bridge_state(path: Path, *, session_day: date | None = None) -> list[BridgeEntry] | None:
+    """Return parsed entries, or ``None`` when the bridge has never written ``path``."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
         raise BridgeStateUnreadable("PAPER bridge state file could not be read") from exc
-    return parse_bridge_state(raw)
+    return parse_bridge_state(raw, session_day=session_day)
+
+
+def read_session_bridge_state(
+    directory: Path, legacy: Path, session_day: date
+) -> list[BridgeEntry] | None:
+    """The session's own state file first, else the legacy mirror.
+
+    The bridge writes ``<directory>/<YYYY-MM-DD>.json`` atomically, so a
+    present but unreadable session file is reported as such rather than
+    hidden behind an older mirror.
+    """
+    entries = read_bridge_state(
+        directory / f"{session_day.isoformat()}.json", session_day=session_day
+    )
+    return entries if entries is not None else read_bridge_state(legacy)
 
 
 def project_orders(
@@ -556,6 +668,78 @@ def _screener_body(
     }
 
 
+def _pct_text(value: Decimal | None) -> str | None:
+    return None if value is None else format(value, "f")
+
+
+def project_market_context(
+    context: MarketContext, *, snapshot_id: str, now: datetime
+) -> MarketContextView:
+    index_changes = {
+        "SPY": context.spy_change_pct,
+        "QQQ": context.qqq_change_pct,
+        "IWM": context.iwm_change_pct,
+        "DIA": context.dia_change_pct,
+    }
+    return MarketContextView(
+        snapshot_id=snapshot_id,
+        session_date=context.session_date,
+        observed_at=_iso_utc(context.observed_at),
+        age_seconds=_age_seconds(now, context.observed_at),
+        regime=context.regime,
+        summary=context.summary,
+        indexes=[
+            MarketIndexChange(symbol=symbol, change_pct=_pct_text(index_changes.get(symbol)))
+            for symbol in INDEX_SYMBOLS
+        ],
+        breadth_up_pct=_pct_text(context.breadth_up_pct),
+        advancers=context.advancers,
+        decliners=context.decliners,
+        median_change_pct=_pct_text(context.median_change_pct),
+        sector_leaders=[
+            MarketSectorChange(sector=name, change_pct=format(change, "f"))
+            for name, change in context.sector_leaders
+        ],
+        sector_laggards=[
+            MarketSectorChange(sector=name, change_pct=format(change, "f"))
+            for name, change in context.sector_laggards
+        ],
+    )
+
+
+def new_york_day_bounds(session_day: date) -> tuple[datetime, datetime]:
+    """``[start, end)`` of a New York calendar day, in UTC (DST-aware)."""
+    start = datetime.combine(session_day, time(0), tzinfo=MARKET_TIMEZONE)
+    end = datetime.combine(session_day + timedelta(days=1), time(0), tzinfo=MARKET_TIMEZONE)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def project_manual_order(row: Sequence[object]) -> ManualOrder:
+    values = dict(zip(MANUAL_ORDER_COLUMNS, row))
+    order_id = str(values["id"])
+    created_at = values["created_at"]
+    updated_at = values["updated_at"]
+    return ManualOrder(
+        id=order_id,
+        short_id=order_id[:MANUAL_ORDER_SHORT_ID_LENGTH],
+        created_at=_stored_time_text(created_at),
+        updated_at=_stored_time_text(updated_at) if updated_at is not None else None,
+        source=_clean_text(values["source"]),
+        raw_text=_clean_text(values["raw_text"]),
+        action=_clean_text(values["action"]),
+        symbol=_clean_text(values["symbol"]),
+        quantity=_decimal_text(values["quantity"]),
+        order_type=_clean_text(values["order_type"]),
+        limit_price=_decimal_text(values["limit_price"]),
+        stop_price=_decimal_text(values["stop_price"]),
+        status=_clean_text(values["status"]) or "unknown",
+        reject_code=_clean_text(values["reject_code"]),
+        error=_clean_text(values["error"]),
+        filled_qty=_decimal_text(values["filled_qty"]),
+        avg_fill_price=_decimal_text(values["avg_fill_price"]),
+    )
+
+
 # --------------------------------------------------------------------------
 # Ledger reads
 # --------------------------------------------------------------------------
@@ -581,6 +765,22 @@ _DAY_DECISIONS = """
 _SNAPSHOT_COLUMNS = "SELECT id, session_date, observed_at, payload_json FROM autotrader_screener_snapshots"
 # (session_date, observed_at) is indexed; this order reads one index entry.
 _NEWEST_SNAPSHOT_ORDER = "ORDER BY session_date DESC, observed_at DESC LIMIT 1"
+# Only the day's newest sweep is read: one index entry and one JSON parse per
+# poll. A newest sweep without market context means the context is unknown.
+_SESSION_MARKET = """
+    SELECT id, json_type(payload_json, '$.market'), json_extract(payload_json, '$.market')
+    FROM autotrader_screener_snapshots
+    WHERE session_date = ? ORDER BY observed_at DESC LIMIT 1
+"""
+# created_at is ISO-8601 text. The prefilter brackets the New York day by whole
+# UTC dates, whatever the stored time format; the exact day is decided after
+# parsing each timestamp.
+_MANUAL_ORDERS = f"""
+    SELECT {", ".join(MANUAL_ORDER_COLUMNS)} FROM {MANUAL_ORDERS_TABLE}
+    WHERE created_at >= ? AND created_at < ?
+    ORDER BY created_at DESC LIMIT ?
+"""
+MANUAL_ORDERS_SCAN_LIMIT = 5000
 
 
 async def _latest_snapshot_time(db: aiosqlite.Connection) -> datetime | None:
@@ -630,14 +830,31 @@ async def _decision_details(
     }
 
 
-def _bridge_entries_or_status(path: Path) -> tuple[list[BridgeEntry], BridgeFileState]:
+def _bridge_entries_or_status(
+    directory: Path, legacy: Path, session_day: date
+) -> tuple[list[BridgeEntry], BridgeFileState]:
     try:
-        entries = read_bridge_state(path)
+        entries = read_session_bridge_state(directory, legacy, session_day)
     except BridgeStateUnreadable:
         return [], "unreadable"
     if entries is None:
         return [], "missing"
     return entries, "ok"
+
+
+async def _manual_order_rows(db: aiosqlite.Connection, session_day: date) -> list[Sequence[object]]:
+    start, end = new_york_day_bounds(session_day)
+    bounds = (start.date().isoformat(), (end.date() + timedelta(days=1)).isoformat())
+    async with db.execute(_MANUAL_ORDERS, (*bounds, MANUAL_ORDERS_SCAN_LIMIT)) as cursor:
+        rows = await cursor.fetchall()
+    dated: list[tuple[datetime, str, Sequence[object]]] = []
+    for row in rows:
+        created = _parse_stored_time(row[1])
+        if created is not None and start <= created < end:
+            dated.append((created, str(row[0]), row))
+    # Newest first; numeric ids order by magnitude when timestamps tie.
+    dated.sort(key=lambda item: (item[0], len(item[1]), item[1]), reverse=True)
+    return [row for _, _, row in dated]
 
 
 # --------------------------------------------------------------------------
@@ -647,11 +864,14 @@ def _bridge_entries_or_status(path: Path) -> tuple[list[BridgeEntry], BridgeFile
 
 @router.get("/status")
 async def get_live_status(
-    user: CurrentUser, clock: ClockDependency, state_path: BridgePathDependency
+    user: CurrentUser,
+    clock: ClockDependency,
+    state_path: BridgePathDependency,
+    state_directory: BridgeDirectoryDependency,
 ) -> LiveStatus:
     now = _require_utc(clock())
     session_day = new_york_date(now)
-    entries, bridge_state = _bridge_entries_or_status(state_path)
+    entries, bridge_state = _bridge_entries_or_status(state_directory, state_path, session_day)
     async with get_db() as db:
         observed = await _latest_snapshot_time(db)
         counts = await _decision_counts(db, owner_id=user.id, session_day=session_day)
@@ -729,9 +949,15 @@ async def get_live_signals(
 
 
 @router.get("/orders")
-async def get_live_orders(user: CurrentUser, state_path: BridgePathDependency) -> list[BridgeOrder]:
+async def get_live_orders(
+    user: CurrentUser,
+    clock: ClockDependency,
+    state_path: BridgePathDependency,
+    state_directory: BridgeDirectoryDependency,
+) -> list[BridgeOrder]:
+    session_day = new_york_date(clock())
     try:
-        entries = read_bridge_state(state_path)
+        entries = read_session_bridge_state(state_directory, state_path, session_day)
     except BridgeStateUnreadable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not entries:
@@ -741,3 +967,48 @@ async def get_live_orders(user: CurrentUser, state_path: BridgePathDependency) -
             db, owner_id=user.id, decision_ids=[entry.decision_id for entry in entries]
         )
     return project_orders(entries, details)
+
+
+@router.get("/market")
+async def get_live_market(clock: ClockDependency) -> MarketContextView | MarketContextUnavailable:
+    """Today's newest market context, or ``{"available": false}``.
+
+    A document that fails ``market_context.v1`` validation (including a
+    regime its own numbers contradict) is never shown.
+    """
+    now = _require_utc(clock())
+    session_day = new_york_date(now)
+    async with get_db() as db:
+        async with db.execute(_SESSION_MARKET, (session_day.isoformat(),)) as cursor:
+            row = await cursor.fetchone()
+    if row is None or row[1] != "object":
+        return MarketContextUnavailable()
+    snapshot_id = str(row[0])
+    try:
+        context = MarketContext.from_payload(json.loads(str(row[2])))
+    except (ValueError, MarketContextError) as exc:
+        log.warning("market context of screener snapshot %s is unusable: %s", snapshot_id, exc)
+        return MarketContextUnavailable()
+    if context.session_date != session_day:
+        log.warning("screener snapshot %s carries another session's market context", snapshot_id)
+        return MarketContextUnavailable()
+    return project_market_context(context, snapshot_id=snapshot_id, now=now)
+
+
+@router.get("/manual-orders")
+async def get_live_manual_orders(
+    clock: ClockDependency,
+    session_day: Annotated[date | None, Query(alias="date")] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+) -> list[ManualOrder]:
+    """The owner's manual orders created on a New York date (default today), newest first."""
+    day = session_day or new_york_date(clock())
+    try:
+        async with get_db() as db:
+            rows = await _manual_order_rows(db, day)
+    except aiosqlite.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []  # the ledger arrives with migration 12
+        log.error("manual order ledger unreadable: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Manual order ledger unreadable: {exc}") from exc
+    return [project_manual_order(row) for row in rows[:limit]]

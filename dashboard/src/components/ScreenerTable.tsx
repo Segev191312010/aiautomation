@@ -124,6 +124,11 @@ function ScreenerTableView({ snapshot, error, selectedSymbol, onSelect }: Screen
           {typeof snapshot.snapshot_age_seconds === 'number' ? ` (${formatAge(snapshot.snapshot_age_seconds)} old)` : ''}.
         </p>
       ) : null}
+      {snapshot?.compacted ? (
+        <p className="notice warn" role="status">
+          Retention compacted this older sweep: only its hot rows were kept.
+        </p>
+      ) : null}
 
       <div className="table-scroll">
         <table className="screener">

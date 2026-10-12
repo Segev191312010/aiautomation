@@ -11,10 +11,12 @@ import {
   parseTime,
   snapshotAgeTone,
 } from '../format'
-import type { LiveStatus, MarketStatus } from '../types'
+import type { LiveStatus, MarketContextView, MarketStatus } from '../types'
+import { MarketRegimeBadge } from './MarketRegime'
 
 type StatusBarProps = {
   status: Slice<LiveStatus>
+  market: Slice<MarketContextView>
   lastPollAt: number | null
   paused: boolean
   problems: string[]
@@ -47,15 +49,20 @@ function sumOutcomes(counts: Record<string, number> | undefined, outcomes: reado
   return outcomes.reduce((total, outcome) => total + (Number(counts[outcome]) || 0), 0)
 }
 
-/** Header strip: market session, New York clock, snapshot freshness, today's counts. */
-export function StatusBar({ status, lastPollAt, paused, problems, onLock }: StatusBarProps) {
+function ageNow(serverAge: number | null | undefined, receivedAt: number | null, now: number): number | null {
+  if (typeof serverAge !== 'number') return null
+  return serverAge + (receivedAt === null ? 0 : Math.max(0, (now - receivedAt) / 1000))
+}
+
+/** Header strip: market session and regime, New York clock, snapshot freshness, today's counts. */
+export function StatusBar({ status, market: context, lastPollAt, paused, problems, onLock }: StatusBarProps) {
   const now = useNow(1000)
   const clock = new Date(now)
   const data = status.data
   const market = describeMarket(data?.market, clock)
-  const elapsed = status.receivedAt === null ? 0 : Math.max(0, (now - status.receivedAt) / 1000)
-  const snapshotAge =
-    typeof data?.snapshot_age_seconds === 'number' ? data.snapshot_age_seconds + elapsed : null
+  const snapshotAge = ageNow(data?.snapshot_age_seconds, status.receivedAt, now)
+  const regime = context.data
+  const regimeAge = regime?.available ? ageNow(regime.age_seconds, context.receivedAt, now) : null
   const ageTone = snapshotAgeTone(snapshotAge)
   const counts = data?.decisions_today
   const wouldBuy = sumOutcomes(counts, ['shadow_accepted', 'approved', 'submitted'])
@@ -79,6 +86,8 @@ export function StatusBar({ status, lastPollAt, paused, problems, onLock }: Stat
           <small>{market.detail}</small>
         </div>
       </div>
+
+      <MarketRegimeBadge market={regime} ageSeconds={regimeAge} />
 
       <div className="status-item" aria-label="New York time">
         <span className="label">New York</span>

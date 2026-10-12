@@ -25,6 +25,13 @@ export type ScreenerRow = {
   hot_rank?: number | null
 }
 
+/** Present when retention reduced an old sweep to its hot rows. */
+export type ScreenerCompaction = {
+  rows_kept?: number
+  rows_dropped?: number
+  compacted_at?: string
+}
+
 export type ScreenerSnapshot = {
   schema?: string
   session_date?: string
@@ -38,6 +45,61 @@ export type ScreenerSnapshot = {
   empty?: boolean
   stale?: boolean
   snapshot_age_seconds?: number | null
+  compacted?: ScreenerCompaction | null
+}
+
+export type MarketRegime = 'risk_on' | 'neutral' | 'risk_off'
+
+export type MarketIndexChange = {
+  symbol: string
+  change_pct: string | null
+}
+
+export type MarketSectorChange = {
+  sector: string
+  change_pct: string
+}
+
+/** Today's newest market context (`/api/live/market`); percentages are decimal strings. */
+export type MarketContextView =
+  | { available: false }
+  | {
+      available: true
+      snapshot_id: string
+      session_date: string
+      observed_at: string
+      age_seconds: number | null
+      regime: MarketRegime
+      summary: string
+      indexes: MarketIndexChange[]
+      breadth_up_pct: string | null
+      advancers: number
+      decliners: number
+      median_change_pct: string | null
+      sector_leaders: MarketSectorChange[]
+      sector_laggards: MarketSectorChange[]
+    }
+
+/** One row of the owner's manual-order ledger; the status vocabulary passes through. */
+export type ManualOrder = {
+  id: string
+  /** The id the owner types in Telegram, e.g. `/cancel a3f9c2`. */
+  short_id: string
+  created_at: string
+  updated_at: string | null
+  source: string | null
+  raw_text: string | null
+  action: string | null
+  symbol: string | null
+  quantity: string | null
+  order_type: string | null
+  limit_price: string | null
+  stop_price: string | null
+  status: string
+  reject_code: string | null
+  error: string | null
+  filled_qty: string | null
+  avg_fill_price: string | null
 }
 
 export type MarketPhase = 'pre_open' | 'open' | 'after_close' | 'no_session' | 'unknown'

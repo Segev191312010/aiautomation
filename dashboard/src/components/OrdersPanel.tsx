@@ -27,6 +27,27 @@ function sessionDay(order: BridgeOrder): string | null {
   return match ? match[0] : null
 }
 
+export type SessionPnl = { day: string; amount: number }
+
+/**
+ * Realized P&L of one session, summed in cents: today's when any listed order is
+ * from today, else the newest session listed. Orders with no known session are
+ * left out, as in the header's count.
+ */
+export function sessionPnlTotal(orders: readonly BridgeOrder[], today: string | null): SessionPnl | null {
+  const cents = new Map<string, number>()
+  for (const order of orders) {
+    const day = sessionDay(order)
+    const amount = toNumber(order.realized_pnl)
+    if (day === null || amount === null) continue
+    cents.set(day, (cents.get(day) ?? 0) + Math.round(amount * 100))
+  }
+  const days = [...cents.keys()].sort()
+  if (days.length === 0) return null
+  const day = today !== null && cents.has(today) ? today : days[days.length - 1]
+  return { day, amount: (cents.get(day) ?? 0) / 100 }
+}
+
 function fillSummary(order: BridgeOrder): string | null {
   const filled = order.filled_quantity ?? 0
   if (filled <= 0) return null
@@ -50,6 +71,7 @@ function showsPnl(order: BridgeOrder): boolean {
 
 function OrdersPanelView({ orders, error, bridgeState, today, onSelect }: OrdersPanelProps) {
   const list = orders ?? []
+  const total = sessionPnlTotal(list, today)
   return (
     <>
       <div className="panel-head">
@@ -57,6 +79,18 @@ function OrdersPanelView({ orders, error, bridgeState, today, onSelect }: Orders
           <h2>PAPER orders</h2>
           <p className="panel-sub">Brackets from the temporary PAPER bridge (read-only)</p>
         </div>
+        {total ? (
+          <div
+            className="panel-total"
+            aria-label="Realized P&L total"
+            title="Realized P&L the PAPER bridge computed from broker fills"
+          >
+            <span className="label">
+              Realized P&amp;L {total.day === today ? 'today' : formatNyDate(`${total.day}T16:00:00Z`)}
+            </span>
+            <strong className={`mono ${directionClass(total.amount)}`}>{formatSignedCurrency(total.amount)}</strong>
+          </div>
+        ) : null}
       </div>
       {error ? (
         <p className="inline-error" role="alert">

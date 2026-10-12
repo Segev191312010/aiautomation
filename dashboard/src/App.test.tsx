@@ -91,6 +91,42 @@ describe('live dashboard data', () => {
     expect(within(counts).getByText('Signals').nextSibling?.textContent).toBe('4')
     expect(within(counts).getByText('Would buy').nextSibling?.textContent).toBe('1')
     expect(within(counts).getByText('Orders sent').nextSibling?.textContent).toBe('1')
+    expect(within(orders).getByText('Realized P&L today')).toBeTruthy()
+
+    const regime = screen.getByLabelText('Market regime')
+    expect(within(regime).getByText('Risk-on').className).toContain('regime-risk-on')
+    expect(within(regime).getByText(/^S&P \+0\.5% · Nasdaq \+0\.8%/)).toBeTruthy()
+
+    const manual = screen.getByRole('region', { name: 'Manual orders' })
+    expect(within(manual).getByText('Rejected')).toBeTruthy()
+    expect(within(manual).getByText('naked_short: no TSLA shares outside bot brackets')).toBeTruthy()
+    expect(within(manual).getByText('Filled 1/1 @ 227.31')).toBeTruthy()
+  })
+
+  it('polls the market context and the manual orders with the same bearer token', async () => {
+    const fetchMock = installFetch(liveApi())
+    render(<App />)
+
+    await screen.findByText('Would buy: 5266 @ 19.11')
+    for (const path of ['/api/live/market', '/api/live/manual-orders']) {
+      const call = fetchMock.mock.calls.find(([url]) => url === path)
+      expect(headerOf(call, 'Authorization')).toBe('Bearer token-abc')
+    }
+  })
+
+  it('treats an unrecognised regime as no market context and isolates a failing manual-order ledger', async () => {
+    installFetch(
+      liveApi({
+        '/api/live/market': () => jsonResponse({ available: true, regime: 'euphoric', summary: 'To the moon' }),
+        '/api/live/manual-orders': () => jsonResponse({ detail: 'Manual order ledger unreadable: no such column' }, 503),
+      }),
+    )
+    render(<App />)
+
+    expect(await screen.findByText('Manual orders: Manual order ledger unreadable: no such column')).toBeTruthy()
+    expect(within(screen.getByLabelText('Market regime')).getByText('No regime')).toBeTruthy()
+    expect(screen.queryByText('To the moon')).toBeNull()
+    expect(screen.getByText('Would buy: 5266 @ 19.11')).toBeTruthy()
   })
 
   it('shows a failing endpoint inline while the rest keeps rendering', async () => {

@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
 
-import type { BridgeOrder, LiveStatus, ScreenerSnapshot, Signal } from '../types'
+import type { BridgeOrder, LiveStatus, ManualOrder, MarketContextView, ScreenerSnapshot, Signal } from '../types'
 
 export const TOKEN_KEY = 'autotrader.live.token'
 
@@ -163,6 +163,73 @@ export const ORDERS_FIXTURE: BridgeOrder[] = [
   },
 ]
 
+export const MARKET_FIXTURE: MarketContextView = {
+  available: true,
+  snapshot_id: 'snapshot-1',
+  session_date: '2026-10-12',
+  observed_at: '2026-10-12T14:04:52.000Z',
+  age_seconds: 8,
+  regime: 'risk_on',
+  summary:
+    'Risk-on · S&P +0.5% · Nasdaq +0.8% · 250↑/150↓ · Leading: Technology +1.2% · Lagging: Utilities -0.4%',
+  indexes: [
+    { symbol: 'SPY', change_pct: '0.45' },
+    { symbol: 'QQQ', change_pct: '0.80' },
+    { symbol: 'IWM', change_pct: null },
+    { symbol: 'DIA', change_pct: '0.12' },
+  ],
+  breadth_up_pct: '61.20',
+  advancers: 250,
+  decliners: 150,
+  median_change_pct: '0.31',
+  sector_leaders: [
+    { sector: 'Technology', change_pct: '1.20' },
+    { sector: 'Energy', change_pct: '0.80' },
+  ],
+  sector_laggards: [{ sector: 'Utilities', change_pct: '-0.40' }],
+}
+
+export const MANUAL_ORDERS_FIXTURE: ManualOrder[] = [
+  {
+    id: 'c0ffee2222222222222222222222222a',
+    short_id: 'c0ffee',
+    created_at: '2026-10-12T14:02:10.000Z',
+    updated_at: '2026-10-12T14:02:10.000Z',
+    source: 'text',
+    raw_text: 'sell 1 $TSLA at 250',
+    action: 'SELL',
+    symbol: 'TSLA',
+    quantity: '1',
+    order_type: 'LMT',
+    limit_price: '250.00',
+    stop_price: null,
+    status: 'rejected',
+    reject_code: 'naked_short',
+    error: 'no TSLA shares outside bot brackets',
+    filled_qty: '0',
+    avg_fill_price: null,
+  },
+  {
+    id: 'a3f9c20000000000000000000000000b',
+    short_id: 'a3f9c2',
+    created_at: '2026-10-12T13:35:02.123Z',
+    updated_at: '2026-10-12T13:35:03.000Z',
+    source: 'command',
+    raw_text: '/buy 1 AAPL',
+    action: 'BUY',
+    symbol: 'AAPL',
+    quantity: '1',
+    order_type: 'MKT',
+    limit_price: null,
+    stop_price: null,
+    status: 'filled',
+    reject_code: null,
+    error: null,
+    filled_qty: '1',
+    avg_fill_price: '227.31',
+  },
+]
+
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -172,13 +239,15 @@ export function jsonResponse(body: unknown, status = 200): Response {
 
 type Handler = (path: string, init?: RequestInit) => Response
 
-/** Route table for the four live endpoints; a fresh Response is built per call. */
+/** Route table for the live endpoints; a fresh Response is built per call. */
 export function liveApi(overrides: Record<string, () => Response> = {}): Handler {
   const routes: Record<string, () => Response> = {
     '/api/live/status': () => jsonResponse(STATUS_FIXTURE),
     '/api/live/screener': () => jsonResponse(SCREENER_FIXTURE),
+    '/api/live/market': () => jsonResponse(MARKET_FIXTURE),
     '/api/live/signals': () => jsonResponse(SIGNALS_FIXTURE),
     '/api/live/orders': () => jsonResponse(ORDERS_FIXTURE),
+    '/api/live/manual-orders': () => jsonResponse(MANUAL_ORDERS_FIXTURE),
     ...overrides,
   }
   return (path) => {

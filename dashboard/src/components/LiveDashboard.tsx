@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useColorScheme } from '../hooks/useColorScheme'
 import { useLiveData } from '../hooks/useLiveData'
 import type { ScreenerRow, SelectedSymbol } from '../types'
+import { ManualOrdersPanel } from './ManualOrdersPanel'
 import { OrdersPanel } from './OrdersPanel'
 import { ScreenerTable } from './ScreenerTable'
 import { SignalsFeed } from './SignalsFeed'
@@ -46,10 +47,22 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
 
   const problems = useMemo(
     () =>
-      [live.status.error, live.screener.error, live.signals.error, live.orders.error].filter(
-        (problem): problem is string => Boolean(problem),
-      ),
-    [live.status.error, live.screener.error, live.signals.error, live.orders.error],
+      [
+        live.status.error,
+        live.screener.error,
+        live.market.error,
+        live.signals.error,
+        live.orders.error,
+        live.manualOrders.error,
+      ].filter((problem): problem is string => Boolean(problem)),
+    [
+      live.status.error,
+      live.screener.error,
+      live.market.error,
+      live.signals.error,
+      live.orders.error,
+      live.manualOrders.error,
+    ],
   )
   const today = live.status.data?.session_date ?? null
 
@@ -57,6 +70,7 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
     <div className="live-shell">
       <StatusBar
         status={live.status}
+        market={live.market}
         lastPollAt={live.lastPollAt}
         paused={live.paused}
         problems={problems}
@@ -91,6 +105,13 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
             error={live.orders.error}
             bridgeState={live.status.data?.bridge_state ?? null}
             today={today}
+            onSelect={handleSelect}
+          />
+        </section>
+        <section className="panel manual-panel" aria-label="Manual orders">
+          <ManualOrdersPanel
+            orders={live.manualOrders.data}
+            error={live.manualOrders.error}
             onSelect={handleSelect}
           />
         </section>

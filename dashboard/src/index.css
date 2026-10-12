@@ -350,15 +350,55 @@ code,
   max-width: 420px;
 }
 
+/* ---------- market regime ---------- */
+
+.status-item.regime {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.regime-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.regime-risk-on {
+  background: var(--accent-soft);
+  color: var(--up);
+}
+
+.regime-neutral {
+  background: var(--neutral-soft);
+  color: var(--muted);
+}
+
+.regime-risk-off {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.regime-unknown {
+  border: 1px dashed var(--border);
+  color: var(--faint);
+}
+
+.status-item.regime.stale .regime-badge {
+  opacity: 0.55;
+}
+
 /* ---------- grid ---------- */
 
 .live-grid {
   display: grid;
   grid-template-columns: minmax(520px, 5fr) minmax(0, 4fr) minmax(0, 3fr);
-  grid-template-rows: minmax(340px, 3fr) minmax(240px, 2fr);
+  grid-template-rows: minmax(340px, 3fr) minmax(150px, 1fr) minmax(150px, 1fr);
   grid-template-areas:
     'screener chart chart'
-    'screener signals orders';
+    'screener signals orders'
+    'screener signals manual';
   gap: 12px;
   min-height: 0;
   padding: 12px;
@@ -390,6 +430,10 @@ code,
 
 .orders-panel {
   grid-area: orders;
+}
+
+.manual-panel {
+  grid-area: manual;
 }
 
 .panel-head {
@@ -448,6 +492,21 @@ code,
   color: var(--muted);
   font-size: 0.8rem;
   cursor: pointer;
+}
+
+.panel-total {
+  display: grid;
+  justify-items: end;
+  line-height: 1.25;
+}
+
+.panel-total .label {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.panel-total strong {
+  font-size: 0.95rem;
 }
 
 .panel > .inline-error {
@@ -660,8 +719,17 @@ th[aria-sort='ascending'] {
   border-left-color: var(--warn);
 }
 
-.pnl {
+.pnl,
+.order-id {
   margin-left: auto;
+}
+
+.signal-reason.danger {
+  color: var(--danger);
+}
+
+.signal-reason.quote {
+  font-style: italic;
 }
 
 .signal-plan {
@@ -723,11 +791,16 @@ th[aria-sort='ascending'] {
 @media (max-width: 1279px) {
   .live-grid {
     grid-template-columns: minmax(400px, 1fr) minmax(0, 1.2fr);
-    grid-template-rows: minmax(340px, 3fr) minmax(130px, 1fr) minmax(150px, 1fr);
+    grid-template-rows: minmax(340px, 3fr) minmax(130px, 1fr) minmax(150px, 1fr) minmax(130px, 1fr);
     grid-template-areas:
       'screener chart'
       'screener signals'
-      'orders signals';
+      'orders signals'
+      'manual signals';
+  }
+
+  .status-item.regime {
+    max-width: 420px;
   }
 
   .screener .optional {
@@ -747,7 +820,12 @@ th[aria-sort='ascending'] {
       'screener'
       'chart'
       'signals'
-      'orders';
+      'orders'
+      'manual';
+  }
+
+  .status-item.regime {
+    max-width: 100%;
   }
 
   .screener-panel {

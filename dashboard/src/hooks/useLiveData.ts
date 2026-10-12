@@ -1,7 +1,15 @@
 import { useEffect, useState } from 'react'
 
 import { ApiError, describeError, getJson } from '../api'
-import type { BridgeOrder, LiveStatus, ScreenerRow, ScreenerSnapshot, Signal } from '../types'
+import type {
+  BridgeOrder,
+  LiveStatus,
+  ManualOrder,
+  MarketContextView,
+  ScreenerRow,
+  ScreenerSnapshot,
+  Signal,
+} from '../types'
 
 export const POLL_INTERVAL_MS = 5000
 
@@ -15,8 +23,10 @@ export type Slice<T> = {
 export type LiveData = {
   status: Slice<LiveStatus>
   screener: Slice<ScreenerSnapshot>
+  market: Slice<MarketContextView>
   signals: Slice<Signal[]>
   orders: Slice<BridgeOrder[]>
+  manualOrders: Slice<ManualOrder[]>
   paused: boolean
   lastPollAt: number | null
 }
@@ -26,8 +36,10 @@ const EMPTY_SLICE = { data: null, error: null, receivedAt: null } as const
 const INITIAL_STATE: LiveData = {
   status: EMPTY_SLICE,
   screener: EMPTY_SLICE,
+  market: EMPTY_SLICE,
   signals: EMPTY_SLICE,
   orders: EMPTY_SLICE,
+  manualOrders: EMPTY_SLICE,
   paused: false,
   lastPollAt: null,
 }
@@ -54,6 +66,24 @@ function asScreener(value: unknown): ScreenerSnapshot {
   throw new Error('Unexpected screener response')
 }
 
+const REGIMES = new Set(['risk_on', 'neutral', 'risk_off'])
+
+/** An unknown regime is treated as no context at all rather than guessed at. */
+function asMarket(value: unknown): MarketContextView {
+  if (isObject(value) && value.available === false) return { available: false }
+  if (
+    isObject(value) &&
+    value.available === true &&
+    typeof value.regime === 'string' &&
+    REGIMES.has(value.regime) &&
+    typeof value.summary === 'string'
+  ) {
+    return value as MarketContextView
+  }
+  if (isObject(value) && value.available === true) return { available: false }
+  throw new Error('Unexpected market response')
+}
+
 function asList<T>(label: string): (value: unknown) => T[] {
   return (value) => {
     if (Array.isArray(value)) return value.filter(isObject) as T[]
@@ -71,7 +101,7 @@ function isUnauthorized(result: PromiseSettledResult<unknown>): boolean {
 }
 
 /**
- * Poll the four read-only live endpoints every 5 s while the tab is visible.
+ * Poll the read-only live endpoints every 5 s while the tab is visible.
  * A 401 from any endpoint hands control back to the auth gate.
  */
 export function useLiveData(token: string, signalsDate: string, onUnauthorized: () => void): LiveData {
@@ -96,24 +126,27 @@ export function useLiveData(token: string, signalsDate: string, onUnauthorized: 
       const current = new AbortController()
       controller = current
       const { signal } = current
-      const results = await Promise.allSettled([
+      const [status, screener, market, signals, orders, manualOrders] = await Promise.allSettled([
         getJson('/api/live/status', token, signal).then(asStatus),
         getJson('/api/live/screener', token, signal).then(asScreener),
+        getJson('/api/live/market', token, signal).then(asMarket),
         getJson(`/api/live/signals${signalsQuery}`, token, signal).then(asList<Signal>('signals')),
         getJson('/api/live/orders', token, signal).then(asList<BridgeOrder>('orders')),
+        getJson('/api/live/manual-orders', token, signal).then(asList<ManualOrder>('manual orders')),
       ])
       if (disposed || signal.aborted) return
-      if (results.some(isUnauthorized)) {
+      if ([status, screener, market, signals, orders, manualOrders].some(isUnauthorized)) {
         onUnauthorized()
         return
       }
-      const [status, screener, signals, orders] = results
       const now = Date.now()
       setState((previous) => ({
         status: settle(previous.status, status, now),
         screener: settle(previous.screener, screener, now),
+        market: settle(previous.market, market, now),
         signals: settle(previous.signals, signals, now),
         orders: settle(previous.orders, orders, now),
+        manualOrders: settle(previous.manualOrders, manualOrders, now),
         paused: false,
         lastPollAt: now,
       }))

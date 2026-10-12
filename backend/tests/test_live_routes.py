@@ -1,12 +1,15 @@
-"""Read-only live dashboard routes: status, screener, signals, and PAPER bridge orders."""
+"""Read-only live dashboard routes: status, screener, market context, signals, PAPER
+bridge orders, and the owner's manual orders."""
 from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 from itertools import count
 import json
 from pathlib import Path
+from typing import Any
 
 from httpx import ASGITransport, AsyncClient
 import pytest
@@ -29,6 +32,7 @@ from trading.contracts import (
     fingerprint_payload,
 )
 from trading.data import CandidateRepository, RunRepository, ScannerRunRepository
+from trading.market.context import MarketContext, market_summary
 from trading.storage.repository import create_strategy, record_decision, transition_strategy
 
 
@@ -36,7 +40,14 @@ NOW = datetime(2026, 10, 12, 14, 5, tzinfo=timezone.utc)  # Monday 10:05 New Yor
 TODAY = "2026-10-12"
 DECIDED = datetime(2026, 10, 12, 14, 0, tzinfo=timezone.utc)
 SETUP = "a" * 64
-LIVE_PATHS = ("/api/live/status", "/api/live/screener", "/api/live/signals", "/api/live/orders")
+LIVE_PATHS = (
+    "/api/live/status",
+    "/api/live/screener",
+    "/api/live/market",
+    "/api/live/signals",
+    "/api/live/orders",
+    "/api/live/manual-orders",
+)
 
 
 class _Clock:
@@ -51,18 +62,21 @@ class _Clock:
 def live_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[object, Path, _Clock]]:
     from config import cfg
     from main import app
-    from routers.live_routes import bridge_state_path, live_clock
+    from routers.live_routes import bridge_state_directory, bridge_state_path, live_clock
 
     monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "live_routes.db"))
     state_file = tmp_path / "paper_bridge_state.json"
     clock = _Clock(NOW)
     app.dependency_overrides[live_clock] = lambda: clock
     app.dependency_overrides[bridge_state_path] = lambda: state_file
+    # Never the owner's real per-session bridge files.
+    app.dependency_overrides[bridge_state_directory] = lambda: tmp_path / "bridge"
     try:
         yield app, state_file, clock
     finally:
         app.dependency_overrides.pop(live_clock, None)
         app.dependency_overrides.pop(bridge_state_path, None)
+        app.dependency_overrides.pop(bridge_state_directory, None)
 
 
 _CLIENT_HOSTS = count(1)
@@ -277,10 +291,17 @@ async def _seed_ledger() -> dict[str, str]:
     return ids
 
 
-async def _insert_snapshot(snapshot_id: str, session_day: str, observed_at: str, rows: list[dict]) -> None:
+async def _insert_snapshot(
+    snapshot_id: str,
+    session_day: str,
+    observed_at: str,
+    rows: list[dict],
+    *,
+    market: dict[str, Any] | None = None,
+) -> None:
     from db.core import transaction
 
-    payload = {
+    payload: dict[str, Any] = {
         "schema": "screener.v1",
         "session_date": session_day,
         "observed_at": observed_at,
@@ -291,6 +312,8 @@ async def _insert_snapshot(snapshot_id: str, session_day: str, observed_at: str,
         "errors": 10,
         "rows": rows,
     }
+    if market is not None:
+        payload["market"] = market
     async with transaction() as db:
         await db.execute(
             "INSERT INTO autotrader_screener_snapshots VALUES (?, ?, ?, ?)",
@@ -639,7 +662,12 @@ async def test_status_reports_session_snapshot_age_and_todays_counts(live_app) -
 async def test_polled_queries_stay_on_indexes(live_app) -> None:
     """The dashboard polls every 5 s; a full ledger or snapshot scan would grow without bound."""
     from db.core import get_db, init_db
-    from routers.live_routes import _DAY_DECISIONS, _NEWEST_SNAPSHOT_ORDER, _SNAPSHOT_COLUMNS
+    from routers.live_routes import (
+        _DAY_DECISIONS,
+        _NEWEST_SNAPSHOT_ORDER,
+        _SESSION_MARKET,
+        _SNAPSHOT_COLUMNS,
+    )
 
     await init_db()
     queries = {
@@ -651,6 +679,7 @@ async def test_polled_queries_stay_on_indexes(live_app) -> None:
         "todays_snapshot": (
             f"{_SNAPSHOT_COLUMNS} WHERE session_date = ? ORDER BY observed_at DESC LIMIT 1", (TODAY,)
         ),
+        "todays_market": (_SESSION_MARKET, (TODAY,)),
     }
     plans: dict[str, str] = {}
     async with get_db() as db:
@@ -662,7 +691,7 @@ async def test_polled_queries_stay_on_indexes(live_app) -> None:
     assert day.startswith("SCAN r"), day
     for alias in ("sr", "c", "d"):
         assert f"SEARCH {alias} USING" in day, day
-    for name in ("newest_snapshot", "newest_snapshot_time", "todays_snapshot"):
+    for name in ("newest_snapshot", "newest_snapshot_time", "todays_snapshot", "todays_market"):
         assert "INDEX idx_autotrader_screener_snapshots_observed" in plans[name], plans[name]
         assert "TEMP B-TREE" not in plans[name], plans[name]
 
@@ -712,3 +741,308 @@ def test_bridge_state_parser_never_invents_a_sent_order() -> None:
     for raw in ("", "[]", '{"submitted": []}'):
         with pytest.raises(BridgeStateUnreadable):
             parse_bridge_state(raw)
+
+
+# --- per-session bridge state ----------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_orders_and_status_read_the_session_file_before_the_legacy_mirror(
+    live_app, tmp_path
+) -> None:
+    app, state_file, _ = live_app
+    ids = await _seed_ledger()
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    state_file.write_text(
+        json.dumps({"submitted": {ids["old"]: {"parent": 55, "symbol": "OLD"}}}), encoding="utf-8"
+    )
+    session = {
+        "schema": "paper-bridge-state.v3",
+        "session_date": TODAY,
+        "submitted": {
+            ids["accepted"]: _bracket(
+                ids["accepted"], parent=101, status="closed", filled=5266, exit_filled=5266,
+                realized_pnl="120.50",
+            ),
+        },
+    }
+    session_file = bridge_dir / f"{TODAY}.json"
+    session_file.write_text(json.dumps(session), encoding="utf-8")
+    # Another session's file is never read for today.
+    (bridge_dir / "2026-10-09.json").write_text("{torn", encoding="utf-8")
+    async with _client(app) as client:
+        orders = await client.get("/api/live/orders", headers=_bearer())
+        status = await client.get("/api/live/status", headers=_bearer())
+        session_file.unlink()
+        legacy = await client.get("/api/live/orders", headers=_bearer())
+        session_file.write_text(json.dumps({**session, "session_date": "2026-10-09"}), encoding="utf-8")
+        mismatched = await client.get("/api/live/orders", headers=_bearer())
+        mismatched_status = await client.get("/api/live/status", headers=_bearer())
+
+    assert orders.status_code == 200
+    assert [order["decision_id"] for order in orders.json()] == [ids["accepted"]]
+    assert orders.json()[0]["realized_pnl"] == "120.50"
+    assert status.json()["bridge_state"] == "ok"
+    assert status.json()["orders_today"]["realized_pnl"] == "120.50"
+    # Before the bridge writes today's file the legacy mirror is shown, as before.
+    assert [order["decision_id"] for order in legacy.json()] == [ids["old"]]
+    assert mismatched.status_code == 503
+    assert "holds session 2026-10-09" in mismatched.json()["detail"]
+    assert mismatched_status.json()["bridge_state"] == "unreadable"
+
+
+# --- market context ----------------------------------------------------------------------
+
+LEADERS = (("Technology", Decimal("1.20")), ("Energy", Decimal("0.80")), ("Financials", Decimal("0.55")))
+LAGGARDS = (
+    ("Utilities", Decimal("-0.40")),
+    ("Real Estate", Decimal("-0.25")),
+    ("Consumer Staples", Decimal("-0.10")),
+)
+
+
+def _market(
+    observed: datetime, *, session_day: date = date(2026, 10, 12), regime: str = "risk_on"
+) -> dict[str, Any]:
+    """A market_context.v1 document whose numbers classify as risk_on."""
+    numbers = {
+        "spy_change_pct": Decimal("0.45"),
+        "qqq_change_pct": Decimal("0.80"),
+        "breadth_up_pct": Decimal("61.20"),
+    }
+    summary = market_summary(
+        regime=regime,  # type: ignore[arg-type]
+        advancers=250,
+        decliners=150,
+        sector_leaders=LEADERS,
+        sector_laggards=LAGGARDS,
+        **numbers,
+    )
+    return MarketContext(
+        session_date=session_day,
+        observed_at=observed,
+        regime=regime,  # type: ignore[arg-type]
+        iwm_change_pct=None,
+        dia_change_pct=Decimal("0.12"),
+        advancers=250,
+        decliners=150,
+        median_change_pct=Decimal("0.31"),
+        sector_leaders=LEADERS,
+        sector_laggards=LAGGARDS,
+        summary=summary,
+        **numbers,
+    ).to_payload()
+
+
+def _utc(hour: int, minute: int, second: int = 0, day: int = 12) -> datetime:
+    return datetime(2026, 10, day, hour, minute, second, tzinfo=timezone.utc)
+
+
+@pytest.mark.anyio
+async def test_market_shows_todays_newest_context_or_reports_it_unavailable(live_app) -> None:
+    from db.core import init_db
+
+    app, _, _ = live_app
+    await init_db()
+    fresh = _market(_utc(14, 3))
+    responses = {}
+    async with _client(app) as client:
+        responses["empty"] = await client.get("/api/live/market", headers=_bearer())
+        await _insert_snapshot(
+            "friday", "2026-10-09", "2026-10-09T19:59:00.000000+00:00", [],
+            market=_market(_utc(19, 59, day=9), session_day=date(2026, 10, 9)),
+        )
+        responses["friday_only"] = await client.get("/api/live/market", headers=_bearer())
+        await _insert_snapshot("today-1", TODAY, "2026-10-12T14:02:00.000000+00:00", [], market=_market(_utc(14, 2)))
+        await _insert_snapshot("today-2", TODAY, "2026-10-12T14:02:30.000000+00:00", [])
+        responses["newest_without"] = await client.get("/api/live/market", headers=_bearer())
+        await _insert_snapshot("today-3", TODAY, "2026-10-12T14:03:00.000000+00:00", [], market=fresh)
+        responses["fresh"] = await client.get("/api/live/market", headers=_bearer())
+        await _insert_snapshot(
+            "today-4", TODAY, "2026-10-12T14:04:00.000000+00:00", [],
+            market=_market(_utc(14, 4), regime="risk_off"),
+        )
+        responses["contradicted"] = await client.get("/api/live/market", headers=_bearer())
+
+    # Only today's newest sweep counts, and only a document that validates.
+    for name in ("empty", "friday_only", "newest_without", "contradicted"):
+        assert responses[name].status_code == 200, name
+        assert responses[name].json() == {"available": False}, name
+    assert responses["fresh"].json() == {
+        "available": True,
+        "snapshot_id": "today-3",
+        "session_date": TODAY,
+        "observed_at": "2026-10-12T14:03:00.000Z",
+        "age_seconds": 120.0,
+        "regime": "risk_on",
+        "summary": fresh["summary"],
+        "indexes": [
+            {"symbol": "SPY", "change_pct": "0.45"},
+            {"symbol": "QQQ", "change_pct": "0.80"},
+            {"symbol": "IWM", "change_pct": None},
+            {"symbol": "DIA", "change_pct": "0.12"},
+        ],
+        "breadth_up_pct": "61.20",
+        "advancers": 250,
+        "decliners": 150,
+        "median_change_pct": "0.31",
+        "sector_leaders": [
+            {"sector": "Technology", "change_pct": "1.20"},
+            {"sector": "Energy", "change_pct": "0.80"},
+            {"sector": "Financials", "change_pct": "0.55"},
+        ],
+        "sector_laggards": [
+            {"sector": "Utilities", "change_pct": "-0.40"},
+            {"sector": "Real Estate", "change_pct": "-0.25"},
+            {"sector": "Consumer Staples", "change_pct": "-0.10"},
+        ],
+    }
+    assert fresh["summary"].startswith("Risk-on · S&P +0.5% · Nasdaq +0.8%")
+
+
+# --- manual orders -----------------------------------------------------------------------
+
+_MANUAL_ORDERS_DDL = """
+    CREATE TABLE autotrader_manual_orders (
+        id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT, source TEXT,
+        raw_text TEXT, action TEXT, symbol TEXT, quantity INTEGER, order_type TEXT,
+        limit_price TEXT, stop_price TEXT, status TEXT NOT NULL, reject_code TEXT, error TEXT,
+        filled_qty INTEGER, avg_fill_price TEXT
+    )
+"""
+ID1, ID2, ID3, ID4, ID5 = (prefix + digit * 26 for prefix, digit in (
+    ("a3f9c2", "0"), ("b7d1e0", "1"), ("c0ffee", "2"), ("d4c3b2", "3"), ("e5f6a7", "4"),
+))
+_MANUAL_ROWS = (
+    (ID1, "2026-10-12T13:35:02.123456+00:00", "2026-10-12T13:35:03.000000+00:00", "command",
+     "/buy 1 AAPL", "BUY", "AAPL", 1, "MKT", None, None, "filled", None, None, 1, "227.31"),
+    (ID2, "2026-10-12T14:01:00+00:00", "2026-10-12T14:01:00+00:00", "text",
+     "sell 1 $TSLA at 250", "SELL", "TSLA", 1, "LMT", "250.00", None, "rejected", "naked_short",
+     "no TSLA shares outside bot brackets", 0, None),
+    # 21:30 New York on the 12th is already the 13th in UTC.
+    (ID3, "2026-10-13T01:30:00Z", "2026-10-13T01:30:00Z", "command", "/buy 5 NVDA", "BUY",
+     "NVDA", 5, "MKT", None, None, "rejected", "market_closed", None, 0, None),
+    # 23:59:59 New York on the 11th is the 12th in UTC.
+    (ID4, "2026-10-12T03:59:59.000000+00:00", "2026-10-12T03:59:59.000000+00:00", "command",
+     "/close MSFT", "CLOSE", "MSFT", None, None, None, None, "rejected", "market_closed", None,
+     0, None),
+    (ID5, "2026-10-09T15:00:00.000000+00:00", "2026-10-09T15:05:00.000000+00:00", "command",
+     "/stop 2 AMD 150.5", "SELL_STOP", "AMD", 2, "STP", None, "150.5", "cancelled", None, None,
+     0, None),
+)
+
+
+async def _manual_orders_table(ddl: str | None, rows: tuple[tuple[object, ...], ...] = ()) -> None:
+    from db.core import init_db, transaction
+
+    await init_db()
+    async with transaction() as db:
+        # The test owns the table's shape whether or not migration 12 has landed.
+        await db.execute("DROP TABLE IF EXISTS autotrader_manual_orders")
+        if ddl is not None:
+            await db.execute(ddl)
+        for row in rows:
+            await db.execute(
+                f"INSERT INTO autotrader_manual_orders VALUES ({', '.join('?' * len(row))})", row
+            )
+
+
+@pytest.mark.anyio
+async def test_manual_orders_are_empty_before_the_ledger_exists(live_app) -> None:
+    app, _, _ = live_app
+    await _manual_orders_table(None)
+    async with _client(app) as client:
+        response = await client.get("/api/live/manual-orders", headers=_bearer())
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.anyio
+async def test_manual_orders_list_a_new_york_day_newest_first(live_app) -> None:
+    app, _, _ = live_app
+    await _manual_orders_table(_MANUAL_ORDERS_DDL, _MANUAL_ROWS)
+    async with _client(app) as client:
+        today = await client.get("/api/live/manual-orders", headers=_bearer())
+        sunday = await client.get("/api/live/manual-orders?date=2026-10-11", headers=_bearer())
+        friday = await client.get("/api/live/manual-orders?date=2026-10-09", headers=_bearer())
+        limited = await client.get("/api/live/manual-orders?limit=1", headers=_bearer())
+        invalid = await client.get("/api/live/manual-orders?date=today", headers=_bearer())
+
+    assert today.status_code == 200
+    assert [order["id"] for order in today.json()] == [ID3, ID2, ID1]
+    filled = today.json()[2]
+    assert filled == {
+        "id": ID1,
+        "short_id": "a3f9c2",
+        "created_at": "2026-10-12T13:35:02.123Z",
+        "updated_at": "2026-10-12T13:35:03.000Z",
+        "source": "command",
+        "raw_text": "/buy 1 AAPL",
+        "action": "BUY",
+        "symbol": "AAPL",
+        "quantity": "1",
+        "order_type": "MKT",
+        "limit_price": None,
+        "stop_price": None,
+        "status": "filled",
+        "reject_code": None,
+        "error": None,
+        "filled_qty": "1",
+        "avg_fill_price": "227.31",
+    }
+    rejected = today.json()[1]
+    assert (rejected["status"], rejected["reject_code"], rejected["limit_price"]) == (
+        "rejected", "naked_short", "250.00"
+    )
+    assert rejected["error"] == "no TSLA shares outside bot brackets"
+    assert today.json()[0]["created_at"] == "2026-10-13T01:30:00.000Z"
+    assert [order["id"] for order in sunday.json()] == [ID4]
+    assert [order["id"] for order in friday.json()] == [ID5]
+    assert (friday.json()[0]["action"], friday.json()[0]["stop_price"]) == ("SELL_STOP", "150.5")
+    assert [order["id"] for order in limited.json()] == [ID3]
+    assert invalid.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_a_manual_order_ledger_of_another_shape_is_reported(live_app) -> None:
+    app, _, _ = live_app
+    await _manual_orders_table(
+        "CREATE TABLE autotrader_manual_orders (id TEXT PRIMARY KEY, created_at TEXT, status TEXT)"
+    )
+    async with _client(app) as client:
+        response = await client.get("/api/live/manual-orders", headers=_bearer())
+    assert response.status_code == 503
+    assert response.json()["detail"].startswith("Manual order ledger unreadable: no such column")
+
+
+@pytest.mark.anyio
+async def test_the_route_reads_columns_the_migrated_ledger_has(live_app) -> None:
+    """Pins the contract with migration 12: every column read exists, ids match Telegram's."""
+    from db.core import get_db, init_db
+    from routers.live_routes import (
+        MANUAL_ORDER_COLUMNS,
+        MANUAL_ORDER_SHORT_ID_LENGTH,
+        MANUAL_ORDERS_TABLE,
+    )
+
+    await init_db()
+    async with get_db() as db:
+        async with db.execute(f"PRAGMA table_info({MANUAL_ORDERS_TABLE})") as cursor:
+            columns = {str(row[1]) for row in await cursor.fetchall()}
+    if not columns:
+        pytest.skip("migration 12 (the manual order ledger) is not in this tree")
+    assert set(MANUAL_ORDER_COLUMNS) <= columns
+    manual_orders = pytest.importorskip("trading.execution.manual_orders")
+    assert manual_orders.SHORT_ID_LENGTH == MANUAL_ORDER_SHORT_ID_LENGTH
+
+
+def test_new_york_day_bounds_follow_daylight_saving() -> None:
+    from routers.live_routes import new_york_day_bounds
+
+    assert new_york_day_bounds(date(2026, 10, 12)) == (_utc(4, 0), _utc(4, 0, day=13))
+    november = new_york_day_bounds(date(2026, 11, 1))
+    assert november == (
+        datetime(2026, 11, 1, 4, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc),
+    )

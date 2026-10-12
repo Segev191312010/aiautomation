@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 
 import { ORDERS_FIXTURE } from '../testing/fixtures'
 import type { BridgeOrder } from '../types'
-import { OrdersPanel } from './OrdersPanel'
+import { OrdersPanel, sessionPnlTotal } from './OrdersPanel'
 
 const BASE = ORDERS_FIXTURE[0]
 
@@ -65,6 +65,38 @@ describe('OrdersPanel', () => {
 
     fireEvent.click(within(skipped).getByRole('button', { name: 'AMD' }))
     expect(onSelect).toHaveBeenCalledWith({ symbol: 'AMD', exchange: 'NASDAQ' })
+  })
+
+  it('totals the realized P&L of today\'s session in the panel header', () => {
+    render(<OrdersPanel orders={ORDERS} error={null} bridgeState="ok" today="2026-10-12" onSelect={vi.fn()} />)
+
+    const total = screen.getByLabelText('Realized P&L total')
+    // Today's closed +1,790.44 and skipped 0; Friday's -85.25 is another session.
+    expect(within(total).getByText('Realized P&L today')).toBeTruthy()
+    expect(within(total).getByText('+$1,790.44').className).toContain('up')
+  })
+
+  it('totals the newest listed session when none is from today', () => {
+    const friday = ORDERS.filter((order) => order.run_id?.endsWith('2026-10-09'))
+    const { rerender } = render(
+      <OrdersPanel orders={friday} error={null} bridgeState="ok" today="2026-10-12" onSelect={vi.fn()} />,
+    )
+    const total = screen.getByLabelText('Realized P&L total')
+    expect(within(total).getByText('Realized P&L Fri, Oct 9')).toBeTruthy()
+    expect(within(total).getByText('-$85.25').className).toContain('down')
+
+    rerender(<OrdersPanel orders={[]} error={null} bridgeState="ok" today="2026-10-12" onSelect={vi.fn()} />)
+    expect(screen.queryByLabelText('Realized P&L total')).toBeNull()
+  })
+
+  it('sums in cents so decimal strings never drift', () => {
+    const cents = ['0.10', '0.20', '-0.05'].map((pnl, index) => ({
+      ...BASE,
+      decision_id: `d${index}`,
+      realized_pnl: pnl,
+    }))
+    expect(sessionPnlTotal(cents, '2026-10-12')).toEqual({ day: '2026-10-12', amount: 0.25 })
+    expect(sessionPnlTotal([{ ...BASE, run_id: null, realized_pnl: '5' }], '2026-10-12')).toBeNull()
   })
 
   it('explains an empty or missing bridge state', () => {
