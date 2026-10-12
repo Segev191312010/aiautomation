@@ -23,7 +23,9 @@ from trading.scheduler.decision_keys import decision_key
 
 
 HASH = "a" * 64
-NOW = datetime(2026, 1, 2, 17, 0, tzinfo=timezone.utc)
+# 11:30 New York: inside the entry window. CUTOFF is the 12:00 entry cutoff.
+NOW = datetime(2026, 1, 2, 16, 30, tzinfo=timezone.utc)
+CUTOFF = datetime(2026, 1, 2, 17, 0, tzinfo=timezone.utc)
 
 
 def _strategy() -> StrategyRecord:
@@ -135,7 +137,7 @@ class _Provider:
 
 
 @pytest.mark.anyio
-async def test_pipeline_emits_one_terminal_decision_per_candidate_and_stable_keys():
+async def test_pipeline_decides_breakouts_and_closes_pending_candidates_at_cutoff():
     recorded = []
 
     async def recorder(**kwargs):
@@ -143,29 +145,127 @@ async def test_pipeline_emits_one_terminal_decision_per_candidate_and_stable_key
 
     provider = _Provider()
     pipeline = ShadowPipeline(proposal_provider=provider, decision_recorder=recorder)
+    inputs = [_input("AAPL", 101), _input("MSFT", 102, breakout=False)]
     decisions = await pipeline.run(
         run_id="run-1",
         strategy=_strategy(),
-        candidates=[_input("AAPL", 101), _input("MSFT", 102, breakout=False)],
+        candidates=inputs,
         portfolio=_portfolio(),
         policy=RiskPolicy(),
         session_date=date(2026, 1, 2),
         now=NOW,
     )
 
-    assert len(decisions) == 2
-    assert len({decision.candidate_id for decision in decisions}) == 2
-    assert decisions[0].outcome == DecisionOutcome.SHADOW_ACCEPTED
-    assert decisions[1].outcome == DecisionOutcome.RULE_REJECTED
-    snapshot_fingerprint = decisions[0].decision_key
+    # MSFT has no breakout yet and stays pending inside the entry window.
+    assert [decision.outcome for decision in decisions] == [DecisionOutcome.SHADOW_ACCEPTED]
     expected_snapshot = _input("AAPL", 101).fingerprint()
-    assert snapshot_fingerprint == decision_key(
+    assert decisions[0].decision_key == decision_key(
         strategy_id="strategy-pipeline",
         strategy_version=1,
         snapshot_fingerprint=expected_snapshot,
     )
-    assert recorded == list(decisions)
+
+    # The cutoff sweep re-polls with newer data: AAPL's recorded decision is
+    # final despite a changed snapshot, and MSFT becomes terminal.
+    later = [
+        CandidateInput(
+            candidate=item.candidate,
+            bars=item.bars,
+            quote=None,
+            reference_price=item.reference_price,
+            average_dollar_volume=item.average_dollar_volume,
+        )
+        for item in inputs
+    ]
+    final = await pipeline.run(
+        run_id="run-1",
+        strategy=_strategy(),
+        candidates=later,
+        portfolio=_portfolio(),
+        policy=RiskPolicy(),
+        session_date=date(2026, 1, 2),
+        now=CUTOFF,
+        existing_decisions={decisions[0].candidate_id: decisions[0]},
+    )
+
+    assert [decision.outcome for decision in final] == [
+        DecisionOutcome.SHADOW_ACCEPTED,
+        DecisionOutcome.RULE_REJECTED,
+    ]
+    assert final[0] == decisions[0]
+    assert recorded == [decisions[0], final[1]]
     assert provider.calls == 1
+
+
+@pytest.mark.anyio
+async def test_breakout_without_quote_asks_for_one_and_transient_data_waits():
+    pipeline = ShadowPipeline(proposal_provider=_Provider(), decision_recorder=_record_noop)
+    item = _input("AAPL", 101)
+    unquoted = CandidateInput(
+        candidate=item.candidate,
+        bars=item.bars,
+        quote=None,
+        reference_price=item.reference_price,
+        average_dollar_volume=item.average_dollar_volume,
+    )
+    common = dict(
+        run_id="run-q",
+        strategy=_strategy(),
+        portfolio=_portfolio(),
+        policy=RiskPolicy(),
+        session_date=date(2026, 1, 2),
+        admitted_symbols=frozenset({"AAPL"}),
+    )
+
+    needs_quote = await pipeline.assess_one(item=unquoted, now=NOW, **common)
+    assert needs_quote.decision is None and needs_quote.needs_quote is True
+
+    stale = await pipeline.assess_one(item=item, now=NOW + timedelta(seconds=30), **common)
+    assert stale.decision is None and stale.pending_reason == "quote_stale"
+
+    no_bars = CandidateInput(
+        candidate=item.candidate,
+        bars=(),
+        quote=None,
+        reference_price=item.reference_price,
+        average_dollar_volume=item.average_dollar_volume,
+    )
+    waiting = await pipeline.assess_one(item=no_bars, now=NOW, **common)
+    assert waiting.decision is None
+    closed = await pipeline.assess_one(item=no_bars, now=CUTOFF, **common)
+    assert closed.decision is not None
+    assert closed.decision.outcome == DecisionOutcome.DATA_BLOCKED
+
+
+@pytest.mark.anyio
+async def test_no_setup_is_built_at_or_after_the_entry_cutoff():
+    provider = _Provider()
+    pipeline = ShadowPipeline(proposal_provider=provider, decision_recorder=_record_noop)
+    item = _input("AAPL", 101)
+    late_quote = CandidateInput(
+        candidate=item.candidate,
+        bars=item.bars,
+        quote=QuoteSnapshot(
+            con_id=101, bid="102.99", ask="103", observed_at=CUTOFF, min_tick="0.01"
+        ),
+        reference_price=item.reference_price,
+        average_dollar_volume=item.average_dollar_volume,
+    )
+
+    result = await pipeline.assess_one(
+        run_id="run-late",
+        strategy=_strategy(),
+        item=late_quote,
+        portfolio=_portfolio(),
+        policy=RiskPolicy(),
+        session_date=date(2026, 1, 2),
+        admitted_symbols=frozenset({"AAPL"}),
+        now=CUTOFF,
+    )
+
+    assert result.decision is not None
+    assert result.decision.outcome == DecisionOutcome.DATA_BLOCKED
+    assert provider.calls == 0
 
 
 @pytest.mark.anyio
@@ -196,7 +296,7 @@ async def test_provider_failure_is_recorded_as_ai_blocked_without_rules_only_fal
 
 
 @pytest.mark.anyio
-async def test_data_failure_is_terminal_and_does_not_call_ai():
+async def test_missing_data_at_cutoff_is_terminal_and_does_not_call_ai():
     recorded = []
 
     async def recorder(**kwargs):
@@ -221,7 +321,7 @@ async def test_data_failure_is_terminal_and_does_not_call_ai():
         portfolio=_portfolio(),
         policy=RiskPolicy(),
         session_date=date(2026, 1, 2),
-        now=NOW,
+        now=CUTOFF,
     )
 
     assert decisions[0].outcome == DecisionOutcome.DATA_BLOCKED

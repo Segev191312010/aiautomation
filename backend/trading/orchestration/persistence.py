@@ -1,7 +1,8 @@
 """Repository-backed shadow-run execution with lease and replay safety."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
@@ -25,7 +26,12 @@ from trading.data import (
     RunRepository,
     ScannerRunRepository,
 )
-from trading.orchestration.pipeline import CandidateInput, ShadowPipeline
+from trading.orchestration.pipeline import (
+    Assessment,
+    CandidateInput,
+    ShadowPipeline,
+    entry_cutoff_utc,
+)
 from trading.scheduler import (
     DEFAULT_LEASE_RENEW_INTERVAL,
     DEFAULT_LEASE_TTL,
@@ -188,17 +194,64 @@ class RepositoryBackedShadowRunner:
         now: datetime | None = None,
         lease_name: str | None = None,
     ) -> tuple[Decision, ...]:
-        """Run candidates after durable materialization and lease acquisition."""
+        """Assess every candidate once at ``now``; pending candidates are omitted."""
         observed_at = _utc(now or self._clock())
+        async with self.open_session(
+            run=run,
+            scanner_run=scanner_run,
+            strategy=strategy,
+            candidates=tuple(item.candidate for item in candidates),
+            policy=policy,
+            holder_id=holder_id,
+            now=observed_at,
+            lease_name=lease_name,
+        ) as session:
+            decisions: list[Decision] = []
+            for item in candidates:
+                assessment = await session.assess(item, portfolio=portfolio, now=observed_at)
+                if assessment.decision is not None:
+                    decisions.append(assessment.decision)
+            if observed_at >= session.cutoff and not session.complete:
+                raise ShadowPersistenceConflictError(
+                    "shadow pipeline did not produce one terminal decision per candidate"
+                )
+            return tuple(decisions)
+
+    @asynccontextmanager
+    async def open_session(
+        self,
+        *,
+        run: Run,
+        scanner_run: ScannerRun,
+        strategy: StrategyRecord,
+        candidates: Sequence[Candidate],
+        policy: RiskPolicy,
+        holder_id: str,
+        now: datetime | None = None,
+        lease_name: str | None = None,
+    ) -> AsyncIterator["ShadowRunSession"]:
+        """Hold the run lease for a whole session of repeated assessments.
+
+        The scanner universe is materialized once; every later poll assesses
+        only these candidates. A failure while the lease is held marks the run
+        failed so a restart resumes from the recorded decisions.
+        """
+        observed_at = _utc(now or self._clock())
+        candidate_tuple = tuple(candidates)
         self._validate_inputs(
             run=run,
             scanner_run=scanner_run,
             strategy=strategy,
-            candidates=candidates,
+            candidates=candidate_tuple,
             policy=policy,
             holder_id=holder_id,
             lease_name=lease_name,
         )
+        session_calendar = market_session(run.session_date)
+        if session_calendar is None:
+            raise ShadowPersistenceConflictError(
+                "shadow run session date is not an XNYS trading session"
+            )
         name = lease_name or _lease_name(run)
         async with get_db() as lease_db:
             claim = await acquire_lease(
@@ -210,6 +263,7 @@ class RepositoryBackedShadowRunner:
             )
             if claim is None:
                 raise ShadowLeaseUnavailableError(f"shadow lease is busy: {name}")
+            heartbeat: LeaseHeartbeat | None = None
             try:
                 async with LeaseHeartbeat(
                     lease_db,
@@ -221,21 +275,22 @@ class RepositoryBackedShadowRunner:
                     await self._materialize(
                         run=run,
                         scanner_run=scanner_run,
-                        candidates=tuple(item.candidate for item in candidates),
+                        candidates=candidate_tuple,
                         observed_at=observed_at,
                     )
                     stored_decisions = await self._existing_decisions(
                         run=run,
-                        candidates=candidates,
+                        candidate_ids=frozenset(item.id for item in candidate_tuple),
                     )
                     already_completed = await self._set_running(
                         run=run,
                         stored_status=stored_decisions,
-                        candidate_count=len(candidates),
+                        candidate_count=len(candidate_tuple),
                     )
+                    active_heartbeat = heartbeat
 
                     async def guarded_recorder(*, decision: Decision, owner_id: str) -> None:
-                        await heartbeat.require(now=_utc(self._clock()))
+                        await active_heartbeat.require(now=_utc(self._clock()))
                         await _record_decision_idempotent(
                             decision=decision, owner_id=owner_id
                         )
@@ -244,50 +299,27 @@ class RepositoryBackedShadowRunner:
                         proposal_provider=self._pipeline.proposal_provider,
                         decision_recorder=guarded_recorder,
                         orb_config=self._pipeline.orb_config,
+                        mode=self._pipeline.mode,
                     )
-                    decisions = await pipeline.run(
-                        run_id=run.id,
+                    yield ShadowRunSession(
+                        run=run,
                         strategy=strategy,
-                        candidates=candidates,
-                        portfolio=portfolio,
                         policy=policy,
-                        session_date=run.session_date,
-                        now=observed_at,
-                        existing_decisions=stored_decisions,
+                        candidates=candidate_tuple,
+                        pipeline=pipeline,
+                        decisions=stored_decisions,
+                        completed=already_completed,
+                        cutoff=entry_cutoff_utc(run.session_date, self._pipeline.orb_config),
+                        heartbeat=heartbeat,
+                        clock=self._clock,
                     )
-                    await heartbeat.require(now=_utc(self._clock()))
-                    complete = self._is_complete(
-                        candidates=candidates, decisions=decisions
-                    )
-                    session = market_session(run.session_date)
-                    if session is None:
-                        raise ShadowPersistenceConflictError(
-                            "shadow run session date is not an XNYS trading session"
-                        )
-                    cutoff_reached = observed_at >= session.entry_cutoff_at.astimezone(
-                        timezone.utc
-                    )
-                    if cutoff_reached and not complete:
-                        self._assert_complete(candidates=candidates, decisions=decisions)
-                    if complete and not already_completed:
-                        await _mark_run_status(
-                            run_id=run.id,
-                            owner_id=run.owner_id,
-                            status="completed",
-                            allowed_statuses=("running",),
-                            closed_at=_utc(self._clock()),
-                        )
-                    return decisions
             except BaseException:
                 try:
-                    heartbeat_claim = claim
-                    if "heartbeat" in locals():
-                        heartbeat_claim = heartbeat.claim
                     from trading.scheduler import require_lease
 
                     await require_lease(
                         lease_db,
-                        claim=heartbeat_claim,
+                        claim=heartbeat.claim if heartbeat is not None else claim,
                         now=_utc(self._clock()),
                     )
                 except LeaseLostError:
@@ -305,11 +337,10 @@ class RepositoryBackedShadowRunner:
                         pass
                 raise
             finally:
-                release_claim = claim
-                if "heartbeat" in locals():
-                    release_claim = heartbeat.claim
                 await release_lease(
-                    lease_db, claim=release_claim, now=_utc(self._clock())
+                    lease_db,
+                    claim=heartbeat.claim if heartbeat is not None else claim,
+                    now=_utc(self._clock()),
                 )
 
     async def _materialize(
@@ -369,12 +400,12 @@ class RepositoryBackedShadowRunner:
         self,
         *,
         run: Run,
-        candidates: Sequence[CandidateInput],
+        candidate_ids: frozenset[str],
     ) -> dict[str, Decision]:
         from trading.storage.repository import list_decisions
 
         payloads = await list_decisions(owner_id=run.owner_id, run_id=run.id, limit=500)
-        requested = {item.candidate.id for item in candidates}
+        requested = candidate_ids
         result: dict[str, Decision] = {}
         for payload in payloads:
             try:
@@ -417,35 +448,12 @@ class RepositoryBackedShadowRunner:
         return False
 
     @staticmethod
-    def _assert_complete(
-        *,
-        candidates: Sequence[CandidateInput],
-        decisions: Sequence[Decision],
-    ) -> None:
-        expected = {item.candidate.id for item in candidates}
-        actual = {decision.candidate_id for decision in decisions}
-        if actual != expected or len(decisions) != len(expected):
-            raise ShadowPersistenceConflictError(
-                "shadow pipeline did not produce one terminal decision per candidate"
-            )
-
-    @staticmethod
-    def _is_complete(
-        *,
-        candidates: Sequence[CandidateInput],
-        decisions: Sequence[Decision],
-    ) -> bool:
-        expected = {item.candidate.id for item in candidates}
-        actual = {decision.candidate_id for decision in decisions}
-        return actual == expected and len(decisions) == len(expected)
-
-    @staticmethod
     def _validate_inputs(
         *,
         run: Run,
         scanner_run: ScannerRun,
         strategy: StrategyRecord,
-        candidates: Sequence[CandidateInput],
+        candidates: Sequence[Candidate],
         policy: RiskPolicy,
         holder_id: str,
         lease_name: str | None,
@@ -464,16 +472,137 @@ class RepositoryBackedShadowRunner:
         if lease_name is not None and not lease_name.strip():
             raise ValueError("lease_name must be non-empty")
         candidate_ids: set[str] = set()
-        for item in candidates:
-            if item.candidate.id in candidate_ids:
+        for candidate in candidates:
+            if candidate.id in candidate_ids:
                 raise ValueError("a shadow run cannot assess one candidate more than once")
-            candidate_ids.add(item.candidate.id)
-            if item.candidate.scanner_run_id != scanner_run.id:
+            candidate_ids.add(candidate.id)
+            if candidate.scanner_run_id != scanner_run.id:
                 raise ValueError("candidate does not belong to scanner run")
+
+
+class ShadowRunSession:
+    """One leased run: assess candidates repeatedly until each is terminal."""
+
+    def __init__(
+        self,
+        *,
+        run: Run,
+        strategy: StrategyRecord,
+        policy: RiskPolicy,
+        candidates: tuple[Candidate, ...],
+        pipeline: ShadowPipeline,
+        decisions: dict[str, Decision],
+        completed: bool,
+        cutoff: datetime,
+        heartbeat: LeaseHeartbeat,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.run = run
+        self.cutoff = cutoff
+        self._strategy = strategy
+        self._policy = policy
+        self._candidates = {candidate.id: candidate for candidate in candidates}
+        self._admitted_symbols = frozenset(
+            candidate.symbol
+            for candidate in candidates
+            if candidate.admission_status == "admitted"
+        )
+        self._pipeline = pipeline
+        self._decisions = dict(decisions)
+        self._completed = completed
+        self._heartbeat = heartbeat
+        self._clock = clock
+
+    @property
+    def complete(self) -> bool:
+        return len(self._decisions) == len(self._candidates)
+
+    @property
+    def decisions(self) -> dict[str, Decision]:
+        return dict(self._decisions)
+
+    def pending(self) -> tuple[Candidate, ...]:
+        return tuple(
+            candidate
+            for candidate_id, candidate in self._candidates.items()
+            if candidate_id not in self._decisions
+        )
+
+    async def assess(
+        self,
+        item: CandidateInput,
+        *,
+        portfolio: PortfolioSnapshot,
+        now: datetime | None = None,
+    ) -> Assessment:
+        candidate = self._candidates.get(item.candidate.id)
+        if candidate is None or candidate != item.candidate:
+            raise ShadowPersistenceConflictError(
+                "assessed candidate is not part of the materialized scanner run"
+            )
+        observed = _utc(now or self._clock())
+        await self._heartbeat.require(now=observed)
+        assessment = await self._pipeline.assess_one(
+            run_id=self.run.id,
+            strategy=self._strategy,
+            item=item,
+            portfolio=portfolio,
+            policy=self._policy,
+            session_date=self.run.session_date,
+            admitted_symbols=self._admitted_symbols,
+            now=observed,
+            prior=self._decisions.get(candidate.id),
+        )
+        if assessment.decision is not None:
+            self._decisions[candidate.id] = assessment.decision
+            await self._complete_if_done()
+        return assessment
+
+    async def finalize(
+        self,
+        inputs: Sequence[CandidateInput],
+        *,
+        portfolio: PortfolioSnapshot,
+        now: datetime | None = None,
+    ) -> dict[str, Decision]:
+        """Cutoff sweep: every remaining candidate must become terminal."""
+        observed = _utc(now or self._clock())
+        if observed < self.cutoff:
+            raise ValueError("finalize requires the entry cutoff to have passed")
+        by_id = {item.candidate.id: item for item in inputs}
+        for candidate in self.pending():
+            item = by_id.get(candidate.id)
+            if item is not None:
+                await self.assess(item, portfolio=portfolio, now=observed)
+                continue
+            await self._heartbeat.require(now=observed)
+            decision = await self._pipeline.record_data_blocked(
+                run_id=self.run.id, strategy=self._strategy, candidate=candidate
+            )
+            self._decisions[candidate.id] = decision
+            await self._complete_if_done()
+        if not self.complete:
+            raise ShadowPersistenceConflictError(
+                "shadow pipeline did not produce one terminal decision per candidate"
+            )
+        return self.decisions
+
+    async def _complete_if_done(self) -> None:
+        if self._completed or not self.complete:
+            return
+        await _mark_run_status(
+            run_id=self.run.id,
+            owner_id=self.run.owner_id,
+            status="completed",
+            allowed_statuses=("running",),
+            closed_at=_utc(self._clock()),
+        )
+        self._completed = True
 
 
 __all__ = [
     "RepositoryBackedShadowRunner",
+    "ShadowRunSession",
     "ShadowLeaseUnavailableError",
     "ShadowPersistenceConflictError",
 ]

@@ -21,6 +21,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 UTC = timezone.utc
 QUOTE_MAX_AGE_SECONDS = Decimal("2")
 NO_SIGNAL_YET = "NO_SIGNAL_YET"
+# A breakout exists but entry pricing needs a fresh quote; not a rejection.
+QUOTE_REQUIRED = "QUOTE_REQUIRED"
 _BPS = Decimal("10000")
 
 
@@ -183,7 +185,7 @@ def evaluate_orb(
     *,
     candidate: Candidate,
     bars: Sequence[CompletedBar],
-    quote: QuoteSnapshot,
+    quote: QuoteSnapshot | None,
     session_date: date,
     run_id: str,
     strategy_id: str,
@@ -194,6 +196,11 @@ def evaluate_orb(
     now: datetime | None = None,
     config: ORBConfig = ORBConfig(),
 ) -> ORBResult:
+    """Evaluate bars first; a quote is consulted only once a breakout exists.
+
+    Quote freshness is a property of the entry moment, so requesting quotes for
+    candidates without a breakout would only spend data lines and go stale.
+    """
     try:
         rejection = qualify_candidate(
             candidate,
@@ -205,16 +212,7 @@ def evaluate_orb(
         return ORBResult(setup=None, rejection_reason=str(exc))
     if rejection:
         return ORBResult(setup=None, rejection_reason=rejection)
-    if quote.con_id != candidate.con_id:
-        return ORBResult(setup=None, rejection_reason="quote_contract_mismatch")
-
-    try:
-        now_utc = require_aware(now or datetime.now(UTC))
-        quote.require_fresh(now=now_utc, max_age_seconds=config.quote_max_age_seconds)
-    except (ValueError, TypeError):
-        return ORBResult(setup=None, rejection_reason="quote_stale")
-    if quote.spread_bps > config.max_spread_bps:
-        return ORBResult(setup=None, rejection_reason="quote_spread_too_wide")
+    now_utc = require_aware(now or datetime.now(UTC))
 
     try:
         ordered = _ordered_bars(bars)
@@ -268,6 +266,26 @@ def evaluate_orb(
             opening_range_high=opening_high,
             opening_range_low=opening_low,
         )
+
+    def pending_quote(reason: str) -> ORBResult:
+        return ORBResult(
+            setup=None,
+            rejection_reason=reason,
+            opening_range_high=opening_high,
+            opening_range_low=opening_low,
+            breakout_bar=breakout,
+        )
+
+    if quote is None:
+        return pending_quote(QUOTE_REQUIRED)
+    if quote.con_id != candidate.con_id:
+        return pending_quote("quote_contract_mismatch")
+    try:
+        quote.require_fresh(now=now_utc, max_age_seconds=config.quote_max_age_seconds)
+    except (ValueError, TypeError):
+        return pending_quote("quote_stale")
+    if quote.spread_bps > config.max_spread_bps:
+        return pending_quote("quote_spread_too_wide")
 
     history = [
         bar
@@ -365,6 +383,7 @@ def build_orb_setup(**kwargs: object) -> RuleSetup:
 
 __all__ = [
     "NO_SIGNAL_YET",
+    "QUOTE_REQUIRED",
     "ORBConfig",
     "ORBError",
     "ORBResult",

@@ -24,7 +24,7 @@ from trading.contracts import (
 )
 from trading.engine import AutotraderEngine
 from trading.intelligence.provider import TradeProposalProvider
-from trading.rules.orb import NO_SIGNAL_YET, ORBConfig, evaluate_orb
+from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED, ORBConfig, evaluate_orb
 from trading.scheduler.decision_keys import decision_key
 from trading.storage.repository import record_decision
 
@@ -36,6 +36,24 @@ _DATA_REJECTION_PREFIXES = (
     "opening_range_",
     "insufficient_atr_history",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Assessment:
+    """Outcome of assessing one candidate at one moment.
+
+    ``decision`` is set only for a terminal, recorded outcome. Otherwise the
+    candidate stays pending: ``needs_quote`` asks the caller to fetch a quote
+    and assess again immediately; ``pending_reason`` explains any other wait.
+    """
+
+    decision: Decision | None
+    needs_quote: bool = False
+    pending_reason: str | None = None
+
+    @property
+    def terminal(self) -> bool:
+        return self.decision is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +112,21 @@ def _is_data_rejection(reason: str) -> bool:
     return reason == "no bars supplied" or reason.startswith(_DATA_REJECTION_PREFIXES)
 
 
+def entry_cutoff_utc(session_date: date, config: ORBConfig) -> datetime:
+    from trading.rules.orb import NEW_YORK
+
+    return datetime.combine(session_date, config.entry_cutoff, tzinfo=NEW_YORK).astimezone(
+        timezone.utc
+    )
+
+
+def _session_day(session_date: date | datetime) -> date:
+    session_day = session_date.date() if isinstance(session_date, datetime) else session_date
+    if not isinstance(session_day, date):
+        raise TypeError("session_date must be a date or timezone-aware datetime")
+    return session_day
+
+
 def _blocked_review(*, setup: RuleSetup, reason: str) -> AIReview:
     response_hash = hashlib.sha256(reason.encode("utf-8")).hexdigest()
     return AIReview(
@@ -129,7 +162,7 @@ def _blocked_risk(
 
 
 class ShadowPipeline:
-    """Run one sequential shadow pipeline with no broker or scheduler side effects."""
+    """Assess candidates into terminal decisions with no broker side effects."""
 
     def __init__(
         self,
@@ -137,10 +170,12 @@ class ShadowPipeline:
         proposal_provider: TradeProposalProvider,
         decision_recorder: DecisionRecorder = record_decision,
         orb_config: ORBConfig = ORBConfig(),
+        mode: EngineMode = EngineMode.SHADOW,
     ) -> None:
         self._proposal_provider = proposal_provider
         self._decision_recorder = decision_recorder
         self._orb_config = orb_config
+        self._mode = mode
 
         async def defer_recording(**_: object) -> None:
             return None
@@ -155,6 +190,10 @@ class ShadowPipeline:
     def orb_config(self) -> ORBConfig:
         return self._orb_config
 
+    @property
+    def mode(self) -> EngineMode:
+        return self._mode
+
     async def run(
         self,
         *,
@@ -167,12 +206,10 @@ class ShadowPipeline:
         now: datetime | None = None,
         existing_decisions: Mapping[str, Decision] | None = None,
     ) -> tuple[Decision, ...]:
-        """Assess candidates in input order and return one terminal decision each."""
+        """Assess candidates in input order; pending candidates are omitted."""
         if not run_id.strip():
             raise ValueError("run_id must be non-empty")
-        session_day = session_date.date() if isinstance(session_date, datetime) else session_date
-        if not isinstance(session_day, date):
-            raise TypeError("session_date must be a date or timezone-aware datetime")
+        session_day = _session_day(session_date)
         if strategy.owner_id.strip() == "":
             raise ValueError("strategy owner_id must be non-empty")
 
@@ -180,140 +217,197 @@ class ShadowPipeline:
         if len(set(candidate_ids)) != len(candidate_ids):
             raise ValueError("a shadow run cannot assess one candidate more than once")
 
-        results: list[Decision] = []
         existing = existing_decisions or {}
         admitted_symbols = frozenset(
             item.candidate.symbol
             for item in candidates
             if item.candidate.admission_status == "admitted"
         )
+        results: list[Decision] = []
         for item in candidates:
-            snapshot_fingerprint = item.fingerprint()
-            key = decision_key(
-                strategy_id=strategy.strategy_id,
-                strategy_version=strategy.version,
-                snapshot_fingerprint=snapshot_fingerprint,
-            )
-            prior = existing.get(item.candidate.id)
-            if prior is not None:
-                if (
-                    prior.run_id != run_id
-                    or prior.candidate_id != item.candidate.id
-                    or prior.strategy_id != strategy.strategy_id
-                    or prior.strategy_version != strategy.version
-                    or prior.decision_key != key
-                ):
-                    raise ValueError(
-                        "existing decision does not match the immutable candidate input"
-                    )
-                results.append(prior)
-                continue
-            if item.quote is None:
-                decision = self._terminal_decision(
-                    run_id=run_id,
-                    strategy=strategy,
-                    candidate=item.candidate,
-                    key=key,
-                    outcome=DecisionOutcome.DATA_BLOCKED,
-                )
-                await self._record(decision, strategy.owner_id)
-                results.append(decision)
-                continue
-            orb_result = evaluate_orb(
-                candidate=item.candidate,
-                bars=item.bars,
-                quote=item.quote,
-                session_date=session_day,
+            assessment = await self.assess_one(
                 run_id=run_id,
-                strategy_id=strategy.strategy_id,
-                strategy_version=strategy.version,
-                reference_price=item.reference_price,
-                average_dollar_volume=item.average_dollar_volume,
-                candidate_input_fingerprint=snapshot_fingerprint,
+                strategy=strategy,
+                item=item,
+                portfolio=portfolio,
+                policy=policy,
+                session_date=session_day,
+                admitted_symbols=admitted_symbols,
                 now=now,
-                config=self._orb_config,
+                prior=existing.get(item.candidate.id),
             )
-            if orb_result.setup is None:
-                if orb_result.rejection_reason == NO_SIGNAL_YET:
-                    continue
-                outcome = (
-                    DecisionOutcome.DATA_BLOCKED
-                    if _is_data_rejection(orb_result.rejection_reason or "")
-                    else DecisionOutcome.RULE_REJECTED
-                )
+            if assessment.decision is not None:
+                results.append(assessment.decision)
+        return tuple(results)
+
+    async def assess_one(
+        self,
+        *,
+        run_id: str,
+        strategy: StrategyRecord,
+        item: CandidateInput,
+        portfolio: PortfolioSnapshot,
+        policy: RiskPolicy,
+        session_date: date | datetime,
+        admitted_symbols: frozenset[str],
+        now: datetime | None = None,
+        prior: Decision | None = None,
+    ) -> Assessment:
+        """Assess one candidate; record and return a decision only when terminal.
+
+        Before the entry cutoff, missing or transiently bad data leaves the
+        candidate pending so a later poll can still see its breakout. At or
+        after the cutoff every outcome is terminal and no new setup is built,
+        so no entry can be created after the cutoff.
+        """
+        session_day = _session_day(session_date)
+        observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        if prior is not None:
+            # One terminal decision per candidate: a recorded outcome is final
+            # even though later polls observe newer bars and quotes.
+            if (
+                prior.run_id != run_id
+                or prior.candidate_id != item.candidate.id
+                or prior.strategy_id != strategy.strategy_id
+                or prior.strategy_version != strategy.version
+            ):
+                raise ValueError("existing decision belongs to a different run or strategy")
+            return Assessment(decision=prior)
+
+        cutoff_passed = observed >= entry_cutoff_utc(session_day, self._orb_config)
+        snapshot_fingerprint = item.fingerprint()
+        key = decision_key(
+            strategy_id=strategy.strategy_id,
+            strategy_version=strategy.version,
+            snapshot_fingerprint=snapshot_fingerprint,
+        )
+
+        async def terminal(outcome: DecisionOutcome) -> Assessment:
+            decision = self._terminal_decision(
+                run_id=run_id,
+                strategy=strategy,
+                candidate=item.candidate,
+                key=key,
+                outcome=outcome,
+            )
+            await self._record(decision, strategy.owner_id)
+            return Assessment(decision=decision)
+
+        orb_result = evaluate_orb(
+            candidate=item.candidate,
+            bars=item.bars,
+            quote=None if cutoff_passed else item.quote,
+            session_date=session_day,
+            run_id=run_id,
+            strategy_id=strategy.strategy_id,
+            strategy_version=strategy.version,
+            reference_price=item.reference_price,
+            average_dollar_volume=item.average_dollar_volume,
+            candidate_input_fingerprint=snapshot_fingerprint,
+            now=observed,
+            config=self._orb_config,
+        )
+        if orb_result.setup is None:
+            reason = orb_result.rejection_reason or ""
+            if reason == NO_SIGNAL_YET:
+                return Assessment(decision=None, pending_reason=reason)
+            if reason == QUOTE_REQUIRED:
+                if cutoff_passed:
+                    # The breakout was never priced inside the entry window.
+                    return await terminal(DecisionOutcome.DATA_BLOCKED)
+                return Assessment(decision=None, needs_quote=True, pending_reason=reason)
+            if _is_data_rejection(reason):
+                if not cutoff_passed:
+                    return Assessment(decision=None, pending_reason=reason)
+                return await terminal(DecisionOutcome.DATA_BLOCKED)
+            return await terminal(DecisionOutcome.RULE_REJECTED)
+
+        setup = orb_result.setup
+        try:
+            review = await self._proposal_provider.propose_trade(setup=setup)
+            if (
+                not isinstance(review, AIReview)
+                or review.setup_fingerprint != setup.fingerprint()
+            ):
+                raise ValueError("AI review did not preserve setup identity")
+        except Exception as exc:
+            reason = "provider_unavailable"
+            if isinstance(exc, ValueError):
+                reason = "invalid_provider_review"
+            review = _blocked_review(setup=setup, reason=reason)
+
+        try:
+            decision = await self._engine.assess(
+                mode=self._mode,
+                strategy=strategy,
+                setup=setup,
+                review=review,
+                portfolio=portfolio,
+                policy=policy,
+                admitted_symbols=admitted_symbols,
+            )
+        except Exception:
+            if review.decision != "PROPOSE":
                 decision = self._terminal_decision(
                     run_id=run_id,
                     strategy=strategy,
                     candidate=item.candidate,
                     key=key,
-                    outcome=outcome,
+                    outcome=DecisionOutcome.AI_BLOCKED,
+                    setup=setup,
+                    review=_blocked_review(setup=setup, reason="review_invalid"),
                 )
-                await self._record(decision, strategy.owner_id)
-                results.append(decision)
-                continue
-
-            setup = orb_result.setup
-            try:
-                review = await self._proposal_provider.propose_trade(setup=setup)
-                if (
-                    not isinstance(review, AIReview)
-                    or review.setup_fingerprint != setup.fingerprint()
-                ):
-                    raise ValueError("AI review did not preserve setup identity")
-            except Exception as exc:
-                reason = "provider_unavailable"
-                if isinstance(exc, ValueError):
-                    reason = "invalid_provider_review"
-                review = _blocked_review(setup=setup, reason=reason)
-
-            try:
-                decision = await self._engine.assess(
-                    mode=EngineMode.SHADOW,
-                    strategy=strategy,
+            else:
+                risk = _blocked_risk(
                     setup=setup,
                     review=review,
-                    portfolio=portfolio,
                     policy=policy,
-                    admitted_symbols=admitted_symbols,
+                    portfolio=portfolio,
                 )
-            except Exception:
-                if review.decision != "PROPOSE":
-                    decision = self._terminal_decision(
-                        run_id=run_id,
-                        strategy=strategy,
-                        candidate=item.candidate,
-                        key=key,
-                        outcome=DecisionOutcome.AI_BLOCKED,
-                        setup=setup,
-                        review=_blocked_review(setup=setup, reason="review_invalid"),
-                    )
-                else:
-                    risk = _blocked_risk(
-                        setup=setup,
-                        review=review,
-                        policy=policy,
-                        portfolio=portfolio,
-                    )
-                    decision = self._terminal_decision(
-                        run_id=run_id,
-                        strategy=strategy,
-                        candidate=item.candidate,
-                        key=key,
-                        outcome=DecisionOutcome.RISK_BLOCKED,
-                        setup=setup,
-                        review=review,
-                        risk=risk,
-                    )
-            else:
-                decision = Decision.model_validate(
-                    {
-                        **decision.model_dump(mode="json"),
-                        "decision_key": key,
-                    }
+                decision = self._terminal_decision(
+                    run_id=run_id,
+                    strategy=strategy,
+                    candidate=item.candidate,
+                    key=key,
+                    outcome=DecisionOutcome.RISK_BLOCKED,
+                    setup=setup,
+                    review=review,
+                    risk=risk,
                 )
-            await self._record(decision, strategy.owner_id)
-            results.append(decision)
-        return tuple(results)
+        else:
+            decision = Decision.model_validate(
+                {
+                    **decision.model_dump(mode="json"),
+                    "decision_key": key,
+                }
+            )
+        await self._record(decision, strategy.owner_id)
+        return Assessment(decision=decision)
+
+    async def record_data_blocked(
+        self,
+        *,
+        run_id: str,
+        strategy: StrategyRecord,
+        candidate: Candidate,
+    ) -> Decision:
+        """Terminal outcome for a candidate whose data never arrived in the window."""
+        key = decision_key(
+            strategy_id=strategy.strategy_id,
+            strategy_version=strategy.version,
+            snapshot_fingerprint=fingerprint_payload(
+                {"candidate": fingerprint_payload(candidate), "data": "unavailable"}
+            ),
+        )
+        decision = self._terminal_decision(
+            run_id=run_id,
+            strategy=strategy,
+            candidate=candidate,
+            key=key,
+            outcome=DecisionOutcome.DATA_BLOCKED,
+        )
+        await self._record(decision, strategy.owner_id)
+        return decision
 
     async def _record(self, decision: Decision, owner_id: str) -> None:
         await self._decision_recorder(decision=decision, owner_id=owner_id)

@@ -7,7 +7,8 @@ import pytest
 from trading.authority import EngineAuthority, EngineAuthorityError
 from trading.contracts import EngineMode
 import trading.engine as engine_module
-import trading.workflow as workflow_module
+import trading.orchestration.persistence as runner_module
+import trading.orchestration.pipeline as pipeline_module
 
 
 @pytest.mark.parametrize(
@@ -42,8 +43,10 @@ def test_engine_does_not_accept_an_injected_authority():
         engine_module.AutotraderEngine(authority=EngineAuthority())
 
 
-def test_phase1_engine_and_workflow_do_not_import_broker_execution_paths():
-    source = inspect.getsource(engine_module) + inspect.getsource(workflow_module)
+def test_decision_path_does_not_import_broker_execution_paths():
+    source = "".join(
+        inspect.getsource(module) for module in (engine_module, pipeline_module, runner_module)
+    )
 
     assert "order_executor" not in source
     assert "ibkr_client" not in source
