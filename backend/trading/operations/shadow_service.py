@@ -1,13 +1,14 @@
-"""Composition root for real-data shadow sessions and the unattended daemon.
+"""Composition root for one real-data shadow strategy session.
 
 Shadow mode reads IBKR market data and the PAPER account, asks Claude for a
 review, and records decisions. It holds no order client and cannot submit.
+The supervisor (``trading.operations.supervisor``) decides when it runs.
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import logging
@@ -15,10 +16,12 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+from typing import TYPE_CHECKING, Protocol
 
 from trading.contracts import RiskPolicy, ShadowRuntimeConfig
 from trading.intelligence.anthropic_transport import (
     AnthropicMessagesTransport,
+    MarketContextProvider,
     build_anthropic_client,
 )
 from trading.intelligence.prompts import review_prompt, review_prompt_for
@@ -31,25 +34,46 @@ from trading.market.tws_actor import (
     documented_line_allocation,
 )
 from trading.operations.keychain import read_anthropic_api_key
-from trading.orchestration import RepositoryBackedShadowRunner, ShadowPipeline
+from trading.orchestration import (
+    RepositoryBackedShadowRunner,
+    ShadowPersistenceConflictError,
+    ShadowPipeline,
+)
 from trading.orchestration.session_runner import (
     momo_strategy_spec,
     orb_strategy_spec,
     ensure_strategy,
+    EntryGate,
     SessionAborted,
     SessionReport,
     ShadowSessionRunner,
 )
-from trading.orchestration.watchlist_source import hotlist_candidates
+from trading.orchestration.watchlist_source import gap_candidates, hotlist_candidates
 from trading.policies import ExecutionPolicy, OpeningRangeBreakoutPolicy
+from trading.rules.gap_go import (
+    GAP_REVIEW_PROMPT_ID,
+    GapGoConfig,
+    GapGoStrategy,
+    gap_go_bars,
+    gap_go_strategy_spec,
+)
 from trading.rules.momo import MomoConfig, MomoStrategy
-from trading.rules.strategy import ORBStrategy, StrategyEvaluator
+from trading.rules.vwap_pb import (
+    VWAP_REVIEW_PROMPT_ID,
+    VwapPbConfig,
+    VwapPbStrategy,
+    vwap_pb_strategy_spec,
+)
+from trading.rules.strategy import ORBStrategy, StrategyEvaluator, entry_window_utc
 from trading.scheduler.sessions import (
     MARKET_TIMEZONE,
     MarketSession,
     market_session,
     next_market_session,
 )
+
+if TYPE_CHECKING:
+    from trading.market.context import MarketContext
 
 logger = logging.getLogger("autotrader.shadow.service")
 
@@ -91,25 +115,97 @@ def source_sha(repo_root: Path = REPO_ROOT) -> str:
     return f"{head}-dirty" if dirty else head
 
 
+# No fallback: momo-review-v1 describes the old 1x ATR stop and would mislead
+# the reviewer on every V2 setup, so a missing v2 prompt fails the session start.
+MOMO_REVIEW_PROMPT_ID = "momo-review-v2"
+
 # Strategy name -> (evaluator factory, catalogue spec factory, review prompt id).
-# ORB keeps the configured prompt so its existing run fingerprints are stable.
+# ORB keeps the configured prompt so its run fingerprints are stable.
 STRATEGIES = {
     "orb": (ORBStrategy, orb_strategy_spec, None),
-    "momo": (MomoStrategy, momo_strategy_spec, "momo-review-v1"),
+    "momo": (MomoStrategy, momo_strategy_spec, MOMO_REVIEW_PROMPT_ID),
+    # Shadow strategies: their catalogue names are not MOMO_HOD*, so the paper
+    # bridge records but never sends their decisions.
+    "vwap": (VwapPbStrategy, vwap_pb_strategy_spec, VWAP_REVIEW_PROMPT_ID),
+    "gap": (GapGoStrategy, gap_go_strategy_spec, GAP_REVIEW_PROMPT_ID),
 }
+UNIVERSES = ("scanner", "watchlist", "gappers")
 # TWS accepts one connection per client ID. Strategy sessions run concurrently,
 # so each gets its own data client: data_client_id + offset (the screener uses
 # data_client_id + 2 and the order bridge uses order_client_id).
-STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3}
+# Client map with data 17 / orders 18: orb 17, screener 19, momo 20, telegram 21,
+# vwap 22, gap 23 (research and probes use 25-29).
+STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3, "vwap": 5, "gap": 6}
 # A hot-list session fetches bars for up to 35 symbols one after another (~90 s
 # live), so the newest completed bar is legitimately older than the 30 s
 # single-symbol limit. Anything under one bar interval still guarantees the
 # newest bar is the latest completed one.
 WATCHLIST_BAR_MAX_AGE = timedelta(seconds=240)
+# Strategies whose reviews see the screener's market context and whose entries
+# pause while the market is risk_off. ORB is left out so its runs (and run
+# fingerprints) are unchanged.
+MARKET_AWARE_STRATEGIES = frozenset({"momo"})
+MARKET_REGIME_RULE = "momo pauses in risk_off"
+# The screener writes a context about every 80 s; anything older than this is
+# treated as no context (reviews see it as unavailable, the gate stays open).
+MARKET_CONTEXT_MAX_AGE = timedelta(minutes=5)
+
+
+class MarketContextReader(Protocol):
+    async def __call__(
+        self, session_date: date, *, now: datetime, max_age: timedelta
+    ) -> MarketContext | None: ...
+
+
+async def _read_market_context(
+    session_date: date, *, now: datetime, max_age: timedelta
+) -> MarketContext | None:
+    # Imported on use: the screener's market package owns this read, and a
+    # strategy session must start even if that module fails to import (every
+    # caller treats an error as "no context").
+    from trading.market.context import latest_market_context
+
+    return await latest_market_context(session_date, now=now, max_age=max_age)
+
+
+def market_context_provider(
+    session_date: date, *, clock: Clock, reader: MarketContextReader
+) -> MarketContextProvider:
+    """The newest fresh context as the review's ``market_context``, else None."""
+
+    async def provide() -> Mapping[str, object] | None:
+        context = await reader(session_date, now=clock(), max_age=MARKET_CONTEXT_MAX_AGE)
+        return None if context is None else context.to_payload()
+
+    return provide
+
+
+def risk_off_entry_gate(
+    session_date: date, *, clock: Clock, reader: MarketContextReader
+) -> EntryGate:
+    """Block entries only while a fresh context says ``risk_off``.
+
+    No fresh context leaves entries open: the regime is an extra caution on top
+    of the rules and the risk engine, not a precondition for trading.
+    """
+
+    async def gate() -> tuple[bool, str]:
+        context = await reader(session_date, now=clock(), max_age=MARKET_CONTEXT_MAX_AGE)
+        if context is None:
+            return True, "no fresh market context"
+        if context.regime == "risk_off":
+            return False, context.summary
+        return True, context.summary
+
+    return gate
 
 
 def policy_fingerprints(
-    config: ShadowRuntimeConfig, policy: RiskPolicy, *, prompt_id: str | None = None
+    config: ShadowRuntimeConfig,
+    policy: RiskPolicy,
+    *,
+    prompt_id: str | None = None,
+    strategy_name: str = "orb",
 ) -> dict[str, str]:
     prompt = review_prompt(prompt_id or config.prompt_id)
     prints = {
@@ -120,17 +216,63 @@ def policy_fingerprints(
         "review_model": sha256(config.model_id.encode("utf-8")).hexdigest(),
         "runtime_config": config.fingerprint(),
     }
-    if prompt_id == "momo-review-v1":
+    if strategy_name == "momo":
         prints["momo_hod"] = MomoConfig().fingerprint()
+    if strategy_name == "vwap":
+        prints["vwap_pb"] = VwapPbConfig().fingerprint()
+    if strategy_name == "gap":
+        prints["gap_go"] = GapGoConfig().fingerprint()
+    if strategy_name in MARKET_AWARE_STRATEGIES:
+        prints["market_regime_rule"] = MARKET_REGIME_RULE
     return prints
 
 
-def session_to_run(now: datetime) -> MarketSession:
-    """Today's session while its entry window is still open, else the next one."""
+def _require_strategy(strategy_name: str, universe: str = "scanner") -> None:
+    if strategy_name not in STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy_name!r}")
+    if universe not in UNIVERSES:
+        raise ValueError(f"unknown universe {universe!r}")
+
+
+def strategy_entry_window(strategy_name: str, session_date: date) -> tuple[datetime, datetime]:
+    """The strategy's own ``(start, cutoff)`` in UTC; MOMO's moves in on half days."""
+    _require_strategy(strategy_name)
+    return entry_window_utc(STRATEGIES[strategy_name][0](), session_date)
+
+
+def _window_closed(strategy_name: str, session_date: date, cutoff: datetime) -> SessionAborted:
+    local_cutoff = cutoff.astimezone(MARKET_TIMEZONE)
+    return SessionAborted(
+        f"{strategy_name} entry window for {session_date.isoformat()} closed at "
+        f"{local_cutoff:%H:%M} ET"
+    )
+
+
+def session_for_strategy(
+    strategy_name: str, *, now: datetime, requested: date | None = None
+) -> MarketSession:
+    """The session a run uses, judged by the strategy's own cutoff (not ORB's 12:00).
+
+    A requested date is used as given and refused once its cutoff has passed;
+    without one, today's session is used while its window is open, else the next.
+    """
+    if requested is not None:
+        session = market_session(requested)
+        if session is None:
+            raise SessionAborted(f"{requested.isoformat()} is not an XNYS trading session")
+        cutoff = strategy_entry_window(strategy_name, requested)[1]
+        if now >= cutoff:
+            raise _window_closed(strategy_name, requested, cutoff)
+        return session
     today = market_session(now.astimezone(MARKET_TIMEZONE).date())
-    if today is not None and now < today.entry_cutoff_at:
+    if today is not None and now < strategy_entry_window(strategy_name, today.session_date)[1]:
         return today
     return next_market_session(now)
+
+
+def fresh_run_label(now: datetime) -> str:
+    """``r<HHMM>`` (ET) for a run started because the day's run could not resume."""
+    return f"r{now.astimezone(MARKET_TIMEZONE):%H%M}"
 
 
 async def run_shadow_session(
@@ -151,19 +293,22 @@ async def run_shadow_session(
     ``universe="watchlist"`` takes candidates from the live screener's hot list
     when the strategy's entry window opens instead of the 09:45 IBKR scan.
     """
-    if strategy_name not in STRATEGIES:
-        raise ValueError(f"unknown strategy {strategy_name!r}")
-    if universe not in {"scanner", "watchlist"}:
-        raise ValueError(f"unknown universe {universe!r}")
+    _require_strategy(strategy_name, universe)
     evaluator_factory, spec_factory, strategy_prompt = STRATEGIES[strategy_name]
     evaluator: StrategyEvaluator = evaluator_factory()
+    window_start, window_cutoff = entry_window_utc(evaluator, session.session_date)
+    # Refuse before any database write, Keychain read, or TWS connection: a
+    # closed window, or a review prompt that is missing or written for another
+    # strategy kind (review_prompt_for raises).
+    if clock() >= window_cutoff:
+        raise _window_closed(strategy_name, session.session_date, window_cutoff)
     prompt_id = strategy_prompt or config.prompt_id
+    system_prompt = review_prompt_for(prompt_id, strategy_kind=evaluator.strategy_kind)
     strategy = await ensure_strategy(owner_id=owner_id, spec=spec_factory())
     policy = RiskPolicy()
     run_id = f"shadow-{strategy.strategy_id[:8]}-{session.session_date.isoformat()}"
     if run_label:
         run_id = f"{run_id}-{run_label}"
-    window_start, window_cutoff = evaluator.entry_window(session.session_date)
     # Live 2026-10-12: a review took 9.6 s against a 10 s limit; a timeout is an
     # ABSTAIN, so the limit is sized to the model's observed latency.
     limits = ReviewSessionLimits(
@@ -171,13 +316,21 @@ async def run_shadow_session(
         max_calls=config.max_ai_calls,
         max_cost_usd=config.max_ai_cost_usd,
     )
+    market_aware = strategy_name in MARKET_AWARE_STRATEGIES
     api_key = read_anthropic_api_key()
     provider = StructuredAIReviewProvider(
         transport=AnthropicMessagesTransport(
             client=build_anthropic_client(
                 api_key=api_key, timeout_seconds=limits.timeout_seconds
             ),
-            system_prompt=review_prompt_for(prompt_id, strategy_kind=evaluator.strategy_kind),
+            system_prompt=system_prompt,
+            context_provider=(
+                market_context_provider(
+                    session.session_date, clock=clock, reader=_read_market_context
+                )
+                if market_aware
+                else None
+            ),
         ),
         model_id=config.model_id,
         prompt_version=prompt_id,
@@ -195,15 +348,22 @@ async def run_shadow_session(
         actor=actor,
         host=PAPER_TWS_HOST,
         volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
-        **({"bar_max_age": WATCHLIST_BAR_MAX_AGE} if universe == "watchlist" else {}),
+        **({"bar_max_age": WATCHLIST_BAR_MAX_AGE} if universe != "scanner" else {}),
     )
 
     async def watchlist_source(run):
-        scanner_run, candidates, liquidity = await hotlist_candidates(run, now=clock())
+        select = gap_candidates if universe == "gappers" else hotlist_candidates
+        scanner_run, candidates, liquidity = await select(run, now=clock())
         for candidate in candidates:
             # Quotes are priced on each contract's own tick grid.
             await market.load_contract(candidate.con_id)
         return scanner_run, candidates, liquidity
+
+    async def gap_bars(candidate, now):
+        # RTH history (2 D) for ATR plus today's all-hours bars for the gap.
+        regular = await market.completed_bars(con_id=candidate.con_id, now=now)
+        extended = await market.extended_bars(con_id=candidate.con_id, now=now)
+        return gap_go_bars(regular, extended, session_date=session.session_date)
 
     async def reconnect() -> None:
         if actor.connected:
@@ -213,8 +373,6 @@ async def run_shadow_session(
         logger.info("reconnected to TWS")
 
     connect_at = session.scanner_at if universe == "scanner" else window_start
-    if clock() >= window_cutoff:
-        raise SessionAborted(f"{strategy_name} entry window already closed for today")
     await _sleep_until(connect_at - CONNECT_LEAD, clock=clock, sleep=sleep)
     await actor.connect()
     try:
@@ -232,16 +390,27 @@ async def run_shadow_session(
             sleep=sleep,
             reconnect=reconnect,
             holder_id=f"{socket.gethostname()}:{os.getpid()}",
+            entry_gate=(
+                risk_off_entry_gate(
+                    session.session_date, clock=clock, reader=_read_market_context
+                )
+                if market_aware
+                else None
+            ),
+            entry_gate_name=strategy_name,
+            bars_fetcher=gap_bars if strategy_name == "gap" else None,
         )
         report = await runner.run(
             session=session,
             strategy=strategy,
             policy=policy,
             source_sha=source_sha(),
-            policy_fingerprints=policy_fingerprints(config, policy, prompt_id=prompt_id),
+            policy_fingerprints=policy_fingerprints(
+                config, policy, prompt_id=prompt_id, strategy_name=strategy_name
+            ),
             run_id=run_id,
-            candidate_source=watchlist_source if universe == "watchlist" else None,
-            window_start=window_start if universe == "watchlist" else None,
+            candidate_source=watchlist_source if universe != "scanner" else None,
+            window_start=window_start if universe != "scanner" else None,
         )
         usage = provider.usage
         logger.info(
@@ -256,31 +425,58 @@ async def run_shadow_session(
         await actor.disconnect()
 
 
-async def run_shadow_daemon(
+async def run_shadow_day(
     *,
-    config_loader: Callable[[], ShadowRuntimeConfig],
+    config: ShadowRuntimeConfig,
     owner_id: str,
+    session: MarketSession,
+    strategy_name: str = "orb",
+    universe: str = "scanner",
+    run_label: str | None = None,
     clock: Clock = _utc_now,
     sleep: Sleeper = asyncio.sleep,
-    max_sessions: int | None = None,
-) -> None:
-    """Run every trading session forever; one failed day never stops the next."""
-    completed = 0
-    while max_sessions is None or completed < max_sessions:
-        session = session_to_run(clock())
-        logger.info("next session %s", session.session_date.isoformat())
-        try:
-            # Reload each day so config edits apply without restarting the daemon.
-            config = config_loader()
-            await run_shadow_session(
-                config=config, owner_id=owner_id, session=session, clock=clock, sleep=sleep
-            )
-        except asyncio.CancelledError:
+) -> SessionReport:
+    """Resume the day's run; a watchlist run that cannot resume starts one fresh run.
+
+    A restarted watchlist session reads a newer hot-list snapshot than the one
+    its stored run recorded, so resuming conflicts by construction. The stored
+    run is never rewritten: exactly one retry runs under ``r<HHMM>`` (ET).
+    """
+    try:
+        return await run_shadow_session(
+            config=config,
+            owner_id=owner_id,
+            session=session,
+            clock=clock,
+            sleep=sleep,
+            run_label=run_label,
+            strategy_name=strategy_name,
+            universe=universe,
+        )
+    except ShadowPersistenceConflictError as exc:
+        label = fresh_run_label(clock())
+        # Both universes re-select candidates on restart (a new scan or a new
+        # hot-list snapshot), which can never match the stored run; a fresh
+        # labelled run avoids a restart loop until the strategy's cutoff.
+        if label == run_label:
             raise
-        except Exception:
-            logger.exception("session %s failed", session.session_date.isoformat())
-        completed += 1
-        await _sleep_until(session.entry_cutoff_at, clock=clock, sleep=sleep)
+        logger.warning(
+            "%s %s run cannot resume (%s); starting a fresh run %s",
+            strategy_name,
+            universe,
+            exc,
+            label,
+        )
+    return await run_shadow_session(
+        config=config,
+        owner_id=owner_id,
+        session=session,
+        clock=clock,
+        sleep=sleep,
+        run_label=label,
+        strategy_name=strategy_name,
+        universe=universe,
+    )
 
 
 async def _sleep_until(moment: datetime, *, clock: Clock, sleep: Sleeper) -> None:
@@ -291,9 +487,19 @@ async def _sleep_until(moment: datetime, *, clock: Clock, sleep: Sleeper) -> Non
 
 __all__ = [
     "IBKR_API_VOLUME_MULTIPLIER",
+    "MARKET_AWARE_STRATEGIES",
+    "MARKET_CONTEXT_MAX_AGE",
+    "MARKET_REGIME_RULE",
+    "MOMO_REVIEW_PROMPT_ID",
+    "STRATEGIES",
+    "UNIVERSES",
+    "fresh_run_label",
+    "market_context_provider",
     "policy_fingerprints",
-    "run_shadow_daemon",
+    "risk_off_entry_gate",
+    "run_shadow_day",
     "run_shadow_session",
-    "session_to_run",
+    "session_for_strategy",
     "source_sha",
+    "strategy_entry_window",
 ]

@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import date
+from datetime import date, datetime, time, timezone
+import importlib
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Coroutine, Sequence
 from pathlib import Path
+import signal
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -23,6 +25,23 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
+# Mirrors trading.operations.shadow_service.STRATEGIES / UNIVERSES (a test pins
+# them); kept literal so parsing never imports the TWS and Claude stack.
+_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap")
+_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers")
+EXIT_INTERRUPTED = 130
+# An orderly SIGTERM stop is a clean exit, as in paper_bridge.py: the
+# supervisor's window-end stop must not read as a failure on the owner's phone.
+EXIT_STOPPED = 0
+NOTIFY_SERVICE_MODULE = "trading.operations.notify_service"
+TELEGRAM_BOT_MODULE = "trading.operations.telegram_bot"
+
+
+def _clock_time(value: str) -> time:
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected HH:MM, got {value!r}") from exc
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -45,12 +64,24 @@ def _parser() -> argparse.ArgumentParser:
     shadow_actions = shadow.add_subparsers(dest="action", required=True)
     preflight = shadow_actions.add_parser("preflight", help="read-only preparation checks; does not enable orders")
     preflight.add_argument("--json", action="store_true", dest="json_output")
-    run = shadow_actions.add_parser("run", help="run one shadow session in the foreground")
+    run = shadow_actions.add_parser("run", help="run one strategy session in the foreground")
+    run.add_argument(
+        "--strategy", choices=_STRATEGY_CHOICES, default="orb", help="strategy (default orb)"
+    )
+    run.add_argument(
+        "--universe",
+        choices=_UNIVERSE_CHOICES,
+        default="scanner",
+        help="candidates from the 09:45 IBKR scan or the live screener hot list (default scanner)",
+    )
     run.add_argument(
         "--date",
         type=date.fromisoformat,
         default=None,
-        help="session date (YYYY-MM-DD); defaults to today's or the next session",
+        help=(
+            "session date (YYYY-MM-DD), refused after the strategy's cutoff; defaults to "
+            "today's session while the strategy's entry window is open, else the next"
+        ),
     )
     run.add_argument(
         "--new-run",
@@ -58,7 +89,6 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="start a separate run for the day instead of resuming the existing one",
     )
-    shadow_actions.add_parser("daemon", help="run every shadow session unattended (launchd)")
     probe = shadow_actions.add_parser(
         "probe", help="read-only: show what TWS returns for scanner, bars, quote, account"
     )
@@ -68,7 +98,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also send one synthetic setup to Claude (about $0.02)",
     )
-    agent = shadow_actions.add_parser("agent", help="manage the launchd agent that runs the daemon")
+    agent = shadow_actions.add_parser(
+        "agent", help="manage the LaunchAgent that keeps `autotraderctl run` alive"
+    )
     agent.add_argument("agent_action", choices=("install", "enable", "disable", "status"))
 
     universe = domains.add_parser("universe", help="watchlist universe (market data only, no orders)")
@@ -101,6 +133,52 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not merge movers from IBKR scans (HOT_BY_VOLUME, TOP_PERC_GAIN, MOST_ACTIVE)",
     )
+
+    notify = domains.add_parser("notify", help="Telegram notifications to the owner's phone")
+    notify_actions = notify.add_subparsers(dest="action", required=True)
+    notify_run = notify_actions.add_parser(
+        "run", help="relay the session's signals, orders, exits and child restarts"
+    )
+    notify_run.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        default=None,
+        help="session date (YYYY-MM-DD); defaults to today's or the next session",
+    )
+    notify_actions.add_parser("test", help="send one test message")
+
+    telegram = domains.add_parser(
+        "telegram", help="the owner's Telegram assistant: data, questions, manual PAPER orders"
+    )
+    telegram_actions = telegram.add_subparsers(dest="action", required=True)
+    telegram_actions.add_parser(
+        "run",
+        help="answer the pinned owner's messages (foreground; the supervisor keeps it running)",
+    )
+    telegram_actions.add_parser("whoami", help="show the pinned owner chat id (no secrets)")
+
+    supervise = domains.add_parser(
+        "run",
+        help="supervise each trading day's screener, bridge, strategies and notifier (foreground)",
+    )
+    supervise.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the planned child timeline on a simulated clock; launch nothing",
+    )
+    supervise.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        default=None,
+        help="only this session (YYYY-MM-DD); without it every session runs, back to back",
+    )
+    supervise.add_argument(
+        "--clock-start",
+        type=_clock_time,
+        default=None,
+        metavar="HH:MM",
+        help="with --dry-run: simulate a supervisor started at this ET time",
+    )
     return parser
 
 
@@ -113,7 +191,7 @@ def _shadow_agent(action: str) -> int:
             print(f"LaunchAgent written (not loaded): {manager.install()}")
         elif action == "enable":
             manager.enable()
-            print("LaunchAgent enabled: the shadow daemon runs at login and restarts on failure")
+            print("LaunchAgent enabled: the supervisor (autotraderctl run) starts at login and is kept alive")
         elif action == "disable":
             manager.disable()
             print("LaunchAgent disabled")
@@ -147,53 +225,76 @@ async def _execute(arguments: argparse.Namespace) -> int:
         cfg.DB_PATH = original_db_path
 
 
-def _shadow_runtime(arguments: argparse.Namespace) -> int:
-    """Real-data shadow session or daemon; logs go to the private shadow log."""
+async def _cancel_on_sigterm(work: Coroutine[Any, Any, int]) -> int:
+    """Await ``work``; SIGTERM cancels it so its finally blocks disconnect TWS.
+
+    Without a handler SIGTERM kills Python outright: no finally block runs,
+    the TWS client ID stays occupied, and the shadow-run lease is held for its
+    full TTL. The orderly stop exits 0. SIGINT keeps asyncio's own handling.
+    """
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(work)
+    terminated = False
+
+    def terminate() -> None:
+        nonlocal terminated
+        terminated = True
+        task.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, terminate)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if not terminated:
+            raise
+        print("stopped by SIGTERM; connections closed", file=sys.stderr, flush=True)
+        return EXIT_STOPPED
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
+def _shadow_run(arguments: argparse.Namespace) -> int:
+    """One real-data strategy session; logs go to the private shadow log."""
     from auth import DEMO_USER_ID
     from trading.operations.logging import configure_shadow_logging
     from trading.operations.settings import load_shadow_runtime_config
-    from trading.operations.shadow_service import (
-        run_shadow_daemon,
-        run_shadow_session,
-        session_to_run,
-    )
-    from trading.scheduler.sessions import market_session
+    from trading.operations.shadow_service import run_shadow_day, session_for_strategy
+    from trading.orchestration.session_runner import SessionAborted
 
     logger = configure_shadow_logging()
     console = logging.StreamHandler(sys.stderr)
     console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(console)
+    label = f"shadow run --strategy {arguments.strategy}"
 
-    async def foreground() -> int:
+    async def session_run() -> int:
+        # Pure calendar check first: a closed window never touches the database.
+        session = session_for_strategy(
+            arguments.strategy, now=datetime.now(timezone.utc), requested=arguments.date
+        )
         await init_db()
-        config = load_shadow_runtime_config()
-        if arguments.date is not None:
-            session = market_session(arguments.date)
-            if session is None:
-                print(f"error: {arguments.date} is not a trading session", file=sys.stderr)
-                return 1
-        else:
-            from datetime import datetime, timezone
-
-            session = session_to_run(datetime.now(timezone.utc))
-        report = await run_shadow_session(
-            config=config, owner_id=DEMO_USER_ID, session=session, run_label=arguments.new_run
+        report = await run_shadow_day(
+            config=load_shadow_runtime_config(),
+            owner_id=DEMO_USER_ID,
+            session=session,
+            strategy_name=arguments.strategy,
+            universe=arguments.universe,
+            run_label=arguments.new_run,
         )
         print(json.dumps(report.summary(), indent=2))
         return 0
 
-    async def daemon() -> int:
-        await init_db()
-        await run_shadow_daemon(config_loader=load_shadow_runtime_config, owner_id=DEMO_USER_ID)
-        return 0
-
     try:
-        return asyncio.run(foreground() if arguments.action == "run" else daemon())
+        return asyncio.run(_cancel_on_sigterm(session_run()))
     except KeyboardInterrupt:
-        return 130
+        return EXIT_INTERRUPTED
+    except SessionAborted as exc:
+        logger.error("%s aborted: %s", label, exc)
+        print(f"error: {label}: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 - reported without secrets
-        logger.exception("shadow %s failed", arguments.action)
-        print(f"error: shadow {arguments.action} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.exception("%s failed", label)
+        print(f"error: {label} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 
@@ -251,8 +352,6 @@ def _print_sweep(result: SweepResult, *, top: int = 10) -> None:
 
 def _market_data_command(arguments: argparse.Namespace) -> int:
     """Universe import/qualify and the live screener; market data only."""
-    from datetime import datetime, timezone
-
     from trading.market.tws_actor import TWSCompetingSessionError
     from trading.operations import screener_service as service
     from trading.operations.settings import load_shadow_runtime_config
@@ -293,9 +392,9 @@ def _market_data_command(arguments: argparse.Namespace) -> int:
 
     label = f"{arguments.domain} {arguments.action}"
     try:
-        return asyncio.run(command())
+        return asyncio.run(_cancel_on_sigterm(command()))
     except KeyboardInterrupt:
-        return 130
+        return EXIT_INTERRUPTED
     except TWSCompetingSessionError as exc:
         logger.error("%s (%s)", service.COMPETING_SESSION_MESSAGE, exc)
         print(f"error: {service.COMPETING_SESSION_MESSAGE}", file=sys.stderr)
@@ -308,14 +407,87 @@ def _market_data_command(arguments: argparse.Namespace) -> int:
         cfg.DB_PATH = original_db_path
 
 
+def _notify_command(arguments: argparse.Namespace) -> int:
+    """Telegram notifier; its module is loaded only when a notify command runs."""
+    try:
+        service = importlib.import_module(NOTIFY_SERVICE_MODULE)
+    except ImportError as exc:
+        print(f"error: the notifier is unavailable ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    if arguments.action == "test":
+        work = service.send_test_message()
+    else:
+        session_date = arguments.date
+        if session_date is None:
+            from trading.operations.screener_service import screener_session_date
+
+            session_date = screener_session_date(datetime.now(timezone.utc))
+        work = service.run_notifier(session_date=session_date)
+    try:
+        return asyncio.run(_cancel_on_sigterm(work))
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except Exception as exc:  # noqa: BLE001 - type only: a message could carry the bot token
+        print(f"error: notify {arguments.action} failed: {type(exc).__name__}", file=sys.stderr)
+        return 1
+
+
+def _telegram_command(arguments: argparse.Namespace) -> int:
+    """The Telegram assistant; its module is loaded only when a telegram command runs."""
+    try:
+        service = importlib.import_module(TELEGRAM_BOT_MODULE)
+    except ImportError as exc:
+        print(f"error: the Telegram assistant is unavailable ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    if arguments.action == "whoami":
+        return service.print_owner()
+    try:
+        return asyncio.run(_cancel_on_sigterm(service.run_telegram_assistant()))
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except Exception as exc:  # noqa: BLE001 - type only: a message could carry the bot token
+        print(f"error: telegram {arguments.action} failed: {type(exc).__name__}", file=sys.stderr)
+        return 1
+
+
+def _supervise_command(arguments: argparse.Namespace) -> int:
+    """``autotraderctl run``: the foreground supervisor, or its simulated timeline."""
+    from trading.operations import supervisor
+
+    if not arguments.dry_run:
+        return supervisor.run_supervisor(session_date=arguments.date)
+    try:
+        report = supervisor.dry_run_report(
+            session_date=arguments.date, clock_start=arguments.clock_start
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(report)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run an explicitly requested local operator command."""
 
-    arguments = _parser().parse_args(argv)
+    parser = _parser()
+    arguments = parser.parse_args(argv)
+    if arguments.domain == "run":
+        if arguments.clock_start is not None and not arguments.dry_run:
+            parser.error("--clock-start requires --dry-run")
+        if getattr(arguments, "db_path", None) is not None:
+            parser.error("--db-path does not apply to run; its children use the canonical database")
+        return _supervise_command(arguments)
+    if arguments.domain == "notify":
+        return _notify_command(arguments)
+    if arguments.domain == "telegram":
+        if getattr(arguments, "db_path", None) is not None:
+            parser.error("--db-path does not apply to telegram; the assistant uses the canonical database")
+        return _telegram_command(arguments)
     if arguments.domain in {"universe", "screener"}:
         return _market_data_command(arguments)
-    if arguments.domain == "shadow" and arguments.action in {"run", "daemon"}:
-        return _shadow_runtime(arguments)
+    if arguments.domain == "shadow" and arguments.action == "run":
+        return _shadow_run(arguments)
     if arguments.domain == "shadow" and arguments.action == "agent":
         return _shadow_agent(arguments.agent_action)
     if arguments.domain == "shadow" and arguments.action == "probe":
