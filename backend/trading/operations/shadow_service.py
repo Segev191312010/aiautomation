@@ -101,9 +101,11 @@ STRATEGIES = {
 # so each gets its own data client: data_client_id + offset (the screener uses
 # data_client_id + 2 and the order bridge uses order_client_id).
 STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3}
-# A hot-list session fetches bars for up to 35 symbols one after another, so the
-# newest completed bar is legitimately older than the 30 s single-symbol limit.
-WATCHLIST_BAR_MAX_AGE = timedelta(seconds=90)
+# A hot-list session fetches bars for up to 35 symbols one after another (~90 s
+# live), so the newest completed bar is legitimately older than the 30 s
+# single-symbol limit. Anything under one bar interval still guarantees the
+# newest bar is the latest completed one.
+WATCHLIST_BAR_MAX_AGE = timedelta(seconds=240)
 
 
 def policy_fingerprints(

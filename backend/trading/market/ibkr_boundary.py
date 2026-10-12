@@ -565,7 +565,12 @@ class PaperIBKRMarketData:
         if con_id <= 0:
             raise MarketDataQualityError("conId must be positive")
         batch = await self.actor.completed_trade_bars(con_id)
-        return validate_completed_trade_bars(batch, now=now, max_age=self.bar_max_age)
+        # ``now`` is taken before the request; a slow reply (seen live with 35
+        # sequential requests) delivers bars after it. The observation moment
+        # is when the batch arrived, so receipt time is never "in the future".
+        received = [_require_aware(bar.received_at, "received_at") for bar in batch.bars]
+        observed_at = max([_require_aware(now, "now"), *received])
+        return validate_completed_trade_bars(batch, now=observed_at, max_age=self.bar_max_age)
 
     async def quote(self, *, con_id: int) -> QuoteSnapshot:
         """Real-time quote priced on the contract's own tick grid."""

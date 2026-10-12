@@ -388,3 +388,27 @@ async def test_adapter_quote_uses_contract_min_tick_and_checks_contract():
     await wrong_adapter.scanner_snapshot(scanner_run_id="scan-1")
     with pytest.raises(MarketDataQualityError, match="different contract"):
         await wrong_adapter.quote(con_id=1001)
+
+
+@pytest.mark.anyio
+async def test_slow_reply_bars_are_observed_at_receipt_not_request_time():
+    """Live 2026-10-12: replies arriving >1 s after the request were rejected."""
+    requested_at = _at(14, 35, 5)
+    slow = BarBatch(
+        bars=tuple(
+            _bar(
+                interval_start_utc=start,
+                interval_end_utc=start + timedelta(minutes=5),
+                received_at=_at(14, 35, 9),
+            )
+            for start in (_at(14, 25), _at(14, 30))
+        )
+    )
+
+    class SlowActor(_Actor):
+        async def completed_trade_bars(self, con_id):
+            return slow
+
+    adapter = PaperIBKRMarketData(actor=SlowActor(), host="127.0.0.1")
+    bars = await adapter.completed_bars(con_id=101, now=requested_at)
+    assert len(bars) == 2
