@@ -48,6 +48,15 @@ def _parser() -> argparse.ArgumentParser:
         help="session date (YYYY-MM-DD); defaults to today's or the next session",
     )
     shadow_actions.add_parser("daemon", help="run every shadow session unattended (launchd)")
+    probe = shadow_actions.add_parser(
+        "probe", help="read-only: show what TWS returns for scanner, bars, quote, account"
+    )
+    probe.add_argument("--con-id", type=int, default=None, help="probe this conId instead of the top scan row")
+    probe.add_argument(
+        "--with-claude",
+        action="store_true",
+        help="also send one synthetic setup to Claude (about $0.02)",
+    )
     agent = shadow_actions.add_parser("agent", help="manage the launchd agent that runs the daemon")
     agent.add_argument("agent_action", choices=("install", "enable", "disable", "status"))
     return parser
@@ -154,6 +163,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _shadow_runtime(arguments)
     if arguments.domain == "shadow" and arguments.action == "agent":
         return _shadow_agent(arguments.agent_action)
+    if arguments.domain == "shadow" and arguments.action == "probe":
+        from trading.operations.probe import probe_tws
+        from trading.operations.settings import load_shadow_runtime_config
+
+        report = asyncio.run(
+            probe_tws(
+                load_shadow_runtime_config(),
+                con_id=arguments.con_id,
+                include_ai=arguments.with_claude,
+            )
+        )
+        print(json.dumps(report, indent=2, default=str))
+        return 0
     if arguments.domain == "shadow":
         from trading.operations.readiness import check_shadow_preflight
 
