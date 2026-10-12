@@ -340,8 +340,12 @@ def _official_scanner_factory(request: ScannerRequest) -> Any:
     subscription.instrument = request.instrument
     subscription.locationCode = request.location
     subscription.scanCode = request.scan_code
-    subscription.stockTypeFilter = request.stock_type_filter
+    # IBKR's scanner code for ordinary company shares is "CORP"; "COMMON" is
+    # silently ignored (2026-10-12 live scan returned 45/50 ETFs with it).
+    subscription.stockTypeFilter = {"COMMON": "CORP"}[request.stock_type_filter]
     subscription.numberOfRows = request.number_of_rows
+    subscription.abovePrice = float(request.above_price)
+    subscription.belowPrice = float(request.below_price)
     return subscription
 
 

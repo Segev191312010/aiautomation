@@ -54,10 +54,16 @@ class ScannerRequest:
     scan_code: Literal["HOT_BY_VOLUME"] = "HOT_BY_VOLUME"
     stock_type_filter: Literal["COMMON"] = "COMMON"
     number_of_rows: int = MAX_ADMITTED_CANDIDATES
+    # Server-side price band matching ORB's $10-$300 rule. Without it the
+    # 2026-10-12 live scan returned 25 of 26 admitted rows under $10.
+    above_price: Decimal = Decimal("10")
+    below_price: Decimal = Decimal("300")
 
     def __post_init__(self) -> None:
         if self.number_of_rows != MAX_ADMITTED_CANDIDATES:
             raise ValueError("the V1 scanner request must ask for exactly 50 rows")
+        if (self.above_price, self.below_price) != (Decimal("10"), Decimal("300")):
+            raise ValueError("the V1 scanner price band is fixed at $10-$300")
 
 
 DEFAULT_SCANNER_REQUEST = ScannerRequest()

@@ -112,11 +112,18 @@ async def run_shadow_session(
     session: MarketSession,
     clock: Clock = _utc_now,
     sleep: Sleeper = asyncio.sleep,
+    run_label: str | None = None,
 ) -> SessionReport:
-    """Run one real-data session end to end against the local PAPER TWS."""
+    """Run one real-data session end to end against the local PAPER TWS.
+
+    ``run_label`` starts a separate run for the same day (e.g. after a changed
+    scanner request); without it a restart resumes the day's existing run.
+    """
     strategy = await ensure_orb_strategy(owner_id=owner_id)
     policy = RiskPolicy()
     run_id = f"shadow-{strategy.strategy_id[:8]}-{session.session_date.isoformat()}"
+    if run_label:
+        run_id = f"{run_id}-{run_label}"
     limits = ReviewSessionLimits(
         max_calls=config.max_ai_calls, max_cost_usd=config.max_ai_cost_usd
     )

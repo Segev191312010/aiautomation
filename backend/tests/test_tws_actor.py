@@ -528,3 +528,14 @@ async def test_informational_warnings_on_a_request_do_not_fail_it() -> None:
     await actor.connect()
     quote = await actor.quote_snapshot(101, min_tick=Decimal("0.01"))
     assert quote.bid == Decimal("100")
+
+
+def test_official_scanner_request_uses_corp_filter_and_orb_price_band() -> None:
+    from trading.market.tws_actor import _official_scanner_factory
+
+    subscription = _official_scanner_factory(ScannerRequest())
+
+    # Live 2026-10-12: "COMMON" was ignored (45/50 ETFs); IBKR's code is "CORP".
+    assert subscription.stockTypeFilter == "CORP"
+    assert (subscription.abovePrice, subscription.belowPrice) == (10.0, 300.0)
+    assert subscription.scanCode == "HOT_BY_VOLUME"

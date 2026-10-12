@@ -47,6 +47,12 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="session date (YYYY-MM-DD); defaults to today's or the next session",
     )
+    run.add_argument(
+        "--new-run",
+        metavar="LABEL",
+        default=None,
+        help="start a separate run for the day instead of resuming the existing one",
+    )
     shadow_actions.add_parser("daemon", help="run every shadow session unattended (launchd)")
     probe = shadow_actions.add_parser(
         "probe", help="read-only: show what TWS returns for scanner, bars, quote, account"
@@ -135,7 +141,7 @@ def _shadow_runtime(arguments: argparse.Namespace) -> int:
 
             session = session_to_run(datetime.now(timezone.utc))
         report = await run_shadow_session(
-            config=config, owner_id=DEMO_USER_ID, session=session
+            config=config, owner_id=DEMO_USER_ID, session=session, run_label=arguments.new_run
         )
         print(json.dumps(report.summary(), indent=2))
         return 0
