@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
 import threading
@@ -12,7 +12,9 @@ from typing import Any, Protocol
 
 from trading.market.ibkr_boundary import (
     BarBatch,
+    DailyBarBatch,
     IBKRContractDetails,
+    IBKRDailyBar,
     IBKRScannerResult,
     IBKRTradeBar,
     ScannerRequest,
@@ -22,6 +24,10 @@ from trading.contracts import QuoteSnapshot
 PAPER_TWS_HOST = "127.0.0.1"
 PAPER_TWS_PORT = 7497
 PACING_ERROR_CODES = frozenset({162, 165, 366, 420})
+# Two sessions of five-minute RTH bars: ATR(14) is available at the first
+# signal bar (09:50) from the prior session's history.
+INTRADAY_HISTORY_DURATION = "2 D"
+DAILY_HISTORY_DURATION = "2 M"
 
 
 class TWSActorError(RuntimeError):
@@ -138,6 +144,13 @@ class _PendingBars:
     future: asyncio.Future[BarBatch]
     con_id: int
     bars: list[IBKRTradeBar] = field(default_factory=list)
+
+
+@dataclass
+class _PendingDailyBars:
+    future: asyncio.Future[DailyBarBatch]
+    con_id: int
+    bars: list[IBKRDailyBar] = field(default_factory=list)
 
 
 @dataclass
@@ -329,6 +342,7 @@ class TWSPaperActor:
         self._request_gate = asyncio.Lock()
         self._pending_scans: dict[int, _PendingScan] = {}
         self._pending_bars: dict[int, _PendingBars] = {}
+        self._pending_daily: dict[int, _PendingDailyBars] = {}
         self._pending_details: dict[int, _PendingDetails] = {}
         self._pending_quotes: dict[int, _PendingQuote] = {}
         self._last_error: str | None = None
@@ -393,12 +407,14 @@ class TWSPaperActor:
         for pending in (
             *self._pending_scans.values(),
             *self._pending_bars.values(),
+            *self._pending_daily.values(),
             *self._pending_details.values(),
             *self._pending_quotes.values(),
         ):
             self._set_future_exception(pending.future, error)
         self._pending_scans.clear()
         self._pending_bars.clear()
+        self._pending_daily.clear()
         self._pending_details.clear()
         self._pending_quotes.clear()
         self._run_thread = None
@@ -485,7 +501,7 @@ class TWSPaperActor:
                     request_id,
                     contract,
                     "",
-                    "1 D",
+                    INTRADAY_HISTORY_DURATION,
                     "5 mins",
                     "TRADES",
                     1,
@@ -501,6 +517,38 @@ class TWSPaperActor:
                 raise TWSRequestError("TWS historical-data request timed out") from exc
             finally:
                 self._pending_bars.pop(request_id, None)
+
+    async def daily_trade_bars(self, con_id: int) -> DailyBarBatch:
+        """Regular-session daily TRADES bars; today's forming bar is filtered downstream."""
+        if con_id <= 0:
+            raise TWSRequestError("con_id must be positive")
+        self._require_connected()
+        async with self._request_gate:
+            request_id = await self._allocate_request_id()
+            pending = _PendingDailyBars(asyncio.get_running_loop().create_future(), con_id)
+            self._pending_daily[request_id] = pending
+            try:
+                method = getattr(self._client, "reqHistoricalData")
+                method(
+                    request_id,
+                    self._contract_factory(con_id),
+                    "",
+                    DAILY_HISTORY_DURATION,
+                    "1 day",
+                    "TRADES",
+                    1,
+                    1,
+                    False,
+                    [],
+                )
+                return await asyncio.wait_for(
+                    pending.future, timeout=self.config.request_timeout_seconds
+                )
+            except asyncio.TimeoutError as exc:
+                self._cancel_historical(request_id)
+                raise TWSRequestError("TWS daily-history request timed out") from exc
+            finally:
+                self._pending_daily.pop(request_id, None)
 
     async def quote_snapshot(
         self,
@@ -711,6 +759,18 @@ class TWSPaperActor:
 
     def _on_historical_data(self, request_id: int, bar: Any) -> None:
         self._callbacks_seen += 1
+        daily = self._pending_daily.get(request_id)
+        if daily is not None:
+            if daily.future.done():
+                return
+            try:
+                daily.bars.append(self._daily_bar(bar, con_id=daily.con_id))
+            except Exception as exc:
+                self._last_error = str(exc)
+                self._set_future_exception(
+                    daily.future, TWSRequestError("invalid TWS daily bar callback")
+                )
+            return
         pending = self._pending_bars.get(request_id)
         if pending is None or pending.future.done():
             return
@@ -726,6 +786,13 @@ class TWSPaperActor:
 
     def _on_historical_end(self, request_id: int) -> None:
         self._callbacks_seen += 1
+        daily = self._pending_daily.get(request_id)
+        if daily is not None and not daily.future.done():
+            self._set_future_result(
+                daily.future,
+                DailyBarBatch(bars=tuple(daily.bars), connected=self._connected),
+            )
+            return
         pending = self._pending_bars.get(request_id)
         if pending is not None and not pending.future.done():
             self._set_future_result(
@@ -797,6 +864,7 @@ class TWSPaperActor:
             return
         pending_scan = self._pending_scans.get(request_id)
         pending_bars = self._pending_bars.get(request_id)
+        pending_daily = self._pending_daily.get(request_id)
         pending_details = self._pending_details.get(request_id)
         pending_quote = self._pending_quotes.get(request_id)
         if pending_scan is not None:
@@ -813,6 +881,16 @@ class TWSPaperActor:
                     error=self._last_error,
                 ),
             )
+        if pending_daily is not None:
+            self._set_future_result(
+                pending_daily.future,
+                DailyBarBatch(
+                    bars=(),
+                    connected=self._connected,
+                    pacing_failed=code in PACING_ERROR_CODES,
+                    error=self._last_error,
+                ),
+            )
         if pending_quote is not None:
             self._set_future_exception(pending_quote.future, TWSRequestError(self._last_error))
 
@@ -823,6 +901,7 @@ class TWSPaperActor:
         for pending in (
             *self._pending_scans.values(),
             *self._pending_bars.values(),
+            *self._pending_daily.values(),
             *self._pending_details.values(),
             *self._pending_quotes.values(),
         ):
@@ -928,6 +1007,15 @@ class TWSPaperActor:
             received_at=datetime.now(timezone.utc),
         )
 
+    @staticmethod
+    def _daily_bar(raw: Any, *, con_id: int) -> IBKRDailyBar:
+        return IBKRDailyBar(
+            con_id=con_id,
+            session_date=_parse_ibkr_session_date(getattr(raw, "date")),
+            close=Decimal(str(getattr(raw, "close"))),
+            volume=Decimal(str(getattr(raw, "volume"))),
+        )
+
     def _cancel_scanner(self, request_id: int) -> None:
         if self._client is not None:
             method = getattr(self._client, "cancelScannerSubscription", None)
@@ -959,3 +1047,14 @@ def _parse_ibkr_timestamp(value: Any) -> datetime:
     if epoch <= 0:
         raise TWSRequestError("TWS bar timestamp must be positive")
     return datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+
+def _parse_ibkr_session_date(value: Any) -> date:
+    """Daily bars carry the exchange session date as ``YYYYMMDD``."""
+    text = str(value).strip()
+    if len(text) != 8 or not text.isdigit():
+        raise TWSRequestError("TWS daily bar date must be YYYYMMDD")
+    try:
+        return date(int(text[:4]), int(text[4:6]), int(text[6:]))
+    except ValueError as exc:
+        raise TWSRequestError("TWS daily bar date is invalid") from exc

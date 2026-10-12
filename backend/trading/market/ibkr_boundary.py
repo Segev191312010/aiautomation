@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -20,6 +20,9 @@ from trading.contracts import Candidate, CompletedBar
 PAPER_TWS_PORT = 7497
 MAX_ADMITTED_CANDIDATES = 50
 DEFAULT_BAR_MAX_AGE = timedelta(seconds=30)
+LIQUIDITY_LOOKBACK_SESSIONS = 20
+# Most recent prior session may be at most this old (covers long holiday weekends).
+MAX_DAILY_HISTORY_GAP = timedelta(days=5)
 
 
 class MarketDataBoundaryError(ValueError):
@@ -150,6 +153,35 @@ class BarBatch:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class IBKRDailyBar:
+    """One regular-session daily TRADES bar; ``volume`` is in the API's raw unit."""
+
+    con_id: int
+    session_date: date
+    close: Decimal
+    volume: Decimal
+
+
+@dataclass(frozen=True)
+class DailyBarBatch:
+    bars: tuple[IBKRDailyBar, ...]
+    connected: bool = True
+    pacing_failed: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class LiquidityProfile:
+    """Prior-session price and 20-session average dollar volume for qualification."""
+
+    con_id: int
+    reference_price: Decimal
+    average_dollar_volume: Decimal
+    sessions_used: int
+    last_session_date: date
+
+
 class IBKRConnectionActor(Protocol):
     """The sole integration seam for request IDs, callbacks, and reconnects."""
 
@@ -164,6 +196,9 @@ class IBKRConnectionActor(Protocol):
 
     async def contract_details(self, con_id: int) -> IBKRContractDetails:
         """Return qualified contract details for one conId."""
+
+    async def daily_trade_bars(self, con_id: int) -> DailyBarBatch:
+        """Return recent regular-session daily TRADES bars for one contract."""
 
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
@@ -304,6 +339,7 @@ def validate_completed_trade_bars(
     validated: list[CompletedBar] = []
     fingerprints: set[str] = set()
     intervals: set[tuple[int, datetime]] = set()
+    latest_end: datetime | None = None
     for raw in batch.bars:
         start = _require_aware(raw.interval_start_utc, "interval_start_utc")
         end = _require_aware(raw.interval_end_utc, "interval_end_utc")
@@ -317,9 +353,10 @@ def validate_completed_trade_bars(
         if not raw.complete:
             raise MarketDataQualityError("incomplete bars cannot feed a candidate")
         if end > observed_at:
-            raise MarketDataQualityError("bar interval ends in the future")
-        if observed_at - end > max_age:
-            raise MarketDataQualityError("stale market data cannot feed a candidate")
+            # IBKR includes the still-forming interval when the request ends "now";
+            # it is not completed evidence and is dropped, never admitted.
+            continue
+        latest_end = end if latest_end is None or end > latest_end else latest_end
         if received_at > observed_at + timedelta(seconds=1):
             raise MarketDataQualityError("bar receipt timestamp is in the future")
         if raw.con_id <= 0:
@@ -351,7 +388,59 @@ def validate_completed_trade_bars(
             )
         except ValueError as exc:
             raise MarketDataQualityError("bar failed the five-minute OHLC validation") from exc
+    # Older bars are legitimate history (ATR, opening range); freshness is a
+    # property of the newest completed interval only.
+    if latest_end is not None and observed_at - latest_end > max_age:
+        raise MarketDataQualityError("stale market data cannot feed a candidate")
     return tuple(validated)
+
+
+def liquidity_profile(
+    batch: DailyBarBatch,
+    *,
+    session_date: date,
+    volume_multiplier: Decimal,
+    lookback: int = LIQUIDITY_LOOKBACK_SESSIONS,
+) -> LiquidityProfile:
+    """Average dollar volume over the prior ``lookback`` completed sessions.
+
+    Today's daily bar is still forming during the session and is excluded.
+    """
+    if not volume_multiplier.is_finite() or volume_multiplier <= 0:
+        raise ValueError("volume_multiplier must be finite and positive")
+    if not batch.connected:
+        raise MarketDataQualityError("IBKR market-data connection is unavailable")
+    if batch.pacing_failed:
+        raise MarketDataQualityError("IBKR market-data pacing limit blocked the request")
+    if batch.error:
+        raise MarketDataQualityError("IBKR market-data request failed")
+    con_ids = {bar.con_id for bar in batch.bars}
+    if len(con_ids) > 1:
+        raise MarketDataQualityError("daily history contains multiple contracts")
+    prior = sorted(
+        (bar for bar in batch.bars if bar.session_date < session_date),
+        key=lambda bar: bar.session_date,
+    )
+    if len({bar.session_date for bar in prior}) != len(prior):
+        raise MarketDataQualityError("duplicate daily bar cannot feed a candidate")
+    if len(prior) < lookback:
+        raise MarketDataQualityError("insufficient_daily_history")
+    window = prior[-lookback:]
+    if any(not bar.close.is_finite() or bar.close <= 0 for bar in window):
+        raise MarketDataQualityError("daily bar has a non-positive close")
+    if any(not bar.volume.is_finite() or bar.volume < 0 for bar in window):
+        raise MarketDataQualityError("daily bar has an invalid volume")
+    last = window[-1]
+    if session_date - last.session_date > MAX_DAILY_HISTORY_GAP:
+        raise MarketDataQualityError("stale daily history cannot feed a candidate")
+    total = sum((bar.close * bar.volume * volume_multiplier for bar in window), Decimal("0"))
+    return LiquidityProfile(
+        con_id=last.con_id,
+        reference_price=last.close,
+        average_dollar_volume=total / Decimal(lookback),
+        sessions_used=lookback,
+        last_session_date=last.session_date,
+    )
 
 
 @dataclass
@@ -362,6 +451,8 @@ class PaperIBKRMarketData:
     host: str
     port: int = PAPER_TWS_PORT
     bar_max_age: timedelta = DEFAULT_BAR_MAX_AGE
+    # Raw API volume unit for US stocks; confirmed against TWS by the probe.
+    volume_multiplier: Decimal = Decimal("1")
     _scanner_ready: bool = field(default=False, init=False, repr=False)
     _contract_details: dict[int, IBKRContractDetails] = field(
         default_factory=dict, init=False, repr=False
@@ -376,6 +467,8 @@ class PaperIBKRMarketData:
             )
         if self.bar_max_age <= timedelta(0):
             raise ConnectionConfigurationError("bar_max_age must be positive")
+        if not self.volume_multiplier.is_finite() or self.volume_multiplier <= 0:
+            raise ConnectionConfigurationError("volume_multiplier must be positive")
 
     async def initialize(self) -> None:
         """Verify scanner support before allowing a session to request data."""
@@ -453,3 +546,13 @@ class PaperIBKRMarketData:
             raise MarketDataQualityError("conId must be positive")
         batch = await self.actor.completed_trade_bars(con_id)
         return validate_completed_trade_bars(batch, now=now, max_age=self.bar_max_age)
+
+    async def liquidity(self, *, con_id: int, session_date: date) -> LiquidityProfile:
+        if con_id <= 0:
+            raise MarketDataQualityError("conId must be positive")
+        batch = await self.actor.daily_trade_bars(con_id)
+        if any(bar.con_id != con_id for bar in batch.bars):
+            raise MarketDataQualityError("daily history returned for a different contract")
+        return liquidity_profile(
+            batch, session_date=session_date, volume_multiplier=self.volume_multiplier
+        )

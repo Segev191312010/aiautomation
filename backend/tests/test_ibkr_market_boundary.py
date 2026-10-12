@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
 
@@ -9,6 +9,8 @@ import pytest
 from trading.market.ibkr_boundary import (
     BarBatch,
     ConnectionConfigurationError,
+    DailyBarBatch,
+    IBKRDailyBar,
     IBKRConnectionActor,
     IBKRContractDetails,
     IBKRScannerResult,
@@ -17,6 +19,7 @@ from trading.market.ibkr_boundary import (
     PaperIBKRMarketData,
     ScannerDataError,
     ScannerSupportError,
+    liquidity_profile,
     qualify_scanner_results,
     validate_completed_trade_bars,
 )
@@ -257,3 +260,96 @@ def test_stale_duplicate_disconnected_and_pacing_data_are_rejected():
         validate_completed_trade_bars(BarBatch(bars=(), connected=False), now=now)
     with pytest.raises(MarketDataQualityError, match="pacing"):
         validate_completed_trade_bars(BarBatch(bars=(), pacing_failed=True), now=now)
+
+
+def _at(hour: int, minute: int, second: int = 0) -> datetime:
+    return datetime(2026, 1, 2, hour, minute, second, tzinfo=timezone.utc)
+
+
+def _five(start: datetime, **overrides) -> IBKRTradeBar:
+    return _bar(
+        interval_start_utc=start,
+        interval_end_utc=start + timedelta(minutes=5),
+        received_at=start + timedelta(minutes=5, seconds=1),
+        **overrides,
+    )
+
+
+def test_forming_bar_is_dropped_and_history_is_not_stale():
+    batch = BarBatch(
+        bars=(
+            _five(_at(14, 30) - timedelta(days=1)),  # prior session history
+            _five(_at(14, 30)),
+            _bar(  # still forming when IBKR answered
+                interval_start_utc=_at(14, 35),
+                interval_end_utc=_at(14, 40),
+                received_at=_at(14, 35, 4),
+            ),
+        )
+    )
+
+    bars = validate_completed_trade_bars(batch, now=_at(14, 35, 5))
+
+    assert [bar.interval_start_utc for bar in bars] == [_at(14, 30) - timedelta(days=1), _at(14, 30)]
+
+
+def test_newest_completed_bar_must_be_fresh():
+    batch = BarBatch(bars=(_five(_at(14, 25)), _five(_at(14, 30))))
+    with pytest.raises(MarketDataQualityError, match="stale"):
+        validate_completed_trade_bars(batch, now=_at(14, 36))
+
+
+def _daily(day: int, *, close: str = "50", volume: str = "1000000", con_id: int = 101) -> IBKRDailyBar:
+    return IBKRDailyBar(
+        con_id=con_id,
+        session_date=date(2026, 9, 1) + timedelta(days=day),
+        close=Decimal(close),
+        volume=Decimal(volume),
+    )
+
+
+def test_liquidity_uses_prior_twenty_sessions_and_excludes_today():
+    prior = tuple(_daily(day) for day in range(25))
+    today = date(2026, 9, 1) + timedelta(days=25)
+    forming = _daily(25, close="999", volume="1")
+    batch = DailyBarBatch(bars=(*prior, forming))
+
+    profile = liquidity_profile(batch, session_date=today, volume_multiplier=Decimal("100"))
+
+    assert profile.reference_price == Decimal("50")
+    assert profile.average_dollar_volume == Decimal("5000000000")
+    assert profile.sessions_used == 20
+    assert profile.last_session_date == today - timedelta(days=1)
+
+
+def test_liquidity_rejects_short_stale_or_failed_history():
+    today = date(2026, 9, 1) + timedelta(days=25)
+    with pytest.raises(MarketDataQualityError, match="insufficient_daily_history"):
+        liquidity_profile(
+            DailyBarBatch(bars=tuple(_daily(day) for day in range(5, 25))[1:]),
+            session_date=today,
+            volume_multiplier=Decimal("1"),
+        )
+    with pytest.raises(MarketDataQualityError, match="stale"):
+        liquidity_profile(
+            DailyBarBatch(bars=tuple(_daily(day) for day in range(20))),
+            session_date=today,
+            volume_multiplier=Decimal("1"),
+        )
+    with pytest.raises(MarketDataQualityError, match="pacing"):
+        liquidity_profile(
+            DailyBarBatch(bars=(), pacing_failed=True),
+            session_date=today,
+            volume_multiplier=Decimal("1"),
+        )
+
+
+@pytest.mark.anyio
+async def test_adapter_liquidity_rejects_history_for_another_contract():
+    class DailyActor(_Actor):
+        async def daily_trade_bars(self, con_id):
+            return DailyBarBatch(bars=tuple(_daily(day, con_id=999) for day in range(25)))
+
+    adapter = PaperIBKRMarketData(actor=DailyActor(), host="127.0.0.1")
+    with pytest.raises(MarketDataQualityError, match="different contract"):
+        await adapter.liquidity(con_id=101, session_date=date(2026, 9, 26))

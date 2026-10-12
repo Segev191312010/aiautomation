@@ -94,6 +94,13 @@ class FakeTWSClient:
         if self.pacing_error:
             self.callbacks.error(request_id, 162, "pacing")
             return
+        if args[4] == "1 day":
+            for day, close in (("20261008", "100"), ("20261009", "101")):
+                self.callbacks.historicalData(
+                    request_id, SimpleNamespace(date=day, close=close, volume="5000")
+                )
+            self.callbacks.historicalDataEnd(request_id)
+            return
         bar = SimpleNamespace(
             date="1770000000",
             open="100",
@@ -229,6 +236,7 @@ async def test_historical_request_returns_completed_trades_with_unique_request_i
     assert batch.bars[0].complete is True
     assert batch.bars[0].interval_start_utc.tzinfo is timezone.utc
     assert client.history_calls[0][0] == 900
+    assert client.history_calls[0][3] == "2 D"
     assert client.history_calls[0][5] == "TRADES"
     assert client.history_calls[0][7] == 2
 
@@ -385,3 +393,24 @@ async def test_contract_details_resolve_min_tick_and_primary_exchange() -> None:
     assert details.min_tick == Decimal("0.01")
     with pytest.raises(TWSRequestError, match="missing or ambiguous"):
         await actor.contract_details(404)
+
+
+@pytest.mark.asyncio
+async def test_daily_bars_request_rth_sessions_and_parse_session_dates() -> None:
+    client: FakeTWSClient | None = None
+
+    def factory(callbacks):
+        nonlocal client
+        client = FakeTWSClient(callbacks)
+        return client
+
+    actor = TWSPaperActor(config(), client_factory=factory)
+    await actor.connect()
+    batch = await actor.daily_trade_bars(101)
+
+    assert client is not None
+    call = client.history_calls[0]
+    assert (call[3], call[4], call[5], call[6], call[7]) == ("2 M", "1 day", "TRADES", 1, 1)
+    assert [bar.session_date.isoformat() for bar in batch.bars] == ["2026-10-08", "2026-10-09"]
+    assert batch.bars[1].close == Decimal("101")
+    assert batch.bars[1].volume == Decimal("5000")
