@@ -2,19 +2,30 @@
 
 The screener connects to the local PAPER TWS with its own client ID and
 reads market data only; nothing here can place, modify, or cancel orders.
+Each sweep also records the market context (index, breadth and sector ETFs).
+
+``universe import``, ``universe qualify`` and ``screener run`` all connect
+with that one client ID, so each holds ``client-<id>.lock`` beside the
+database for its whole run and a second one exits with a clear message
+instead of fighting over the TWS connection. Outside the sweep window the
+screener loop also runs the daily snapshot retention job.
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, time, timezone
+import fcntl
 import logging
+import os
 from pathlib import Path
 import time as monotonic_time
 from typing import Protocol
 
 from trading.contracts import ShadowRuntimeConfig
 from trading.market.screener import (
+    ContextETFs,
     ScanMerge,
     ScanSource,
     ScreenerError,
@@ -22,6 +33,7 @@ from trading.market.screener import (
     SweepResult,
     run_sweep,
 )
+from trading.market.retention import compact_snapshots, next_retention_at, retention_day
 from trading.market.tws_actor import (
     TWSActorConfig,
     TWSActorError,
@@ -39,6 +51,7 @@ from trading.market.universe import (
     import_watchlist,
     parse_watchlist,
     qualify_universe,
+    runtime_directory,
 )
 from trading.operations.shadow_service import IBKR_API_VOLUME_MULTIPLIER
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session, next_market_session
@@ -60,6 +73,8 @@ CONTRACT_DETAILS_MIN_INTERVAL_SECONDS = 0.05
 # Historical-data requests are paced at one per second.
 DAILY_HISTORY_MIN_INTERVAL_SECONDS = 1.0
 MIN_SWEEP_PAUSE_SECONDS = 1.0
+CLIENT_LOCK_TEMPLATE = "client-{client_id}.lock"
+_LOCK_FILE_MODE = 0o600
 
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -86,8 +101,56 @@ class ScreenerConfigurationError(ValueError):
     """The screener's TWS identity would collide with another connection."""
 
 
+class ClientIdInUseError(RuntimeError):
+    """Another local process holds the lock of the TWS client ID this command needs."""
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def client_lock_path(client_id: int) -> Path:
+    """``client-<id>.lock`` beside the configured database."""
+    return runtime_directory() / CLIENT_LOCK_TEMPLATE.format(client_id=client_id)
+
+
+def _lock_holder(descriptor: int) -> str:
+    try:
+        text = os.pread(descriptor, 256, 0).decode("utf-8", "replace").strip()
+    except OSError:
+        text = ""
+    pid, _, purpose = text.partition(" ")
+    if not pid.isdigit():
+        return "another process"
+    return f"`{purpose}` (pid {pid})" if purpose else f"pid {pid}"
+
+
+@contextmanager
+def tws_client_lock(client_id: int, purpose: str) -> Iterator[Path]:
+    """Hold the client ID's lock for one whole command; a second holder is refused.
+
+    TWS accepts one connection per client ID. The kernel drops the flock
+    when the holding process exits, so a crash never leaves a stale lock.
+    """
+    path = client_lock_path(client_id)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(
+        path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, _LOCK_FILE_MODE
+    )
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ClientIdInUseError(
+                f"TWS client {client_id} is in use by {_lock_holder(descriptor)}; "
+                "`universe import`, `universe qualify` and `screener run` share it and "
+                "never run at the same time. Wait for it to finish or stop it, then retry."
+            ) from exc
+        os.ftruncate(descriptor, 0)
+        os.pwrite(descriptor, f"{os.getpid()} {purpose}\n".encode("utf-8"), 0)
+        yield path
+    finally:
+        os.close(descriptor)
 
 
 def screener_actor_config(config: ShadowRuntimeConfig) -> TWSActorConfig:
@@ -103,11 +166,9 @@ def default_actor_factory(config: TWSActorConfig) -> ScreenerActor:
     return TWSPaperActor(config)
 
 
-def _build_actor(
-    actor_factory: ActorFactory | None, runtime_config: ShadowRuntimeConfig
-) -> ScreenerActor:
+def _build_actor(actor_factory: ActorFactory | None, config: TWSActorConfig) -> ScreenerActor:
     factory = actor_factory or default_actor_factory
-    return factory(screener_actor_config(runtime_config))
+    return factory(config)
 
 
 def screener_session_date(now: datetime) -> date:
@@ -172,17 +233,19 @@ async def import_universe(
     text = read_watchlist(path)
     # Reject an unreadable export before opening a TWS connection.
     parse_watchlist(text)
-    actor = _build_actor(actor_factory, runtime_config)
-    await connect_actor(actor)
-    try:
-        return await import_watchlist(
-            actor,
-            text,
-            clock=clock,
-            pacer=pacer or RequestPacer(CONTRACT_DETAILS_MIN_INTERVAL_SECONDS),
-        )
-    finally:
-        await actor.disconnect()
+    config = screener_actor_config(runtime_config)
+    with tws_client_lock(config.client_id, "universe import"):
+        actor = _build_actor(actor_factory, config)
+        await connect_actor(actor)
+        try:
+            return await import_watchlist(
+                actor,
+                text,
+                clock=clock,
+                pacer=pacer or RequestPacer(CONTRACT_DETAILS_MIN_INTERVAL_SECONDS),
+            )
+        finally:
+            await actor.disconnect()
 
 
 async def _qualify(
@@ -217,12 +280,14 @@ async def qualify_session(
     clock: Clock = _utc_now,
     pacer: RequestPacer | None = None,
 ) -> QualificationReport:
-    actor = _build_actor(actor_factory, runtime_config)
-    await connect_actor(actor)
-    try:
-        return await _qualify(actor, session_date, clock=clock, pacer=pacer)
-    finally:
-        await actor.disconnect()
+    config = screener_actor_config(runtime_config)
+    with tws_client_lock(config.client_id, "universe qualify"):
+        actor = _build_actor(actor_factory, config)
+        await connect_actor(actor)
+        try:
+            return await _qualify(actor, session_date, clock=clock, pacer=pacer)
+        finally:
+            await actor.disconnect()
 
 
 async def run_screener_once(
@@ -236,19 +301,34 @@ async def run_screener_once(
     """Qualify (resumably) and sweep the current session once."""
     session_date = screener_session_date(clock())
     pacer = history_pacer or RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
-    actor = _build_actor(actor_factory, runtime_config)
-    await connect_actor(actor)
+    config = screener_actor_config(runtime_config)
+    with tws_client_lock(config.client_id, "screener run --once"):
+        actor = _build_actor(actor_factory, config)
+        await connect_actor(actor)
+        try:
+            qualification = await _qualify(actor, session_date, clock=clock, pacer=pacer)
+            sweep = await run_sweep(
+                actor,
+                session_date=session_date,
+                clock=clock,
+                scan_merge=_scan_merge(actor, pacer, enabled=include_scans),
+                context_etfs=ContextETFs(actor, clock=clock),
+            )
+            return qualification, sweep
+        finally:
+            await actor.disconnect()
+
+
+async def _run_retention(now: datetime, *, clock: Clock, deadline: datetime) -> None:
+    """The daily snapshot retention job; a failure is logged and never stops the screener."""
     try:
-        qualification = await _qualify(actor, session_date, clock=clock, pacer=pacer)
-        sweep = await run_sweep(
-            actor,
-            session_date=session_date,
-            clock=clock,
-            scan_merge=_scan_merge(actor, pacer, enabled=include_scans),
-        )
-        return qualification, sweep
-    finally:
-        await actor.disconnect()
+        report = await compact_snapshots(now, clock=clock, deadline=deadline)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - housekeeping must never stop the screener
+        logger.exception("screener snapshot retention failed")
+        return
+    logger.info("snapshot retention: %s", report.summary())
 
 
 async def run_screener(
@@ -261,19 +341,52 @@ async def run_screener(
     monotonic: Callable[[], float] = monotonic_time.monotonic,
     max_sweeps: int | None = None,
     include_scans: bool = True,
+    retention: bool = True,
 ) -> int:
     """Sweep every ``interval_seconds`` inside 08:00-16:00 ET on trading days.
 
     Outside the window the TWS connection is released. Connection failures
     back off up to a minute; a competing IBKR login is reported and retried
     every minute until the owner logs out elsewhere. Returns completed sweeps.
+
+    With ``retention`` the snapshot retention job runs outside the window
+    once per day after 16:05 ET; a screener stopped at 16:00 (as the
+    supervisor does) catches up before its next window opens, with that
+    window's opening as the job's deadline.
     """
     if not 0 < interval_seconds < float("inf"):
         raise ValueError("interval_seconds must be finite and positive")
-    actor = _build_actor(actor_factory, runtime_config)
+    config = screener_actor_config(runtime_config)
+    with tws_client_lock(config.client_id, "screener run"):
+        return await _screener_loop(
+            _build_actor(actor_factory, config),
+            interval_seconds=interval_seconds,
+            clock=clock,
+            sleep=sleep,
+            monotonic=monotonic,
+            max_sweeps=max_sweeps,
+            include_scans=include_scans,
+            retention=retention,
+        )
+
+
+async def _screener_loop(
+    actor: ScreenerActor,
+    *,
+    interval_seconds: float,
+    clock: Clock,
+    sleep: Sleeper,
+    monotonic: Callable[[], float],
+    max_sweeps: int | None,
+    include_scans: bool,
+    retention: bool,
+) -> int:
     history_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
     scan_merge = _scan_merge(actor, history_pacer, enabled=include_scans)
+    # conIds are stable across reconnects, so the ETFs resolve once per process.
+    context_etfs = ContextETFs(actor, clock=clock)
     qualified_dates: set[date] = set()
+    retained_for: date | None = None
     failures = 0
     sweeps = 0
     try:
@@ -285,6 +398,14 @@ async def run_screener(
                     await actor.disconnect()
                     logger.info("outside the screener window; TWS connection released")
                 wake = next_window_open(now)
+                if retention:
+                    due = retention_day(now)
+                    if retained_for != due:
+                        # Marked before running: a failing job waits for tomorrow.
+                        retained_for = due
+                        await _run_retention(now, clock=clock, deadline=wake)
+                        continue
+                    wake = min(wake, next_retention_at(now))
                 logger.info("screener idle until %s", wake.isoformat())
                 await sleep_until(wake, clock=clock, sleep=sleep)
                 continue
@@ -305,7 +426,11 @@ async def run_screener(
                         len(report.errors),
                     )
                 await run_sweep(
-                    actor, session_date=session_date, clock=clock, scan_merge=scan_merge
+                    actor,
+                    session_date=session_date,
+                    clock=clock,
+                    scan_merge=scan_merge,
+                    context_etfs=context_etfs,
                 )
                 sweeps += 1
                 if max_sweeps is not None and sweeps >= max_sweeps:
@@ -342,10 +467,13 @@ async def run_screener(
 
 
 __all__ = [
+    "CLIENT_LOCK_TEMPLATE",
     "COMPETING_SESSION_MESSAGE",
     "SCREENER_CLIENT_ID_OFFSET",
+    "ClientIdInUseError",
     "ScreenerActor",
     "ScreenerConfigurationError",
+    "client_lock_path",
     "connect_actor",
     "default_actor_factory",
     "import_universe",
@@ -357,5 +485,6 @@ __all__ = [
     "screener_actor_config",
     "screener_session_date",
     "sleep_until",
+    "tws_client_lock",
     "window_session_date",
 ]

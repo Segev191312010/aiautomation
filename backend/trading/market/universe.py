@@ -4,20 +4,31 @@ The module also owns each session's price/liquidity qualification of the
 resolved contracts. Resolution and qualification fail closed: a symbol is
 only tradable data once IBKR returned exactly one matching US stock, and a
 contract is only screened once its prior-session history qualifies it.
+
+Resolution also records IBKR's ``stockType`` per conId in a private JSON file
+beside the database (``universe_stock_types.json``); qualification rejects
+every reported type other than COMMON (REIT, ADR, ETF, ...) as
+``stock_type_<TYPE>``. A blank or never-recorded type is unknown and is not
+by itself a reason to reject.
 """
 from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
+import json
 import logging
+import os
+from pathlib import Path
 import re
 import time
 from typing import Literal, Protocol
+from uuid import uuid4
 
+from config import cfg
 from db.core import get_db, transaction
 from trading.market.ibkr_boundary import (
     LIQUIDITY_LOOKBACK_SESSIONS,
@@ -62,11 +73,54 @@ MIN_AVG_DOLLAR_VOLUME = Decimal("20000000")
 ERROR_REASON_PREFIX = "error: "
 PACING_BACKOFF_SECONDS = 15.0
 
+# IBKR ``stockType`` per conId, recorded at resolution and read by qualification.
+STOCK_TYPES_FILENAME = "universe_stock_types.json"
+STOCK_TYPES_SCHEMA = "universe_stock_types.v1"
+# Only ordinary shares are screened. A blank stockType means IBKR did not say,
+# which (like a contract resolved before types were recorded) is unknown.
+SCREENED_STOCK_TYPES = frozenset({"COMMON", ""})
+STOCK_TYPE_REASON_PREFIX = "stock_type_"
+_STOCK_TYPE_TOKEN = re.compile(r"[^A-Z0-9]+")
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIRECTORY_MODE = 0o700
+
 Clock = Callable[[], datetime]
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def runtime_directory() -> Path:
+    """Directory of the configured database; canonically ~/.local/share/autotrader-v1.
+
+    Runtime side files (stock-type cache, TWS client locks, retention state)
+    live beside the database they describe, so a test or ``--db-path``
+    database never reads or writes the owner's runtime files.
+    """
+    if cfg.DB_PATH.strip() == ":memory:":
+        raise ValueError("an in-memory database has no runtime directory")
+    return Path(cfg.DB_PATH).expanduser().resolve().parent
+
+
+def write_private_text(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with an owner-only (0600) file.
+
+    A reader sees the previous or the new content, never a torn write.
+    Existing directories keep their permissions; a missing one is created 0700.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIRECTORY_MODE)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_FILE_MODE)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _timestamp(value: datetime) -> str:
@@ -217,6 +271,8 @@ class UniverseRow:
 class Resolution:
     row: UniverseRow
     used_fallback: bool = False
+    # IBKR's normalized stockType for a resolved row ('' when not reported).
+    stock_type: str | None = None
 
 
 def details_rejection(details: IBKRContractDetails, ibkr_symbol: str) -> str | None:
@@ -230,6 +286,120 @@ def details_rejection(details: IBKRContractDetails, ibkr_symbol: str) -> str | N
     if details.symbol.strip().upper() != ibkr_symbol:
         return f"IBKR returned symbol {details.symbol!r}"
     return None
+
+
+# --- IBKR stock types ------------------------------------------------------------
+
+
+def normalize_stock_type(value: str | None) -> str:
+    """IBKR's stockType text, whitespace-collapsed and upper case ('' when absent)."""
+    return " ".join((value or "").split()).upper()
+
+
+def stock_type_rejection(stock_type: str | None) -> str | None:
+    """``stock_type_<TYPE>`` for any reported type other than COMMON, else None.
+
+    ``CLOSED-END FUND`` becomes ``stock_type_CLOSED_END_FUND``; blank and
+    unknown (None) types are not rejections.
+    """
+    normalized = normalize_stock_type(stock_type)
+    if normalized in SCREENED_STOCK_TYPES:
+        return None
+    token = _STOCK_TYPE_TOKEN.sub("_", normalized).strip("_") or "UNKNOWN"
+    return STOCK_TYPE_REASON_PREFIX + token
+
+
+def _parse_stock_types(document: object) -> dict[int, str]:
+    if not isinstance(document, dict) or document.get("schema") != STOCK_TYPES_SCHEMA:
+        raise ValueError(f"not a {STOCK_TYPES_SCHEMA} document")
+    entries = document.get("stock_types")
+    if not isinstance(entries, dict):
+        raise ValueError("stock_types must be an object")
+    parsed: dict[int, str] = {}
+    for key, value in entries.items():
+        if not (key.isascii() and key.isdigit()) or int(key) <= 0 or not isinstance(value, str):
+            raise ValueError(f"invalid stock type entry {key!r}")
+        parsed[int(key)] = normalize_stock_type(value)
+    return parsed
+
+
+class StockTypeCache:
+    """conId -> IBKR stockType in memory, persisted as one private JSON file.
+
+    The file is re-read only when its size or mtime changes, so a long-lived
+    process sees a later import. An unreadable file reads as empty -- every
+    type unknown, which never rejects a contract -- and is logged; the next
+    import rewrites it.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._types: dict[int, str] = {}
+        self._signature: tuple[int, int] | None = None
+
+    def _stat(self) -> tuple[int, int] | None:
+        try:
+            status = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return status.st_mtime_ns, status.st_size
+
+    def _refresh(self) -> None:
+        signature = self._stat()
+        if signature == self._signature:
+            return
+        self._signature = signature
+        self._types = {} if signature is None else self._read()
+
+    def _read(self) -> dict[int, str]:
+        try:
+            return _parse_stock_types(json.loads(self.path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            logger.error(
+                "IBKR stock types in %s are unreadable (%s); types are unknown until the"
+                " next `autotraderctl universe import`",
+                self.path,
+                exc,
+            )
+            return {}
+
+    def types(self) -> dict[int, str]:
+        self._refresh()
+        return dict(self._types)
+
+    def get(self, con_id: int) -> str | None:
+        self._refresh()
+        return self._types.get(con_id)
+
+    def record(self, updates: Mapping[int, str]) -> None:
+        """Merge ``updates`` (conId -> stockType) and persist; a conId is never dropped."""
+        self._refresh()
+        merged = dict(self._types)
+        for con_id, stock_type in updates.items():
+            if isinstance(con_id, bool) or not isinstance(con_id, int) or con_id <= 0:
+                raise ValueError("stock types are keyed by positive conIds")
+            merged[con_id] = normalize_stock_type(stock_type)
+        if merged == self._types and self._signature is not None:
+            return
+        document = {
+            "schema": STOCK_TYPES_SCHEMA,
+            "stock_types": {str(con_id): merged[con_id] for con_id in sorted(merged)},
+        }
+        write_private_text(self.path, json.dumps(document, indent=1) + "\n")
+        self._types = merged
+        self._signature = self._stat()
+
+
+_STOCK_TYPE_CACHES: dict[Path, StockTypeCache] = {}
+
+
+def stock_type_cache(path: Path | None = None) -> StockTypeCache:
+    """The process-wide cache for ``path``; by default beside the configured database."""
+    target = path if path is not None else runtime_directory() / STOCK_TYPES_FILENAME
+    cache = _STOCK_TYPE_CACHES.get(target)
+    if cache is None:
+        cache = _STOCK_TYPE_CACHES[target] = StockTypeCache(target)
+    return cache
 
 
 async def resolve_entry(
@@ -289,6 +459,7 @@ async def resolve_entry(
                 primary_exchange=details.primary_exchange.strip().upper() or None,
             ),
             used_fallback=attempt is None and hint is not None,
+            stock_type=normalize_stock_type(details.stock_type),
         )
     return Resolution(row("unresolved", error="; ".join(failures)))
 
@@ -301,6 +472,8 @@ class ImportReport:
     unresolved: tuple[UniverseRow, ...]
     used_fallback: tuple[str, ...]
     removed: tuple[str, ...]
+    # (symbol, IBKR stockType) of resolved rows that daily qualification rejects.
+    non_common: tuple[tuple[str, str], ...] = ()
 
 
 async def import_watchlist(
@@ -315,6 +488,8 @@ async def import_watchlist(
 
     The stored universe always equals the latest export: symbols missing from
     it are removed, and a failed import leaves the previous universe intact.
+    Each resolved contract's IBKR stockType is recorded first (a failed write
+    aborts the import before the universe changes).
     """
     parsed = parse_watchlist(text)
     resolutions: list[Resolution] = []
@@ -328,7 +503,26 @@ async def import_watchlist(
         if index % 100 == 0:
             logger.info("resolved %d/%d watchlist symbols", index, len(parsed.entries))
     rows = tuple(resolution.row for resolution in resolutions)
+    stock_types = {
+        resolution.row.con_id: resolution.stock_type
+        for resolution in resolutions
+        if resolution.row.con_id is not None and resolution.stock_type is not None
+    }
+    stock_type_cache().record(stock_types)
     removed = await replace_universe_source(source, rows)
+    non_common = tuple(
+        (row.symbol, stock_type)
+        for row in rows
+        if row.con_id is not None
+        and (stock_type := stock_types.get(row.con_id)) is not None
+        and stock_type_rejection(stock_type) is not None
+    )
+    if non_common:
+        logger.warning(
+            "%d resolved symbols are not common stock and will not qualify: %s",
+            len(non_common),
+            ", ".join(f"{symbol} ({stock_type})" for symbol, stock_type in non_common),
+        )
     return ImportReport(
         parsed=len(parsed.entries),
         duplicates=parsed.duplicates,
@@ -338,6 +532,7 @@ async def import_watchlist(
             resolution.row.symbol for resolution in resolutions if resolution.used_fallback
         ),
         removed=removed,
+        non_common=non_common,
     )
 
 
@@ -657,12 +852,31 @@ async def qualify_contract(
     volume_multiplier: Decimal,
     clock: Clock,
     pacer: RequestPacer,
+    stock_type: str | None = None,
 ) -> DailyQualification:
     """Request one contract's daily history, evaluate it, and persist the outcome.
 
-    A competing login or lost connection raises instead of recording a
-    failure, because neither says anything about the contract itself.
+    A recorded non-COMMON ``stock_type`` is a final rejection decided without
+    spending a paced history request. A competing login or lost connection
+    raises instead of recording a failure, because neither says anything
+    about the contract itself.
     """
+    type_rejection = stock_type_rejection(stock_type)
+    if type_rejection is not None:
+        rejected = DailyQualification(
+            session_date=session_date,
+            con_id=con_id,
+            symbol=symbol,
+            prior_close=None,
+            avg_daily_volume_shares=None,
+            avg_dollar_volume=None,
+            daily_atr=None,
+            qualified=False,
+            reason=type_rejection,
+            observed_at=clock(),
+        )
+        await upsert_daily(rejected)
+        return rejected
     await pacer.wait()
     try:
         batch = await history.daily_trade_bars(con_id)
@@ -714,13 +928,16 @@ async def qualify_universe(
 
     Contracts with a final outcome for the date are skipped, so an
     interrupted run continues where it stopped and transient failures are
-    retried. A competing login or lost connection aborts the run.
+    retried. Contracts whose recorded IBKR stockType is not COMMON are
+    rejected as ``stock_type_<TYPE>``. A competing login or lost connection
+    aborts the run.
     """
     instruments = resolved_instruments(await load_universe())
     universe_ids = {row.con_id for row in instruments}
     final = {row.con_id for row in await load_daily(session_date) if not row.transient}
     pending = [row for row in instruments if row.con_id not in final]
     pacer = pacer or RequestPacer(1.0)
+    stock_types = stock_type_cache().types() if pending else {}
     if pending:
         logger.info(
             "qualifying %d of %d instruments for %s",
@@ -728,6 +945,14 @@ async def qualify_universe(
             len(instruments),
             session_date.isoformat(),
         )
+        unknown = sum(1 for row in pending if row.con_id not in stock_types)
+        if unknown:
+            logger.warning(
+                "%d of %d instruments have no recorded IBKR stockType and are not type-filtered;"
+                " run `autotraderctl universe import` to record them",
+                unknown,
+                len(pending),
+            )
     for index, row in enumerate(pending, start=1):
         if row.con_id is None:
             continue
@@ -739,6 +964,7 @@ async def qualify_universe(
             volume_multiplier=volume_multiplier,
             clock=clock,
             pacer=pacer,
+            stock_type=stock_types.get(row.con_id),
         )
         if index % 50 == 0:
             logger.info("qualified %d/%d instruments", index, len(pending))
@@ -760,6 +986,10 @@ __all__ = [
     "MAX_WATCHLIST_BYTES",
     "MIN_AVG_DOLLAR_VOLUME",
     "MIN_PRICE",
+    "SCREENED_STOCK_TYPES",
+    "STOCK_TYPES_FILENAME",
+    "STOCK_TYPES_SCHEMA",
+    "STOCK_TYPE_REASON_PREFIX",
     "WATCHLIST_SOURCE",
     "DailyQualification",
     "ImportReport",
@@ -767,6 +997,7 @@ __all__ = [
     "QualificationReport",
     "RequestPacer",
     "Resolution",
+    "StockTypeCache",
     "UniverseRow",
     "WatchlistEntry",
     "WatchlistFormatError",
@@ -776,13 +1007,18 @@ __all__ = [
     "import_watchlist",
     "load_daily",
     "load_universe",
+    "normalize_stock_type",
     "parse_watchlist",
     "qualify_contract",
     "qualify_universe",
     "replace_universe_source",
     "resolve_entry",
     "resolved_instruments",
+    "runtime_directory",
+    "stock_type_cache",
+    "stock_type_rejection",
     "summarize_daily",
     "to_ibkr_symbol",
     "upsert_daily",
+    "write_private_text",
 ]
