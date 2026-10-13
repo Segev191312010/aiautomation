@@ -42,6 +42,9 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     # STAND-IN for phase 1's own registration of DRAFT_PHASE1_DDL: at merge,
     # keep phase 1's pin for 15 and drop this one.
     15: ("manager-day-universe", "7d065aec21019127d6a29369dd6757ba7b06fa40484e6abdd98a044894b65b1c"),
+    # Phase 2, the AI day manager in shadow (plans, verdicts, managed
+    # decisions, the switch and its day latch, spend).
+    16: ("manager-day-plans", "b1cdc0f64c350802c525767209b98386fa9b0b01b270fa44b75cec3ce2ff2278"),
 }
 
 
