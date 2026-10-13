@@ -31,10 +31,11 @@ net R over its trade count. The bounds are nearest-rank percentiles of those
 statistics. The random generator is seeded from the identity and the sample,
 so a report is reproducible.
 
-AI do-no-harm: on the live setups the AI selected (today the reviewer's
-PROPOSE; later the manager's selection) against all live setups, paired by
-day. If the bootstrap upper bound of (selected - all) is below zero the AI
-is reported ``advisory`` for that strategy: following it measurably costs R.
+AI do-no-harm: on the live setups the AI judged, its selection (today the
+reviewer's PROPOSE; later the manager's selection) against all of them,
+paired by day. If the bootstrap upper bound of (selected - all) is below
+zero the AI is reported ``advisory`` for that strategy: following it
+measurably costs R.
 """
 from __future__ import annotations
 
@@ -199,6 +200,8 @@ class EvidenceTrade:
     exit_at: datetime
     net_r: Decimal
     hour_bucket: int | None = None
+    # The AI judged the setup (a succeeded review) and, if so, picked it.
+    reviewed: bool = True
     selected: bool = False
 
 
@@ -399,16 +402,22 @@ class AIDoNoHarm:
 
 
 def ai_do_no_harm(live: Sequence[EvidenceTrade], *, identity: EvidenceIdentity) -> AIDoNoHarm:
-    """``advisory`` when following the AI's selection measurably costs R."""
-    selected = sum(1 for trade in live if trade.selected)
-    difference = paired_difference_bootstrap(live, seed_label=f"{identity.fingerprint()}:ai")
-    if len(live) < MIN_LIVE_SETUPS or selected < MIN_MANAGED_SETUPS or difference.upper is None:
+    """``advisory`` when following the AI's selection measurably costs R.
+
+    Only setups the AI actually judged take part: one it never saw (its
+    per-run budget spent, a timeout) is neither picked nor passed over, and
+    counting it would compare the morning's picks with the afternoon.
+    """
+    judged = [trade for trade in live if trade.reviewed]
+    selected = sum(1 for trade in judged if trade.selected)
+    difference = paired_difference_bootstrap(judged, seed_label=f"{identity.fingerprint()}:ai")
+    if len(judged) < MIN_LIVE_SETUPS or selected < MIN_MANAGED_SETUPS or difference.upper is None:
         status = AI_INSUFFICIENT
     elif difference.upper < 0:
         status = AI_ADVISORY
     else:
         status = AI_ACTIVE
-    return AIDoNoHarm(status, selected, len(live), difference)
+    return AIDoNoHarm(status, selected, len(judged), difference)
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,6 +562,11 @@ _LIVE_OUTCOMES = """
            EXISTS (
                SELECT 1 FROM autotrader_ai_calls a
                WHERE a.run_id = s.run_id AND a.setup_fingerprint = s.setup_fingerprint
+                 AND a.status = 'succeeded'
+           ),
+           EXISTS (
+               SELECT 1 FROM autotrader_ai_calls a
+               WHERE a.run_id = s.run_id AND a.setup_fingerprint = s.setup_fingerprint
                  AND a.status = 'succeeded' AND a.decision = 'PROPOSE'
            )
     FROM autotrader_manager_signal_outcomes o
@@ -612,7 +626,9 @@ def read_live_evidence(database: str | Path, *, fill_model_id: str = FILL_MODEL_
             rows = db.execute(_LIVE_OUTCOMES, (fill_model_id,)).fetchall() if len(tables) == 2 else []
     except sqlite3.Error as exc:
         return LiveEvidence(readable=False, note=f"{type(exc).__name__}")
-    for name, kind, session_date, hour, filled, gross, cost, details_json, prints_json, picked in rows:
+    for (
+        name, kind, session_date, hour, filled, gross, cost, details_json, prints_json, judged, picked,
+    ) in rows:
         identity = identity_from_run(str(name), str(kind), _json_object(prints_json))
         if identity is None:
             continue
@@ -628,6 +644,7 @@ def read_live_evidence(database: str | Path, *, fill_model_id: str = FILL_MODEL_
                 exit_at=exit_at,
                 net_r=Decimal(str(gross)) - Decimal(str(cost)),
                 hour_bucket=int(hour),
+                reviewed=bool(judged),
                 selected=bool(picked),
             )
         except (TypeError, ValueError, InvalidOperation):

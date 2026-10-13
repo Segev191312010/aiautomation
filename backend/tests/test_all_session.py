@@ -520,6 +520,126 @@ def test_gap_go_v1_still_refuses_a_window_past_the_earliest_close():
     assert gap_go_strategy_spec().name == "GAP_GO_V1"
 
 
+# --- the session wiring -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "source", "gap_bars", "dynamic"),
+    [
+        ("orb-v2", None, False, False),
+        ("vwap-v2", "hotlist_candidates", False, True),
+        ("gap-v2", "gap_union_candidates", True, False),
+        ("gap", "gap_candidates", True, False),
+    ],
+)
+async def test_each_v2_session_gets_its_universe_and_bars_like_its_v1(monkeypatch, key, source, gap_bars, dynamic):
+    from types import SimpleNamespace
+
+    from trading.orchestration.session_runner import SessionReport
+
+    captured: dict[str, Any] = {}
+    selected: list[str] = []
+
+    class FakeActor:
+        connected = True
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            captured["client_id"] = _args[0].client_id
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            pass
+
+        async def preflight(self, *, required_data_lines: int) -> SimpleNamespace:
+            return SimpleNamespace(ready=True, reasons=())
+
+        async def account_snapshot(self) -> None:
+            raise AssertionError("never read")
+
+    class FakeMarket:
+        def __init__(self, **kwargs: object) -> None:
+            captured["bar_max_age"] = kwargs["bar_max_age"]
+
+        async def load_contract(self, con_id: int) -> None:
+            pass
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["runner"] = kwargs
+
+        async def run(self, **kwargs: object) -> SessionReport:
+            captured["run"] = kwargs
+            return SessionReport(run_id=str(kwargs["run_id"]), session_date=FULL_DAY)
+
+    def fake_source(name: str):
+        async def select(run, *, now):
+            selected.append(name)
+            return "scanner-run", (), {}
+
+        return select
+
+    async def strategy(**kwargs: object) -> SimpleNamespace:
+        captured["spec"] = kwargs["spec"]
+        return SimpleNamespace(strategy_id="f" * 32)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    usage = SimpleNamespace(usage=SimpleNamespace(calls=0, cost_usd=Decimal("0")))
+
+    def transport(**kwargs: Any) -> object:
+        captured["prompt"] = kwargs["system_prompt"]
+        return object()
+
+    def provider(**kwargs: Any) -> object:
+        captured["limits"] = kwargs["limits"]
+        return usage
+
+    for name in ("hotlist_candidates", "gap_candidates", "gap_union_candidates"):
+        monkeypatch.setattr(shadow_service, name, fake_source(name))
+    monkeypatch.setattr(shadow_service, "ensure_strategy", strategy)
+    monkeypatch.setattr(shadow_service, "read_anthropic_api_key", lambda: "sk-test")
+    monkeypatch.setattr(shadow_service, "build_anthropic_client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "AnthropicMessagesTransport", transport)
+    monkeypatch.setattr(shadow_service, "StructuredAIReviewProvider", provider)
+    monkeypatch.setattr(shadow_service, "TWSPaperActor", FakeActor)
+    monkeypatch.setattr(shadow_service, "PaperIBKRMarketData", FakeMarket)
+    monkeypatch.setattr(shadow_service, "ShadowPipeline", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "RepositoryBackedShadowRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "ShadowSessionRunner", FakeRunner)
+    monkeypatch.setattr(shadow_service, "source_sha", lambda: "abc1234")
+    config = ShadowRuntimeConfig(
+        paper_account_id="DU1234567", data_client_id=17, order_client_id=18,
+        model_id="claude-opus-5-5", prompt_id="orb-review-v1", calendar_id="XNYS",
+        calendar_version="2026.1", commission_policy_id="ibkr-fixed", commission_policy_version=1,
+    )
+
+    await shadow_service.run_shadow_session(
+        config=config,
+        owner_id="demo",
+        session=market_session(FULL_DAY),
+        clock=lambda: datetime.combine(FULL_DAY, time(9, 0), tzinfo=NEW_YORK).astimezone(UTC),
+        sleep=no_sleep,
+        strategy_name=key,
+        universe=STRATEGY_UNIVERSES.get(key, "gappers"),
+    )
+
+    assert captured["spec"] == STRATEGIES[key][1]()
+    assert captured["client_id"] == 17 + STRATEGY_CLIENT_OFFSET[key]
+    assert (captured["runner"]["bars_fetcher"] is not None) is gap_bars
+    assert (captured["run"]["candidate_refresh"] is not None) is dynamic
+    assert captured["prompt"] == REVIEW_PROMPTS[STRATEGIES[key][2]]
+    assert (captured["limits"].max_calls, captured["limits"].max_cost_usd) == (20, Decimal("5"))
+    candidate_source = captured["run"]["candidate_source"]
+    if source is None:
+        assert candidate_source is None  # ORB keeps its 09:45 IBKR scan
+    else:
+        await candidate_source("run")
+        assert selected == [source]
+
+
 # --- GAP_GO_V2's universe: watchlist gappers plus the day universe's gappers -------
 
 GAP_NOW = datetime(2026, 10, 12, 13, 30, tzinfo=UTC)

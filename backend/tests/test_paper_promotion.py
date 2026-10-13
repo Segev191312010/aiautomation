@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import json
@@ -200,6 +201,22 @@ def test_an_ai_selection_that_costs_r_is_advisory_one_that_helps_stays_active():
     assert few.status == AI_INSUFFICIENT and few.selected_trades == 9
 
 
+def test_setups_the_ai_never_judged_take_no_part_in_its_verdict():
+    judged = _paired(15, chosen="-1", other="1")
+    # Afternoon setups after the review budget ran out: never seen, never picked.
+    unseen = [
+        EvidenceTrade(session_date=trade.session_date, exit_at=trade.exit_at, net_r=Decimal("-3"), reviewed=False)
+        for trade in judged
+    ]
+    verdict = ai_do_no_harm(judged + unseen, identity=IDENTITY)
+    assert verdict.status == AI_ADVISORY
+    assert (verdict.all_trades, verdict.selected_trades) == (45, 15)
+    # Counted as passed over, the -3R trades would have made the AI look good.
+    assert ai_do_no_harm(
+        judged + [replace(trade, reviewed=True) for trade in unseen], identity=IDENTITY
+    ).status == AI_ACTIVE
+
+
 def test_the_weekly_lines_name_an_eligible_strategy_and_an_advisory_ai():
     from trading.research.report_notify import evidence_lines
 
@@ -320,9 +337,10 @@ def test_live_evidence_counts_only_the_current_identity_and_reads_the_ai_selecti
     assert live.readable and set(live.sessions) == {current, identity_from_run("ORB_V1", "orb", _orb_prints(risk="0" * 64)).fingerprint()}
     assert live.sessions[current] == frozenset({SESSION})
     trades = sorted(live.trades[current], key=lambda trade: trade.exit_at)
-    assert [(trade.net_r, trade.selected, trade.hour_bucket) for trade in trades] == [
-        (Decimal("-1.2223"), False, 9),
-        (Decimal("1.9375"), True, 10),
+    # BF B was never reviewed; FIGS was, and the reviewer said PROPOSE.
+    assert [(trade.net_r, trade.reviewed, trade.selected, trade.hour_bucket) for trade in trades] == [
+        (Decimal("-1.2223"), False, False, 9),
+        (Decimal("1.9375"), True, True, 10),
     ]
     reports = {report.registry_key: report for report in evaluate_registry(
         replays={"orb": replay_strategy("orb", store)}, live=live, keys=("orb", "gap-v2"),
