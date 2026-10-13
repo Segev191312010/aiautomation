@@ -14,9 +14,10 @@
   review before it runs unattended.
 
 ## Execution Engine (C2): built, not wired
-- `backend/trading/execution/live_executor.py` is the reviewed execution engine
-  meant to replace the bridge. It is NOT wired: no supervisor child, LaunchAgent
-  or CLI command runs it, and it must not be wired until it has passed an
+- `backend/trading/execution/live_executor.py` is the execution engine (not yet
+  independently reviewed) meant to replace the bridge. It is NOT wired: no
+  supervisor child, LaunchAgent or CLI command runs it, and it must not be
+  wired until it has passed an
   independent execution-safety review and a supervised drill on the paper
   account, and the owner explicitly decides to switch the order sender. Only
   one sender may ever run: the bridge stays the only one until the switch, and

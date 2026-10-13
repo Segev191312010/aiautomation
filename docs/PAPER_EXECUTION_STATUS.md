@@ -49,7 +49,7 @@ Order sources:
   untested modify encoding). Fixed in v5 with tests.
 - Pending: final review of v5 with manual-order intake before unattended use.
 
-## The reviewed execution engine (C2): built, not wired
+## The execution engine (C2): built, not wired, review pending
 
 `backend/trading/execution/live_executor.py` is built and tested against a fake
 TWS only. Nothing runs it and it cannot send an order today: no supervisor
