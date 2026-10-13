@@ -461,11 +461,15 @@ def window_lines(research: FamilyResearch) -> list[str]:
     """Plain text for the replay summary and the weekly message."""
     label = FAMILY_LABELS.get(research.family, research.family)
     if research.status != "swept":
-        return [f"{label}: not swept ({research.note})"]
+        # The short reason only; windows.json keeps the whole note.
+        return [f"{label}: not swept ({research.note.split(':')[0]})"]
     lines = [f"{label} ({len(research.sessions)} sessions, {research.symbol_days} symbol-days)"]
     for result in research.windows:
         stats = result.stats
         tag = " (V1)" if result.core else (" (V2)" if result.window == ALL_SESSION_WINDOW else "")
+        if not stats.trades:
+            lines.append(f"  {result.label}{tag}: no trades")
+            continue
         lines.append(
             f"  {result.label}{tag}: {stats.trades} trades, {_r(stats.expectancy_r)}/trade,"
             f" PF {_pf(stats.profit_factor, stats.trades)}, total {_r(stats.total_r)}"
@@ -482,10 +486,15 @@ def window_lines(research: FamilyResearch) -> list[str]:
         core, extra = research.core_stats, research.extra_stats
         if core is not None and extra is not None:
             lines.append(
-                f"  core {core.trades} trades {_r(core.expectancy_r)}/trade"
-                f" | extra hours {extra.trades} trades {_r(extra.expectancy_r)}/trade (* = extra)"
+                f"  core {_count(core)} | extra hours {_count(extra)}"
             )
     return lines
+
+
+def _count(stats: StrategyStats) -> str:
+    if not stats.trades:
+        return "no trades"
+    return f"{stats.trades} trades {_r(stats.expectancy_r)}/trade"
 
 
 def research_payload(research: FamilyResearch) -> dict[str, Any]:

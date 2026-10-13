@@ -66,6 +66,7 @@ from trading.rules.vwap_pb import VWAP_PB_RULES_VERSION, VwapPbStrategy
 from trading.scheduler.sessions import market_session
 
 if TYPE_CHECKING:
+    from trading.research.nightly import NightlyEnvironment
     from trading.research.report_notify import NotifyMode
 
 logger = logging.getLogger("autotrader.shadow.research")
@@ -666,6 +667,12 @@ def text_report(
     return "\n\n".join(sections)
 
 
+def report_date(results: Sequence[ReplayResult], *, generated_at: datetime) -> date:
+    """The reports' directory date: the newest replayed session."""
+    sessions = sorted({day for result in results for day in result.sessions})
+    return sessions[-1] if sessions else generated_at.date()
+
+
 def write_reports(
     results: Sequence[ReplayResult],
     *,
@@ -678,8 +685,7 @@ def write_reports(
     A skipped strategy gets a ``"status": "skipped"`` JSON with its named
     reason, so its absence from the statistics is explicit, never silent.
     """
-    sessions = sorted({day for result in results for day in result.sessions})
-    as_of = sessions[-1].isoformat() if sessions else generated_at.date().isoformat()
+    as_of = report_date(results, generated_at=generated_at).isoformat()
     directory = paths.ensure_private(paths.reports_directory / as_of)
     written: list[str] = []
     payloads = [
@@ -702,15 +708,24 @@ def write_reports(
     return tuple(written)
 
 
-def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -> int:
+def run_replay_cli(
+    strategies: Sequence[str],
+    *,
+    notify: NotifyMode = "never",
+    environment: NightlyEnvironment | None = None,
+) -> int:
     """``autotraderctl research replay [--strategy ...] [--notify]``: rule-only replay.
 
-    Without strategies every registered one is reported; GAP_GO as not
-    replayable. ``notify`` hands the summary to ``report_notify`` after a
-    successful replay ("weekly": only on the week's last session; "now": on
-    demand). Telegram never changes a successful replay's exit code unless the
-    owner asked for the message ("now") and it was not delivered.
+    Without strategies every registered one is reported (GAP_GO as not
+    replayable) and the nightly evidence run follows (``trading.research.nightly``:
+    the signal-outcome tracker, the live R ledger, the paper promotion rule
+    and the window research), its sections leading the summary. ``notify``
+    hands the summary to ``report_notify`` after a successful replay
+    ("weekly": only on the week's last session; "now": on demand). Telegram
+    never changes a successful replay's exit code unless the owner asked for
+    the message ("now") and it was not delivered.
     """
+    full_run = not [name for name in strategies if name.strip()]
     names = [name.strip().lower() for name in strategies if name.strip()] or list(
         REGISTERED_STRATEGIES
     )
@@ -730,11 +745,28 @@ def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -
     ordered = list(dict.fromkeys(names))
     skipped = [UNREPLAYABLE[name] for name in ordered if name in UNREPLAYABLE]
     results = [replay_strategy(name, store) for name in ordered if name not in UNREPLAYABLE]
-    written = write_reports(
-        results, paths=store.paths, generated_at=datetime.now(UTC), skipped=skipped
-    )
+    generated_at = datetime.now(UTC)
+    written = write_reports(results, paths=store.paths, generated_at=generated_at, skipped=skipped)
     report = text_report(results, skipped=skipped)
-    print(report)
+    summary = report
+    if full_run:
+        from trading.research import nightly, report_notify as summaries
+
+        evidence = nightly.collect_evidence(
+            results,
+            skipped,
+            store,
+            environment=environment or nightly.NightlyEnvironment.current(),
+        )
+        summary = summaries.compose_summary(report, evidence)
+        written += nightly.write_evidence(
+            evidence,
+            paths=store.paths,
+            as_of=report_date(results, generated_at=generated_at),
+            generated_at=generated_at,
+            text=summaries.evidence_text(evidence),
+        )
+    print(summary)
     print("")
     print("reports:")
     for path in written:
@@ -743,7 +775,7 @@ def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -
         return 0
     from trading.research import report_notify
 
-    outcome = report_notify.notify_summary(report, mode=notify, newest_session=stored[-1])
+    outcome = report_notify.notify_summary(summary, mode=notify, newest_session=stored[-1])
     if outcome == report_notify.SENT:
         print("telegram: summary sent")
     elif notify == "now":
@@ -780,6 +812,7 @@ __all__ = [
     "flatten_at",
     "r_multiple",
     "replay_strategy",
+    "report_date",
     "result_payload",
     "result_stats",
     "run_replay_cli",

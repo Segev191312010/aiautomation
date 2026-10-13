@@ -639,8 +639,10 @@ def _run_sync_until_sigterm(work: Callable[[], int]) -> int:
 
 def _research_command(arguments: argparse.Namespace) -> int:
     """Research bars and replay. ``backfill`` and ``record`` read TWS PAPER market
-    data on client 28 (they refuse a non-paper login); ``replay`` reads only the
-    research store. Nothing here can place an order."""
+    data on client 28 (they refuse a non-paper login); ``replay`` reads the
+    research store and, after a full replay, runs the nightly evidence
+    (trading.research.nightly: it writes only the signal-outcome table, and only
+    on a database at this code's schema). Nothing here can place an order."""
     logger = _interactive_research_logger()
     label = f"research {arguments.action}"
     if arguments.action == "replay":

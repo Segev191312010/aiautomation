@@ -200,6 +200,24 @@ def test_an_ai_selection_that_costs_r_is_advisory_one_that_helps_stays_active():
     assert few.status == AI_INSUFFICIENT and few.selected_trades == 9
 
 
+def test_the_weekly_lines_name_an_eligible_strategy_and_an_advisory_ai():
+    from trading.research.report_notify import evidence_lines
+
+    # Every day: the AI picked the -1R trade and passed on two +2R trades.
+    live = _trades([["-1", "2", "2"] for _ in range(25)], selected=[[True, False, False]] * 25)
+    report = evaluate_promotion(
+        identity=IDENTITY, registry_key="vwap-v2", live=live, live_sessions=25,
+        replay=_strong(25, per_day=["2", "2", "2", "-1", "-1"]), replay_sessions=25,
+    )
+
+    assert report.eligible and report.ai.status == AI_ADVISORY
+    assert evidence_lines([report]) == [
+        "Paper promotion (paper-promotion-v1; reports only, nothing is granted)",
+        "VWAP_PB_V2: ELIGIBLE for the owner's review; AI advisory (its picks cost R)"
+        " (picks - all -2.00R, upper bound -2.00R)",
+    ]
+
+
 def test_the_paired_difference_compares_on_the_same_days():
     trades = _paired(12, chosen="-1", other="1")
     bound = paired_difference_bootstrap(trades, seed_label="paired")

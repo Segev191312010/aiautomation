@@ -16,17 +16,22 @@ inside America/New_York windows:
 A strategy window ends one minute after that strategy's own entry cutoff, so a
 half day's earlier cutoffs move their windows in (MOMO 12:00, the all-session
 simulations 12:30). The all-session simulations are shadow only (their names
-do not start with MOMO_HOD); each sleeps until its own data is due. Between sessions, and on
-closed days, the process sleeps until the next session's 07:55 ET; it never
-exits because a day ended (launchd's KeepAlive would only restart it).
+do not start with MOMO_HOD); each sleeps until its own data is due.
+
+Between sessions, and on closed days, the process sleeps until the next
+session's 07:55 ET; it never exits because a day ended (launchd's KeepAlive
+would only restart it).
 
 The learning loop runs after the close: the recorder stores the session that
 just closed in the research bar store (read-only TWS data client 28; it takes
 no date because it always records the newest closed sessions, and reaches back
 three weeks, so the first night fills the sample and a missed night is filled
 in by the next), then the replay
-walks every stored session through each strategy's rules, writes the reports
-and, on the week's last session, sends their summary to Telegram. Both run
+walks every stored session through each strategy's rules, writes the reports,
+runs the nightly evidence inside the same window (the signal-outcome tracker,
+the live R ledger, the paper promotion rule, and the window research when it
+can start by 18:00; ``trading.research.nightly``) and, on the week's last
+session, sends their summary to Telegram. Both run
 once: any clean exit is final, a failure is retried inside the window. Their
 exits come after the notifier's 16:15 end, so they reach the phone only through
 the weekly summary (which flags a session the recorder missed) and the

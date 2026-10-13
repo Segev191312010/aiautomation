@@ -178,7 +178,8 @@ def test_gap_go_is_not_swept_without_extended_bars(store):
     research = sweep_family("gap_go", store)
 
     assert research.status == "skipped" and "needs extended bars" in research.note
-    assert window_lines(research) == [f"GAP_GO: not swept ({research.note})"]
+    assert window_lines(research) == ["GAP_GO: not swept (needs extended bars)"]
+    assert research_payload(research)["note"] == research.note
 
 
 def test_the_sweep_windows_start_at_v1_and_end_at_the_all_session_window():
