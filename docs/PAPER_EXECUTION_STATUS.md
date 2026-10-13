@@ -81,7 +81,7 @@ Order sources:
   loop by up to 20 s, a few-second startup window, and two untested guards
   (startup replay exclusion, the SLD path).
 
-## The execution engine (C2): built, not wired, review NOT-READY, fixes awaiting re-review
+## The execution engine (C2): built, not wired; re-review READY-FOR-DRILL
 
 `backend/trading/execution/live_executor.py` is built and tested against a fake
 TWS only. Nothing runs it and it cannot send an order today: no supervisor
@@ -156,7 +156,34 @@ signatures, not captured from a live TWS.
   filled quantity and completion time; one without a readable time zone
   counts as after the entry (its shares stay reserved), and a CRITICAL
   follows when the position still does not show such a sell after 15 s (the
-  bridge's L-e). A re-review is pending.
+  bridge's L-e).
+- 2026-10-13: independent re-review of 3579e92 — READY-FOR-DRILL: a
+  supervised PAPER drill only, conditional on the reviewer's drill checklist.
+  All eight first-review probes no longer reproduce. New findings (R-1 and
+  R-2 must be fixed before any unattended use):
+  - R-1 (MEDIUM): a snapshot TWS does not answer ended the flatten for good:
+    at its start (stop left live) and in the fallback after both cancels were
+    confirmed (no stop, no target, no sell).
+  - R-2 (MEDIUM): a completed sell whose filledQuantity is empty counted as
+    0 sold (ibapi 9.81 decodes an empty field as 0.0), which reopens the
+    C2-1 double sell.
+  - R-3 (MEDIUM-LOW): the engine's own earlier bracket in the same symbol, or
+    any same-day sell without a readable time zone, counted as another
+    order's unshown sale: no flatten sell, a false CRITICAL.
+  - R-4 (LOW): a restart after the stop time neither finished nor flagged a
+    fallback that had already cancelled target and stop.
+  - R-5 (LOW): the bridge interlock missed `python -m scripts_local.paper_bridge`,
+    read the heartbeat from the engine's own database rather than the
+    bridge's, and was tested only with a mocked pgrep.
+  - R-6 (LOW): the code digest left out the package `__init__` modules the
+    engine imports for their side effects and `db/core.py`; its completeness
+    test followed explicit imports only.
+  - R-7 (LOW): only promote backs the database up; revoke, the Telegram
+    assistant and supervisor children would apply the ledger migration
+    without one. Covered by the explicit-migration work on the main line (see
+    "Migration numbering" below), not on this branch.
+  - Status: R-1 to R-6 are being fixed on this branch, each with a
+    regression test named after it.
 
 ## Still to do
 
