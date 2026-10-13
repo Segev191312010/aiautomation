@@ -100,6 +100,30 @@ the requested JSON: decision, confidence between 0 and 1, and a short rationale 
 that names the specific values behind your decision."""
 
 
+# Managed MOMO (AP_MOMO_HOD_V1, shadow): V2's review plus the day manager's
+# context and a size step. Only the managed review provider uses it; in
+# neutral mode managed MOMO is reviewed with momo-review-v2, byte for byte.
+MOMO_MANAGED_REVIEW_PROMPT_ID = "momo-managed-review-v1"
+MOMO_MANAGED_REVIEW_V1 = MOMO_REVIEW_V2.removesuffix(
+    """You cannot change any price, quantity, symbol, or order field. Respond only with \
+the requested JSON: decision, confidence between 0 and 1, and a short rationale \
+that names the specific values behind your decision."""
+) + """The request also carries manager_context from today's AI day manager: the \
+plan's regime, the momentum strategy's day step (1 is full size), and the plan's \
+one-line note on why this name is in focus. Treat it as context, not as a \
+reason to PROPOSE a setup you would otherwise ABSTAIN on.
+
+Besides the decision, return step, the size you would take for this setup \
+on top of the day step: 1 for full size, 0.75, 0.5 or 0.25 to scale it down \
+(for example a setup that is fine but late in the move), 0 to skip it. Size \
+can only go down; deterministic code multiplies the steps and rounds down. \
+Return note, one line of at most 140 characters on the sizing.
+
+You cannot change any price, quantity, symbol, or order field. Respond only with \
+the requested JSON: decision, confidence between 0 and 1, a short rationale \
+that names the specific values behind your decision, step, and note."""
+
+
 def _shadow_strategy_prompts() -> dict[str, str]:
     """Prompts owned by their strategy modules (registered verbatim; hash-pinned there)."""
     from trading.rules.gap_go import GAP_REVIEW_PROMPT_ID, GAP_REVIEW_V1
@@ -112,6 +136,7 @@ REVIEW_PROMPTS: dict[str, str] = {
     "orb-review-v1": ORB_REVIEW_V1,
     "momo-review-v1": MOMO_REVIEW_V1,
     "momo-review-v2": MOMO_REVIEW_V2,
+    MOMO_MANAGED_REVIEW_PROMPT_ID: MOMO_MANAGED_REVIEW_V1,
     **_shadow_strategy_prompts(),
 }
 # Each prompt describes exactly one rule set; reviewing another kind's setup
@@ -121,6 +146,7 @@ REVIEW_PROMPT_STRATEGY_KINDS: dict[str, str] = {
     "orb-review-v1": "orb",
     "momo-review-v1": "momo_hod",
     "momo-review-v2": "momo_hod",
+    MOMO_MANAGED_REVIEW_PROMPT_ID: "momo_hod",
     "vwap-review-v1": "vwap_pb",
     "gap-review-v1": "gap_go",
 }
@@ -144,6 +170,8 @@ def review_prompt_for(prompt_id: str, *, strategy_kind: str) -> str:
 
 
 __all__ = [
+    "MOMO_MANAGED_REVIEW_PROMPT_ID",
+    "MOMO_MANAGED_REVIEW_V1",
     "MOMO_REVIEW_V1",
     "MOMO_REVIEW_V2",
     "ORB_REVIEW_V1",
