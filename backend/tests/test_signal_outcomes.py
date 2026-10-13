@@ -63,13 +63,19 @@ def _strategy(connection: sqlite3.Connection, strategy_id: str, spec: StrategySp
     )
 
 
-def _run(connection: sqlite3.Connection, run_id: str, strategy_id: str, session_date: date) -> None:
+def _run(
+    connection: sqlite3.Connection,
+    run_id: str,
+    strategy_id: str,
+    session_date: date,
+    prints: dict[str, str] | None = None,
+) -> None:
     connection.execute(
         """INSERT INTO autotrader_runs
            (id, owner_id, source_sha, strategy_id, strategy_version, session_date, mode, status,
             policy_fingerprints_json)
-           VALUES (?, 'owner', 'abcdef1', ?, 1, ?, 'shadow', 'completed', '{}')""",
-        (run_id, strategy_id, session_date.isoformat()),
+           VALUES (?, 'owner', 'abcdef1', ?, 1, ?, 'shadow', 'completed', ?)""",
+        (run_id, strategy_id, session_date.isoformat(), json.dumps(prints or {})),
     )
     connection.execute(
         """INSERT INTO autotrader_scanner_runs
