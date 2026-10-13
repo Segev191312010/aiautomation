@@ -1,0 +1,1667 @@
+{
+  "captured_at_utc": null,
+  "et_phase": null,
+  "probe_version": 1,
+  "rank_base": 0,
+  "scans": [
+    {
+      "rows": [
+        {
+          "con_id": 990000001,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "NVDA"
+        },
+        {
+          "con_id": 990000002,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "TSLA"
+        },
+        {
+          "con_id": 990000003,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "AMD"
+        },
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000006,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "INTC"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "MSFT"
+        }
+      ],
+      "scan_code": "HOT_BY_VOLUME",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000006,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "INTC"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "AVGO"
+        }
+      ],
+      "scan_code": "TOP_PERC_GAIN",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000015,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "COIN"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "MARA"
+        }
+      ],
+      "scan_code": "MOST_ACTIVE",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000015,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "COIN"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000018,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "RIVN"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 9,
+          "symbol": "BAC"
+        }
+      ],
+      "scan_code": "HIGH_OPEN_GAP",
+      "variant": "base"
+    },
+    {
+      "rows": [],
+      "scan_code": "TOP_OPEN_PERC_GAIN",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000018,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "RIVN"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000021,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "T"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 8,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 9,
+          "symbol": "SHOP"
+        }
+      ],
+      "scan_code": "TOP_TRADE_COUNT",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000021,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "T"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000027,
+          "exchange": "NYSE",
+          "rank": 8,
+          "symbol": "WFC"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 9,
+          "symbol": "XOM"
+        }
+      ],
+      "scan_code": "HOT_BY_PRICE",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000027,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "WFC"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "XOM"
+        },
+        {
+          "con_id": 990000029,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "JPM"
+        },
+        {
+          "con_id": 990000030,
+          "exchange": "NYSE",
+          "rank": 8,
+          "symbol": "BA"
+        },
+        {
+          "con_id": 990000031,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "DKNG"
+        }
+      ],
+      "scan_code": "HIGH_VS_13W_HL",
+      "variant": "base"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000001,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "NVDA"
+        },
+        {
+          "con_id": 990000002,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "TSLA"
+        },
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MSFT"
+        }
+      ],
+      "scan_code": "HOT_BY_VOLUME",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AVGO"
+        }
+      ],
+      "scan_code": "TOP_PERC_GAIN",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MARA"
+        }
+      ],
+      "scan_code": "MOST_ACTIVE",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "BAC"
+        }
+      ],
+      "scan_code": "HIGH_OPEN_GAP",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [],
+      "scan_code": "TOP_OPEN_PERC_GAIN",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "SHOP"
+        }
+      ],
+      "scan_code": "TOP_TRADE_COUNT",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "XOM"
+        }
+      ],
+      "scan_code": "HOT_BY_PRICE",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "XOM"
+        },
+        {
+          "con_id": 990000029,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "JPM"
+        },
+        {
+          "con_id": 990000031,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "DKNG"
+        }
+      ],
+      "scan_code": "HIGH_VS_13W_HL",
+      "variant": "above_volume"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000001,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "NVDA"
+        },
+        {
+          "con_id": 990000002,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "TSLA"
+        },
+        {
+          "con_id": 990000003,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "AMD"
+        },
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000006,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "INTC"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "AMZN"
+        }
+      ],
+      "scan_code": "HOT_BY_VOLUME",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000006,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "INTC"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "GOOGL"
+        }
+      ],
+      "scan_code": "TOP_PERC_GAIN",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "HOOD"
+        }
+      ],
+      "scan_code": "MOST_ACTIVE",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000015,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "COIN"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "RIOT"
+        }
+      ],
+      "scan_code": "HIGH_OPEN_GAP",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [],
+      "scan_code": "TOP_OPEN_PERC_GAIN",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000018,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "RIVN"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000021,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "T"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "ORCL"
+        }
+      ],
+      "scan_code": "TOP_TRADE_COUNT",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000021,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "T"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "CCL"
+        }
+      ],
+      "scan_code": "HOT_BY_PRICE",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000027,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "WFC"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "XOM"
+        },
+        {
+          "con_id": 990000029,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "JPM"
+        }
+      ],
+      "scan_code": "HIGH_VS_13W_HL",
+      "variant": "market_cap_musd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000001,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "NVDA"
+        },
+        {
+          "con_id": 990000002,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "TSLA"
+        },
+        {
+          "con_id": 990000003,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "AMD"
+        },
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000006,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "INTC"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "MSFT"
+        }
+      ],
+      "scan_code": "HOT_BY_VOLUME",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000004,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "PLTR"
+        },
+        {
+          "con_id": 990000005,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "SOFI"
+        },
+        {
+          "con_id": 990000006,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "INTC"
+        },
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "AVGO"
+        }
+      ],
+      "scan_code": "TOP_PERC_GAIN",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000007,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "AAPL"
+        },
+        {
+          "con_id": 990000008,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "AMZN"
+        },
+        {
+          "con_id": 990000009,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "META"
+        },
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000015,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "COIN"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "MARA"
+        }
+      ],
+      "scan_code": "MOST_ACTIVE",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000010,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MSFT"
+        },
+        {
+          "con_id": 990000011,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "GOOGL"
+        },
+        {
+          "con_id": 990000012,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "MU"
+        },
+        {
+          "con_id": 990000013,
+          "exchange": "NASDAQ",
+          "rank": 3,
+          "symbol": "AVGO"
+        },
+        {
+          "con_id": 990000014,
+          "exchange": "NASDAQ",
+          "rank": 4,
+          "symbol": "HOOD"
+        },
+        {
+          "con_id": 990000015,
+          "exchange": "NASDAQ",
+          "rank": 5,
+          "symbol": "COIN"
+        },
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 6,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 7,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000018,
+          "exchange": "NASDAQ",
+          "rank": 8,
+          "symbol": "RIVN"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 9,
+          "symbol": "BAC"
+        }
+      ],
+      "scan_code": "HIGH_OPEN_GAP",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [],
+      "scan_code": "TOP_OPEN_PERC_GAIN",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000016,
+          "exchange": "NASDAQ",
+          "rank": 0,
+          "symbol": "MARA"
+        },
+        {
+          "con_id": 990000017,
+          "exchange": "NASDAQ",
+          "rank": 1,
+          "symbol": "RIOT"
+        },
+        {
+          "con_id": 990000018,
+          "exchange": "NASDAQ",
+          "rank": 2,
+          "symbol": "RIVN"
+        },
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000021,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "T"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 8,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 9,
+          "symbol": "SHOP"
+        }
+      ],
+      "scan_code": "TOP_TRADE_COUNT",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000019,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "BAC"
+        },
+        {
+          "con_id": 990000020,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "PFE"
+        },
+        {
+          "con_id": 990000021,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "T"
+        },
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000027,
+          "exchange": "NYSE",
+          "rank": 8,
+          "symbol": "WFC"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 9,
+          "symbol": "XOM"
+        }
+      ],
+      "scan_code": "HOT_BY_PRICE",
+      "variant": "market_cap_usd"
+    },
+    {
+      "rows": [
+        {
+          "con_id": 990000022,
+          "exchange": "NYSE",
+          "rank": 0,
+          "symbol": "UBER"
+        },
+        {
+          "con_id": 990000023,
+          "exchange": "NYSE",
+          "rank": 1,
+          "symbol": "ORCL"
+        },
+        {
+          "con_id": 990000024,
+          "exchange": "NYSE",
+          "rank": 2,
+          "symbol": "CRM"
+        },
+        {
+          "con_id": 990000025,
+          "exchange": "NYSE",
+          "rank": 3,
+          "symbol": "SHOP"
+        },
+        {
+          "con_id": 990000026,
+          "exchange": "NYSE",
+          "rank": 4,
+          "symbol": "CCL"
+        },
+        {
+          "con_id": 990000027,
+          "exchange": "NYSE",
+          "rank": 5,
+          "symbol": "WFC"
+        },
+        {
+          "con_id": 990000028,
+          "exchange": "NYSE",
+          "rank": 6,
+          "symbol": "XOM"
+        },
+        {
+          "con_id": 990000029,
+          "exchange": "NYSE",
+          "rank": 7,
+          "symbol": "JPM"
+        },
+        {
+          "con_id": 990000030,
+          "exchange": "NYSE",
+          "rank": 8,
+          "symbol": "BA"
+        },
+        {
+          "con_id": 990000031,
+          "exchange": "NASDAQ",
+          "rank": 9,
+          "symbol": "DKNG"
+        }
+      ],
+      "scan_code": "HIGH_VS_13W_HL",
+      "variant": "market_cap_usd"
+    }
+  ],
+  "source": "synthetic: fake TWS replay, not a TWS run; regenerate with autotraderctl shadow probe --scanner-only --fixtures-dir"
+}

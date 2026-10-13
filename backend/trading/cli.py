@@ -111,6 +111,35 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also send one synthetic setup to Claude (about $0.02)",
     )
+    probe.add_argument(
+        "--scanner-only",
+        action="store_true",
+        help=(
+            "only the read-only scanner, news and market-data-line probe on the probe's own "
+            "client id; reads no config, database or Keychain"
+        ),
+    )
+    probe.add_argument("--out", type=Path, default=None, help="--scanner-only: write the JSON report here")
+    probe.add_argument("--host", default=None, help="--scanner-only: TWS host (loopback only)")
+    probe.add_argument("--port", type=int, default=None, help="--scanner-only: TWS PAPER port")
+    probe.add_argument(
+        "--client-id",
+        type=int,
+        default=None,
+        help="--scanner-only: TWS client id (default: the probe's own; child ids are refused)",
+    )
+    probe.add_argument(
+        "--fixtures-dir",
+        type=Path,
+        default=None,
+        help="--scanner-only: also write trimmed public test fixtures here",
+    )
+    probe.add_argument(
+        "--from-report",
+        type=Path,
+        default=None,
+        help="--scanner-only --fixtures-dir: rebuild the fixtures from a saved report, without TWS",
+    )
     agent = shadow_actions.add_parser(
         "agent", help="manage the LaunchAgent that keeps `autotraderctl run` alive"
     )
@@ -629,6 +658,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.domain == "shadow" and arguments.action == "agent":
         return _shadow_agent(arguments.agent_action)
     if arguments.domain == "shadow" and arguments.action == "probe":
+        scanner_options = ("out", "host", "port", "client_id", "fixtures_dir", "from_report")
+        if arguments.scanner_only:
+            if arguments.con_id is not None or arguments.with_claude:
+                parser.error("--con-id and --with-claude do not apply to --scanner-only")
+            from trading.operations.scanner_probe import run_cli as run_scanner_probe
+
+            return run_scanner_probe(
+                **{name: getattr(arguments, name) for name in scanner_options}
+            )
+        given = [name for name in scanner_options if getattr(arguments, name) is not None]
+        if given:
+            parser.error(f"--{given[0].replace('_', '-')} requires --scanner-only")
         from trading.operations.probe import probe_tws
         from trading.operations.settings import load_shadow_runtime_config
 
