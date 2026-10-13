@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
@@ -25,6 +26,7 @@ from trading.contracts import (
 )
 from trading.engine import AutotraderEngine
 from trading.intelligence.provider import TradeProposalProvider
+from trading.risk.engine import SIZE_SCALED_TO_ZERO
 from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
 from trading.rules.strategy import (
     ORBStrategy,
@@ -44,6 +46,34 @@ SetupRecorder = Callable[[FormedSetup], Awaitable[object]]
 # Named token of the one failure the pipeline swallows: evidence that could
 # not be saved. The decision it follows is already recorded and unchanged.
 SETUP_PERSIST_FAILED = "setup_persist_failed"
+# The managed-size overlay failed: the setup is sized as if unmanaged (step 1),
+# never larger (Principle 3).
+MANAGED_SIZE_FAILED = "managed_size_failed"
+MANAGED_RECORD_FAILED = "managed_record_failed"
+NO_SCALING = Decimal("1")
+
+
+class ManagedSizing(Protocol):
+    """The AI day manager's verdict hookup for a managed strategy (Principle 2).
+
+    ``size_multiplier`` is the day step times the setup step for a PROPOSE
+    review, in [0, 1]; 0 skips the setup. ``after_decision`` records the
+    narrowing beside the recorded decision. An unmanaged pipeline has no
+    overlay and sizes exactly as before.
+    """
+
+    async def size_multiplier(self, *, setup: RuleSetup, review: AIReview) -> Decimal: ...
+
+    async def after_decision(
+        self,
+        *,
+        decision: Decision,
+        setup: RuleSetup,
+        candidate: Candidate,
+        policy: RiskPolicy,
+        portfolio: PortfolioSnapshot,
+        size_multiplier: Decimal,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,11 +179,12 @@ def _blocked_risk(
     review: AIReview,
     policy: RiskPolicy,
     portfolio: PortfolioSnapshot,
+    code: str = "risk_evaluation_failed",
 ) -> RiskApproval:
     now = datetime.now(timezone.utc)
     return RiskApproval(
         approved=False,
-        codes=("risk_evaluation_failed",),
+        codes=(code,),
         setup_fingerprint=setup.fingerprint(),
         ai_review_fingerprint=review.fingerprint(),
         policy_fingerprint=policy.fingerprint(),
@@ -173,6 +204,7 @@ class ShadowPipeline:
         strategy: StrategyEvaluator = ORBStrategy(),
         mode: EngineMode = EngineMode.SHADOW,
         setup_recorder: SetupRecorder = record_formed_setup,
+        sizing: ManagedSizing | None = None,
     ) -> None:
         if not isinstance(strategy, StrategyEvaluator):
             raise TypeError("strategy must implement StrategyEvaluator")
@@ -181,6 +213,7 @@ class ShadowPipeline:
         self._strategy = strategy
         self._mode = mode
         self._setup_recorder = setup_recorder
+        self._sizing = sizing
 
         async def defer_recording(**_: object) -> None:
             return None
@@ -202,6 +235,10 @@ class ShadowPipeline:
     @property
     def setup_recorder(self) -> SetupRecorder:
         return self._setup_recorder
+
+    @property
+    def sizing(self) -> ManagedSizing | None:
+        return self._sizing
 
     async def run(
         self,
@@ -350,16 +387,40 @@ class ShadowPipeline:
                 reason = "invalid_provider_review"
             review = _blocked_review(setup=setup, reason=reason)
 
+        multiplier = await self._managed_multiplier(setup=setup, review=review)
+        # Unmanaged runs call the engine exactly as before the manager existed.
+        managed_size = {} if self._sizing is None else {"size_multiplier": multiplier}
         try:
-            decision = await self._engine.assess(
-                mode=self._mode,
-                strategy=strategy,
-                setup=setup,
-                review=review,
-                portfolio=portfolio,
-                policy=policy,
-                admitted_symbols=admitted_symbols,
-            )
+            if multiplier == 0:
+                # The manager's steps skip this setup: a deterministic risk
+                # block, never a resize upward.
+                decision = self._terminal_decision(
+                    run_id=run_id,
+                    strategy=strategy,
+                    candidate=item.candidate,
+                    key=key,
+                    outcome=DecisionOutcome.RISK_BLOCKED,
+                    setup=setup,
+                    review=review,
+                    risk=_blocked_risk(
+                        setup=setup,
+                        review=review,
+                        policy=policy,
+                        portfolio=portfolio,
+                        code=SIZE_SCALED_TO_ZERO,
+                    ),
+                )
+            else:
+                decision = await self._engine.assess(
+                    mode=self._mode,
+                    strategy=strategy,
+                    setup=setup,
+                    review=review,
+                    portfolio=portfolio,
+                    policy=policy,
+                    admitted_symbols=admitted_symbols,
+                    **managed_size,
+                )
         except Exception:
             if review.decision != "PROPOSE":
                 decision = self._terminal_decision(
@@ -389,19 +450,77 @@ class ShadowPipeline:
                     risk=risk,
                 )
         else:
-            decision = Decision.model_validate(
-                {
-                    **decision.model_dump(mode="json"),
-                    "decision_key": key,
-                }
-            )
+            if multiplier != 0:
+                decision = Decision.model_validate(
+                    {
+                        **decision.model_dump(mode="json"),
+                        "decision_key": key,
+                    }
+                )
         await self._record(decision, strategy.owner_id)
         # Evidence after the decision, never before it: the decision's inputs,
         # outcome and write time are exactly those of a pipeline without it.
         await self._persist_setup(
             setup=setup, strategy=strategy, item=item, session_date=session_day
         )
+        await self._record_managed(
+            decision=decision,
+            setup=setup,
+            item=item,
+            policy=policy,
+            portfolio=portfolio,
+            multiplier=multiplier,
+        )
         return Assessment(decision=decision)
+
+    async def _managed_multiplier(self, *, setup: RuleSetup, review: AIReview) -> Decimal:
+        """The overlay's multiplier for a PROPOSE review; 1 without an overlay.
+
+        Any failure or out-of-range answer sizes the setup as unmanaged (1),
+        the neutral fallback, and is logged CRITICAL: never larger than 1.
+        """
+        if self._sizing is None or review.decision != "PROPOSE":
+            return NO_SCALING
+        try:
+            multiplier = await self._sizing.size_multiplier(setup=setup, review=review)
+            if not isinstance(multiplier, Decimal) or not multiplier.is_finite():
+                raise ValueError("size multiplier must be a finite Decimal")
+            if not Decimal("0") <= multiplier <= NO_SCALING:
+                raise ValueError(f"size multiplier {multiplier} is outside [0, 1]")
+        except Exception:  # noqa: BLE001 - neutral sizing, see docstring
+            logger.critical(
+                "%s: setup %s sized as unmanaged", MANAGED_SIZE_FAILED, setup.fingerprint(),
+                exc_info=True,
+            )
+            return NO_SCALING
+        return multiplier
+
+    async def _record_managed(
+        self,
+        *,
+        decision: Decision,
+        setup: RuleSetup,
+        item: CandidateInput,
+        policy: RiskPolicy,
+        portfolio: PortfolioSnapshot,
+        multiplier: Decimal,
+    ) -> None:
+        if self._sizing is None:
+            return
+        try:
+            await self._sizing.after_decision(
+                decision=decision,
+                setup=setup,
+                candidate=item.candidate,
+                policy=policy,
+                portfolio=portfolio,
+                size_multiplier=multiplier,
+            )
+        except Exception:  # noqa: BLE001 - evidence must never block or alter a decision
+            logger.error(
+                "%s: run %s setup %s", MANAGED_RECORD_FAILED, setup.run_id, setup.fingerprint(),
+                exc_info=True,
+            )
 
     async def record_data_blocked(
         self,

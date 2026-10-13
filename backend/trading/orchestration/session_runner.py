@@ -57,6 +57,10 @@ logger = logging.getLogger("autotrader.shadow.session")
 
 ORB_STRATEGY_NAME = "ORB_V1"
 MOMO_STRATEGY_NAME = "MOMO_HOD_V2"
+# Managed MOMO in shadow. Never sendable: the name does not start with
+# MOMO_HOD, so the pinned bridge records and never sends its decisions. The
+# real managed identity (MOMO_HOD_AP_V1) is a reviewed phase-3 change.
+AP_MOMO_STRATEGY_NAME = "AP_MOMO_HOD_V1"
 BAR_INTERVAL = timedelta(minutes=5)
 # The least time a poll gets, from its slot to its freshness limit, to fetch
 # every pending candidate: what the original 30 s limit left a poll made 5 s
@@ -117,6 +121,13 @@ Reconnector = Callable[[], Awaitable[None]]
 # ``(allowed, reason)``: asked once per poll; ``(False, reason)`` skips that
 # poll's assessments so candidates stay pending (e.g. MOMO in a risk-off market).
 EntryGate = Callable[[], Awaitable[tuple[bool, str]]]
+# ``(candidate, eligible) -> admitted``: asked for each pending candidate of a
+# poll, with every candidate the run holds (its eligible set). False skips the
+# candidate for this poll before any data request or review: it stays pending
+# (managed MOMO's focus filter, a deterministic skip with no AI call).
+CandidateFilter = Callable[[Candidate, tuple[Candidate, ...]], bool]
+# The log tag of a filter that raised; the candidate is assessed as unfiltered.
+CANDIDATE_FILTER_FAILED = "candidate_filter_failed"
 
 
 class SessionAborted(RuntimeError):
@@ -234,6 +245,22 @@ def momo_strategy_spec() -> StrategySpec:
     )
 
 
+def ap_momo_strategy_spec() -> StrategySpec:
+    """AP_MOMO_HOD_V1's catalogue entry: MOMO_HOD_V2's rules under the AI day manager."""
+    momo = momo_strategy_spec()
+    return StrategySpec(
+        name=AP_MOMO_STRATEGY_NAME,
+        universe=momo.universe,
+        conditions=momo.conditions,
+        rationale=(
+            "MOMO_HOD_V2's rules (trading/rules/momo.py MomoConfig) in shadow under the AI "
+            "day manager, which may only narrow: it picks a focus inside the hot list, "
+            "switches the strategy off for the day, and scales size down by fixed steps "
+            "(0.25-1). Without a valid plan it runs exactly as MOMO_HOD_V2. Shadow only."
+        ),
+    )
+
+
 async def ensure_strategy(*, owner_id: str, spec: StrategySpec) -> StrategyRecord:
     """Return the owner's strategy named ``spec.name``, creating it in SHADOW.
 
@@ -311,6 +338,7 @@ class ShadowSessionRunner:
         entry_gate_name: str = "entries",
         bars_fetcher: BarsFetcher | None = None,
         contract_loader: ContractLoader | None = None,
+        candidate_filter: CandidateFilter | None = None,
     ) -> None:
         """``poll_schedule`` places every poll inside its bar (a required
         choice: children sharing symbols must not poll together).
@@ -318,7 +346,9 @@ class ShadowSessionRunner:
         labels its log lines (``<name> paused: <reason>``). ``contract_loader``
         runs before every quote request, so candidates that joined without a
         loaded contract (a refresh, or a resumed run) still quote on their tick
-        grid."""
+        grid. ``candidate_filter`` skips candidates for a poll (they stay
+        pending); a filter that raises admits every candidate, so a broken
+        filter can only fall back to the unfiltered run."""
         if not isinstance(poll_schedule, PollSchedule):
             raise TypeError("poll_schedule must be a PollSchedule")
         self._poll_schedule = poll_schedule
@@ -333,6 +363,8 @@ class ShadowSessionRunner:
         self._entry_gate_name = entry_gate_name
         self._bars_fetcher = bars_fetcher
         self._contract_loader = contract_loader
+        self._candidate_filter = candidate_filter
+        self._filter_failing = False
         self._entries_paused = False
         self._gate_failing = False
 
@@ -505,7 +537,10 @@ class ShadowSessionRunner:
         if portfolio is None:
             report.record_data_error(ACCOUNT_UNAVAILABLE)
             return
+        eligible = shadow.candidates
         for candidate in shadow.pending():
+            if not self._admitted(candidate, eligible):
+                continue
             profile = liquidity.get(candidate.con_id)
             if profile is None:
                 try:
@@ -588,6 +623,28 @@ class ShadowSessionRunner:
                 logger.info(
                     "%s decided: %s", candidate.symbol, outcome.decision.outcome.value
                 )
+
+    def _admitted(self, candidate: Candidate, eligible: tuple[Candidate, ...]) -> bool:
+        """The candidate filter's answer; no filter, or a failing one, admits."""
+        if self._candidate_filter is None:
+            return True
+        try:
+            admitted = self._candidate_filter(candidate, eligible)
+            if not isinstance(admitted, bool):
+                raise TypeError("candidate filter must answer a bool")
+        except Exception as exc:  # noqa: BLE001 - fall back to the unfiltered run
+            if not self._filter_failing:
+                logger.critical(
+                    "%s (%s); every candidate is assessed until it recovers",
+                    CANDIDATE_FILTER_FAILED,
+                    type(exc).__name__,
+                )
+            self._filter_failing = True
+            return True
+        if self._filter_failing:
+            logger.info("candidate filter recovered")
+        self._filter_failing = False
+        return admitted
 
     async def _refresh(
         self,
@@ -758,8 +815,10 @@ def bars_error_reason(exc: BaseException) -> str:
 
 __all__ = [
     "ACCOUNT_UNAVAILABLE",
+    "AP_MOMO_STRATEGY_NAME",
     "BARS_ERROR",
     "BARS_FAULT_REASONS",
+    "CANDIDATE_FILTER_FAILED",
     "DATA_ERROR_REASONS",
     "DEFAULT_REFRESH_INTERVAL",
     "LATE_POLLS_SKIPPED",
@@ -768,6 +827,7 @@ __all__ = [
     "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
     "QUOTE_UNAVAILABLE",
+    "CandidateFilter",
     "CandidateRefresh",
     "ContractLoader",
     "EntryGate",
@@ -775,6 +835,7 @@ __all__ = [
     "SessionAborted",
     "SessionReport",
     "ShadowSessionRunner",
+    "ap_momo_strategy_spec",
     "bars_error_reason",
     "ensure_orb_strategy",
     "ensure_strategy",
