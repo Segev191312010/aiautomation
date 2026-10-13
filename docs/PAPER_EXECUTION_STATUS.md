@@ -49,10 +49,50 @@ Order sources:
   untested modify encoding). Fixed in v5 with tests.
 - Pending: final review of v5 with manual-order intake before unattended use.
 
+## The reviewed execution engine (C2): built, not wired
+
+`backend/trading/execution/live_executor.py` is built and tested against a fake
+TWS only. Nothing runs it and it cannot send an order today: no supervisor
+child, LaunchAgent or CLI command starts it, and `start()` refuses without an
+explicit promotion record for its exact code (`autotraderctl execution promote
+--confirm`, MOMO_HOD strategies and DU accounts only). What it adds over the
+bridge:
+
+- a SQLite ledger (migration 13) instead of a JSON state file: an outbox keyed
+  by decision id written before any order, brackets, legs tagged
+  `at1:<bracket>:P|T|S`, fills keyed by execId with commission reports, and
+  append-only order events; a bracket still being sent at a restart becomes
+  `sent` when IBKR reports its legs and `unknown` (never resent) otherwise;
+- order ids `max(nextValidId, ledger max + 1)` and a paper-only check with
+  `reqIds` on every reconnect;
+- reconciliation at start, on reconnect and every two minutes, scoped to
+  `at1:`: a mismatch pauses new entries (CRITICAL), exits never pause;
+- a shared risk book across strategies: 0.5% per new trade, 1.5% open risk,
+  2% realized loss plus open plus new risk, three positions, 25% notional;
+- a flatten fallback when the target cannot be repriced or the reprice is not
+  confirmed: cancel target and stop, confirm both, then one market sell of the
+  ledger quantity capped by the position less every other working sell (never
+  a second sell next to the owner's manual close).
+
+The bridge's review lessons (H1, H2, M1-M4, L1-L8, N1-N7, D3) are ported with a
+regression test each. The recorded TWS callback sequences in
+`backend/tests/fakes/tws_recordings.py` were written from the ibapi 9.81
+signatures, not captured from a live TWS.
+
 ## Still to do
 
 - Supervised first live modify (the 15:45 flatten path has not yet run against
   a real TWS).
-- Replace the bridge with the reviewed execution engine (ledger, reconciliation
-  every 2 minutes, shared risk book) after a clean paper week; delete the old
-  `trading/execution/` transport stack at the same time.
+- Execution engine: an independent execution-safety review of
+  `trading/execution/live_executor.py`, `tws_state.py`, `promotion.py`,
+  `trading/storage/execution_ledger*.py` and `trading/risk/book.py`.
+- Execution engine: a supervised drill on the paper account that captures the
+  recorded callback sequences from a real TWS (bracket fill, partial fill,
+  modify echo, rejected modify, restart mid-send) and checks how TWS reports
+  untransmitted legs after a client crash.
+- Execution engine: a runner (connection, reconnect loop, supervisor child) and
+  a decision on how owner manual orders are sent once the bridge is retired;
+  both need their own review.
+- Replace the bridge with the engine only after the review, the drill and a
+  clean paper week; delete the old `trading/execution/` transport stack at the
+  same time.
