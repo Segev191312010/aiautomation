@@ -45,6 +45,14 @@ from trading.research.stats import (
     stats_payload,
     summarize,
 )
+from trading.rules.all_session import (
+    GAP_GO_V2_NAME,
+    ORB_V1_RULES_VERSION,
+    ORB_V2_NAME,
+    VWAP_PB_V2_NAME,
+    orb_v2_strategy,
+    vwap_pb_v2_strategy,
+)
 from trading.rules.gap_go import GAP_GO_RULES_VERSION
 from trading.rules.momo import MOMO_RULES_VERSION, MomoStrategy
 from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
@@ -74,23 +82,32 @@ SYNTHETIC_TICK = Decimal("0.01")
 ENTRY_TTL = timedelta(minutes=10)
 FLATTEN_TIME = time(15, 45)
 FLATTEN_BEFORE_CLOSE = timedelta(minutes=15)
+# The bar fill model above and in ``simulate_bracket``, by name: the nightly
+# tracker records every outcome under it, so a change to the model needs a new
+# id (and every saved setup is simulated again under it).
+FILL_MODEL_ID = "replay-bracket-v1"
 _R_QUANTUM = Decimal("0.0001")
 
 STRATEGY_FACTORIES: dict[str, Callable[[], StrategyEvaluator]] = {
     "orb": ORBStrategy,
     "momo": MomoStrategy,
     "vwap": VwapPbStrategy,
+    "orb-v2": orb_v2_strategy,
+    "vwap-v2": vwap_pb_v2_strategy,
 }
 RULES_VERSIONS = {
-    "orb": "ORB_V1",
+    "orb": ORB_V1_RULES_VERSION,
     "momo": MOMO_RULES_VERSION,
     "vwap": VWAP_PB_RULES_VERSION,
     "gap": GAP_GO_RULES_VERSION,
+    "orb-v2": ORB_V2_NAME,
+    "vwap-v2": VWAP_PB_V2_NAME,
+    "gap-v2": GAP_GO_V2_NAME,
 }
 # Every strategy the live pipeline registers (shadow_service.STRATEGIES; a
 # test pins the two), in report order. Kept literal so a replay never loads
 # the TWS and Claude stack that module imports.
-REGISTERED_STRATEGIES = ("orb", "momo", "vwap", "gap")
+REGISTERED_STRATEGIES = ("orb", "momo", "vwap", "gap", "orb-v2", "vwap-v2", "gap-v2")
 NEEDS_EXTENDED_BARS = "needs_extended_bars"
 
 ExitReason = Literal["stop", "target", "time", "data_end"]
@@ -139,14 +156,15 @@ class SkippedStrategy:
 # pre-market volume and trigger need pre-market bars; replaying it on
 # regular-hours bars would only ever say "no pre-market data".
 UNREPLAYABLE: dict[str, SkippedStrategy] = {
-    "gap": SkippedStrategy(
-        strategy="gap",
+    name: SkippedStrategy(
+        strategy=name,
         reason=NEEDS_EXTENDED_BARS,
         note=(
             "needs extended bars: GAP_GO's gap, pre-market volume and trigger come from"
             " pre-market bars, and the research store holds regular-hours bars only"
         ),
-    ),
+    )
+    for name in ("gap", "gap-v2")
 }
 
 
@@ -744,6 +762,7 @@ def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -
 
 __all__ = [
     "ENTRY_TTL",
+    "FILL_MODEL_ID",
     "FLATTEN_TIME",
     "NEEDS_EXTENDED_BARS",
     "POLL_DELAY",

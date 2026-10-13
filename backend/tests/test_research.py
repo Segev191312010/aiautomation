@@ -978,9 +978,12 @@ def test_run_replay_cli_reports_every_registered_strategy_and_skips_gap_explicit
 
     directory = root / "reports" / "2026-10-12"
     assert sorted(path.name for path in directory.iterdir()) == [
+        "replay-gap-v2.json",
         "replay-gap.json",
         "replay-momo.json",
+        "replay-orb-v2.json",
         "replay-orb.json",
+        "replay-vwap-v2.json",
         "replay-vwap.json",
         "summary.txt",
     ]
@@ -1000,7 +1003,10 @@ def test_run_replay_cli_reports_every_registered_strategy_and_skips_gap_explicit
         "ORB (ORB_V1)",
         "MOMO (MOMO_HOD_V2)",
         "VWAP (VWAP_PB_V1)",
+        "ORB-V2 (ORB_V2)",
+        "VWAP-V2 (VWAP_PB_V2)",
         "GAP (GAP_GO_V1)",
+        "GAP-V2 (GAP_GO_V2)",
     ]
     assert "VWAP (VWAP_PB_V1)\n  0 trades from 2 symbol-days\n  no filled trades" in summary
     assert "GAP (GAP_GO_V1)\n  not replayed: needs extended bars: GAP_GO's gap" in summary

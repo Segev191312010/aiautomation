@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
 # Mirrors trading.operations.shadow_service.STRATEGIES / UNIVERSES (a test pins
 # them); kept literal so parsing never imports the TWS and Claude stack.
-_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap")
-_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers")
+_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap", "orb-v2", "vwap-v2", "gap-v2")
+_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers", "all-gappers")
 # Three weeks of five-minute bars: enough sessions for a first replay sample.
 DEFAULT_BACKFILL_DAYS = 21
 # The nightly recording keeps the whole replay sample filled: a contract with
@@ -237,8 +237,8 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help=(
-            f"strategies to replay, from {' '.join(_STRATEGY_CHOICES)} (default all; gap is"
-            " reported as not replayable: it needs pre-market bars)"
+            f"strategies to replay, from {' '.join(_STRATEGY_CHOICES)} (default all; gap and"
+            " gap-v2 are reported as not replayable: they need pre-market bars)"
         ),
     )
     research_replay.add_argument(

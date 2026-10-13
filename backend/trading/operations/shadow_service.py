@@ -53,11 +53,22 @@ from trading.orchestration.session_runner import (
 )
 from trading.orchestration.watchlist_source import (
     gap_candidates,
+    gap_union_candidates,
     hotlist_candidates,
     hotlist_refresh,
 )
 from trading.policies import ExecutionPolicy, OpeningRangeBreakoutPolicy
+from trading.rules.all_session import (
+    GAP_REVIEW_V2_PROMPT_ID,
+    gap_go_v2_strategy,
+    gap_go_v2_strategy_spec,
+    orb_v2_strategy,
+    orb_v2_strategy_spec,
+    vwap_pb_v2_strategy,
+    vwap_pb_v2_strategy_spec,
+)
 from trading.rules.gap_go import (
+    GAP_GO_STRATEGY_KIND,
     GAP_REVIEW_PROMPT_ID,
     GapGoConfig,
     GapGoStrategy,
@@ -136,8 +147,15 @@ STRATEGIES = {
     # bridge records but never sends their decisions.
     "vwap": (VwapPbStrategy, vwap_pb_strategy_spec, VWAP_REVIEW_PROMPT_ID),
     "gap": (GapGoStrategy, gap_go_strategy_spec, GAP_REVIEW_PROMPT_ID),
+    # All-session simulations (owner decision "Both", 2026-10-13): the V1 rules
+    # with entries 09:35-15:30 ET (trading/rules/all_session.py). Shadow only:
+    # ORB_V2, VWAP_PB_V2 and GAP_GO_V2 do not start with MOMO_HOD.
+    "orb-v2": (orb_v2_strategy, orb_v2_strategy_spec, "orb-review-v1"),
+    "vwap-v2": (vwap_pb_v2_strategy, vwap_pb_v2_strategy_spec, VWAP_REVIEW_PROMPT_ID),
+    "gap-v2": (gap_go_v2_strategy, gap_go_v2_strategy_spec, GAP_REVIEW_V2_PROMPT_ID),
 }
-UNIVERSES = ("scanner", "watchlist", "gappers")
+# "all-gappers": the watchlist gappers plus the day universe's scanner gappers.
+UNIVERSES = ("scanner", "watchlist", "gappers", "all-gappers")
 # Universes whose runs add symbols that heat up after the window opens. The
 # hot list moves all day; gappers are an opening set and ORB keeps its scan.
 DYNAMIC_UNIVERSES = frozenset({"watchlist"})
@@ -145,8 +163,18 @@ DYNAMIC_UNIVERSES = frozenset({"watchlist"})
 # so each gets its own data client: data_client_id + offset (the screener uses
 # data_client_id + 2 and the order bridge uses order_client_id).
 # Client map with data 17 / orders 18: orb 17, screener 19, momo 20, telegram 21,
-# vwap 22, gap 23 (research and probes use 25-29).
-STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3, "vwap": 5, "gap": 6}
+# vwap 22, gap 23 (research and probes use 25-29). Each V2 simulation replaces
+# its V1 child in the supervisor's table and reuses that client id: the two are
+# never scheduled together.
+STRATEGY_CLIENT_OFFSET = {
+    "orb": 0,
+    "momo": 3,
+    "vwap": 5,
+    "gap": 6,
+    "orb-v2": 0,
+    "vwap-v2": 5,
+    "gap-v2": 6,
+}
 # A hot-list session fetches bars for up to 35 symbols one after another (~90 s
 # live), so the newest completed bar is legitimately older than the 30 s
 # single-symbol limit. Anything under one bar interval still guarantees the
@@ -165,6 +193,11 @@ STRATEGY_POLL_OFFSETS = {
     "orb": timedelta(seconds=30),
     "gap": timedelta(seconds=45),
     "vwap": timedelta(seconds=60),
+    # The all-session simulations keep slots of their own behind every V1
+    # slot, in the V1 order: VWAP_PB_V2 reads MOMO's hot list and polls last.
+    "orb-v2": timedelta(seconds=75),
+    "gap-v2": timedelta(seconds=90),
+    "vwap-v2": timedelta(seconds=105),
 }
 # Strategies whose reviews see the screener's market context and whose entries
 # pause while the market is risk_off. ORB is left out so its runs (and run
@@ -249,6 +282,12 @@ def policy_fingerprints(
         prints["gap_go"] = GapGoConfig().fingerprint()
     if strategy_name in MARKET_AWARE_STRATEGIES:
         prints["market_regime_rule"] = MARKET_REGIME_RULE
+    # A windowed simulation names its rules and its window apart, for the paper
+    # promotion rule's evidence identity (a V1 config embeds its window).
+    if strategy_name in STRATEGIES:
+        evidence = getattr(STRATEGIES[strategy_name][0](), "policy_fingerprints", None)
+        if callable(evidence):
+            prints.update(evidence())
     return prints
 
 
@@ -432,7 +471,9 @@ async def run_shadow_session(
     )
 
     async def watchlist_source(run):
-        select = gap_candidates if universe == "gappers" else hotlist_candidates
+        select = {"gappers": gap_candidates, "all-gappers": gap_union_candidates}.get(
+            universe, hotlist_candidates
+        )
         scanner_run, candidates, liquidity = await select(run, now=clock())
         for candidate in candidates:
             # Quotes are priced on each contract's own tick grid.
@@ -485,7 +526,7 @@ async def run_shadow_session(
                 else None
             ),
             entry_gate_name=strategy_name,
-            bars_fetcher=gap_bars if strategy_name == "gap" else None,
+            bars_fetcher=gap_bars if evaluator.strategy_kind == GAP_GO_STRATEGY_KIND else None,
             contract_loader=load_contract if dynamic else None,
         )
         report = await runner.run(

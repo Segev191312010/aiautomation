@@ -6,15 +6,17 @@ inside America/New_York windows:
     screener  07:55-16:00  autotraderctl.py screener run --interval 60
     notifier  07:55-16:15  autotraderctl.py notify run --date D
     bridge    09:25-close  scripts_local/paper_bridge.py --date D   (16:00; 13:00 on a half day)
-    orb       09:40-12:01  autotraderctl.py shadow run --strategy orb --universe scanner --date D
+    orb-v2    09:28-15:31  autotraderctl.py shadow run --strategy orb-v2 --universe scanner --date D
     momo      09:55-15:01  autotraderctl.py shadow run --strategy momo --universe watchlist --date D
-    gap       09:28-10:31  autotraderctl.py shadow run --strategy gap --universe gappers --date D
-    vwap      10:25-14:31  autotraderctl.py shadow run --strategy vwap --universe watchlist --date D
+    gap-v2    09:28-15:31  autotraderctl.py shadow run --strategy gap-v2 --universe all-gappers --date D
+    vwap-v2   09:28-15:31  autotraderctl.py shadow run --strategy vwap-v2 --universe watchlist --date D
     recorder  16:20-17:30  autotraderctl.py research record
     replay    17:35-18:30  autotraderctl.py research replay
 
 A strategy window ends one minute after that strategy's own entry cutoff, so a
-half day's earlier MOMO cutoff moves its window in. Between sessions, and on
+half day's earlier cutoffs move their windows in (MOMO 12:00, the all-session
+simulations 12:30). The all-session simulations are shadow only (their names
+do not start with MOMO_HOD); each sleeps until its own data is due. Between sessions, and on
 closed days, the process sleeps until the next session's 07:55 ET; it never
 exits because a day ended (launchd's KeepAlive would only restart it).
 
@@ -123,13 +125,21 @@ BRIDGE_CHILD = "bridge"
 # this only in the commit that records that review in
 # docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
 REVIEWED_BRIDGE_SHA256 = "7ad34b5824602f725fd04ca8631122b95ad2c86dadf8e2b224cd1942d171022a"
+# The all-session simulations (orb-v2, gap-v2, vwap-v2) replace ORB_V1,
+# GAP_GO_V1 and VWAP_PB_V1 here (owner decision "Both", 2026-10-13); the V1
+# strategies stay registered for the CLI and the replay but are not scheduled.
 STRATEGY_STARTS = {
-    "orb": time(9, 40),
+    "orb-v2": time(9, 28),
     "momo": time(9, 55),
-    "gap": time(9, 28),
-    "vwap": time(10, 25),
+    "gap-v2": time(9, 28),
+    "vwap-v2": time(9, 28),
 }
-STRATEGY_UNIVERSES = {"orb": "scanner", "momo": "watchlist", "gap": "gappers", "vwap": "watchlist"}
+STRATEGY_UNIVERSES = {
+    "orb-v2": "scanner",
+    "momo": "watchlist",
+    "gap-v2": "all-gappers",
+    "vwap-v2": "watchlist",
+}
 STRATEGY_WINDOW_TAIL = timedelta(minutes=1)
 TELEGRAM_CHILD = "telegram"
 # The learning loop, after the close: name -> ((start, end) ET, autotraderctl

@@ -117,8 +117,14 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
         "orb": timedelta(seconds=30),
         "gap": timedelta(seconds=45),
         "vwap": timedelta(seconds=60),
+        "orb-v2": timedelta(seconds=75),
+        "gap-v2": timedelta(seconds=90),
+        "vwap-v2": timedelta(seconds=105),
     }
-    assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES) == set(STRATEGY_UNIVERSES)
+    assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES)
+    # The supervisor schedules registry strategies only (the V2 simulations
+    # in place of their V1 strategies).
+    assert set(STRATEGY_UNIVERSES) < set(STRATEGIES)
     # IBKR refuses an identical historical request within 15 s of the first.
     assert MIN_POLL_SEPARATION == timedelta(seconds=15)
     for (first, first_at), (second, second_at) in combinations(STRATEGY_POLL_OFFSETS.items(), 2):
@@ -127,7 +133,10 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
     assert min(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "momo"
     assert momo_strategy_spec().name == "MOMO_HOD_V2"
     # VWAP polls MOMO's own hot list, so it polls furthest behind it.
-    assert max(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "vwap"
+    assert max(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "vwap-v2"
+    scheduled = {name: STRATEGY_POLL_OFFSETS[name] for name in STRATEGY_UNIVERSES}
+    assert min(scheduled, key=scheduled.__getitem__) == "momo"
+    assert max(scheduled, key=scheduled.__getitem__) == "vwap-v2"
     assert poll_offset_problems(STRATEGY_POLL_OFFSETS) == []
 
 
@@ -158,17 +167,17 @@ def test_each_child_keeps_a_pass_budget_under_its_freshness_limit():
     schedules = {name: poll_schedule(name, universe) for name, universe in STRATEGY_UNIVERSES.items()}
     assert {name: schedule.bar_max_age for name, schedule in schedules.items()} == {
         "momo": WATCHLIST_BAR_MAX_AGE,
-        "vwap": WATCHLIST_BAR_MAX_AGE,
-        "gap": WATCHLIST_BAR_MAX_AGE,
+        "vwap-v2": WATCHLIST_BAR_MAX_AGE,
+        "gap-v2": WATCHLIST_BAR_MAX_AGE,
         # A scanner run keeps its old 25 s after its slot (30 s at +5 s before).
-        "orb": timedelta(seconds=55),
+        "orb-v2": timedelta(seconds=100),
     }
     assert WATCHLIST_BAR_MAX_AGE == timedelta(seconds=240) and MIN_PASS_BUDGET == timedelta(seconds=25)
     assert {name: schedule.late_poll_limit for name, schedule in schedules.items()} == {
         "momo": timedelta(seconds=112.5),
-        "orb": timedelta(seconds=12.5),
-        "gap": timedelta(seconds=97.5),
-        "vwap": timedelta(seconds=90),
+        "orb-v2": timedelta(seconds=12.5),
+        "gap-v2": timedelta(seconds=75),
+        "vwap-v2": timedelta(seconds=67.5),
     }
     for schedule in schedules.values():
         assert schedule.bar_max_age < BAR_INTERVAL
