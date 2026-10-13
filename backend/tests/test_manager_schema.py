@@ -1,7 +1,7 @@
 """The day-manager tables: migration 13 (formed setups) and the unregistered drafts.
 
 Migration 13 holds only ``autotrader_manager_setups``. The other tables are
-drafts (phase 1: migration 14, phase 2: migration 15) that nothing applies
+drafts (phase 1: migration 15, phase 2: migration 16) that nothing applies
 yet; their constraints and triggers are checked here on scratch databases
 built from migration 13 plus the drafts, so the design is kept until it is
 registered.
@@ -87,7 +87,7 @@ def _objects(connection: sqlite3.Connection) -> dict[str, set[str]]:
 
 
 def _apply_drafts(connection: sqlite3.Connection) -> None:
-    """Phase 1 then phase 2, in the order they will be registered (14, 15)."""
+    """Phase 1 then phase 2, in the order they will be registered (15, 16)."""
     for statement in (*DRAFT_PHASE1_DDL, *DRAFT_PHASE2_DDL):
         connection.execute(statement)
 
