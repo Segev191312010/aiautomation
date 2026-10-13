@@ -38,7 +38,7 @@ from db.core import get_db, transaction
 # Owner decision 2026-10-12: only MOMO_HOD strategies may send PAPER orders.
 PROMOTABLE_STRATEGY_PREFIXES: tuple[str, ...] = ("MOMO_HOD",)
 # The modules a running engine starts from (relative to backend/).
-ENGINE_ENTRY_POINTS: tuple[str, ...] = ("trading/execution/live_executor.py",)
+ENGINE_ENTRY_POINTS: tuple[str, ...] = ("trading/execution/live_executor.py", "trading/execution/runner.py")
 # The files whose exact content a promotion binds (relative to backend/): every backend module the
 # entry points import, directly or not, at import time or inside a function, with every package
 # __init__ on the way, whose side-effect imports run too (review R-6). A test walks the import
@@ -56,6 +56,7 @@ ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "trading/execution/live_executor.py",
     "trading/execution/manual_orders.py",
     "trading/execution/promotion.py",
+    "trading/execution/runner.py",
     "trading/execution/tws_paper_transport.py",
     "trading/execution/tws_state.py",
     "trading/operations/__init__.py",

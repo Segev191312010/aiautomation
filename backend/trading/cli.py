@@ -1,9 +1,11 @@
 """Local operator controls for the Autotrader V1 runtime.
 
-PAPER controls are stop-only. The one exception is ``execution promote``: the
-owner's explicit, recorded grant that the reviewed execution engine requires
-before it may start (trading/execution/promotion.py). The engine itself is not
-wired: no command here runs it or sends an order.
+PAPER controls are stop-only. The exceptions are the execution engine's:
+``execution promote``, the owner's explicit, recorded grant the engine requires
+before it may start (trading/execution/promotion.py), and ``execution run
+--confirm``, which starts the engine by hand for its supervised drill
+(trading/execution/runner.py). The engine is not wired: no supervisor child,
+LaunchAgent or schedule runs it.
 """
 from __future__ import annotations
 
@@ -220,7 +222,7 @@ def _parser() -> argparse.ArgumentParser:
 
     execution = domains.add_parser(
         "execution",
-        help="PAPER authority records of the reviewed execution engine (not wired; sends no orders)",
+        help="the PAPER execution engine: its authority records and its hand-started run (never scheduled)",
     )
     execution.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
     execution_actions = execution.add_subparsers(dest="action", required=True)
@@ -244,6 +246,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     execution_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
     execution_status.add_argument("--account", default=None)
+    execution_run = execution_actions.add_parser(
+        "run", help="run the PAPER execution engine for one session, by hand (the supervised drill only)"
+    )
+    execution_run.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    execution_run.add_argument("--date", type=date.fromisoformat, default=None,
+                               help="session date (YYYY-MM-DD); defaults to today in New York")
+    execution_run.add_argument("--confirm", action="store_true",
+                               help="required: the engine sends PAPER orders for promoted strategies")
 
     supervise = domains.add_parser(
         "run",
@@ -359,7 +369,8 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
                       " no PAPER promotion")
                 return 0
             print(f"execution engine code: {digest}")
-            print("execution engine: built, not wired (the PAPER bridge is the only order sender)")
+            print("execution engine: not wired; only `execution run --confirm` starts it, by hand (the PAPER"
+                  " bridge is the scheduled order sender)")
             accounts = [arguments.account] if arguments.account else sorted({item.account for item in records})
             for account in accounts:
                 active = active_strategies(records, account=account, code_digest=digest)
@@ -751,6 +762,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _research_command(arguments)
     if arguments.domain in {"universe", "screener"}:
         return _market_data_command(arguments)
+    if arguments.domain == "execution" and arguments.action == "run":
+        from trading.execution.runner import main as run_engine
+
+        return run_engine(arguments.date, confirm=arguments.confirm, db_path=getattr(arguments, "db_path", None))
     if arguments.domain == "execution":
         return asyncio.run(_execution_command(arguments))
     if arguments.domain == "shadow" and arguments.action == "run":

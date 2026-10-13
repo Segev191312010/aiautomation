@@ -137,7 +137,7 @@ from trading.storage.execution_ledger import (
 from trading.storage.runtime_fence import SQLitePaperKillStore
 
 
-ENGINE_VERSION = "c2.2"
+ENGINE_VERSION = "c2.3"
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
 

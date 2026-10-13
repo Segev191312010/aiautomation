@@ -1,4 +1,8 @@
-"""autotraderctl execution: the explicit, recorded PAPER grant, and nothing that runs the engine."""
+"""autotraderctl execution: the explicit, recorded PAPER grant, and the engine's hand-started run.
+
+``execution run`` is the supervised drill's entry point: every refusal comes
+before TWS is contacted, and nothing schedules it (tests/test_execution_runner.py).
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -37,7 +41,8 @@ def test_promote_needs_confirm_records_the_grant_and_status_shows_it(tmp_path, c
     assert main(["execution", "status", "--db-path", str(database)]) == 0
     out = capsys.readouterr().out.splitlines()
     assert out == [f"execution engine code: {engine_code_digest()}",
-                   "execution engine: built, not wired (the PAPER bridge is the only order sender)",
+                   "execution engine: not wired; only `execution run --confirm` starts it, by hand (the PAPER"
+                   " bridge is the scheduled order sender)",
                    "DU1234567: MOMO_HOD_V2"]
 
     assert main(["execution", "revoke", "--db-path", str(database), "--strategy", "MOMO_HOD_V2", "--account",
@@ -107,10 +112,94 @@ def test_status_is_read_only(tmp_path, capsys) -> None:
         assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
 
 
-@pytest.mark.parametrize("arguments", [["execution", "start"], ["execution", "run"], ["execution", "order"],
-                                       ["execution", "send"]])
-def test_no_command_runs_the_engine_or_sends_an_order(arguments, capsys) -> None:
+@pytest.mark.parametrize("arguments", [["execution", "start"], ["execution", "order"], ["execution", "send"]])
+def test_no_other_command_runs_the_engine_or_sends_an_order(arguments, capsys) -> None:
     with pytest.raises(SystemExit) as error:
         main(arguments)
     assert error.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def never_connects(config: object) -> object:
+    raise AssertionError("the runner reached TWS")
+
+
+def test_run_needs_confirm_and_refuses_before_tws(tmp_path, capsys, monkeypatch) -> None:
+    import trading.execution.runner as runner
+
+    monkeypatch.setattr(runner, "IbapiTransport", never_connects)
+    database = tmp_path / "live.db"
+    base = ["execution", "run", "--db-path", str(database)]
+
+    assert main(base) == 2
+    assert "re-run with --confirm" in capsys.readouterr().err
+
+    assert main([*base, "--confirm"]) == 78  # no database
+    assert f"refusing: no autotrader database at {database}; exit 78" in capsys.readouterr().out
+    assert not database.exists()
+
+    assert main([*base, "--confirm", "--date", "2999-01-04"]) == 78
+    assert "is after today" in capsys.readouterr().out
+
+    sqlite3.connect(database).close()
+    assert main([*base, "--confirm"]) == 78  # pending migrations: the runner never migrates
+    assert "are not applied: apply them with a backup first; exit 78" in capsys.readouterr().out
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
+
+
+async def _migrated(path) -> None:
+    from config import cfg
+    from db.core import init_db
+
+    original = cfg.DB_PATH
+    cfg.DB_PATH = str(path)
+    try:
+        await init_db()
+    finally:
+        cfg.DB_PATH = original
+
+
+def test_run_refuses_without_the_shadow_configuration_or_a_grant(tmp_path, capsys, monkeypatch) -> None:
+    import asyncio
+
+    import trading.execution.runner as runner
+    from trading.operations.settings import ShadowSettingsError
+
+    monkeypatch.setattr(runner, "IbapiTransport", never_connects)
+    database = tmp_path / "live.db"
+    asyncio.run(_migrated(database))
+    run = ["execution", "run", "--db-path", str(database), "--confirm"]
+
+    def no_configuration() -> runner.RunnerConfig:
+        raise ShadowSettingsError("shadow configuration is unavailable at ~/.config/autotrader-v1/config.toml")
+
+    monkeypatch.setattr(runner, "runner_config", no_configuration)
+    assert main(run) == 78
+    assert "refusing: shadow configuration is unavailable" in capsys.readouterr().out
+
+    connected: list[object] = []
+    monkeypatch.setattr(runner, "runner_config", lambda: runner.RunnerConfig(
+        account=ACCOUNT, client_id=18, host="127.0.0.1", port=7497))
+    monkeypatch.setattr(runner, "IbapiTransport", lambda config: _Unreached(config, connected))
+    assert main(run) == 78  # no PAPER grant for this code: refused before TWS
+    assert "refusing: promotion_missing" in capsys.readouterr().out
+    assert connected == []
+
+
+class _Unreached:
+    """A transport whose connect must never run (the runner refuses first)."""
+
+    def __init__(self, config: object, log: list[object]) -> None:
+        from tests.fakes.fake_tws import FakeTws
+        from trading.execution.tws_state import TwsMirror
+
+        self.broker = FakeTws(wrapper=None)
+        self.mirror = TwsMirror(18)
+        self.log = log
+
+    async def connect(self) -> None:
+        self.log.append("connect")
+
+    def disconnect(self) -> None:
+        self.log.append("disconnect")
