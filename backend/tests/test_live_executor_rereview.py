@@ -114,6 +114,21 @@ async def test_r3_an_owner_sale_before_the_entry_with_a_zone_less_time_reserves_
     assert sells(h) == [(101, "SELL", "LMT", 100)]  # the entry baseline saw it completed before the entry
 
 
+async def test_r3_without_a_baseline_a_sale_timed_before_the_entry_reserves_nothing(tmp_path, monkeypatch) -> None:
+    h = await build(tmp_path, monkeypatch, start=False)
+    h.clock.value = ny(9, 40)
+    owner_sells(h, 100, status="Filled")  # completedTime 20261013 09:40:00 America/New_York
+    h.clock.value = ny(10, 0, 5)
+    await h.engine.start()
+    bracket = await open_bracket(h)
+    without_baseline(h, bracket)
+    h.tws.quotes[HELD] = {"bid": 50.20}
+    h.clock.value = ny(15, 45, 1)
+    await h.engine.tick()
+
+    assert sells(h) == [(101, "SELL", "LMT", 100)]  # the completion time places it 20 minutes before the entry
+
+
 async def test_r3_without_a_baseline_an_unreadable_time_still_counts_as_after_the_entry(
     tmp_path, monkeypatch
 ) -> None:
