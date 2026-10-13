@@ -79,6 +79,40 @@ def test_only_bridge_sendable_names_are_real_decisions():
     ]
 
 
+def test_the_notifier_follows_every_supervised_strategy_childs_log(monkeypatch):
+    from datetime import time
+
+    from trading.operations import notify_service, supervisor
+
+    assert notify_service.log_files() == {
+        "bridge": "bridge.log", "supervisor": "supervisor.log", "screener": "screener.log",
+        "orb": "orb.log", "momo": "momo.log", "gap": "gap.log", "vwap": "vwap.log",
+        "momo-ap": "momo-ap.log",
+    }
+    # A renamed child (the V2 simulations write orb-v2.log ...) is followed as is.
+    monkeypatch.setattr(supervisor, "STRATEGY_STARTS", {"momo": time(9, 55), "orb-v2": time(9, 40)})
+    assert set(notify_service.log_files()) == {"bridge", "supervisor", "screener", "momo", "orb-v2", "momo-ap"}
+
+
+@pytest.mark.anyio
+async def test_the_v2_simulations_reviewed_decisions_go_to_the_digest(tmp_path, monkeypatch):
+    await _use_database(tmp_path, monkeypatch)
+    for name in ("ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"):
+        await _seed_run(f"run-{name}", f"strategy-{name}", name)
+        await _add_decision(f"d-{name}", run_id=f"run-{name}", strategy_id=f"strategy-{name}",
+                            symbol="AAPL", outcome="ai_abstained", created_at=_et(13, 5),
+                            review=_review("ABSTAIN", "No."))
+    clock = FakeTime(_et(13, 6))
+    session, notifier = _session(tmp_path, clock)
+
+    await _cycle(session)
+
+    [digest] = notifier.texts
+    assert digest.startswith("🗂 Shadow digest 13:06 ET · 3 decisions (no orders)")
+    for name in ("GAP_GO_V2", "ORB_V2", "VWAP_PB_V2"):
+        assert f"{name}:\n• AAPL Claude abstained" in digest
+
+
 @pytest.mark.anyio
 async def test_real_momo_goes_at_once_and_shadow_decisions_wait_for_the_digest(tmp_path, monkeypatch):
     await _use_database(tmp_path, monkeypatch)

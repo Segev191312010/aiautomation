@@ -281,9 +281,13 @@ def policy_fingerprints(
     if family in MARKET_AWARE_FAMILIES:
         prints["market_regime_rule"] = MARKET_REGIME_RULE
     if strategy_name in MANAGED_STRATEGIES:
+        # The evidence identity of a managed run includes the manager's
+        # version and the prompts its plans and reviews come from (Design F).
+        from trading.intelligence.manager_prompts import DAY_PLAN_PROMPT_ID
         from trading.manager.constants import MANAGER_VERSION
 
-        prints["manager"] = MANAGER_VERSION
+        prints["manager_version"] = MANAGER_VERSION
+        prints["manager_prompt_id"] = DAY_PLAN_PROMPT_ID
         prints["managed_review_prompt"] = sha256(
             review_prompt(MOMO_MANAGED_REVIEW_PROMPT_ID).encode("utf-8")
         ).hexdigest()

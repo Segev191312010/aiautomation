@@ -694,8 +694,8 @@ def test_managed_momo_keeps_momos_gates_and_v2s_fingerprints_are_unchanged():
     assert momo["momo_hod"] == MomoConfig().fingerprint()
     managed = shadow_service.policy_fingerprints(config, policy, prompt_id="momo-review-v2", strategy_name="momo-ap")
     assert {key: managed[key] for key in momo} == momo
-    assert set(managed) - set(momo) == {"manager", "managed_review_prompt"}
-    assert managed["manager"] == "manager-v1"
+    assert set(managed) - set(momo) == {"manager_version", "manager_prompt_id", "managed_review_prompt"}
+    assert (managed["manager_version"], managed["manager_prompt_id"]) == ("manager-v1", "day-plan-v1")
 
 
 def test_the_plans_running_strategies_are_the_registry_families_with_a_window_today():
@@ -704,3 +704,25 @@ def test_the_plans_running_strategies_are_the_registry_families_with_a_window_to
     assert running_strategies(date(2026, 10, 13)) == ("orb", "momo", "vwap", "gap")
     # Managed MOMO is MOMO's family: it adds no strategy key of its own.
     assert "momo-ap" not in running_strategies(date(2026, 10, 13))
+
+
+def test_managed_momo_polls_last_clear_of_every_child_including_the_v2_simulations():
+    """The V2 simulations take +75/+90/+105 s (the V1 entries keep +30/+45/+60):
+    managed MOMO's +120 s stays 15 s from each, inside its 240 s freshness limit."""
+    from trading.operations.shadow_service import (
+        MIN_POLL_SEPARATION,
+        STRATEGY_POLL_OFFSETS,
+        poll_offset_problems,
+        poll_schedule,
+    )
+
+    managed = STRATEGY_POLL_OFFSETS["momo-ap"]
+    assert managed >= timedelta(seconds=120)
+    planned = {**STRATEGY_POLL_OFFSETS, **{name: timedelta(seconds=seconds) for name, seconds in (
+        ("orb-v2", 75), ("vwap-v2", 90), ("gap-v2", 105))}}
+    for name, offset in planned.items():
+        if name != "momo-ap":
+            assert abs(managed - offset) >= MIN_POLL_SEPARATION, name
+    assert poll_offset_problems(STRATEGY_POLL_OFFSETS) == []
+    schedule = poll_schedule("momo-ap", "watchlist")
+    assert schedule.offset == managed and schedule.late_poll_limit == timedelta(seconds=60)

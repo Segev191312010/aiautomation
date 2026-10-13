@@ -127,14 +127,24 @@ SCHEMA_ALERT_KEY = "schema_alert"
 REGIME_ALERTS_FROM = MARKET_UPDATE_TIMES[0]
 HOT_NAMES_IN_UPDATE = 5
 _REGIME_LABELS = {"risk_on": "RISK-ON", "neutral": "NEUTRAL", "risk_off": "RISK-OFF"}
-LOG_FILES = {
+_SERVICE_LOG_FILES = {
     "bridge": "bridge.log",
     "supervisor": "supervisor.log",
     "screener": "screener.log",
-    "momo": "momo.log",
-    "orb": "orb.log",
-    "momo-ap": "momo-ap.log",
 }
+
+
+def log_files() -> dict[str, str]:
+    """Every log the notifier follows: the services', and each supervised
+    strategy child's own ``<name>.log`` (read from the supervisor's tables, so
+    a renamed or added child is followed without an edit here)."""
+    from trading.operations import supervisor
+
+    children = (*supervisor.STRATEGY_STARTS, *supervisor.MANAGED_STRATEGY_STARTS)
+    return {**_SERVICE_LOG_FILES, **{name: f"{name}.log" for name in children}}
+
+
+LOG_FILES = log_files()
 # Shadow decisions (managed and simulated) reach the phone in one digest per
 # half hour; only real MOMO's are sent one by one.
 DIGEST_INTERVAL_MINUTES = 30
@@ -1268,7 +1278,7 @@ class _NotifierSession:
         self._report_at = market_time(session_date, REPORT_AT)
         log_directory = environment.paths.log_directory
         self._tailers = {
-            name: LogTailer(log_directory / filename) for name, filename in LOG_FILES.items()
+            name: LogTailer(log_directory / filename) for name, filename in log_files().items()
         }
         self._fills = FillCoalescer()
         self._outstanding: list[_Outbound] = []
@@ -1854,6 +1864,7 @@ __all__ = [
     "BRIDGE_FORWARD_KINDS",
     "LOGIN_ALERT_TEXT",
     "LOG_FILES",
+    "log_files",
     "MARKET_CONTEXT_MAX_AGE",
     "MARKET_UPDATE_GRACE",
     "MARKET_UPDATE_TIMES",
