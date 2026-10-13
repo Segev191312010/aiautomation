@@ -21,8 +21,11 @@ It models the TWS behaviour the engine relies on:
   ``commissionReport`` and, while subscribed, ``position``; a child fill
   reduces or cancels its OCA sibling;
 * ``reqAllOpenOrders`` reports every client's working orders,
-  ``reqCompletedOrders`` the finished ones, ``reqExecutions`` this client's
-  executions with their commission reports.
+  ``reqCompletedOrders`` the finished ones (TWS GUI orders only with
+  ``apiOnly=False``; like 9.81, without orderId or clientId but with
+  ``filledQuantity`` and ``completedTime``), ``reqExecutions`` this client's
+  executions with their commission reports;
+* an Inactive order can still be cancelled; a filled or cancelled one cannot.
 
 Behaviour that has not been observed on a real TWS yet (the reporting of
 untransmitted orders after a client crash) is marked as an assumption.
@@ -31,8 +34,10 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from ibapi.commission_report import CommissionReport
 from ibapi.common import UNSET_DOUBLE
@@ -44,7 +49,9 @@ from ibapi.order_state import OrderState
 
 ACCOUNT = "DU1234567"
 CLIENT_ID = 18
+NY = ZoneInfo("America/New_York")
 DEAD = frozenset({"Filled", "Cancelled", "ApiCancelled", "Inactive"})
+FINAL = frozenset({"Filled", "Cancelled", "ApiCancelled"})  # nothing left to cancel
 
 
 def contract_for(con_id: int, symbol: str = "", primary_exchange: str = "NASDAQ") -> Contract:
@@ -77,6 +84,7 @@ class ServerOrder:
     filled: int = 0
     value: Decimal = Decimal("0")
     oca_group: str = ""
+    completed_at: str = ""  # completedTime once the order is filled or cancelled
 
     @property
     def total(self) -> int:
@@ -123,9 +131,17 @@ class FakeTws:
     requests: list[str] = field(default_factory=list)
     fail_place_after: int | None = None  # raise OSError once this many placeOrder calls went through
     position_subscribed: bool = False
+    clock: Any = None  # the test clock: completion times follow it
     _perm: int = 990000
     _exec: int = 0
     _oca: int = 1528474519
+
+    def stamp(self) -> str:
+        """A completedTime as TWS writes it, at the test clock's time."""
+        if self.clock is None:
+            return f"{self.session_day} 15:44:00 America/New_York"
+        moment: datetime = self.clock()
+        return f"{moment.astimezone(NY):%Y%m%d %H:%M:%S} America/New_York"
 
     # ---- connection -------------------------------------------------------------
     def connect(self) -> None:
@@ -205,11 +221,15 @@ class FakeTws:
         if not self.answer_snapshots:
             return
         for server in self.orders.values():
-            if server.working:
+            if server.working or (apiOnly and server.client_id == 0):
                 continue
             state = order_state(server.status)
             state.completedStatus = server.status
-            self.wrapper.completedOrder(server.contract, self.echo(server), state)
+            state.completedTime = server.completed_at or self.stamp()
+            completed = self.echo(server)
+            completed.orderId, completed.clientId = 0, 0  # 9.81 decodes neither for a completed order
+            completed.filledQuantity = float(server.filled)
+            self.wrapper.completedOrder(server.contract, completed, state)
         self.wrapper.completedOrdersEnd()
 
     def reqExecutions(self, reqId: int, execFilter: Any) -> None:
@@ -336,7 +356,7 @@ class FakeTws:
         if server is None:
             self.wrapper.error(orderId, 10147, f"OrderId {orderId} that needs to be cancelled is not found.")
             return
-        if not server.working:
+        if server.status in FINAL:
             self.wrapper.error(orderId, 10148, f"OrderId {orderId} that needs to be cancelled cannot be"
                                f" cancelled, state: {server.status}.")
             return
@@ -352,6 +372,7 @@ class FakeTws:
 
     def _cancel(self, server: ServerOrder) -> None:
         server.status = "Cancelled"
+        server.completed_at = self.stamp()
         self.status_only(server)
         self.wrapper.error(server.order_id, 202, "Order Canceled - reason:")
 
@@ -371,6 +392,7 @@ class FakeTws:
         server.value += Decimal(shares) * price_dec
         if server.remaining == 0:
             server.status = "Filled"
+            server.completed_at = self.stamp()
         elif server.status == "PreSubmitted" and int(server.order.parentId) == 0:
             server.status = "Submitted"
         self._exec += 1
@@ -433,7 +455,7 @@ class FakeTws:
 
     def add_foreign_order(self, *, client_id: int, order_id: int, con_id: int, symbol: str, action: str,
                           quantity: int, order_type: str = "LMT", price: float = 10.0, order_ref: str = "",
-                          status: str = "Submitted") -> ServerOrder:
+                          status: str = "Submitted", completed_time: str | None = None) -> ServerOrder:
         """An order of another client: the owner's TWS order (client 0), a manual order, another app."""
         placed = Order()
         placed.action, placed.orderType, placed.totalQuantity = action, order_type, quantity
@@ -444,7 +466,9 @@ class FakeTws:
             placed.auxPrice = price
         self._perm += 1
         server = ServerOrder(client_id=client_id, order_id=order_id, perm_id=self._perm,
-                             contract=contract_for(con_id, symbol), order=placed, status=status)
+                             contract=contract_for(con_id, symbol), order=placed, status=status,
+                             filled=quantity if status == "Filled" else 0,
+                             completed_at=(completed_time or self.stamp()) if status in FINAL else "")
         self.orders[(client_id, order_id)] = server
         return server
 

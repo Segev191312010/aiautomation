@@ -116,6 +116,7 @@ class Harness:
     async def restart(self, *, start: bool = True, clock: Clock | None = None) -> "Harness":
         """The engine process restarts: a fresh mirror and engine on the same ledger and TWS."""
         engine = make_engine(self.tws, clock or self.clock, self.lines, session_date=self.session_date)
+        self.tws.clock = clock or self.clock
         self.tws.attach(engine.mirror)
         self.tws.connect()
         restarted = Harness(engine=engine, tws=self.tws, clock=clock or self.clock, seeder=self.seeder,
@@ -146,6 +147,8 @@ def make_engine(tws: FakeTws, clock: Clock, lines: list[str], *, session_date: d
         return None
 
     engine.fallback_quote = no_screener_quote
+    # Never the real process table: the live bridge may be running on this machine.
+    engine.bridge_processes = lambda: []
     return engine
 
 
@@ -165,6 +168,7 @@ async def build(
     clock = clock or Clock(ny(10, 0, 5, day=session_date))
     lines: list[str] = []
     tws = FakeTws(wrapper=None, **tws_fields)
+    tws.clock = clock
     engine = make_engine(tws, clock, lines, session_date=session_date)
     tws.attach(engine.mirror)
     tws.session_day = session_date.strftime("%Y%m%d")

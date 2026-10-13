@@ -11,7 +11,12 @@ bridge (``scripts_local/paper_bridge.py`` v5) with its review lessons:
   final period, higher suffix) replaces the execution it corrects (L5);
 * only this client's executions are mirrored, never the owner's TWS trades;
 * any TWS error on one of the engine's own order ids is CRITICAL unless it is
-  a known informational notice (N2, L1, L8).
+  a known informational notice (N2, L1, L8);
+* completed orders are kept with their side, size, filled quantity and
+  completion time, whichever client placed them (the TWS GUI included), so
+  the engine can tell a sell that filled but is not in the position yet;
+* TWS error 1101 (connectivity restored, data lost) sets ``data_lost``: the
+  engine then requests its position and account subscriptions again.
 """
 from __future__ import annotations
 
@@ -29,8 +34,10 @@ DEAD_ORDER_STATUSES = frozenset({"Cancelled", "ApiCancelled", "Inactive", "Fille
 PARENT_CANCELLED_STATUSES = frozenset({"Cancelled", "ApiCancelled", "Inactive"})
 # 202 cancel confirmed, 399 order warning, 2109/2148 order event warnings, 10311 direct routing.
 ORDER_INFO_CODES = frozenset({202, 399, 2109, 2148, 10311})
-# 1100 connectivity lost, 1300 socket port reset, 2110 TWS-to-server connectivity broken.
-CRITICAL_TWS_CODES = frozenset({1100, 1300, 2110})
+# 1100 connectivity lost, 1101 restored with data lost (subscriptions must be renewed),
+# 1300 socket port reset, 2110 TWS-to-server connectivity broken.
+CRITICAL_TWS_CODES = frozenset({1100, 1101, 1300, 2110})
+DATA_LOST_CODE = 1101
 FARM_BROKEN_CODES = frozenset({2103, 2105, 2157})  # logged; the other 21xx farm notices are dropped
 QUOTE_TICKS = {1: "bid", 2: "ask", 4: "last", 66: "bid", 67: "ask", 68: "last"}  # 66-68 are delayed
 _UNSET_LIMIT = Decimal("1e12")  # ibapi 9.81 marks an unset double with 1.8e308
@@ -128,15 +135,22 @@ class AccountOrder:
 
 @dataclass(frozen=True, slots=True)
 class CompletedOrderRow:
-    """A finished order TWS reports through reqCompletedOrders (any API client)."""
+    """A finished order from reqCompletedOrders, of any client (TWS GUI included with apiOnly=False).
 
-    order_id: int
-    client_id: int
+    9.81 decodes no orderId or clientId for completed orders: they are known by
+    permId and orderRef only.
+    """
+
     perm_id: int
     order_ref: str
     status: str
     con_id: int
     symbol: str
+    action: str
+    account: str
+    total: Decimal
+    filled: Decimal | None  # filledQuantity: shares it executed before it completed; None = not reported
+    completed_time: str
 
 
 class TwsMirror:
@@ -177,6 +191,8 @@ class TwsMirror:
         self.quotes: dict[int, dict[str, Decimal]] = {}
         self.delayed_quotes: set[int] = set()
         self.data_types: dict[int, int] = {}
+        # Set by TWS error 1101 (connectivity restored, data lost): every subscription is gone.
+        self.data_lost = threading.Event()
 
     # ---- connection ------------------------------------------------------------
     def begin_connection(self) -> None:
@@ -253,10 +269,13 @@ class TwsMirror:
     def completedOrder(self, contract: Any, order: Any, orderState: Any) -> None:
         ref = str(getattr(order, "orderRef", "") or "")
         row = CompletedOrderRow(
-            order_id=whole(getattr(order, "orderId", 0)), client_id=whole(getattr(order, "clientId", 0)),
             perm_id=whole(getattr(order, "permId", 0)), order_ref=ref,
             status=str(getattr(orderState, "status", "") or ""),
             con_id=whole(getattr(contract, "conId", 0) or 0), symbol=str(getattr(contract, "symbol", "") or ""),
+            action=str(getattr(order, "action", "") or ""), account=str(getattr(order, "account", "") or ""),
+            total=decimal_or_none(getattr(order, "totalQuantity", None)) or Decimal("0"),
+            filled=decimal_or_none(getattr(order, "filledQuantity", None)),
+            completed_time=str(getattr(orderState, "completedTime", "") or ""),
         )
         with self.lock:
             self.completed[(ref, row.perm_id)] = row
@@ -367,6 +386,8 @@ class TwsMirror:
             return
         if 2100 <= number < 2200 and number not in CRITICAL_TWS_CODES:
             return  # data-farm "connection is OK" notices
+        if number == DATA_LOST_CODE:
+            self.data_lost.set()  # the engine renews its subscriptions and reconciles
         self.alert("CRITICAL" if number in CRITICAL_TWS_CODES else "INFO", f"TWS {reqId} {errorCode} {text}")
 
     # ---- reads (the engine holds no lock across an await) -------------------------
@@ -408,6 +429,7 @@ __all__ = [
     "AccountOrder",
     "AlertSink",
     "CompletedOrderRow",
+    "DATA_LOST_CODE",
     "ExecutionRow",
     "OpenOrderRow",
     "TwsMirror",
