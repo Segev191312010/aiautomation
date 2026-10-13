@@ -4,10 +4,18 @@ Autotrader V1 is a clean rebuild of the trading system around typed strategy con
 
 ## Current Status
 
-- Available: strategy drafts, deterministic scanning, conservative backtests, shadow decisions, risk evaluation, lifecycle persistence, local auth, and the V1 status API.
-- Disabled: automated PAPER order submission.
-- Unsupported: LIVE has no V1 runtime type, route, transition, or configuration.
-- There is no legacy bot, autopilot router, direct-AI trader, rule engine, screener UI, alert engine, or broker executor in the active application.
+- **Daily automation:** `autotraderctl run` supervises a trading day — the
+  watchlist screener (07:55–16:00 ET, with market regime), the PAPER order
+  bridge, strategies (MOMO_HOD_V2 sends paper orders; ORB_V1, GAP_GO_V1 and
+  VWAP_PB_V1 are shadow-only), Telegram notifications, and the always-on
+  Telegram assistant. A LaunchAgent can start it at login.
+- **AI:** Claude reviews every deterministic setup (PROPOSE/ABSTAIN) and answers
+  owner questions with read-only tools; it never creates orders.
+- **Owner orders:** any order from the pinned Telegram chat via a strict
+  deterministic parser and validator; sent by the single order sender.
+- **Evidence:** every decision is recorded; `trading/research/` records real
+  bars and replays strategies.
+- **Unsupported:** LIVE money has no runtime type, route, or configuration.
 
 ## Architecture
 
@@ -72,6 +80,17 @@ The first command runs backend tests, frontend typecheck/build/tests, and skips 
 - `.env` and SQLite files are local artifacts and are never committed.
 - `docs/archive/` holds owner work from the retired system (including the old TradingView/Claude paper runbook); it is not a current V1 contract.
 
-## Next Work
+## Operations
 
-The next product slice is a real market-data adapter and evidence-producing shadow scheduler. PAPER execution comes later through a separately reviewed broker adapter and release gate.
+```bash
+cd backend
+.venv/bin/python autotraderctl.py run --dry-run --date YYYY-MM-DD   # planned day
+.venv/bin/python autotraderctl.py shadow agent install|enable|disable|status
+.venv/bin/python autotraderctl.py notify test                        # Telegram check
+.venv/bin/python autotraderctl.py paper stop                         # kill switch
+```
+
+Owner prerequisites: TWS or IB Gateway logged into the PAPER account on
+127.0.0.1:7497 with auto-restart enabled, the Anthropic and Telegram keys in the
+macOS Keychain, `~/.config/autotrader-v1/config.toml`, the Mac on AC power during
+market hours, and no other IBKR session receiving market data.

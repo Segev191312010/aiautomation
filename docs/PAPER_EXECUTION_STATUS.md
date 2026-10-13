@@ -1,61 +1,58 @@
-# PAPER execution integration status
+# PAPER execution status
 
-This is a working-tree engineering note, not SHA-bound release evidence or
-permission to submit orders. Current runtime authority remains blocked.
+Working engineering note (updated 2026-10-13). It records how PAPER orders are
+sent today and what still stands between this and the reviewed execution
+engine. It is not evidence for real-money authority; LIVE has no V1 path.
 
-## Containment contract
+## Who sends orders
 
-- The outgoing IBKR order carries the configured account explicitly.
-- Every staged leg retains the qualified stock conId and primary exchange.
-- Submission uncertainty stops the sequence and requires manual intervention.
-- The executor never cancels broker orders as failure cleanup. In particular,
-  a timeout after final transmission must not remove potentially active stops.
-- A cancellation request is not proof of cancellation. This executor does not
-  invent canceled leg states when a broker outcome is unknown.
-- Failures and task cancellation during persistence block local authority and
-  attempt a durable execution fence independently of the bracket-group write.
-- A failed durable fence remains an error; no database failure is considered safe.
-- Broker acknowledgements must match account, qualified instrument, order reference,
-  prices, quantity, parent linkage and protective order settings. Pending statuses
-  and identity-free orderStatus callbacks cannot establish accepted protection.
-- Disconnects, rejected/uncertain orders and observed fills currently block the
-  transport instance from further submissions or reconnect. Fill containment is
-  temporary until a reviewed lifecycle reconciler can establish protection.
-- The final pre-send check shares a lock with callback-triggered blocking. This
-  prevents a previously recorded block from being ignored at placeOrder.
+`backend/scripts_local/paper_bridge.py` is the only process that places,
+modifies or cancels orders (IBKR TWS client 18, PAPER account only). The
+supervisor (`autotraderctl run`) starts it at 09:25 ET and restarts it on exit
+code 75; exit 78 is a permanent refusal and is not restarted.
 
-This transport block is process-local, not durable recovery. Creating another
-transport is not proof of reconciliation or permission to resume entries.
+Order sources:
+- **Bot decisions** — accepted decisions of strategies whose catalogue name
+  starts with `MOMO_HOD`. Other strategies are recorded but never sent.
+- **Owner manual orders** — rows queued in `autotrader_manual_orders`
+  (migration 12) by the Telegram assistant after the deterministic parser and
+  validator accept them. The bridge claims a row atomically, re-validates it
+  against live positions and working orders, and only then sends it.
 
-## Remaining release blockers
+## Containment rules (enforced and tested)
 
-- Instantiate the reviewed transport/store in the application lifecycle, then
-  implement account/order/position reconciliation and durable session recovery.
-- Verification of acknowledged account, instrument, order reference and leg state.
-- Restart/disconnect fencing and independent review of the full execution path.
-- Real PAPER account, entitlements and client identity verification.
-- Reviewed activation authority and evidence requirements; no environment bypass.
-- Human-approved real PAPER bracket and partial-fill protection drill.
-- Full green engineering gates and exact-source evidence.
+- Every managed account must be a paper (`DU…`) account, checked at connect
+  and on every restart; orders carry the account explicitly.
+- Bot entries are native brackets (parent DAY limit, GTC target, GTC stop).
+  State is persisted before any order is sent; a crash never resends.
+- At most three bot positions across strategies, one per symbol, only in
+  symbols the account does not already hold; per-order caps of 25% notional
+  and 1% risk; a 2% daily-loss stop; the kill switch blocks new entries.
+- Exit quantities come from one locked fill snapshot and are capped by the
+  account position; exits never exceed fills.
+- The session-end flatten reprices the existing target order once (15 minutes
+  before the close, half-day aware). Later checks only alert; the bridge never
+  sends a second sell.
+- Every modify is rebuilt with the placement encoding TWS already accepted and
+  counts as done only when TWS echoes it; unconfirmed modifies alert.
+- Any error on an own order id is CRITICAL unless informational.
+- Manual orders never short, never sell shares held by a bot bracket (that is
+  done by `close`, which flattens the bracket), and are refused outside regular
+  hours, when stale, or when the bridge heartbeat is older than 20 s.
 
-Unit tests use test-only broker substitutes. They are not real IBKR order or
-fill evidence. No test in this change sends an order to TWS.
+## Review history
 
-## Observation inbox
+- 2026-10-12: first independent execution-safety review — NO-GO (H1, H2,
+  M1–M4, L1–L8). All fixed with regression tests.
+- 2026-10-12: re-review of v4 — all prior findings confirmed fixed; NO-GO on
+  new findings N1–N3 (owner holdings vs bot exits, silent rejected modifies,
+  untested modify encoding). Fixed in v5 with tests.
+- Pending: final review of v5 with manual-order intake before unattended use.
 
-Migration 8 adds an immutable inbox independent of bracket foreign keys, so
-unknown order and connection events can be retained. Session/sequence retries
-are idempotent only for identical owner, account, client and payload. Conflicting
-observations are rejected. Raw broker error messages are excluded; numeric codes
-and request IDs remain. The transport flush cursor advances only after each
-successful write, and persistence failures block further execution.
+## Still to do
 
-The transport accepts a scoped observation store and starts its background writer
-after handshake. Submission requires a running writer and flushes observations
-before sending and before returning an acknowledgement. Writer failure blocks
-execution. Disconnect stops and joins the writer. The application composition
-still needs to provide the store and verified owner.
-
-Events received between flushes can still be lost on process crash. A durable
-session marker and restart reconciliation are required before release; observation
-records alone do not establish reconciled state or protection.
+- Supervised first live modify (the 15:45 flatten path has not yet run against
+  a real TWS).
+- Replace the bridge with the reviewed execution engine (ledger, reconciliation
+  every 2 minutes, shared risk book) after a clean paper week; delete the old
+  `trading/execution/` transport stack at the same time.

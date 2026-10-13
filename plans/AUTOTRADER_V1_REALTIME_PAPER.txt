@@ -1,3 +1,12 @@
+STATUS 2026-10-13
+This was the original single-strategy (ORB_V1) plan. Owner decisions on
+2026-10-12 superseded parts of it: the universe is the owner's watchlist plus a
+live screener; MOMO_HOD_V2 is the paper-trading strategy (ORB_V1, VWAP_PB_V1 and
+GAP_GO_V1 run in shadow); the reviewer is Claude; the owner can place manual
+orders from Telegram; the market regime pauses momentum entries in risk_off.
+See plans/AUTOTRADER_V1_SPEC.md and docs/PAPER_EXECUTION_STATUS.md for the
+current contract. The sections below are kept for history.
+
 AUTOTRADER V1 - REAL-TIME IBKR PAPER AUTOMATION
 
 PURPOSE

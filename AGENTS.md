@@ -1,12 +1,17 @@
 # Autotrader V1 — Engineering Rules
 
 ## Product Boundary
-- `backend/trading/` is the only trading-domain implementation.
-- Current authority is `backtest` and `shadow`; `paper` unlocks only through the
-  supervised drill and owner-signed receipt defined in `plans/AUTOTRADER_V1_SPEC.md`.
+- `backend/trading/` is the trading-domain implementation. The temporary PAPER
+  order sender `backend/scripts_local/paper_bridge.py` is the ONLY process that
+  sends orders (TWS client 18) until the reviewed execution engine replaces it.
+- PAPER order authority (owner, 2026-10-12): MOMO_HOD strategies and owner manual
+  orders from the pinned Telegram chat. ORB_V1, VWAP_PB_V1 and GAP_GO_V1 are
+  shadow-only. LIVE has no path. See `plans/AUTOTRADER_V1_SPEC.md`.
 - No environment variable may enable PAPER or LIVE execution.
-- AI providers may return typed proposals; deterministic code owns risk and lifecycle decisions.
-- Broker execution remains a protocol boundary until evidence-backed PAPER work is approved.
+- AI models may only PROPOSE/ABSTAIN on deterministic setups or answer questions
+  with read-only tools; orders come only from deterministic code.
+- Every change to the order sender needs an independent execution-safety
+  review before it runs unattended.
 
 ## Repository Layout
 - API entry point: `backend/main.py`
@@ -23,7 +28,8 @@
 - Keep one implementation per concern and one canonical application entry point.
 - Do not edit `.env`, `*.db`, or `docs/archive/` without explicit owner instruction.
 - Do not add LIVE execution, broker credentials, or model authority without explicit human approval.
-  PAPER execution follows the approved Milestone A plan; LIVE has no V1 path.
+- Never commit personal identifiers (account numbers, chat ids, tokens); the
+  repository is public. Tests use fake ids such as `DU1234567`.
 - Do not commit, push, or rewrite Git history unless the owner asks.
 
 ## Collaboration
