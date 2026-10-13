@@ -313,6 +313,17 @@ async def _execute(arguments: argparse.Namespace) -> int:
         cfg.DB_PATH = original_db_path
 
 
+async def _backup_before_promote(database: Path) -> Path:
+    """A non-overwriting SQLite backup of the database, taken before PAPER authority is written into it."""
+    from trading.storage.migrations import backup_database
+
+    directory = database.parent / "backups"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    async with aiosqlite.connect(str(database)) as db:
+        return await backup_database(db, directory / f"{database.stem}.before-execution-promote-{stamp}.db")
+
+
 async def _execution_command(arguments: argparse.Namespace) -> int:
     """Authority records only: nothing here connects to TWS or sends an order."""
     from trading.execution.promotion import (
@@ -321,6 +332,7 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
         engine_code_digest,
         grant_promotion,
         promotion_history,
+        require_grantable,
         revoke_promotion,
     )
 
@@ -353,6 +365,21 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
             if not accounts:
                 print("no promotion records")
             return 0
+        if arguments.action == "promote":
+            require_grantable(arguments.strategy, arguments.account)  # refused before the database is touched
+            # A grant is written into the live database (migrations included): never without a backup.
+            database = Path(cfg.DB_PATH).expanduser()
+            if cfg.DB_PATH == ":memory:" or not database.is_file():
+                print(f"error: no autotrader database at {database} — promote writes into the existing database"
+                      " (check --db-path); nothing promoted", file=sys.stderr)
+                return 1
+            try:
+                backup = await _backup_before_promote(database)
+            except (OSError, RuntimeError, aiosqlite.Error) as exc:
+                print(f"error: database backup failed ({type(exc).__name__}: {exc}) — nothing promoted",
+                      file=sys.stderr)
+                return 1
+            print(f"database backed up to {backup}")
         await init_db()
         if arguments.action == "promote":
             record = await grant_promotion(

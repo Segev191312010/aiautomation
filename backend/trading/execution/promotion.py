@@ -8,8 +8,10 @@ grant it:
 * only strategies whose catalogue name starts with a code-owned prefix
   (``MOMO_HOD``, owner decision 2026-10-12) can be promoted, and a record for
   any other name grants nothing even if it is written into the table by hand;
-* a grant binds the SHA-256 of the engine's own source files, so any change to
-  the order-sending code needs a new explicit grant after its review;
+* a grant binds the SHA-256 of the engine's source files (the engine and every
+  trading module it imports), so any change to the order-sending code needs a
+  new explicit grant after its review, and the engine refuses to start when the
+  code it runs is not the code its authority names;
 * a revoke ends every grant of that strategy and account;
 * operator configuration (:class:`ExecutionSwitches`) can only switch entries
   off; it has no field that can add a strategy or an account;
@@ -33,14 +35,19 @@ from db.core import get_db, transaction
 
 # Owner decision 2026-10-12: only MOMO_HOD strategies may send PAPER orders.
 PROMOTABLE_STRATEGY_PREFIXES: tuple[str, ...] = ("MOMO_HOD",)
-# The files whose exact content a promotion binds (relative to backend/).
+# The files whose exact content a promotion binds (relative to backend/): the engine and every
+# trading module it imports, the kill switch, the manual-order and bridge records and the
+# session calendar included (a test keeps this list complete).
 ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "trading/execution/live_executor.py",
+    "trading/execution/manual_orders.py",
     "trading/execution/promotion.py",
     "trading/execution/tws_state.py",
     "trading/risk/book.py",
+    "trading/scheduler/sessions.py",
     "trading/storage/execution_ledger.py",
     "trading/storage/execution_ledger_schema.py",
+    "trading/storage/runtime_fence.py",
 )
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _SWITCH_KEYS = frozenset({"entries_enabled", "disabled_strategies"})
@@ -53,6 +60,7 @@ AuthorityCode = Literal[
     "entries_disabled",
     "not_paper_account",
     "invalid_record",
+    "code_mismatch",
 ]
 
 
@@ -133,11 +141,8 @@ async def _append(
                            created_at=datetime.fromisoformat(created_at))
 
 
-async def grant_promotion(
-    *, strategy_name: str, account: str, actor: str, reason: str, code_digest: str | None = None,
-    now: datetime | None = None,
-) -> PromotionRecord:
-    """Record the owner's explicit PAPER grant for one strategy, account and engine build."""
+def require_grantable(strategy_name: str, account: str) -> None:
+    """Refuse a grant that could never be valid, before anything is written."""
     if not is_promotable(strategy_name):
         raise ExecutionAuthorityError(
             "strategy_not_promotable",
@@ -146,6 +151,14 @@ async def grant_promotion(
         )
     if not is_paper_account(account):
         raise ExecutionAuthorityError("not_paper_account", "promotions name a DU paper account only")
+
+
+async def grant_promotion(
+    *, strategy_name: str, account: str, actor: str, reason: str, code_digest: str | None = None,
+    now: datetime | None = None,
+) -> PromotionRecord:
+    """Record the owner's explicit PAPER grant for one strategy, account and engine build."""
+    require_grantable(strategy_name, account)
     return await _append(
         action="grant", strategy_name=strategy_name, account=account,
         code_digest=code_digest or engine_code_digest(), actor=_require_text(actor, "actor", 128),
@@ -284,5 +297,6 @@ __all__ = [
     "is_paper_account",
     "is_promotable",
     "promotion_history",
+    "require_grantable",
     "revoke_promotion",
 ]
