@@ -24,6 +24,11 @@ and has no way to place, change, or cancel an order. Each call reserves a
 worst-case cost against a $3.00 daily budget first and settles the actual
 cost after; every call is audited in a private JSONL file.
 
+Autopilot. ``/autopilot on|off|status`` and ``/plan`` reach the AI day
+manager's switch and plan only through this module's deterministic command
+routing (``trading.manager.telegram``); no data tool offered to Claude can
+read or write the switch.
+
 Schema. The assistant never migrates. It starts while only migrations newer
 than ``schema_gate.TELEGRAM_ASSISTANT_REQUIRES`` are pending, so /stop and
 manual exits stay available (a test pins every table this module, the data
@@ -141,6 +146,8 @@ ORDER_COMMANDS = frozenset({"buy", "sell", "stop", "close", "closeall", "cancel"
 READ_COMMANDS = frozenset(
     {"status", "pnl", "positions", "orders", "hot", "market", "signals", "report", "quote"}
 )
+# The AI day manager's switch and plan, by the command parser only.
+MANAGER_COMMANDS = frozenset({"autopilot", "plan"})
 _FORWARD_FIELDS = (
     "forward_origin",
     "forward_from",
@@ -212,6 +219,10 @@ Data
 /signals — today's strategy signals and reasons
 /report — the daily report so far
 /quote SYM — price of one stock
+
+AI day manager (shadow)
+/plan — today's day plan in force
+/autopilot on · off · status — the autopilot switch (real MOMO is unchanged)
 
 Orders — sent at once, no confirmation; 09:30-15:54 ET only
 /buy 100 AAPL · /buy 100 AAPL 180.50 · /buy $5k NVDA
@@ -989,6 +1000,14 @@ class Questions(Protocol):
     async def answer(self, question: str, *, message_id: int | None) -> str: ...
 
 
+class ManagerControl(Protocol):
+    """``/autopilot`` and ``/plan`` (trading.manager.telegram.ManagerDesk)."""
+
+    async def autopilot(self, args: str) -> str: ...
+
+    async def plan(self) -> str: ...
+
+
 class _FatalPollError(Exception):
     def __init__(self, code: int) -> None:
         super().__init__(code)
@@ -1014,6 +1033,7 @@ class TelegramAssistant:
         questions: Questions | None,
         questions_unavailable: str = "",
         state: AssistantState,
+        manager: ManagerControl | None = None,
         clock: Clock = _utc_now,
         monotonic: Callable[[], float] = monotonic_time.monotonic,
         sleep: Sleeper = asyncio.sleep,
@@ -1029,6 +1049,7 @@ class TelegramAssistant:
         self._kill_switch = kill_switch
         self._questions = questions
         self._questions_unavailable = questions_unavailable
+        self._manager = manager
         self._state = state
         self._clock = clock
         self._monotonic = monotonic
@@ -1222,6 +1243,9 @@ class TelegramAssistant:
         if command == "resume":
             self._reply(RESUME_TEXT)
             return "command:resume"
+        if command in MANAGER_COMMANDS:
+            self._reply(await self._manager_command(command, args))
+            return f"command:{command}"
         if command in READ_COMMANDS:
             self._reply(await self._read_command(command, args))
             return f"command:{command}"
@@ -1261,6 +1285,17 @@ class TelegramAssistant:
             "report": tools.report,
         }
         return await handlers[command]()
+
+    async def _manager_command(self, command: str, args: str) -> str:
+        if self._manager is None:
+            return "The AI day manager isn't available in this assistant."
+        try:
+            if command == "plan":
+                return await self._manager.plan()
+            return await self._manager.autopilot(args)
+        except Exception as exc:  # noqa: BLE001 - one failed command never stops the assistant
+            logger.exception("/%s failed", command)
+            return f"⚠️ /{command} failed ({type(exc).__name__}); the switch is unchanged unless /autopilot status says so."
 
     async def _stop_command(self) -> str:
         try:
@@ -1567,7 +1602,10 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
     notifier = TelegramNotifier(
         send_api, chat_id=owner, sleep=environment.sleep, monotonic=environment.monotonic
     )
+    from trading.manager.telegram import ManagerDesk
+
     assistant = TelegramAssistant(
+        manager=ManagerDesk(),
         owner_id=owner,
         updates=BotUpdates(poll_api),
         replies=notifier,
