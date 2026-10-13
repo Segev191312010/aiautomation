@@ -246,6 +246,8 @@ def runtime_db(tmp_path) -> Path:
                 (SESSION.isoformat(), 600, "DAYB", stamp, stamp, 2, 1, None),
                 (SESSION.isoformat(), 601, "DAYA", stamp, stamp, 5, 1, None),
                 (SESSION.isoformat(), 602, "DAYX", stamp, stamp, 1, 0, "stock_type_etf"),
+                # Admitted by the day universe alone: no autotrader_universe_daily row.
+                (SESSION.isoformat(), 603, "DAYC", stamp, stamp, 3, 1, None),
             ],
         )
         db.commit()
@@ -258,7 +260,8 @@ def test_the_recorder_takes_the_closed_sessions_universe_in_priority_order_and_c
     assert session_date == SESSION  # not tonight's NEXT qualification
     assert [(item.symbol, item.primary_exchange) for item in instruments] == [
         ("WAT", "NASDAQ"), ("ZED", "NASDAQ"),  # the watchlist first
-        ("DAYB", "NYSE"), ("DAYA", "NYSE"),  # the day universe by scan rank
+        # the day universe by scan rank, whether or not the hot-35 path qualified it too
+        ("DAYB", "NYSE"), ("DAYC", "NYSE"), ("DAYA", "NYSE"),
         ("SCAN", None),  # other qualified scan names last
     ]
     _date, capped = load_qualified_universe(runtime_db, now=EVENING, max_contracts=3)
@@ -390,9 +393,9 @@ async def test_the_nightly_run_records_extends_and_qualifies_the_next_session(ru
     (actor,) = NightActor.instances
     kinds = [kind for kind, _con_id in actor.requests]
     # RTH first (two requests each), then the gap candidate, then tomorrow's watchlist.
-    assert kinds == ["intraday", "daily"] * 5 + ["extended"] + ["daily"] * 2
+    assert kinds == ["intraday", "daily"] * 6 + ["extended"] + ["daily"] * 2
     store = BarsStore(ResearchPaths(root))
-    assert set(store.list_con_ids(SESSION)) == {1, 2, 600, 601, 700}
+    assert set(store.list_con_ids(SESSION)) == {1, 2, 600, 601, 603, 700}
     assert store.list_con_ids(SESSION, extended=True) == (600,)
     with closing(sqlite3.connect(runtime_db)) as db:
         qualified = db.execute(

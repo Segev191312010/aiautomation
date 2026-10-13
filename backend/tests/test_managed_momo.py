@@ -698,12 +698,15 @@ def test_managed_momo_keeps_momos_gates_and_v2s_fingerprints_are_unchanged():
     assert (managed["manager_version"], managed["manager_prompt_id"]) == ("manager-v1", "day-plan-v1")
 
 
-def test_the_plans_running_strategies_are_the_registry_families_with_a_window_today():
+def test_the_plans_running_strategies_are_the_scheduled_families_with_a_window_today():
     from trading.manager.planner import running_strategies
 
-    assert running_strategies(date(2026, 10, 13)) == ("orb", "momo", "vwap", "gap")
+    # The supervisor's strategy children: the V2 simulations replace V1.
+    assert running_strategies(date(2026, 10, 13)) == ("orb-v2", "momo", "gap-v2", "vwap-v2")
     # Managed MOMO is MOMO's family: it adds no strategy key of its own.
     assert "momo-ap" not in running_strategies(date(2026, 10, 13))
+    # A half day keeps every strategy with an entry window.
+    assert running_strategies(date(2026, 11, 27)) == ("orb-v2", "momo", "gap-v2", "vwap-v2")
 
 
 def test_managed_momo_polls_last_clear_of_every_child_including_the_v2_simulations():

@@ -126,10 +126,15 @@ that names the specific values behind your decision, step, and note."""
 
 def _shadow_strategy_prompts() -> dict[str, str]:
     """Prompts owned by their strategy modules (registered verbatim; hash-pinned there)."""
+    from trading.rules.all_session import GAP_REVIEW_V2, GAP_REVIEW_V2_PROMPT_ID
     from trading.rules.gap_go import GAP_REVIEW_PROMPT_ID, GAP_REVIEW_V1
     from trading.rules.vwap_pb import VWAP_REVIEW_PROMPT_ID, VWAP_REVIEW_V1
 
-    return {VWAP_REVIEW_PROMPT_ID: VWAP_REVIEW_V1, GAP_REVIEW_PROMPT_ID: GAP_REVIEW_V1}
+    return {
+        VWAP_REVIEW_PROMPT_ID: VWAP_REVIEW_V1,
+        GAP_REVIEW_PROMPT_ID: GAP_REVIEW_V1,
+        GAP_REVIEW_V2_PROMPT_ID: GAP_REVIEW_V2,
+    }
 
 
 REVIEW_PROMPTS: dict[str, str] = {
@@ -149,6 +154,7 @@ REVIEW_PROMPT_STRATEGY_KINDS: dict[str, str] = {
     MOMO_MANAGED_REVIEW_PROMPT_ID: "momo_hod",
     "vwap-review-v1": "vwap_pb",
     "gap-review-v1": "gap_go",
+    "gap-review-v2": "gap_go",
 }
 
 

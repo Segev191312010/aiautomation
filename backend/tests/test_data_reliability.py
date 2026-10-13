@@ -117,11 +117,16 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
         "orb": timedelta(seconds=30),
         "gap": timedelta(seconds=45),
         "vwap": timedelta(seconds=60),
+        "orb-v2": timedelta(seconds=75),
+        "gap-v2": timedelta(seconds=90),
+        "vwap-v2": timedelta(seconds=105),
         "momo-ap": timedelta(seconds=120),
     }
-    assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES) == set(STRATEGY_UNIVERSES) | set(
-        MANAGED_STRATEGY_UNIVERSES
-    )
+    assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES)
+    # The supervisor schedules registry strategies only (the V2 simulations
+    # in place of their V1 strategies, and managed MOMO in its own table).
+    assert set(STRATEGY_UNIVERSES) < set(STRATEGIES)
+    assert set(MANAGED_STRATEGY_UNIVERSES) == set(shadow_service.MANAGED_STRATEGIES) < set(STRATEGIES)
     # IBKR refuses an identical historical request within 15 s of the first.
     assert MIN_POLL_SEPARATION == timedelta(seconds=15)
     for (first, first_at), (second, second_at) in combinations(STRATEGY_POLL_OFFSETS.items(), 2):
@@ -129,11 +134,12 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
     # Real MOMO asks first: a collision costs a shadow child, never MOMO.
     assert min(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "momo"
     assert momo_strategy_spec().name == "MOMO_HOD_V2"
-    # Managed MOMO and VWAP poll MOMO's own hot list, so they poll furthest
-    # behind it; managed MOMO last of all.
+    # Managed MOMO polls MOMO's own hot list last of all; among the
+    # simulations, VWAP (which reads it too) polls furthest behind MOMO.
     assert max(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "momo-ap"
-    unmanaged = {name: at for name, at in STRATEGY_POLL_OFFSETS.items() if name != "momo-ap"}
-    assert max(unmanaged, key=unmanaged.__getitem__) == "vwap"
+    scheduled = {name: STRATEGY_POLL_OFFSETS[name] for name in STRATEGY_UNIVERSES}
+    assert min(scheduled, key=scheduled.__getitem__) == "momo"
+    assert max(scheduled, key=scheduled.__getitem__) == "vwap-v2"
     assert poll_offset_problems(STRATEGY_POLL_OFFSETS) == []
 
 
@@ -165,18 +171,18 @@ def test_each_child_keeps_a_pass_budget_under_its_freshness_limit():
     schedules = {name: poll_schedule(name, universe) for name, universe in universes.items()}
     assert {name: schedule.bar_max_age for name, schedule in schedules.items()} == {
         "momo": WATCHLIST_BAR_MAX_AGE,
-        "vwap": WATCHLIST_BAR_MAX_AGE,
-        "gap": WATCHLIST_BAR_MAX_AGE,
+        "vwap-v2": WATCHLIST_BAR_MAX_AGE,
+        "gap-v2": WATCHLIST_BAR_MAX_AGE,
         "momo-ap": WATCHLIST_BAR_MAX_AGE,
         # A scanner run keeps its old 25 s after its slot (30 s at +5 s before).
-        "orb": timedelta(seconds=55),
+        "orb-v2": timedelta(seconds=100),
     }
     assert WATCHLIST_BAR_MAX_AGE == timedelta(seconds=240) and MIN_PASS_BUDGET == timedelta(seconds=25)
     assert {name: schedule.late_poll_limit for name, schedule in schedules.items()} == {
         "momo": timedelta(seconds=112.5),
-        "orb": timedelta(seconds=12.5),
-        "gap": timedelta(seconds=97.5),
-        "vwap": timedelta(seconds=90),
+        "orb-v2": timedelta(seconds=12.5),
+        "gap-v2": timedelta(seconds=75),
+        "vwap-v2": timedelta(seconds=67.5),
         "momo-ap": timedelta(seconds=60),
     }
     for schedule in schedules.values():

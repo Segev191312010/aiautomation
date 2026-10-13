@@ -785,7 +785,7 @@ def test_config_is_frozen_and_every_parameter_is_in_the_fingerprint():
     [
         {"window_start": time(9, 30)},
         {"entry_cutoff": time(9, 35)},
-        {"entry_cutoff": time(13, 5)},
+        {"entry_cutoff": time(16, 5)},
         {"premarket_start": time(3, 55)},
         {"premarket_start": time(9, 30)},
         {"min_gap_pct": Decimal("0")},

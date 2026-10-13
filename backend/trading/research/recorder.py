@@ -582,19 +582,32 @@ def _has_table(db: sqlite3.Connection, table: str) -> bool:
 
 
 # Tier 0: the owner's watchlist; 1: the day universe by its best scan rank;
-# 2: any other qualified contract (the hot-35's scan additions).
+# 2: any other qualified contract (the hot-35's scan additions). The day
+# universe keeps its qualifications out of autotrader_universe_daily, so its
+# names are read from its own table too.
 _UNIVERSE_SQL = """
-    SELECT d.con_id, d.symbol,
+    SELECT con_id, symbol, exchange, tier, day_rank FROM (
+    SELECT d.con_id AS con_id, d.symbol AS symbol,
            COALESCE((SELECT u.primary_exchange FROM autotrader_universe u
                       WHERE u.con_id = d.con_id AND u.primary_exchange IS NOT NULL
-                      ORDER BY u.source LIMIT 1), {day_exchange}),
+                      ORDER BY u.source LIMIT 1), {day_exchange}) AS exchange,
            CASE WHEN EXISTS (SELECT 1 FROM autotrader_universe u WHERE u.con_id = d.con_id) THEN 0
                 WHEN {day_member} THEN 1 ELSE 2 END AS tier,
            {day_rank} AS day_rank
       FROM autotrader_universe_daily d
       {day_join}
      WHERE d.session_date = ? AND d.qualified = 1
-     ORDER BY tier, day_rank IS NULL, day_rank, d.symbol, d.con_id
+    {day_only}
+    ) ORDER BY tier, day_rank IS NULL, day_rank, symbol, con_id
+"""
+_DAY_ONLY_SQL = """
+    UNION ALL
+    SELECT du.con_id, du.symbol, du.primary_exchange, 1, du.best_rank
+      FROM autotrader_manager_day_universe du
+     WHERE du.session_date = ? AND du.qualified = 1
+       AND NOT EXISTS (SELECT 1 FROM autotrader_universe_daily d
+                        WHERE d.session_date = du.session_date AND d.con_id = du.con_id
+                          AND d.qualified = 1)
 """
 
 
@@ -633,12 +646,15 @@ def load_qualified_universe(
                         " ON du.session_date = d.session_date AND du.con_id = d.con_id"
                         " AND du.qualified = 1"
                     ),
+                    day_only=_DAY_ONLY_SQL,
                 )
+                universe_params: tuple[str, ...] = (session_date.isoformat(),) * 2
             else:
                 sql = _UNIVERSE_SQL.format(
-                    day_exchange="NULL", day_member="0", day_rank="NULL", day_join=""
+                    day_exchange="NULL", day_member="0", day_rank="NULL", day_join="", day_only=""
                 )
-            rows = db.execute(sql, (session_date.isoformat(),)).fetchall()
+                universe_params = (session_date.isoformat(),)
+            rows = db.execute(sql, universe_params).fetchall()
     except sqlite3.Error as exc:
         raise UniverseUnavailableError(f"qualified universe unreadable: {exc}") from exc
     instruments = tuple(

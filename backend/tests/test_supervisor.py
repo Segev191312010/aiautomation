@@ -1245,15 +1245,19 @@ def test_default_plan_runs_the_shadow_strategies_and_the_learning_loop_in_their_
 
     plans = {plan.name: plan for plan in plan_session(market_session(date(2026, 10, 13)))}
     assert list(plans) == [
-        "screener", "notifier", "bridge", "orb", "momo", "gap", "vwap", "manager", "momo-ap",
-        "recorder", "replay",
+        "screener", "notifier", "bridge", "orb-v2", "momo", "gap-v2", "vwap-v2", "manager",
+        "momo-ap", "recorder", "replay",
     ]
     ny = ZoneInfo("America/New_York")
-    assert plans["gap"].starts_at.astimezone(ny).time() == time(9, 28)
-    assert plans["gap"].finishes_at.astimezone(ny).time() == time(10, 30)
-    assert plans["vwap"].starts_at.astimezone(ny).time() == time(10, 25)
-    assert plans["vwap"].finishes_at.astimezone(ny).time() == time(14, 30)
-    assert "gappers" in plans["gap"].argv and "watchlist" in plans["vwap"].argv
+    # The all-session simulations replace ORB_V1, GAP_GO_V1 and VWAP_PB_V1: 09:28-15:31.
+    for name in ("orb-v2", "gap-v2", "vwap-v2"):
+        assert window(plans[name]) == ("09:28", "15:31", "15:30"), name
+        assert plans[name].argv[4:6] == ("--strategy", name)
+        assert plans[name].base_backoff == timedelta(seconds=95)
+    assert window(plans["momo"]) == ("09:55", "15:01", "15:00")
+    assert "all-gappers" in plans["gap-v2"].argv and "watchlist" in plans["vwap-v2"].argv
+    assert "scanner" in plans["orb-v2"].argv
+    assert not {"orb", "gap", "vwap"} & set(plans)
     # After the close: record the session that just closed, then replay the store.
     control = str(BACKEND_DIR / "autotraderctl.py")
     assert plans["recorder"].argv == (str(VENV_PYTHON), control, "research", "record")
@@ -1306,9 +1310,14 @@ def test_the_manager_child_holds_no_tws_client_and_momo_ap_its_own():
     from trading.operations.screener_service import SCREENER_CLIENT_ID_OFFSET
     from trading.operations.shadow_service import STRATEGY_CLIENT_OFFSET
 
+    from trading.operations.supervisor import MANAGED_STRATEGY_STARTS, STRATEGY_STARTS
+
     data = 17
-    ids = {name: data + offset for name, offset in STRATEGY_CLIENT_OFFSET.items()}
-    assert ids["momo-ap"] == 24
+    # Every child the supervisor schedules has a client id of its own (an
+    # unscheduled V1 entry shares its V2 replacement's).
+    scheduled = (*STRATEGY_STARTS, *MANAGED_STRATEGY_STARTS)
+    ids = {name: data + STRATEGY_CLIENT_OFFSET[name] for name in scheduled}
+    assert ids["momo-ap"] == 24 and ids["momo"] == 20
     assert len(set(ids.values())) == len(ids)
     assert data + SCREENER_CLIENT_ID_OFFSET not in ids.values()
     # The manager plans from the database and Claude only.

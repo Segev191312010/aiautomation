@@ -176,15 +176,13 @@ def estimate_cost(
 
 
 def running_strategies(session_date: date) -> tuple[str, ...]:
-    """The plan's strategy keys: each registry family that has an entry window today."""
-    from trading.operations.shadow_service import (
-        STRATEGIES,
-        strategy_entry_window,
-        strategy_family,
-    )
+    """The plan's strategy keys: the family of each strategy child the supervisor
+    schedules (registry entries it leaves out never run) with an entry window today."""
+    from trading.operations.shadow_service import strategy_entry_window, strategy_family
+    from trading.operations.supervisor import MANAGED_STRATEGY_STARTS, STRATEGY_STARTS
 
     running: list[str] = []
-    for name in STRATEGIES:
+    for name in (*STRATEGY_STARTS, *MANAGED_STRATEGY_STARTS):
         start, cutoff = strategy_entry_window(name, session_date)
         family = strategy_family(name)
         if cutoff > start and family not in running:

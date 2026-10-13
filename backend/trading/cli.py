@@ -33,14 +33,14 @@ if TYPE_CHECKING:
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
 # Mirrors trading.operations.shadow_service.STRATEGIES / UNIVERSES (a test pins
 # them); kept literal so parsing never imports the TWS and Claude stack.
-_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap", "momo-ap")
+_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap", "orb-v2", "vwap-v2", "gap-v2", "momo-ap")
 # Managed entries (shadow_service.MANAGED_STRATEGIES) run their family's rules
 # under the AI day manager; the rules-only replay covers them as that family.
 _MANAGED_STRATEGY_CHOICES = ("momo-ap",)
 _REPLAY_STRATEGY_CHOICES = tuple(
     name for name in _STRATEGY_CHOICES if name not in _MANAGED_STRATEGY_CHOICES
 )
-_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers")
+_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers", "all-gappers")
 # Three weeks of five-minute bars: enough sessions for a first replay sample.
 DEFAULT_BACKFILL_DAYS = 21
 # The nightly recording keeps the whole replay sample filled: a contract with
@@ -243,8 +243,8 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help=(
-            f"strategies to replay, from {' '.join(_REPLAY_STRATEGY_CHOICES)} (default all; gap is"
-            " reported as not replayable: it needs pre-market bars)"
+            f"strategies to replay, from {' '.join(_REPLAY_STRATEGY_CHOICES)} (default all; gap and"
+            " gap-v2 are reported as not replayable: they need pre-market bars)"
         ),
     )
     research_replay.add_argument(
@@ -668,8 +668,10 @@ def _run_sync_until_sigterm(work: Callable[[], int]) -> int:
 
 def _research_command(arguments: argparse.Namespace) -> int:
     """Research bars and replay. ``backfill`` and ``record`` read TWS PAPER market
-    data on client 28 (they refuse a non-paper login); ``replay`` reads only the
-    research store. Nothing here can place an order."""
+    data on client 28 (they refuse a non-paper login); ``replay`` reads the
+    research store and, after a full replay, runs the nightly evidence
+    (trading.research.nightly: it writes only the signal-outcome table, and only
+    on a database at this code's schema). Nothing here can place an order."""
     logger = _interactive_research_logger()
     label = f"research {arguments.action}"
     if arguments.action == "replay":

@@ -86,12 +86,12 @@ def test_the_notifier_follows_every_supervised_strategy_childs_log(monkeypatch):
 
     assert notify_service.log_files() == {
         "bridge": "bridge.log", "supervisor": "supervisor.log", "screener": "screener.log",
-        "orb": "orb.log", "momo": "momo.log", "gap": "gap.log", "vwap": "vwap.log",
-        "momo-ap": "momo-ap.log",
+        "orb-v2": "orb-v2.log", "momo": "momo.log", "gap-v2": "gap-v2.log",
+        "vwap-v2": "vwap-v2.log", "momo-ap": "momo-ap.log",
     }
-    # A renamed child (the V2 simulations write orb-v2.log ...) is followed as is.
-    monkeypatch.setattr(supervisor, "STRATEGY_STARTS", {"momo": time(9, 55), "orb-v2": time(9, 40)})
-    assert set(notify_service.log_files()) == {"bridge", "supervisor", "screener", "momo", "orb-v2", "momo-ap"}
+    # A renamed child is followed as is, from the supervisor's own table.
+    monkeypatch.setattr(supervisor, "STRATEGY_STARTS", {"momo": time(9, 55), "orb-v3": time(9, 40)})
+    assert set(notify_service.log_files()) == {"bridge", "supervisor", "screener", "momo", "orb-v3", "momo-ap"}
 
 
 @pytest.mark.anyio

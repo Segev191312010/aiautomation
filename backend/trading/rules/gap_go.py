@@ -73,7 +73,10 @@ UTC = timezone.utc
 _PREMARKET_EARLIEST = time(4, 0)
 _REGULAR_OPEN = time(9, 30)
 _FIRST_BAR_CLOSE = time(9, 35)
-# The earliest scheduled XNYS close (half days), so the window fits every session.
+_REGULAR_CLOSE = time(16, 0)
+# The earliest scheduled XNYS close (half days). GapGoStrategy has no calendar
+# lookup, so its window must end by then to fit every session; a window that
+# runs later is resolved per session against the close (trading.rules.all_session).
 _EARLIEST_CLOSE = time(13, 0)
 _BPS = Decimal("10000")
 _PERCENT = Decimal("100")
@@ -109,8 +112,8 @@ class GapGoConfig:
     minimum_average_dollar_volume: Decimal = Decimal("20000000")
 
     def __post_init__(self) -> None:
-        if not _FIRST_BAR_CLOSE <= self.window_start < self.entry_cutoff <= _EARLIEST_CLOSE:
-            raise ValueError("gap-and-go window must lie between 09:35 and 13:00 ET")
+        if not _FIRST_BAR_CLOSE <= self.window_start < self.entry_cutoff <= _REGULAR_CLOSE:
+            raise ValueError("gap-and-go window must lie between 09:35 and 16:00 ET")
         if not _PREMARKET_EARLIEST <= self.premarket_start < _REGULAR_OPEN:
             raise ValueError("pre-market must start between 04:00 and 09:30 ET")
         if self.atr_period < 1:
@@ -557,13 +560,17 @@ def _price_signal(
 class GapGoStrategy:
     """GAP_GO_V1 behind the strategy boundary.
 
-    The window ends by 13:00 ET (enforced by ``GapGoConfig``), so a half day
+    The window must end by 13:00 ET (refused here otherwise), so a half day
     needs no calendar lookup.
     """
 
     __slots__ = ("_config",)
 
     def __init__(self, config: GapGoConfig = GapGoConfig()) -> None:
+        if config.entry_cutoff > _EARLIEST_CLOSE:
+            raise ValueError(
+                "GapGoStrategy has no session calendar: its window must end by 13:00 ET"
+            )
         self._config = config
 
     @property

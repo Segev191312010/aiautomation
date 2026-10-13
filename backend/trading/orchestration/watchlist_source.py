@@ -17,6 +17,7 @@ import json
 from db.core import get_db
 from trading.contracts import Candidate, Run, ScannerRun, fingerprint_payload
 from trading.market.ibkr_boundary import LiquidityProfile
+from trading.orchestration.day_universe import DayUniverseReader, qualified_day_universe
 
 MAX_CANDIDATES = 35
 MAX_SNAPSHOT_AGE = timedelta(minutes=5)
@@ -189,6 +190,14 @@ async def hotlist_refresh(
 GAP_MIN_PCT = Decimal("3")
 
 
+def _gap_of(row: dict) -> Decimal | None:
+    for key in ("gap_pct", "change_pct"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return Decimal(str(value))
+    return None
+
+
 async def gap_candidates(
     run: Run,
     *,
@@ -204,19 +213,11 @@ async def gap_candidates(
     re-checks the real gap from the first regular-session bar.
     """
     snapshot = await _fresh_snapshot(run.session_date, now=now, max_age=max_age)
-
-    def gap_of(row: dict) -> Decimal | None:
-        for key in ("gap_pct", "change_pct"):
-            value = row.get(key)
-            if value not in (None, ""):
-                return Decimal(str(value))
-        return None
-
     gappers = [
         (gap, row)
         for row in snapshot.rows
         if row.get("source") == "watchlist"
-        and (gap := gap_of(row)) is not None
+        and (gap := _gap_of(row)) is not None
         and gap >= min_gap_pct
     ]
     gappers.sort(key=lambda item: (-item[0], str(item[1].get("symbol"))))
@@ -248,4 +249,93 @@ async def gap_candidates(
     return scanner_run, candidates, liquidity
 
 
-__all__ = ["HotListUnavailable", "gap_candidates", "hotlist_candidates", "hotlist_refresh"]
+async def gap_union_candidates(
+    run: Run,
+    *,
+    now: datetime,
+    min_gap_pct: Decimal = GAP_MIN_PCT,
+    max_candidates: int = MAX_CANDIDATES,
+    max_age: timedelta = MAX_SNAPSHOT_AGE,
+    day_universe: DayUniverseReader = qualified_day_universe,
+) -> tuple[ScannerRun, tuple[Candidate, ...], dict[int, LiquidityProfile]]:
+    """GAP_GO_V2's universe: watchlist gappers plus the day universe's scanner gappers.
+
+    A day-universe name joins when its sweep row gaps at least ``min_gap_pct``
+    or, without a row, when an IBKR gap scan surfaced it; the strategy itself
+    re-checks the real gap from the first regular-session bar. Every name still
+    needs the day's qualification (liquidity) like any watchlist name. Without
+    the day-universe table this is exactly the watchlist gappers.
+    """
+    snapshot = await _fresh_snapshot(run.session_date, now=now, max_age=max_age)
+    scanner_names = await day_universe(run.session_date)
+    scanner_ids = {item.con_id for item in scanner_names}
+    rows_by_id = {int(row["con_id"]): row for row in snapshot.rows}
+
+    ranked: list[tuple[Decimal | None, int, dict]] = []
+    watchlist_gappers = scanner_gappers = 0
+    for row in snapshot.rows:
+        con_id = int(row["con_id"])
+        is_watchlist = row.get("source") == "watchlist"
+        if not is_watchlist and con_id not in scanner_ids:
+            continue
+        gap = _gap_of(row)
+        if gap is None or gap < min_gap_pct:
+            continue
+        ranked.append((gap, len(ranked), row))
+        if is_watchlist:
+            watchlist_gappers += 1
+        else:
+            scanner_gappers += 1
+    for item in scanner_names:
+        # Surfaced by a gap scan but not swept yet: its gap is unknown, so it
+        # ranks after every measured gapper.
+        if item.con_id not in rows_by_id and item.from_gap_scan:
+            ranked.append(
+                (None, len(ranked), {"con_id": item.con_id, "symbol": item.symbol})
+            )
+            scanner_gappers += 1
+    ranked.sort(
+        key=lambda entry: (
+            entry[0] is None,
+            -(entry[0] or Decimal("0")),
+            str(entry[2].get("symbol")),
+            entry[1],
+        )
+    )
+    scanner_run_id = f"{run.id}-gappers"
+    candidates, liquidity = _admit(
+        (row for _gap, _order, row in ranked),
+        run=run,
+        scanner_run_id=scanner_run_id,
+        daily=snapshot.daily,
+        max_candidates=max_candidates,
+    )
+    parameters: dict[str, object] = {
+        "source": "screener_gappers_with_day_universe",
+        "snapshot_id": snapshot.id,
+        "snapshot_observed_at": snapshot.observed_at.isoformat(),
+        "min_gap_pct": str(min_gap_pct),
+        "day_universe_names": len(scanner_names),
+        "watchlist_gappers": watchlist_gappers,
+        "scanner_gappers": scanner_gappers,
+        "admitted": len(candidates),
+    }
+    scanner_run = ScannerRun(
+        id=scanner_run_id,
+        run_id=run.id,
+        parameters=parameters,
+        parameters_fingerprint=fingerprint_payload(parameters),
+        status="completed",
+        started_at=snapshot.observed_at,
+        completed_at=now,
+    )
+    return scanner_run, candidates, liquidity
+
+
+__all__ = [
+    "HotListUnavailable",
+    "gap_candidates",
+    "gap_union_candidates",
+    "hotlist_candidates",
+    "hotlist_refresh",
+]

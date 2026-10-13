@@ -49,6 +49,14 @@ from trading.research.stats import (
     summarize,
 )
 from trading.rules.gap_go import GAP_GO_RULES_VERSION, GapGoStrategy
+from trading.rules.all_session import (
+    GAP_GO_V2_NAME,
+    ORB_V1_RULES_VERSION,
+    ORB_V2_NAME,
+    VWAP_PB_V2_NAME,
+    orb_v2_strategy,
+    vwap_pb_v2_strategy,
+)
 from trading.rules.momo import MOMO_RULES_VERSION, MomoStrategy
 from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
 from trading.rules.strategy import (
@@ -61,6 +69,7 @@ from trading.rules.vwap_pb import VWAP_PB_RULES_VERSION, VwapPbStrategy
 from trading.scheduler.sessions import market_session
 
 if TYPE_CHECKING:
+    from trading.research.nightly import NightlyEnvironment
     from trading.research.report_notify import NotifyMode
 
 logger = logging.getLogger("autotrader.shadow.research")
@@ -77,23 +86,32 @@ SYNTHETIC_TICK = Decimal("0.01")
 ENTRY_TTL = timedelta(minutes=10)
 FLATTEN_TIME = time(15, 45)
 FLATTEN_BEFORE_CLOSE = timedelta(minutes=15)
+# The bar fill model above and in ``simulate_bracket``, by name: the nightly
+# tracker records every outcome under it, so a change to the model needs a new
+# id (and every saved setup is simulated again under it).
+FILL_MODEL_ID = "replay-bracket-v1"
 _R_QUANTUM = Decimal("0.0001")
 
 STRATEGY_FACTORIES: dict[str, Callable[[], StrategyEvaluator]] = {
     "orb": ORBStrategy,
     "momo": MomoStrategy,
     "vwap": VwapPbStrategy,
+    "orb-v2": orb_v2_strategy,
+    "vwap-v2": vwap_pb_v2_strategy,
 }
 RULES_VERSIONS = {
-    "orb": "ORB_V1",
+    "orb": ORB_V1_RULES_VERSION,
     "momo": MOMO_RULES_VERSION,
     "vwap": VWAP_PB_RULES_VERSION,
     "gap": GAP_GO_RULES_VERSION,
+    "orb-v2": ORB_V2_NAME,
+    "vwap-v2": VWAP_PB_V2_NAME,
+    "gap-v2": GAP_GO_V2_NAME,
 }
 # Every strategy the live pipeline registers (shadow_service.STRATEGIES; a
 # test pins the two), in report order. Kept literal so a replay never loads
 # the TWS and Claude stack that module imports.
-REGISTERED_STRATEGIES = ("orb", "momo", "vwap", "gap")
+REGISTERED_STRATEGIES = ("orb", "momo", "vwap", "gap", "orb-v2", "vwap-v2", "gap-v2")
 NEEDS_EXTENDED_BARS = "needs_extended_bars"
 
 ExitReason = Literal["stop", "target", "time", "data_end"]
@@ -160,8 +178,15 @@ def no_extended_bars(strategy: str) -> SkippedStrategy:
     )
 
 
-# Registered strategies the store cannot replay honestly (none today).
-UNREPLAYABLE: dict[str, SkippedStrategy] = {}
+# Registered strategies the store cannot replay honestly. GAP_GO_V2's
+# all-session window is not wired to the extended-hours replay yet.
+UNREPLAYABLE: dict[str, SkippedStrategy] = {
+    "gap-v2": SkippedStrategy(
+        strategy="gap-v2",
+        reason=NEEDS_EXTENDED_BARS,
+        note="needs extended bars: GAP_GO_V2's all-session replay on extended-hours days is not wired yet",
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -674,6 +699,12 @@ def text_report(
     return "\n\n".join(sections)
 
 
+def report_date(results: Sequence[ReplayResult], *, generated_at: datetime) -> date:
+    """The reports' directory date: the newest replayed session."""
+    sessions = sorted({day for result in results for day in result.sessions})
+    return sessions[-1] if sessions else generated_at.date()
+
+
 def write_reports(
     results: Sequence[ReplayResult],
     *,
@@ -686,8 +717,7 @@ def write_reports(
     A skipped strategy gets a ``"status": "skipped"`` JSON with its named
     reason, so its absence from the statistics is explicit, never silent.
     """
-    sessions = sorted({day for result in results for day in result.sessions})
-    as_of = sessions[-1].isoformat() if sessions else generated_at.date().isoformat()
+    as_of = report_date(results, generated_at=generated_at).isoformat()
     directory = paths.ensure_private(paths.reports_directory / as_of)
     written: list[str] = []
     payloads = [
@@ -710,15 +740,24 @@ def write_reports(
     return tuple(written)
 
 
-def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -> int:
+def run_replay_cli(
+    strategies: Sequence[str],
+    *,
+    notify: NotifyMode = "never",
+    environment: NightlyEnvironment | None = None,
+) -> int:
     """``autotraderctl research replay [--strategy ...] [--notify]``: rule-only replay.
 
-    Without strategies every registered one is reported; GAP_GO as not
-    replayable. ``notify`` hands the summary to ``report_notify`` after a
-    successful replay ("weekly": only on the week's last session; "now": on
-    demand). Telegram never changes a successful replay's exit code unless the
-    owner asked for the message ("now") and it was not delivered.
+    Without strategies every registered one is reported (GAP_GO as not
+    replayable) and the nightly evidence run follows (``trading.research.nightly``:
+    the signal-outcome tracker, the live R ledger, the paper promotion rule
+    and the window research), its sections leading the summary. ``notify``
+    hands the summary to ``report_notify`` after a successful replay
+    ("weekly": only on the week's last session; "now": on demand). Telegram
+    never changes a successful replay's exit code unless the owner asked for
+    the message ("now") and it was not delivered.
     """
+    full_run = not [name for name in strategies if name.strip()]
     names = [name.strip().lower() for name in strategies if name.strip()] or list(
         REGISTERED_STRATEGIES
     )
@@ -744,11 +783,28 @@ def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -
     ]
     skipped_names = {item.strategy for item in skipped}
     results = [replay_strategy(name, store) for name in ordered if name not in skipped_names]
-    written = write_reports(
-        results, paths=store.paths, generated_at=datetime.now(UTC), skipped=skipped
-    )
+    generated_at = datetime.now(UTC)
+    written = write_reports(results, paths=store.paths, generated_at=generated_at, skipped=skipped)
     report = text_report(results, skipped=skipped)
-    print(report)
+    summary = report
+    if full_run:
+        from trading.research import nightly, report_notify as summaries
+
+        evidence = nightly.collect_evidence(
+            results,
+            skipped,
+            store,
+            environment=environment or nightly.NightlyEnvironment.current(),
+        )
+        summary = summaries.compose_summary(report, evidence)
+        written += nightly.write_evidence(
+            evidence,
+            paths=store.paths,
+            as_of=report_date(results, generated_at=generated_at),
+            generated_at=generated_at,
+            text=summaries.evidence_text(evidence),
+        )
+    print(summary)
     print("")
     print("reports:")
     for path in written:
@@ -757,7 +813,7 @@ def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -
         return 0
     from trading.research import report_notify
 
-    outcome = report_notify.notify_summary(report, mode=notify, newest_session=stored[-1])
+    outcome = report_notify.notify_summary(summary, mode=notify, newest_session=stored[-1])
     if outcome == report_notify.SENT:
         print("telegram: summary sent")
     elif notify == "now":
@@ -777,6 +833,7 @@ def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -
 __all__ = [
     "ENTRY_TTL",
     "EXTENDED_BAR_STRATEGIES",
+    "FILL_MODEL_ID",
     "FLATTEN_TIME",
     "GAP_REPLAY_NOTE",
     "NEEDS_EXTENDED_BARS",
@@ -796,6 +853,7 @@ __all__ = [
     "no_extended_bars",
     "r_multiple",
     "replay_strategy",
+    "report_date",
     "result_payload",
     "result_stats",
     "run_replay_cli",

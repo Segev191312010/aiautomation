@@ -8,10 +8,14 @@ most ``DAY_UNIVERSE_MAX``), the screener quotes every one of them every
 sweep, and ranks them in their own list under the payload's
 ``day_universe`` key.
 
-Principle 1 (the real MOMO's inputs do not change): day-universe names are
-never part of the hot-35 ranking group or the watchlist breadth. The stock
-type rejections recorded here never reach ``autotrader_universe_daily``,
-which the hot-35's own scan additions read.
+Principle 1 (the real MOMO's inputs do not change, timing included):
+day-universe names are never part of the hot-35 ranking group or the
+watchlist breadth, and admission never writes ``autotrader_universe_daily``,
+which the hot-35's own scan additions read: those qualify exactly as before,
+at the same sweep. Admission keeps its own outcomes (``DayUniverseDaily``, a
+private session-scoped file beside the database; the decision itself is the
+day-universe row) and has its own request pacer. It may read a final row
+the hot-35's own path wrote, to save a request, and never writes one.
 
 Admission spends paced IBKR requests, so the screener runs it after a sweep
 was persisted, in the idle rest of the sweep interval, and it stops before
@@ -22,12 +26,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import json
 import logging
+from pathlib import Path
 import re
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 from db.core import get_db, transaction
 from trading.market.ibkr_boundary import IBKRContractDetails, IBKRScannerResult
@@ -39,11 +44,14 @@ from trading.market.tws_actor import (
 from trading.market.universe import (
     ContractFacts,
     DailyHistorySource,
+    DailyQualification,
     RequestPacer,
     load_daily,
-    qualify_contract,
     record_contract_facts,
+    request_qualification,
+    runtime_directory,
     stock_type_rejection,
+    write_private_text,
 )
 from trading.scheduler.sessions import market_session
 
@@ -65,6 +73,9 @@ ADMISSION_MARGIN_SECONDS = 5.0
 REASON_CONTRACT_MISMATCH = "contract_details_mismatch"
 # The screener row contract's symbol limit (ScreenerRow, DayUniverseRow).
 MAX_SYMBOL_LENGTH = 16
+# The day universe's own daily qualifications, beside the database.
+DAY_UNIVERSE_DAILY_FILENAME = "day_universe_daily.json"
+DAY_UNIVERSE_DAILY_SCHEMA = "day_universe_daily.v1"
 _REASON_LIMIT = 64
 _NON_TOKEN = re.compile(r"[^a-z0-9]+")
 
@@ -152,6 +163,133 @@ def scan_sightings(
     )
 
 
+# --- the day universe's own daily qualifications ------------------------------------------------
+
+
+def _decimal_text(value: Decimal | None) -> str | None:
+    return None if value is None else format(value, "f")
+
+
+def _parse_decimal(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("decimals are stored as text")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"{value!r} is not a decimal") from exc
+    if not parsed.is_finite():
+        raise ValueError(f"{value!r} is not finite")
+    return parsed
+
+
+def _qualification_document(row: DailyQualification) -> dict[str, Any]:
+    return {
+        "symbol": row.symbol,
+        "prior_close": _decimal_text(row.prior_close),
+        "avg_daily_volume_shares": _decimal_text(row.avg_daily_volume_shares),
+        "avg_dollar_volume": _decimal_text(row.avg_dollar_volume),
+        "daily_atr": _decimal_text(row.daily_atr),
+        "qualified": row.qualified,
+        "reason": row.reason,
+        "observed_at": _timestamp(row.observed_at),
+    }
+
+
+def _qualification(session_date: date, con_id: int, document: object) -> DailyQualification:
+    if not isinstance(document, dict):
+        raise ValueError(f"conId {con_id}: not an object")
+    qualified = document.get("qualified")
+    reason = document.get("reason")
+    symbol = document.get("symbol")
+    observed = document.get("observed_at")
+    if not isinstance(qualified, bool) or not isinstance(symbol, str) or not isinstance(observed, str):
+        raise ValueError(f"conId {con_id}: malformed qualification")
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError(f"conId {con_id}: malformed reason")
+    observed_at = datetime.fromisoformat(observed)
+    if observed_at.tzinfo is None:
+        raise ValueError(f"conId {con_id}: naive timestamp")
+    return DailyQualification(
+        session_date=session_date,
+        con_id=con_id,
+        symbol=symbol,
+        prior_close=_parse_decimal(document.get("prior_close")),
+        avg_daily_volume_shares=_parse_decimal(document.get("avg_daily_volume_shares")),
+        avg_dollar_volume=_parse_decimal(document.get("avg_dollar_volume")),
+        daily_atr=_parse_decimal(document.get("daily_atr")),
+        qualified=qualified,
+        reason=reason,
+        observed_at=observed_at,
+    )
+
+
+class DayUniverseDaily:
+    """The day universe's daily qualifications, one private JSON file beside the database.
+
+    Kept out of ``autotrader_universe_daily`` on purpose: that table feeds the
+    hot-35's own scan additions, which must qualify exactly as before. Only
+    the newest session is kept (TTL = session). An unreadable file reads as
+    empty and is logged: the names keep their day-universe rows and are
+    quoted without a volume baseline until re-qualified.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path if path is not None else runtime_directory() / DAY_UNIVERSE_DAILY_FILENAME
+
+    def _read(self) -> tuple[str | None, dict[int, object]]:
+        try:
+            document = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None, {}
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            logger.error("day universe qualifications in %s are unreadable: %s", self.path, exc)
+            return None, {}
+        if not isinstance(document, dict) or document.get("schema") != DAY_UNIVERSE_DAILY_SCHEMA:
+            logger.error("day universe qualifications in %s have an unknown schema", self.path)
+            return None, {}
+        rows = document.get("rows")
+        if not isinstance(rows, dict):
+            return None, {}
+        parsed: dict[int, object] = {}
+        for key, value in rows.items():
+            if isinstance(key, str) and key.isascii() and key.isdigit() and int(key) > 0:
+                parsed[int(key)] = value
+        session = document.get("session_date")
+        return (session if isinstance(session, str) else None), parsed
+
+    def load(self, session_date: date) -> dict[int, DailyQualification]:
+        """The session's stored outcomes by conId; another session's read as none."""
+        session, rows = self._read()
+        if session != session_date.isoformat():
+            return {}
+        loaded: dict[int, DailyQualification] = {}
+        for con_id, document in rows.items():
+            try:
+                loaded[con_id] = _qualification(session_date, con_id, document)
+            except ValueError as exc:
+                logger.error("day universe qualification dropped: %s", exc)
+        return loaded
+
+    def record(self, rows: Sequence[DailyQualification]) -> None:
+        """Merge final outcomes of one session; a new session replaces the old one."""
+        final = [row for row in rows if not row.transient]
+        if not final:
+            return
+        session_date = final[0].session_date
+        if any(row.session_date != session_date for row in final):
+            raise ValueError("day universe qualifications are recorded one session at a time")
+        merged = {con_id: _qualification_document(row) for con_id, row in self.load(session_date).items()}
+        merged.update({row.con_id: _qualification_document(row) for row in final})
+        document = {
+            "schema": DAY_UNIVERSE_DAILY_SCHEMA,
+            "session_date": session_date.isoformat(),
+            "rows": {str(con_id): merged[con_id] for con_id in sorted(merged)},
+        }
+        write_private_text(self.path, json.dumps(document, indent=1, sort_keys=True) + "\n")
+
+
 # --- persistence -------------------------------------------------------------------------------
 
 
@@ -173,13 +311,20 @@ class DayUniverseName:
 
 @dataclass(frozen=True, slots=True)
 class DayUniverseMember:
-    """A qualified name with today's volume baseline, as the sweep quotes it."""
+    """A qualified name with its own daily qualification, as the sweep quotes it.
+
+    The metrics come from ``DayUniverseDaily``; they are unknown (None) when
+    that file was lost, never borrowed from the hot-35's table.
+    """
 
     con_id: int
     symbol: str
     primary_exchange: str | None
     avg_daily_volume_shares: Decimal | None
     best_rank: int | None
+    prior_close: Decimal | None = None
+    avg_dollar_volume: Decimal | None = None
+    daily_atr: Decimal | None = None
 
 
 _SELECT_NAMES = """SELECT session_date, con_id, symbol, primary_exchange, first_seen, last_seen,
@@ -232,30 +377,37 @@ async def load_day_universe(session_date: date) -> tuple[DayUniverseName, ...]:
     )
 
 
-async def load_day_universe_members(session_date: date) -> tuple[DayUniverseMember, ...]:
-    """The session's qualified names whose daily qualification still stands."""
+async def load_day_universe_members(
+    session_date: date, *, store: DayUniverseDaily | None = None
+) -> tuple[DayUniverseMember, ...]:
+    """The session's qualified names, best scan rank first, with their own metrics."""
     async with get_db() as db:
         async with db.execute(
-            """SELECT du.con_id, du.symbol, du.primary_exchange, d.avg_daily_volume_shares,
-                      du.best_rank
-               FROM autotrader_manager_day_universe du
-               JOIN autotrader_universe_daily d
-                 ON d.session_date = du.session_date AND d.con_id = du.con_id
-               WHERE du.session_date = ? AND du.qualified = 1 AND d.qualified = 1
-               ORDER BY du.best_rank IS NULL, du.best_rank, du.symbol, du.con_id""",
+            """SELECT con_id, symbol, primary_exchange, best_rank
+               FROM autotrader_manager_day_universe
+               WHERE session_date = ? AND qualified = 1
+               ORDER BY best_rank IS NULL, best_rank, symbol, con_id""",
             (session_date.isoformat(),),
         ) as cursor:
             raw_rows = await cursor.fetchall()
-    return tuple(
-        DayUniverseMember(
-            con_id=int(str(raw[0])),
-            symbol=str(raw[1]),
-            primary_exchange=None if raw[2] is None else str(raw[2]),
-            avg_daily_volume_shares=None if raw[3] is None else Decimal(str(raw[3])),
-            best_rank=None if raw[4] is None else int(str(raw[4])),
+    own = (store or DayUniverseDaily()).load(session_date)
+    members: list[DayUniverseMember] = []
+    for raw in raw_rows:
+        con_id = int(str(raw[0]))
+        metrics = own.get(con_id)
+        members.append(
+            DayUniverseMember(
+                con_id=con_id,
+                symbol=str(raw[1]),
+                primary_exchange=None if raw[2] is None else str(raw[2]),
+                avg_daily_volume_shares=None if metrics is None else metrics.avg_daily_volume_shares,
+                best_rank=None if raw[3] is None else int(str(raw[3])),
+                prior_close=None if metrics is None else metrics.prior_close,
+                avg_dollar_volume=None if metrics is None else metrics.avg_dollar_volume,
+                daily_atr=None if metrics is None else metrics.daily_atr,
+            )
         )
-        for raw in raw_rows
-    )
+    return tuple(members)
 
 
 async def _insert_name(
@@ -368,6 +520,7 @@ async def admit_scan_names(
     deadline: float | None = None,
     max_admissions: int = SCAN_ADDITIONS_PER_SWEEP,
     max_size: int | None = None,
+    store: DayUniverseDaily | None = None,
 ) -> AdmissionReport:
     """Refresh known names, then admit new ones best rank first.
 
@@ -376,14 +529,22 @@ async def admit_scan_names(
     ``deadline`` (``monotonic`` seconds). A request error leaves the name for
     a later sighting; a competing login or lost connection raises, as in the
     sweep. Every outcome but a transient one is final for the session.
+
+    ``history_pacer`` must be admission's own: the hot-35's scan additions
+    keep their pacer, and so their request timing, to themselves. Outcomes
+    go to ``store`` and the day-universe row, never to
+    ``autotrader_universe_daily``.
     """
     now = clock()
+    store = store or DayUniverseDaily()
     stored = await load_day_universe(session_date)
     known = {name.con_id: name for name in stored}
     refreshed = await record_sightings(session_date, sightings, known, now=now)
     size = sum(1 for name in stored if name.qualified)
     limit = max_size if max_size is not None else size_limit(session_date, now)
-    daily = {row.con_id: row for row in await load_daily(session_date)}
+    own = store.load(session_date)
+    # Read only: a final row the hot-35's path already wrote saves a request.
+    shared = {row.con_id: row for row in await load_daily(session_date) if not row.transient}
     started = admitted = rejected = deferred = failed = 0
     for sighting in sightings:
         if sighting.con_id in known:
@@ -427,9 +588,9 @@ async def admit_scan_names(
             )
             rejected += 1
             continue
-        row = daily.get(sighting.con_id)
-        if row is None or row.transient:
-            row = await qualify_contract(
+        row = own.get(sighting.con_id) or shared.get(sighting.con_id)
+        if row is None:
+            row = await request_qualification(
                 source,
                 con_id=sighting.con_id,
                 symbol=sighting.symbol,
@@ -438,10 +599,13 @@ async def admit_scan_names(
                 clock=clock,
                 pacer=history_pacer,
             )
-            daily[sighting.con_id] = row
         if row.transient:
             failed += 1
+            logger.warning("day universe: qualification of %s failed: %s", sighting.symbol, row.reason)
             continue
+        # Its own outcome first, then the decision row that makes it a member.
+        store.record([row])
+        own[sighting.con_id] = row
         await _insert_name(
             session_date,
             sighting,
@@ -470,12 +634,15 @@ async def admit_scan_names(
 __all__ = [
     "ADMISSION_MARGIN_SECONDS",
     "ADMISSION_SECONDS_PER_NAME",
+    "DAY_UNIVERSE_DAILY_FILENAME",
+    "DAY_UNIVERSE_DAILY_SCHEMA",
     "DAY_UNIVERSE_MAX",
     "DAY_UNIVERSE_PREMARKET_MAX",
     "REASON_CONTRACT_MISMATCH",
     "SCAN_ADDITIONS_PER_SWEEP",
     "AdmissionReport",
     "AdmissionSource",
+    "DayUniverseDaily",
     "DayUniverseMember",
     "DayUniverseName",
     "ScanSighting",

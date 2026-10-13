@@ -1013,6 +1013,39 @@ async def qualify_contract(
     raises instead of recording a failure, because neither says anything
     about the contract itself.
     """
+    result = await request_qualification(
+        history,
+        con_id=con_id,
+        symbol=symbol,
+        session_date=session_date,
+        volume_multiplier=volume_multiplier,
+        clock=clock,
+        pacer=pacer,
+        stock_type=stock_type,
+    )
+    await upsert_daily(result)
+    if result.transient:
+        logger.warning("qualification of %s failed: %s", symbol, result.reason)
+    return result
+
+
+async def request_qualification(
+    history: DailyHistorySource,
+    *,
+    con_id: int,
+    symbol: str,
+    session_date: date,
+    volume_multiplier: Decimal,
+    clock: Clock,
+    pacer: RequestPacer,
+    stock_type: str | None = None,
+) -> DailyQualification:
+    """``qualify_contract`` without persisting: the outcome is the caller's to keep.
+
+    The day universe keeps its own outcomes, so nothing it qualifies ever
+    reaches ``autotrader_universe_daily`` (the hot-35's scan additions and
+    the strategies read that table).
+    """
     type_rejection = stock_type_rejection(stock_type)
     if type_rejection is not None:
         rejected = DailyQualification(
@@ -1027,7 +1060,6 @@ async def qualify_contract(
             reason=type_rejection,
             observed_at=clock(),
         )
-        await upsert_daily(rejected)
         return rejected
     await pacer.wait()
     try:
@@ -1062,9 +1094,6 @@ async def qualify_contract(
             volume_multiplier=volume_multiplier,
             observed_at=clock(),
         )
-    await upsert_daily(result)
-    if result.transient:
-        logger.warning("qualification of %s failed: %s", symbol, result.reason)
     return result
 
 
@@ -1170,6 +1199,7 @@ __all__ = [
     "qualify_universe",
     "record_contract_facts",
     "replace_universe_source",
+    "request_qualification",
     "resolve_entry",
     "resolved_instruments",
     "runtime_directory",
