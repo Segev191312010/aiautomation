@@ -38,7 +38,7 @@ from trading.research.paper_promotion import (
     evaluate_registry,
     read_live_evidence,
 )
-from trading.research.replay import ReplayResult, SkippedStrategy
+from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
 from trading.scheduler.sessions import market_session
 
@@ -132,6 +132,10 @@ def _live_hours(promotion: Sequence[PromotionReport], live: LiveEvidence) -> dic
     return hours
 
 
+def _failed(exc: BaseException) -> str:
+    return f"failed_{type(exc).__name__.lower()}"[:64]
+
+
 def collect_evidence(
     results: Sequence[ReplayResult],
     skipped: Sequence[SkippedStrategy],
@@ -139,17 +143,40 @@ def collect_evidence(
     *,
     environment: NightlyEnvironment,
 ) -> NightlyEvidence:
-    """Tracker, live R, promotion and (time permitting) the window sweep."""
+    """Tracker, live R, promotion and (time permitting) the window sweep.
+
+    Each step stands alone: one that fails is logged and named in the
+    reports, and the others (and the replay before them) still count. A
+    SIGTERM (a BaseException) is never caught here.
+    """
     now = environment.clock()
-    tracker = asyncio.run(track_outcomes(store=store, database=environment.database, now=now))
-    live_r = read_live_ledger(environment.bridge_directory)
-    live = read_live_evidence(environment.database)
-    replays = {result.strategy: result for result in results}
-    notes = {item.strategy: item.note for item in skipped}
-    promotion = evaluate_registry(replays=replays, live=live, replay_notes=notes)
+    try:
+        tracker = asyncio.run(track_outcomes(store=store, database=environment.database, now=now))
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("signal-outcome tracker failed")
+        tracker = TrackerReport(status="skipped", fill_model_id=FILL_MODEL_ID, reason=_failed(exc))
+    try:
+        live_r = read_live_ledger(environment.bridge_directory)
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("live R ledger failed")
+        live_r = LiveLedger(unreadable=(_failed(exc),))
+    try:
+        live = read_live_evidence(environment.database)
+        replays = {result.strategy: result for result in results}
+        notes = {item.strategy: item.note for item in skipped}
+        promotion = evaluate_registry(replays=replays, live=live, replay_notes=notes)
+    except Exception:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("paper promotion evaluation failed")
+        live, promotion = LiveEvidence(readable=False, note="failed"), ()
     allowed, note = sweep_allowed(environment.clock())
-    windows = sweep_all(store) if allowed else ()
-    if not allowed:
+    windows: tuple[FamilyResearch, ...] = ()
+    if allowed:
+        try:
+            windows = sweep_all(store)
+        except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+            logger.exception("window research failed")
+            note = f"not swept tonight: {_failed(exc)}"
+    else:
         logger.warning("window research %s", note)
     return NightlyEvidence(
         tracker=tracker,

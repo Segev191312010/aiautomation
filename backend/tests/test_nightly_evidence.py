@@ -188,6 +188,30 @@ def test_the_night_is_idempotent_and_the_sweep_yields_to_the_window_end(night):
     assert (evidence_report["tracker"]["considered"], evidence_report["tracker"]["written"]) == (1, 0)
 
 
+def test_a_failing_evidence_step_is_named_and_the_rest_still_counts(night, monkeypatch):
+    from trading.research import nightly
+
+    async def broken(**_kwargs: Any) -> None:
+        raise RuntimeError("database is locked")
+
+    def broken_sweep(_store: Any) -> None:
+        raise ValueError("bad bar")
+
+    monkeypatch.setattr(nightly, "track_outcomes", broken)
+    monkeypatch.setattr(nightly, "sweep_all", broken_sweep)
+
+    assert run_replay_cli([], notify="weekly", environment=_environment(night, _et(TUESDAY, 17, 40))) == 0
+
+    (summary,) = night["sent"]
+    assert "signal outcomes: not tracked (failed_runtimeerror)" in summary
+    assert "not swept tonight: failed_valueerror" in summary
+    assert "MOMO_HOD_V2: 3 trades, net +1.44R" in summary  # live R still read
+    directory = night["root"] / "reports" / "2026-10-12"
+    evidence_report = json.loads((directory / "evidence.json").read_text())
+    assert evidence_report["tracker"]["reason"] == "failed_runtimeerror"
+    assert len(evidence_report["promotion"]) == 7
+
+
 def test_an_explicit_strategy_list_replays_only(night):
     assert run_replay_cli(["orb"], notify="weekly", environment=_environment(night, _et(TUESDAY, 17, 40))) == 0
     (summary,) = night["sent"]
