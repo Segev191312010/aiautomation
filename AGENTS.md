@@ -15,8 +15,11 @@
 
 ## Execution Engine (C2): built, not wired
 - `backend/trading/execution/live_executor.py` is the execution engine meant to
-  replace the bridge (re-review 2026-10-13: READY-FOR-DRILL, a supervised
-  PAPER drill only). It is NOT wired: no supervisor child, LaunchAgent or
+  replace the bridge (second re-review 2026-10-13: its drill blocker fixed on
+  the branch, re-review pending; a supervised PAPER drill only). Its ledger
+  is migration 14, which ships alone and reaches the owner's database only
+  through `autotraderctl db migrate`; no engine command migrates. It is NOT
+  wired: no supervisor child, LaunchAgent or
   schedule runs it, and it must not be wired until it has passed an
   independent execution-safety review and a supervised drill on the paper
   account, and the owner explicitly decides to switch the order sender.

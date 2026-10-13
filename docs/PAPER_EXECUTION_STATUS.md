@@ -81,7 +81,7 @@ Order sources:
   loop by up to 20 s, a few-second startup window, and two untested guards
   (startup replay exclusion, the SLD path).
 
-## The execution engine (C2): built, not wired; re-review READY-FOR-DRILL
+## The execution engine (C2): built, not wired; drill blocker fixed, re-review pending
 
 `backend/trading/execution/live_executor.py` is built and tested against a fake
 TWS only. Nothing schedules it: no supervisor child, LaunchAgent or schedule
@@ -91,16 +91,18 @@ Before it contacts TWS, the runner refuses (exit 78) without an explicit
 promotion record for the exact code it runs (`autotraderctl execution promote
 --confirm`, MOMO_HOD strategies and DU accounts only), while the bridge runs (a
 `paper_bridge.py` process in any launch form, or a heartbeat under 60 s old in
-the bridge's own database), with pending or unknown migrations (it never
-migrates), without the shadow configuration's paper account, or on a day
-without a session. `start()` repeats every check once connected. Started
-after the session's stop time, the engine only reports what its ledger holds
-and finishes a fallback sell whose cancels were already sent, before the
-close. It connects with the bridge's order client id; a lost TWS exits 75 and
-is never reconnected in-process (a restart reconciles from the ledger). What
-it adds over the bridge:
+the bridge's own database), unless the database is at exactly this code's
+schema (it never migrates), without the shadow configuration's paper account,
+or on a day without a session. `promote` and `revoke` never migrate either:
+they refuse (exit 78) anything but exactly this code's schema, read-only.
+`start()` repeats every check once connected. Started after the session's
+stop time, the engine only reports what its ledger holds and finishes a
+fallback sell whose cancels were already sent, before the close. It
+connects with the bridge's order client id; a lost TWS exits 75 and is never
+reconnected in-process (a restart reconciles from the ledger). What it adds
+over the bridge:
 
-- a SQLite ledger (its own migration; see "Migration numbering") instead of a
+- a SQLite ledger (migration 14; see "Migration numbering") instead of a
   JSON state file: an outbox keyed by decision id written before any order,
   brackets, legs tagged `at1:<bracket>:P|T|S`, fills keyed by execId with
   commission reports, and append-only order events; a bracket still being
@@ -131,6 +133,9 @@ it adds over the bridge:
 - `autotraderctl execution promote` backs the database up first
   (`<database dir>/backups/<name>.before-execution-promote-<UTC time>.db`,
   printed) and refuses when there is no database or the backup fails.
+- the code digest binds the whole import graph of the engine and its runner,
+  the process entry files (`autotraderctl.py`, `trading/cli.py`) and the
+  installed ibapi release, which must be the reviewed 9.81.1.post1.
 
 The bridge's review lessons (H1, H2, M1-M4, L1-L8, N1-N7, D3) are ported with a
 regression test each. The recorded TWS callback sequences in
@@ -225,27 +230,60 @@ signatures, not captured from a live TWS.
     37 files); its test walks that graph.
   - R-7: left to the main line's explicit migrations (below); the runner
     never migrates.
+- 2026-10-13: second re-review of 5275373 — NOT-READY on one drill blocker
+  (HIGH), plus LOW findings; all reviewer mutants were caught.
+  - HIGH: `execution promote` and `revoke` ran `init_db` on the owner's
+    database and would have applied this branch's ledger migration 13. The
+    main line refuses unknown migrations, so the live `paper stop` kill
+    switch, the screener, shadow runs and the Telegram assistant would all
+    have refused to start; and the main line has taken migration 13 itself
+    (manager setups).
+  - LOW: after the stop time the R-4 path acted on the first load's bracket
+    copies (A); a fallback sell TWS never acknowledged counted as working
+    (D); a recorded but unsent sell was not flagged after the stop time (E);
+    the digest left out the process entry files and the ibapi release R-2
+    depends on. B: a cancelled sell reporting filledQuantity 0 keeps its
+    shares reserved (R-2's conservative rule, kept for now).
+- Fixed: the ledger is migration 14, shipped alone on `c2/ledger-schema-14`
+  (see "Migration numbering"); promote, revoke and the runner never migrate
+  and refuse anything but exactly this code's schema (exit 78); A, D and E
+  and the digest are fixed with regression tests (`test_rr2_*`,
+  `test_r6_*`); B's alerts now say the shares "may have sold, not confirmed
+  by the position".
 
-### Migration numbering
+### Migration numbering and the drill database (settled)
 
-The engine's ledger is migration 13 on this branch and has never been
-applied to the owner's database (it is at 12). The main line is moving to
-explicit migrations: children refuse to start while a migration is pending,
-and `autotraderctl db migrate` takes a lock and a unique backup, which also
-closes R-7. The main line takes migration 13 for its own manager tables, so
-the ledger migration is renumbered to the next free number when the engine
-merges, not before. Its number is written in one place only,
-`EXECUTION_LEDGER_MIGRATION` in `trading/storage/execution_ledger_schema.py`;
-the migration list, the tests and the CLI derive from it. Its pinned
-checksum covers the number, so it is pinned again at the renumbering. Until
-then, on this branch, any `init_db` still applies pending migrations (R-7).
+The engine's ledger is migration 14, after the main line's 13 (manager
+setups); checksum
+`01f8962c8d82e11d2617b6f0d4886e960e600c22abfb380ac71e8b6ee2fb7f8c`. Its
+number is written in one place only, `EXECUTION_LEDGER_MIGRATION` in
+`trading/storage/execution_ledger_schema.py`.
+
+The schema ships ahead of the engine: branch `c2/ledger-schema-14` is the
+main line plus the ledger schema module registered as migration 14 and its
+schema tests (`tests/test_execution_ledger_schema.py`), with no engine,
+runner or CLI code; the main line merges it on its own. The owner's database
+(at 12) then gets migrations 13 and 14 through the main line's explicit
+`autotraderctl db migrate`: an exclusive lock, a verified backup, after the
+close. A dry run on a copy of the owner's database applied both cleanly (only
+new, empty tables; integrity and foreign keys clean; a second run is a
+no-op). Nothing on the engine branch migrates: promote, revoke and the runner
+refuse anything but exactly this code's schema, read-only, and this branch
+carries the very same migrations 13 and 14 (it merged `c2/ledger-schema-14`).
+
+On the drill day the bridge must not run (the interlock refuses otherwise),
+and the kill switch stays the normal `autotraderctl paper stop`: it writes
+only the fence row, never migrates and never waits for a migration, and the
+engine reads it before every entry.
 
 ## Still to do
 
 - Supervised first live runs: the first owner order through the bridge (the
   09:35 one-share test) and the first 15:45 flatten modify against a real TWS.
-- Execution engine: a re-review of the R-1 to R-6 fixes and of the runner
-  (`trading/execution/runner.py` and `execution run` in `trading/cli.py`).
+- Execution engine: a re-review of the second re-review's fixes, the merge of
+  the main line and `c2/ledger-schema-14`, and the runner.
+- Deploy `c2/ledger-schema-14` with the main line and run
+  `autotraderctl db migrate` after the close, before any drill.
 - Execution engine: the supervised drill on the paper account (the
   reviewer's checklist), started with `execution run --confirm` on a day the
   bridge does not run (a supervisor drill mode is still to be built). It
@@ -254,7 +292,10 @@ then, on this branch, any `init_db` still applies pending migrations (R-7).
   TWS reports untransmitted legs after a client crash, and records exactly
   how `reqCompletedOrders(apiOnly=False)` reports TWS GUI sells: the raw
   filledQuantity of a filled, a partly filled then cancelled and an unfilled
-  cancelled sell, and the `completedTime` format and time zone.
+  cancelled sell, and the `completedTime` format and time zone. It also
+  checks whether `reqExecutions` with an empty client filter returns the TWS
+  GUI's executions: a positive fill signal that could replace R-2's
+  conservative "0 may have sold" rule for cancelled sells.
 - Execution engine: a decision on how owner manual orders are sent once the
   bridge is retired; it needs its own review.
 - Replace the bridge with the execution engine (ledger, reconciliation every 2
