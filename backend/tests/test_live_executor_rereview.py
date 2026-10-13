@@ -458,12 +458,13 @@ def engine_import_graph(entry_points: tuple[str, ...], process_files: tuple[str,
 
 
 def test_r6_the_code_digest_binds_the_engines_whole_import_graph() -> None:
-    from trading.execution.promotion import ENGINE_ENTRY_POINTS, ENGINE_SOURCE_FILES
+    from trading.execution.promotion import ENGINE_ENTRY_POINTS, ENGINE_PROCESS_FILES, ENGINE_SOURCE_FILES
 
-    graph = engine_import_graph(ENGINE_ENTRY_POINTS)
-    # The review's examples: package __init__ modules imported for their side effects, and db/core.py.
+    graph = engine_import_graph(ENGINE_ENTRY_POINTS, ENGINE_PROCESS_FILES)
+    # The review's examples: package __init__ modules imported for their side effects, and db/core.py;
+    # the second review's: the process entry files.
     assert {"trading/__init__.py", "trading/risk/__init__.py", "trading/scheduler/__init__.py",
-            "db/core.py"} <= graph
+            "db/core.py", "trading/cli.py", "autotraderctl.py"} <= graph
     missing = graph - set(ENGINE_SOURCE_FILES)
     assert not missing, f"the engine runs {sorted(missing)}, which the promotion does not bind"
     assert all((BACKEND / relative).is_file() for relative in ENGINE_SOURCE_FILES)
@@ -474,3 +475,27 @@ def test_r6_the_import_graph_follows_package_inits_and_lazy_imports() -> None:
     assert "trading/execution/manual_orders.py" in graph  # imported inside a function
     assert "trading/scheduler/decision_keys.py" in graph  # only through trading/scheduler/__init__.py
     assert "config.py" in graph  # through db/core.py
+
+
+def test_r6_the_digest_binds_the_installed_ibapi_and_the_engine_refuses_another(monkeypatch) -> None:
+    import trading.execution.promotion as promotion
+    from trading.execution.promotion import ENGINE_IBAPI_VERSION, engine_code_digest, installed_ibapi_version
+
+    requirements = (BACKEND / "requirements.txt").read_text().splitlines()
+    assert f"ibapi=={ENGINE_IBAPI_VERSION}" in requirements  # the reviewed release is the pinned one
+    assert installed_ibapi_version() == ENGINE_IBAPI_VERSION
+    reviewed = engine_code_digest()
+    monkeypatch.setattr(promotion, "installed_ibapi_version", lambda: "10.19.4")
+    assert engine_code_digest() != reviewed  # a grant never carries over to another ibapi
+
+
+async def test_r6_the_engine_refuses_to_start_on_another_ibapi(tmp_path, monkeypatch) -> None:
+    from trading.execution import live_executor
+    from trading.execution.promotion import ExecutionAuthorityError
+
+    h = await build(tmp_path, monkeypatch, start=False)
+    monkeypatch.setattr(live_executor, "installed_ibapi_version", lambda: "10.19.4")
+    with pytest.raises(ExecutionAuthorityError) as refused:
+        await h.engine.start()
+    assert refused.value.code == "code_mismatch" and "ibapi 10.19.4 is installed" in str(refused.value)
+    assert h.tws.placed == []

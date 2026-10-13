@@ -11,9 +11,11 @@ grant it:
   any other name grants nothing even if it is written into the table by hand;
 * a grant binds the SHA-256 of the engine's source files (the engine and every
   backend module it imports, transitively, package ``__init__`` modules
-  included), so any change to the code an engine process runs needs a new
-  explicit grant after its review, and the engine refuses to start when the
-  code it runs is not the code its authority names;
+  included, plus the process entry files ``autotraderctl.py`` and
+  ``trading/cli.py``) and of the installed ibapi version, so any change to the
+  code an engine process runs needs a new explicit grant after its review, and
+  the engine refuses to start when the code it runs is not the code its
+  authority names, or when ibapi is not the reviewed 9.81;
 * a revoke ends every grant of that strategy and account;
 * operator configuration (:class:`ExecutionSwitches`) can only switch entries
   off; it has no field that can add a strategy or an account;
@@ -28,6 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -39,17 +42,26 @@ from db.core import get_db, transaction
 PROMOTABLE_STRATEGY_PREFIXES: tuple[str, ...] = ("MOMO_HOD",)
 # The modules a running engine starts from (relative to backend/).
 ENGINE_ENTRY_POINTS: tuple[str, ...] = ("trading/execution/live_executor.py", "trading/execution/runner.py")
+# The process's own entry files (`autotraderctl execution run`): bound as files, with what they import
+# when the process starts; the CLI's other commands import nothing into the engine's process.
+ENGINE_PROCESS_FILES: tuple[str, ...] = ("autotraderctl.py", "trading/cli.py")
+# The ibapi release the engine was reviewed against: 9.81 decodes an empty filledQuantity as 0.0
+# (review R-2) and has no orderId or clientId on completed orders. The digest binds the installed
+# version and the engine refuses any other (requirements.txt pins the same, a test checks it).
+ENGINE_IBAPI_VERSION = "9.81.1.post1"
 # The files whose exact content a promotion binds (relative to backend/): every backend module the
 # entry points import, directly or not, at import time or inside a function, with every package
 # __init__ on the way, whose side-effect imports run too (review R-6). A test walks the import
 # graph and keeps this list complete.
 ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "auth.py",
+    "autotraderctl.py",
     "config.py",
     "db/__init__.py",
     "db/core.py",
     "trading/__init__.py",
     "trading/authority.py",
+    "trading/cli.py",
     "trading/contracts.py",
     "trading/execution/__init__.py",
     "trading/execution/ibkr_paper.py",
@@ -107,8 +119,15 @@ class ExecutionAuthorityError(PermissionError):
         super().__init__(f"{code}: {message}")
 
 
+def installed_ibapi_version() -> str:
+    try:
+        return version("ibapi")
+    except PackageNotFoundError:
+        return "not installed"
+
+
 def engine_code_digest(root: Path | None = None) -> str:
-    """SHA-256 over the engine's source files; a missing file fails closed."""
+    """SHA-256 over the engine's source files and the installed ibapi version; a missing file fails closed."""
     base = root or _BACKEND_ROOT
     digest = sha256()
     for relative in sorted(ENGINE_SOURCE_FILES):
@@ -118,6 +137,7 @@ def engine_code_digest(root: Path | None = None) -> str:
         digest.update(relative.encode("utf-8") + b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
+    digest.update(b"ibapi\0" + installed_ibapi_version().encode("utf-8") + b"\0")
     return digest.hexdigest()
 
 
@@ -320,6 +340,8 @@ class EngineAuthority:
 
 __all__ = [
     "ENGINE_ENTRY_POINTS",
+    "ENGINE_IBAPI_VERSION",
+    "ENGINE_PROCESS_FILES",
     "ENGINE_SOURCE_FILES",
     "PROMOTABLE_STRATEGY_PREFIXES",
     "AuthorityCode",
@@ -330,6 +352,7 @@ __all__ = [
     "active_strategies",
     "engine_code_digest",
     "grant_promotion",
+    "installed_ibapi_version",
     "is_paper_account",
     "is_promotable",
     "promotion_history",

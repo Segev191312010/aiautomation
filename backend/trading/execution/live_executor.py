@@ -101,9 +101,11 @@ import aiosqlite
 
 from db.core import get_db
 from trading.execution.promotion import (
+    ENGINE_IBAPI_VERSION,
     EngineAuthority,
     ExecutionAuthorityError,
     engine_code_digest,
+    installed_ibapi_version,
     is_paper_account,
 )
 from trading.execution.tws_state import (
@@ -929,6 +931,10 @@ class LiveExecutor:
 
     def require_reviewed_code(self) -> None:
         """A grant binds one engine build: this process must run exactly that code (review C2-11)."""
+        installed = installed_ibapi_version()
+        if installed != ENGINE_IBAPI_VERSION:  # its decoding is what R-2's fill rule relies on
+            raise ExecutionAuthorityError("code_mismatch", f"ibapi {installed} is installed; the engine was"
+                                          f" reviewed against {ENGINE_IBAPI_VERSION}")
         on_disk = engine_code_digest()
         if LOADED_ENGINE_DIGEST != on_disk:
             raise ExecutionAuthorityError("code_mismatch", "the engine's source files changed after this process"

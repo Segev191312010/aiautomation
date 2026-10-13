@@ -565,7 +565,11 @@ def test_c2_11_the_code_digest_covers_every_trading_module_the_engine_imports() 
     for required in ("trading/storage/runtime_fence.py", "trading/execution/manual_orders.py",
                      "trading/scheduler/sessions.py"):
         assert required in ENGINE_SOURCE_FILES
-    for relative in ENGINE_SOURCE_FILES:
+    from trading.execution.promotion import ENGINE_PROCESS_FILES
+
+    # The process entry files are bound as files; their other commands' imports never run in the
+    # engine's process (tests/test_live_executor_rereview.py walks what does).
+    for relative in set(ENGINE_SOURCE_FILES) - set(ENGINE_PROCESS_FILES):
         missing = _trading_imports(relative) - set(ENGINE_SOURCE_FILES)
         assert not missing, f"{relative} imports {sorted(missing)}, which the promotion does not bind"
 
