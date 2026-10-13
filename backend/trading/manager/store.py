@@ -281,7 +281,7 @@ class ManagedDecisionRecord:
     run_id: str
     candidate_id: str
     con_id: int
-    setup_fingerprint: str
+    setup_fingerprint: str | None
     session_date: date
     outcome: str
     mode: str
@@ -297,6 +297,8 @@ class ManagedDecisionRecord:
     final_qty: int | None
     created_at: datetime
     eligibility_id: str = field(default="")
+    # MANAGER_NOT_IN_FOCUS for a candidate the focus left out until the cutoff.
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.eligibility_id:
@@ -315,6 +317,7 @@ async def insert_managed_decision(record: ManagedDecisionRecord) -> None:
         record.candidate_id,
         record.con_id,
         record.setup_fingerprint,
+        record.reason,
         record.session_date.isoformat(),
         record.outcome,
         record.mode,
@@ -334,10 +337,10 @@ async def insert_managed_decision(record: ManagedDecisionRecord) -> None:
     async with transaction() as db:
         await db.execute(
             """INSERT INTO autotrader_manager_decisions
-               (decision_id, run_id, candidate_id, con_id, setup_fingerprint, session_date,
+               (decision_id, run_id, candidate_id, con_id, setup_fingerprint, reason, session_date,
                 outcome, mode, neutral_reason, mark, plan_id, eligibility_id, eligible_json,
                 focus_json, gates_json, day_step, setup_step, policy_qty, final_qty, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             values,
         )
 
@@ -345,7 +348,7 @@ async def insert_managed_decision(record: ManagedDecisionRecord) -> None:
 async def managed_decisions(session_date: date) -> list[dict[str, Any]]:
     async with get_db() as db:
         async with db.execute(
-            """SELECT decision_id, run_id, candidate_id, con_id, outcome, mode, neutral_reason, mark,
+            """SELECT decision_id, run_id, candidate_id, con_id, outcome, reason, mode, neutral_reason, mark,
                       plan_id, eligibility_id, eligible_json, focus_json, gates_json, day_step,
                       setup_step, policy_qty, final_qty, created_at
                FROM autotrader_manager_decisions WHERE session_date = ? ORDER BY id""",

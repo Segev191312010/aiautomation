@@ -310,6 +310,9 @@ async def _day(
         candidate_source=_hot_list(clock),
         window_start=strategy_entry_window("momo", SESSION)[0],
     )
+    if controller is not None:
+        # As the managed session does after its cutoff sweep.
+        await controller.record_unfocused(run_id=report.run_id, owner_id="owner-a")
     with sqlite3.connect(path) as db:
         tables = {
             table: db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
@@ -428,10 +431,17 @@ async def test_a_narrow_plan_skips_names_outside_its_focus_without_a_review(tmp_
                      plans=focus_figs_only, reviewer=reviewer)
 
     outcomes = {row[2].rsplit("-", 1)[-1]: row[6] for row in day.tables["autotrader_candidate_decisions"]}
-    # BF B was never assessed: no data, no review; it ends data_blocked at the cutoff.
+    # BF B was never assessed: no data, no review; it ends data_blocked at the cutoff...
     assert outcomes == {str(BF_B.con_id): "data_blocked", str(FIGS.con_id): "rule_rejected"}
     assert reviewer.contexts == [] and day.neutral.setups == []
-    assert day.audits == []
+    # ...and the manager's record says why, so evidence never reads a data failure.
+    [skip] = day.audits
+    assert (skip["con_id"], skip["outcome"], skip["reason"], skip["mode"]) == (
+        BF_B.con_id, "data_blocked", "manager_not_in_focus", "managed",
+    )
+    assert skip["focus_json"] == [FIGS.con_id] and BF_B.con_id in skip["eligible_json"]
+    assert (skip["policy_qty"], skip["final_qty"]) == (None, None)
+    assert skip["plan_id"] == plan_id_for(SESSION, "14:30", 1)
 
 
 @pytest.mark.anyio
@@ -550,6 +560,13 @@ async def test_property_every_managed_decision_only_narrows(tmp_path, monkeypatc
         for audit in day.audits:
             checked += 1
             seen.add(audit["mode"])
+            if audit["reason"] is not None:
+                # The focus left it out until the cutoff: outside its focus, never sized.
+                assert audit["reason"] == "manager_not_in_focus" and audit["mode"] == "managed"
+                assert audit["con_id"] not in audit["focus_json"]
+                assert audit["final_qty"] is None and audit["policy_qty"] is None
+                seen.add("not_in_focus")
+                continue
             if audit["final_qty"] is not None and audit["final_qty"] < audit["policy_qty"]:
                 seen.add("scaled_down")
             if audit["outcome"] == "risk_blocked":
@@ -568,7 +585,7 @@ async def test_property_every_managed_decision_only_narrows(tmp_path, monkeypatc
                 assert decision[6] != "shadow_accepted"
     assert checked >= 5
     # The random days exercised both modes, a scaled-down approval and a skip.
-    assert seen >= {"managed", "neutral", "scaled_down"}, seen
+    assert seen >= {"managed", "neutral", "scaled_down", "not_in_focus"}, seen
 
 
 def test_the_narrowing_check_names_every_widening():

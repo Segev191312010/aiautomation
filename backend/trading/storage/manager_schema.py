@@ -306,6 +306,10 @@ MANAGER_VERDICTS_SCHEMA = (
 # decision (Principle 2). The final quantity is floor(policy x day x setup) and
 # never above the policy quantity; neutral mode keeps both steps at 1; the
 # contract is inside the eligible set and, when managed, inside the focus.
+# A candidate the plan's focus left out until the cutoff gets a row too, with
+# no setup and the reason manager_not_in_focus (its decision's outcome is
+# unchanged), so evidence never reads it as a data failure; such a row must be
+# outside its focus.
 MANAGER_DECISIONS_SCHEMA = (
     f"""CREATE TABLE IF NOT EXISTS autotrader_manager_decisions (
         id INTEGER PRIMARY KEY,
@@ -313,7 +317,9 @@ MANAGER_DECISIONS_SCHEMA = (
         run_id TEXT NOT NULL,
         candidate_id TEXT NOT NULL,
         con_id INTEGER NOT NULL CHECK(con_id > 0),
-        setup_fingerprint TEXT NOT NULL CHECK{_digest("setup_fingerprint")},
+        setup_fingerprint TEXT NULL
+            CHECK(setup_fingerprint IS NULL OR {_digest("setup_fingerprint")}),
+        reason TEXT NULL CHECK(reason IS NULL OR reason = 'manager_not_in_focus'),
         session_date TEXT NOT NULL CHECK{_day("session_date")},
         outcome TEXT NOT NULL CHECK{_token("outcome", 32)},
         mode TEXT NOT NULL CHECK(mode IN ('managed', 'neutral')),
@@ -337,6 +343,8 @@ MANAGER_DECISIONS_SCHEMA = (
                                     AND focus_json IS NOT NULL)),
         CHECK(final_qty IS NULL OR (policy_qty IS NOT NULL AND final_qty <= policy_qty
               AND final_qty = CAST(policy_qty * day_step * setup_step AS INTEGER))),
+        CHECK((setup_fingerprint IS NULL) = (reason IS NOT NULL)),
+        CHECK(reason IS NULL OR (mode = 'managed' AND policy_qty IS NULL AND final_qty IS NULL)),
         FOREIGN KEY(run_id) REFERENCES autotrader_runs(id),
         FOREIGN KEY(decision_id) REFERENCES autotrader_candidate_decisions(id),
         FOREIGN KEY(plan_id) REFERENCES autotrader_manager_plans(plan_id)
@@ -346,8 +354,10 @@ MANAGER_DECISIONS_SCHEMA = (
     """CREATE TRIGGER IF NOT EXISTS autotrader_manager_decisions_narrow_only
     BEFORE INSERT ON autotrader_manager_decisions
     WHEN NOT EXISTS (SELECT 1 FROM json_each(NEW.eligible_json) WHERE value = NEW.con_id)
-      OR (NEW.mode = 'managed'
+      OR (NEW.mode = 'managed' AND NEW.reason IS NULL
           AND NOT EXISTS (SELECT 1 FROM json_each(NEW.focus_json) WHERE value = NEW.con_id))
+      OR (NEW.reason IS NOT NULL
+          AND EXISTS (SELECT 1 FROM json_each(NEW.focus_json) WHERE value = NEW.con_id))
     BEGIN SELECT RAISE(ABORT, 'a managed decision stays inside its eligible set and plan focus'); END""",
     *_append_only("autotrader_manager_decisions", "managed decisions"),
 )

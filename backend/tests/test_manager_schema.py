@@ -583,6 +583,28 @@ def test_a_decision_outside_its_eligible_set_or_focus_is_refused(db):
     db.rollback()
 
 
+def test_a_name_left_out_of_focus_is_marked_and_must_be_outside_it(db):
+    _insert(db, "autotrader_manager_plans", _plan())
+    db.commit()
+    skip = _managed_decision(
+        setup_fingerprint=None, reason="manager_not_in_focus", outcome="data_blocked",
+        focus_json=json.dumps([265598]), policy_qty=None, final_qty=None, setup_step=1,
+    )
+    for overrides in (
+        {"reason": None},  # no setup needs the reason
+        {"reason": "not_in_focus"},
+        {"setup_fingerprint": FP},  # a setup is never marked
+        {"policy_qty": 3726},
+        {"mode": "neutral", "plan_id": None, "focus_json": None, "neutral_reason": "plan_missing",
+         "day_step": 1},
+    ):
+        _rejects_row(db, "autotrader_manager_decisions", {**skip, **overrides})
+    with pytest.raises(sqlite3.IntegrityError, match="eligible set and plan focus"):
+        _insert(db, "autotrader_manager_decisions", {**skip, "focus_json": json.dumps([4931])})
+    db.rollback()
+    assert _insert(db, "autotrader_manager_decisions", skip) == 1
+
+
 def test_a_neutral_decision_keeps_the_policy_quantity(db):
     assert _insert(db, "autotrader_manager_decisions", _neutral_decision()) == 1
     db.commit()

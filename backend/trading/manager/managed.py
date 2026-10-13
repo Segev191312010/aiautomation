@@ -40,6 +40,7 @@ from trading.intelligence.managed_review import (
 from trading.manager.constants import (
     FALLBACK_REASONS,
     MANAGER_FALLBACK_NEUTRAL,
+    MANAGER_NOT_IN_FOCUS,
     NEUTRAL_STEP,
     PLAN_ERROR,
     PLAN_EXPIRED,
@@ -139,6 +140,8 @@ class ManagedStrategy:
         self._in_outage = False
         self._eligible: frozenset[int] = frozenset()
         self._con_ids: dict[str, int] = {}
+        # candidate id -> the view that last left it out of focus (None: admitted).
+        self._focus_skips: dict[str, ManagedView | None] = {}
         self._reviewed: dict[str, _Reviewed] = {}
         self._gates: dict[str, object] = {"risk_off": "unknown", "plan": "open"}
 
@@ -270,9 +273,63 @@ class ManagedStrategy:
         self._eligible = frozenset(item.con_id for item in eligible)
         self._con_ids = {item.id: item.con_id for item in eligible}
         view = self._view
-        if view.neutral:
-            return True
-        return candidate.con_id in (view.focus or frozenset()) and candidate.con_id in self._eligible
+        admitted = view.neutral or (
+            candidate.con_id in (view.focus or frozenset()) and candidate.con_id in self._eligible
+        )
+        self._focus_skips[candidate.id] = None if admitted else view
+        return admitted
+
+    async def record_unfocused(self, *, run_id: str, owner_id: str) -> int:
+        """After the cutoff sweep: mark each candidate the focus left out until then.
+
+        Its decision keeps its outcome (usually data_blocked: it was never
+        assessed); the manager's record names the reason, so evidence never
+        reads it as a data failure. Returns how many were marked.
+        """
+        from trading.storage.repository import list_decisions
+
+        skipped = {
+            candidate_id: view
+            for candidate_id, view in self._focus_skips.items()
+            if view is not None and view.plan is not None
+        }
+        if not skipped:
+            return 0
+        marked = 0
+        for payload in await list_decisions(owner_id=owner_id, run_id=run_id, limit=500):
+            candidate_id = str(payload.get("candidate_id"))
+            view = skipped.get(candidate_id)
+            con_id = self._con_ids.get(candidate_id)
+            if view is None or con_id is None or payload.get("setup_fingerprint") is not None:
+                continue
+            assert view.plan is not None
+            await self._decision_writer(
+                ManagedDecisionRecord(
+                    decision_id=str(payload["id"]),
+                    run_id=run_id,
+                    candidate_id=candidate_id,
+                    con_id=con_id,
+                    setup_fingerprint=None,
+                    reason=MANAGER_NOT_IN_FOCUS,
+                    session_date=self._session_date,
+                    outcome=str(payload["outcome"]),
+                    mode=MANAGED,
+                    neutral_reason=None,
+                    mark=None,
+                    plan_id=view.plan.plan_id,
+                    eligible=tuple(sorted(self._eligible or {con_id})),
+                    focus=tuple(sorted(view.focus or ())),
+                    gates={**self._gates, "latch": self._latch.mode},
+                    day_step=view.day_step,
+                    setup_step=NEUTRAL_STEP,
+                    policy_qty=None,
+                    final_qty=None,
+                    created_at=self._now(),
+                )
+            )
+            marked += 1
+        logger.info("%d candidates marked %s for run %s", marked, MANAGER_NOT_IN_FOCUS, run_id)
+        return marked
 
     # -- the managed review -----------------------------------------------------------
 

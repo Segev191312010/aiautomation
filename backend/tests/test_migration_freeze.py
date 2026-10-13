@@ -42,7 +42,7 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     15: ("manager-day-universe", "0f5bbbec11e4198af10f2d5b15d4b2367a0fd8353ba7ccb9427896ae616fa41f"),
     # Phase 2, the AI day manager in shadow (plans, verdicts, managed
     # decisions, the switch and its day latch, spend).
-    16: ("manager-day-plans", "b1cdc0f64c350802c525767209b98386fa9b0b01b270fa44b75cec3ce2ff2278"),
+    16: ("manager-day-plans", "dd1c5832bebd770f90e12133100031d8823c5762a2e9be3c0a8ee86850ce6730"),
 }
 
 

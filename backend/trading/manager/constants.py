@@ -111,6 +111,9 @@ PLAN_ERROR = "plan_error"
 FALLBACK_REASONS = frozenset({PLAN_MISSING, PLAN_EXPIRED, PLAN_ERROR})
 NEUTRAL_REASONS = FALLBACK_REASONS | {SWITCH_OFF, SWITCH_OFF_MIDDAY}
 
+# The reason on a managed run's record for a candidate the plan's focus left
+# out until the cutoff (its decision keeps its outcome, e.g. data_blocked).
+MANAGER_NOT_IN_FOCUS = "manager_not_in_focus"
 # A managed setup the steps scale to zero shares is skipped, never resized up.
 MANAGER_SIZE_ZERO = "manager_size_zero"
 # The managed reviewer's own failures (the review fails closed, like V2's).

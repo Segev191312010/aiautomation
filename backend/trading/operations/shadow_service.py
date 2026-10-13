@@ -604,6 +604,11 @@ async def run_shadow_session(
             window_start=window_start if universe != "scanner" else None,
             candidate_refresh=hotlist_refresh if dynamic else None,
         )
+        if controller is not None:
+            try:
+                await controller.record_unfocused(run_id=report.run_id, owner_id=owner_id)
+            except Exception:  # noqa: BLE001 - evidence never fails a finished session
+                logger.error("could not mark the unfocused candidates", exc_info=True)
         usage = provider.usage
         logger.info(
             "session %s finished: %s; AI calls=%d cost=$%s",
