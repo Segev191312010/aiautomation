@@ -31,6 +31,25 @@ MAX_DAILY_HISTORY_GAP = timedelta(days=5)
 _NEW_YORK = ZoneInfo("America/New_York")
 _BAR_INTERVAL = timedelta(minutes=5)
 
+# Why a batch was refused. Session reports count refusals by these tokens, so
+# a data-blocked candidate can be traced to stale bars, pacing or a dead link.
+FAULT_STALE = "stale"
+FAULT_PACING = "pacing"
+FAULT_DISCONNECTED = "disconnected"
+FAULT_REQUEST_FAILED = "request_failed"
+FAULT_RECEIPT_IN_FUTURE = "receipt_in_future"
+FAULT_INVALID = "invalid"
+MARKET_DATA_FAULTS = frozenset(
+    {
+        FAULT_STALE,
+        FAULT_PACING,
+        FAULT_DISCONNECTED,
+        FAULT_REQUEST_FAILED,
+        FAULT_RECEIPT_IN_FUTURE,
+        FAULT_INVALID,
+    }
+)
+
 
 class MarketDataBoundaryError(ValueError):
     """Raised when market data cannot be admitted to the V1 pipeline."""
@@ -45,7 +64,16 @@ class ScannerSupportError(MarketDataBoundaryError):
 
 
 class MarketDataQualityError(MarketDataBoundaryError):
-    """Raised when data is delayed, incomplete, stale, or otherwise unsafe."""
+    """Raised when data is delayed, incomplete, stale, or otherwise unsafe.
+
+    ``fault`` names the refusal with one of ``MARKET_DATA_FAULTS``.
+    """
+
+    def __init__(self, message: str, *, fault: str = FAULT_INVALID) -> None:
+        if fault not in MARKET_DATA_FAULTS:
+            raise ValueError(f"unknown market-data fault {fault!r}")
+        super().__init__(message)
+        self.fault = fault
 
 
 class ScannerDataError(MarketDataBoundaryError):
@@ -397,12 +425,7 @@ def validate_completed_trade_bars(
     observed_at = _require_aware(now, "now")
     if max_age <= timedelta(0):
         raise ValueError("max_age must be positive")
-    if not batch.connected:
-        raise MarketDataQualityError("IBKR market-data connection is unavailable")
-    if batch.pacing_failed:
-        raise MarketDataQualityError("IBKR market-data pacing limit blocked the request")
-    if batch.error:
-        raise MarketDataQualityError("IBKR market-data request failed")
+    _require_healthy_batch(batch)
 
     validated: list[CompletedBar] = []
     fingerprints: set[str] = set()
@@ -426,7 +449,9 @@ def validate_completed_trade_bars(
             continue
         latest_end = end if latest_end is None or end > latest_end else latest_end
         if received_at > observed_at + timedelta(seconds=1):
-            raise MarketDataQualityError("bar receipt timestamp is in the future")
+            raise MarketDataQualityError(
+                "bar receipt timestamp is in the future", fault=FAULT_RECEIPT_IN_FUTURE
+            )
         if raw.con_id <= 0:
             raise MarketDataQualityError("bar has an invalid conId")
 
@@ -459,8 +484,24 @@ def validate_completed_trade_bars(
     # Older bars are legitimate history (ATR, opening range); freshness is a
     # property of the newest completed interval only.
     if latest_end is not None and observed_at - latest_end > max_age:
-        raise MarketDataQualityError("stale market data cannot feed a candidate")
+        raise MarketDataQualityError(
+            "stale market data cannot feed a candidate", fault=FAULT_STALE
+        )
     return tuple(validated)
+
+
+def _require_healthy_batch(batch: BarBatch | DailyBarBatch) -> None:
+    """Transport health first: no bar of a failed request is ever validated."""
+    if not batch.connected:
+        raise MarketDataQualityError(
+            "IBKR market-data connection is unavailable", fault=FAULT_DISCONNECTED
+        )
+    if batch.pacing_failed:
+        raise MarketDataQualityError(
+            "IBKR market-data pacing limit blocked the request", fault=FAULT_PACING
+        )
+    if batch.error:
+        raise MarketDataQualityError("IBKR market-data request failed", fault=FAULT_REQUEST_FAILED)
 
 
 def liquidity_profile(
@@ -476,12 +517,7 @@ def liquidity_profile(
     """
     if not volume_multiplier.is_finite() or volume_multiplier <= 0:
         raise ValueError("volume_multiplier must be finite and positive")
-    if not batch.connected:
-        raise MarketDataQualityError("IBKR market-data connection is unavailable")
-    if batch.pacing_failed:
-        raise MarketDataQualityError("IBKR market-data pacing limit blocked the request")
-    if batch.error:
-        raise MarketDataQualityError("IBKR market-data request failed")
+    _require_healthy_batch(batch)
     con_ids = {bar.con_id for bar in batch.bars}
     if len(con_ids) > 1:
         raise MarketDataQualityError("daily history contains multiple contracts")
@@ -500,7 +536,9 @@ def liquidity_profile(
         raise MarketDataQualityError("daily bar has an invalid volume")
     last = window[-1]
     if session_date - last.session_date > MAX_DAILY_HISTORY_GAP:
-        raise MarketDataQualityError("stale daily history cannot feed a candidate")
+        raise MarketDataQualityError(
+            "stale daily history cannot feed a candidate", fault=FAULT_STALE
+        )
     total = sum((bar.close * bar.volume * volume_multiplier for bar in window), Decimal("0"))
     return LiquidityProfile(
         con_id=last.con_id,

@@ -1,4 +1,4 @@
-"""Real MOMO's data path: poll slots per strategy and no doomed stale polls.
+"""Real MOMO's data path: poll slots per strategy, no doomed stale polls, error reasons.
 
 2026-10-12 evidence (shadow.log): MOMO's run started late and polled at once,
 78 s after its slot, so 28 of its 35 bar requests were refused as stale; the
@@ -27,11 +27,23 @@ from trading.contracts import (
     fingerprint_payload,
 )
 from trading.market.ibkr_boundary import (
+    FAULT_DISCONNECTED,
+    FAULT_INVALID,
+    FAULT_PACING,
+    FAULT_RECEIPT_IN_FUTURE,
+    FAULT_REQUEST_FAILED,
+    FAULT_STALE,
+    MARKET_DATA_FAULTS,
     BarBatch,
+    DailyBarBatch,
+    IBKRScannerResult,
     IBKRTradeBar,
     LiquidityProfile,
     MarketDataQualityError,
     PaperIBKRMarketData,
+    liquidity_profile,
+    qualify_scanner_results,
+    validate_completed_trade_bars,
 )
 from trading.operations import shadow_service
 from trading.operations.shadow_service import (
@@ -48,10 +60,14 @@ from trading.operations.supervisor import STRATEGY_UNIVERSES
 from trading.orchestration import RepositoryBackedShadowRunner, ShadowPipeline
 from trading.orchestration.session_runner import (
     BAR_INTERVAL,
+    DATA_ERROR_REASONS,
     MIN_PASS_BUDGET,
     PollSchedule,
     SessionAborted,
+    SessionReport,
     ShadowSessionRunner,
+    bars_error_reason,
+    ensure_orb_strategy,
     ensure_strategy,
     momo_strategy_spec,
 )
@@ -379,6 +395,7 @@ async def test_a_late_start_waits_for_its_next_slot_instead_of_polling_stale_bar
     )
     with pytest.raises(MarketDataQualityError, match="stale market data") as refused:
         await probe.completed_bars(con_id=1001, now=old_request_at)
+    assert refused.value.fault == FAULT_STALE
 
     report, actor, log = await _momo_restart(
         tmp_path, monkeypatch, schedule=schedule, restart_at=restart_at
@@ -387,7 +404,7 @@ async def test_a_late_start_waits_for_its_next_slot_instead_of_polling_stale_bar
     # No request is spent on bars that cannot pass; the next slot's all pass.
     assert actor.requests[0] == (1001, first_poll)
     assert report.late_polls_skipped == 1
-    assert report.data_errors == 0
+    assert (report.data_errors, dict(report.data_error_reasons)) == (0, {})
     assert report.polls == 5  # 14:35 through 14:55
     assert len(actor.requests) == 5 * 35
     assert dict(report.outcomes) == {"rule_rejected": 35}
@@ -466,3 +483,229 @@ async def test_a_pass_that_overruns_its_next_slot_skips_it(tmp_path, monkeypatch
         "122 s late, past the 112 s a late poll may start"
     ]
     assert report.data_errors == 0
+
+
+# --------------------------------------------------------------------------
+# 3. The data-error breakdown in the "session complete" payload
+# --------------------------------------------------------------------------
+
+
+def test_data_error_reasons_and_market_data_faults_are_pinned():
+    assert MARKET_DATA_FAULTS == {
+        "stale",
+        "pacing",
+        "disconnected",
+        "request_failed",
+        "receipt_in_future",
+        "invalid",
+    }
+    assert DATA_ERROR_REASONS == {
+        "account_unavailable",
+        "liquidity_unavailable",
+        "quote_unavailable",
+        "bars_error",
+        "bars_stale",
+        "bars_pacing",
+        "bars_disconnected",
+        "bars_request_failed",
+        "bars_receipt_in_future",
+        "bars_invalid",
+    }
+    for fault in MARKET_DATA_FAULTS:
+        assert bars_error_reason(MarketDataQualityError("refused", fault=fault)) == f"bars_{fault}"
+    assert bars_error_reason(TimeoutError("TWS historical-data request timed out")) == "bars_error"
+    with pytest.raises(ValueError, match="unknown market-data fault"):
+        MarketDataQualityError("refused", fault="slow")
+
+
+def _refusal(batch: BarBatch, *, now: datetime) -> MarketDataQualityError:
+    with pytest.raises(MarketDataQualityError) as refused:
+        validate_completed_trade_bars(batch, now=now)
+    return refused.value
+
+
+def test_every_bar_refusal_names_its_fault():
+    now = et(10, 0, 5)
+    fresh = _quiet_bar(7, et(9, 55), now)
+    assert _refusal(BarBatch(bars=(), connected=False), now=now).fault == FAULT_DISCONNECTED
+    assert _refusal(BarBatch(bars=(), pacing_failed=True), now=now).fault == FAULT_PACING
+    assert _refusal(BarBatch(bars=(), error="TWS error 200: x"), now=now).fault == FAULT_REQUEST_FAILED
+    assert _refusal(BarBatch(bars=(fresh, fresh)), now=now).fault == FAULT_INVALID
+    future = _quiet_bar(7, et(9, 55), now + timedelta(seconds=2))
+    assert _refusal(BarBatch(bars=(future,)), now=now).fault == FAULT_RECEIPT_IN_FUTURE
+    old = _quiet_bar(7, et(9, 50), now)
+    stale = _refusal(BarBatch(bars=(old,)), now=now)
+    assert (stale.fault, str(stale)) == (FAULT_STALE, "stale market data cannot feed a candidate")
+    assert validate_completed_trade_bars(BarBatch(bars=(fresh,)), now=now)[0].con_id == 7
+    with pytest.raises(MarketDataQualityError) as daily:
+        liquidity_profile(
+            DailyBarBatch(bars=(), pacing_failed=True),
+            session_date=SESSION,
+            volume_multiplier=Decimal("100"),
+        )
+    assert daily.value.fault == FAULT_PACING
+
+
+def test_an_unregistered_reason_is_still_counted_and_raises_a_critical():
+    report = SessionReport(run_id="run", session_date=SESSION)
+    with _log_lines("autotrader.shadow.session") as log:
+        report.record_data_error("bars_stale")
+        report.record_data_error("bars_mystery")
+    assert report.data_errors == 2 == sum(report.data_error_reasons.values())
+    assert report.summary()["data_error_reasons"] == {"bars_mystery": 1, "bars_stale": 1}
+    assert log == ["CRITICAL unregistered data-error reason 'bars_mystery'"]
+
+
+ORB_DAY = date(2026, 8, 27)
+ORB_OPEN = et(9, 30, day=ORB_DAY)
+
+
+def _orb_bar(con_id: int, start: datetime, *, breakout: bool):
+    from trading.contracts import CompletedBar
+
+    opening = start < ORB_OPEN + timedelta(minutes=15)
+    return CompletedBar(
+        con_id=con_id,
+        interval_start_utc=start,
+        interval_end_utc=start + BAR_INTERVAL,
+        open="100",
+        high="103.2" if breakout else ("101" if opening else "100.8"),
+        low="99",
+        close="103" if breakout else "100.5",
+        volume="10000",
+        rth=True,
+        source="ibkr",
+        data_mode="live",
+    )
+
+
+class FailingMarket:
+    """One ORB scan whose every candidate fails in its own way."""
+
+    SYMBOLS = {101: "BRK", 102: "STAL", 103: "PACE", 105: "SLOW", 106: "THIN"}
+
+    def __init__(self, clock) -> None:
+        self.clock = clock
+
+    async def scanner_snapshot(self, *, scanner_run_id: str):
+        results = tuple(
+            IBKRScannerResult(
+                con_id=con_id,
+                symbol=symbol,
+                currency="USD",
+                security_type="STK",
+                stock_type="COMMON",
+                primary_exchange="NASDAQ",
+                rank=rank,
+                raw_rank=rank - 1,
+            )
+            for rank, (con_id, symbol) in enumerate(self.SYMBOLS.items(), 1)
+        )
+        return qualify_scanner_results(results, scanner_run_id=scanner_run_id)
+
+    async def completed_bars(self, *, con_id: int, now: datetime):
+        if con_id == 102:
+            raise MarketDataQualityError("stale market data cannot feed a candidate", fault=FAULT_STALE)
+        if con_id == 103:
+            raise MarketDataQualityError(
+                "IBKR market-data pacing limit blocked the request", fault=FAULT_PACING
+            )
+        if con_id == 105:
+            raise TimeoutError("TWS historical-data request timed out")
+        bars = []
+        start = ORB_OPEN
+        while start + BAR_INTERVAL <= now:
+            bars.append(_orb_bar(con_id, start, breakout=start >= ORB_OPEN + timedelta(minutes=40)))
+            start += BAR_INTERVAL
+        return tuple(bars)
+
+    async def quote(self, *, con_id: int):
+        raise TimeoutError("TWS quote snapshot timed out")
+
+    async def liquidity(self, *, con_id: int, session_date: date):
+        if con_id == 106:
+            raise MarketDataQualityError("insufficient_daily_history")
+        return LiquidityProfile(
+            con_id=con_id,
+            reference_price=Decimal("103"),
+            average_dollar_volume=Decimal("25000000"),
+            sessions_used=20,
+            last_session_date=session_date - timedelta(days=1),
+        )
+
+
+async def test_session_complete_breaks_data_errors_down_by_reason(tmp_path, monkeypatch):
+    from config import cfg
+    from db.core import init_db
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "breakdown.db"))
+    await init_db()
+    strategy = await ensure_orb_strategy(owner_id="demo")
+    clock = {"now": et(11, 44, day=ORB_DAY)}  # restarted late in the morning
+    now = lambda: clock["now"]  # noqa: E731 - the shared simulated clock
+
+    async def sleep(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
+
+    reads: list[datetime] = []
+
+    async def read_account() -> AccountSnapshot:
+        reads.append(now())
+        if len(reads) == 1:
+            raise TimeoutError("TWS account download timed out")
+        return await _account(now)()
+
+    runner = ShadowSessionRunner(
+        market=FailingMarket(now),
+        read_account=read_account,
+        runner=RepositoryBackedShadowRunner(
+            pipeline=ShadowPipeline(proposal_provider=NeverReviewed()),
+            clock=now,
+            lease_ttl=timedelta(hours=6),
+            lease_renew_interval=timedelta(hours=1),
+        ),
+        clock=now,
+        poll_schedule=poll_schedule("orb", "scanner"),
+        sleep=sleep,
+    )
+    with _log_lines("autotrader.shadow.session") as log:
+        report = await runner.run(
+            session=market_session(ORB_DAY),
+            strategy=strategy,
+            policy=RiskPolicy(),
+            source_sha="abcdef1",
+            policy_fingerprints={"risk": RiskPolicy().fingerprint()},
+        )
+
+    # The 11:40:30 slot was missed; 11:45:30 lost the account, then two full polls.
+    assert report.polls == 3 and report.late_polls_skipped == 1
+    expected = {
+        "account_unavailable": 1,
+        "bars_error": 2,
+        "bars_pacing": 2,
+        "bars_stale": 2,
+        "liquidity_unavailable": 2,
+        "quote_unavailable": 2,
+    }
+    summary = report.summary()
+    assert summary["data_error_reasons"] == expected
+    assert summary["data_errors"] == report.data_errors == sum(expected.values()) == 11
+    assert dict(report.outcomes) == {"data_blocked": 5}
+    complete = [line for line in log if line.startswith("INFO session complete: ")]
+    assert len(complete) == 1
+    assert (
+        "'data_errors': 11, 'data_error_reasons': {'account_unavailable': 1, "
+        "'bars_error': 2, 'bars_pacing': 2, 'bars_stale': 2, 'liquidity_unavailable': 2, "
+        "'quote_unavailable': 2}" in complete[0]
+    )
+    # Every warning carries the same token as the summary key.
+    tagged = {
+        "account_unavailable": "WARNING account snapshot unavailable [account_unavailable]: ",
+        "bars_stale": "WARNING bars unavailable for STAL [bars_stale]: stale market data",
+        "bars_pacing": "WARNING bars unavailable for PACE [bars_pacing]: IBKR market-data pacing",
+        "bars_error": "WARNING bars unavailable for SLOW [bars_error]: TWS historical-data",
+        "liquidity_unavailable": "WARNING liquidity unavailable for THIN [liquidity_unavailable]: ",
+        "quote_unavailable": "WARNING quote unavailable for BRK [quote_unavailable]: ",
+    }
+    for reason, prefix in tagged.items():
+        assert sum(line.startswith(prefix) for line in log) == expected[reason], reason

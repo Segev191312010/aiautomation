@@ -37,7 +37,9 @@ from trading.contracts import (
 )
 from trading.market.ibkr_boundary import (
     DEFAULT_SCANNER_REQUEST,
+    MARKET_DATA_FAULTS,
     LiquidityProfile,
+    MarketDataQualityError,
     ScannerSnapshot,
 )
 from trading.orchestration.persistence import RepositoryBackedShadowRunner, ShadowRunSession
@@ -64,6 +66,25 @@ SCANNER_ATTEMPTS = 3
 SCANNER_RETRY_DELAY = timedelta(seconds=20)
 # How often a dynamic run asks its candidate refresh for newly hot symbols.
 DEFAULT_REFRESH_INTERVAL = timedelta(minutes=15)
+
+# Why a poll could not use a candidate's data. Each literal tags its warning
+# line and keys the session summary's ``data_error_reasons``.
+ACCOUNT_UNAVAILABLE = "account_unavailable"
+LIQUIDITY_UNAVAILABLE = "liquidity_unavailable"
+QUOTE_UNAVAILABLE = "quote_unavailable"
+# A bar request that failed outside the market-data boundary (e.g. a timeout).
+BARS_ERROR = "bars_error"
+# A bar batch the boundary refused, by its fault: bars_stale, bars_pacing, ...
+BARS_FAULT_REASONS = {fault: f"bars_{fault}" for fault in MARKET_DATA_FAULTS}
+DATA_ERROR_REASONS = frozenset(
+    {
+        ACCOUNT_UNAVAILABLE,
+        LIQUIDITY_UNAVAILABLE,
+        QUOTE_UNAVAILABLE,
+        BARS_ERROR,
+        *BARS_FAULT_REASONS.values(),
+    }
+)
 # Log tag for a poll slot reached too late to find fresh bars.
 LATE_POLLS_SKIPPED = "late_polls_skipped"
 
@@ -113,6 +134,16 @@ class SessionReport:
     paused_polls: int = 0
     late_polls_skipped: int = 0
     data_errors: int = 0
+    data_error_reasons: Counter[str] = field(default_factory=Counter)
+
+    def record_data_error(self, reason: str) -> None:
+        """Count one failed request under its reason; the reasons sum to ``data_errors``."""
+        if reason not in DATA_ERROR_REASONS:
+            # Still counted, so the breakdown never hides an error; the new
+            # failure path needs its own token in DATA_ERROR_REASONS.
+            logger.critical("unregistered data-error reason %r", reason, stack_info=True)
+        self.data_errors += 1
+        self.data_error_reasons[reason] += 1
 
     def summary(self) -> dict[str, object]:
         return {
@@ -125,6 +156,7 @@ class SessionReport:
             "paused_polls": self.paused_polls,
             "late_polls_skipped": self.late_polls_skipped,
             "data_errors": self.data_errors,
+            "data_error_reasons": dict(sorted(self.data_error_reasons.items())),
         }
 
 
@@ -471,7 +503,7 @@ class ShadowSessionRunner:
     ) -> None:
         portfolio = await self._portfolio(shadow)
         if portfolio is None:
-            report.data_errors += 1
+            report.record_data_error(ACCOUNT_UNAVAILABLE)
             return
         for candidate in shadow.pending():
             profile = liquidity.get(candidate.con_id)
@@ -481,8 +513,13 @@ class ShadowSessionRunner:
                         con_id=candidate.con_id, session_date=session_date
                     )
                 except Exception as exc:  # noqa: BLE001 - candidate stays pending
-                    report.data_errors += 1
-                    logger.warning("liquidity unavailable for %s: %s", candidate.symbol, exc)
+                    report.record_data_error(LIQUIDITY_UNAVAILABLE)
+                    logger.warning(
+                        "liquidity unavailable for %s [%s]: %s",
+                        candidate.symbol,
+                        LIQUIDITY_UNAVAILABLE,
+                        exc,
+                    )
                     await self._recover_connection()
                     continue
                 liquidity[candidate.con_id] = profile
@@ -512,8 +549,9 @@ class ShadowSessionRunner:
                         con_id=candidate.con_id, now=self._now()
                     )
             except Exception as exc:  # noqa: BLE001 - pending until the next poll
-                report.data_errors += 1
-                logger.warning("bars unavailable for %s: %s", candidate.symbol, exc)
+                reason = bars_error_reason(exc)
+                report.record_data_error(reason)
+                logger.warning("bars unavailable for %s [%s]: %s", candidate.symbol, reason, exc)
                 await self._recover_connection()
                 bars = ()
             item = CandidateInput(
@@ -532,8 +570,10 @@ class ShadowSessionRunner:
                     await self._contract_loader(candidate.con_id)
                 quote = await self._market.quote(con_id=candidate.con_id)
             except Exception as exc:  # noqa: BLE001 - breakout stays pending
-                report.data_errors += 1
-                logger.warning("quote unavailable for %s: %s", candidate.symbol, exc)
+                report.record_data_error(QUOTE_UNAVAILABLE)
+                logger.warning(
+                    "quote unavailable for %s [%s]: %s", candidate.symbol, QUOTE_UNAVAILABLE, exc
+                )
                 await self._recover_connection()
                 continue
             quoted = CandidateInput(
@@ -622,7 +662,7 @@ class ShadowSessionRunner:
         try:
             account = await self._read_account()
         except Exception as exc:  # noqa: BLE001 - no sizing without broker truth
-            logger.warning("account snapshot unavailable: %s", exc)
+            logger.warning("account snapshot unavailable [%s]: %s", ACCOUNT_UNAVAILABLE, exc)
             await self._recover_connection()
             return None
         accepted = tuple(
@@ -709,12 +749,25 @@ def _decision_symbol(shadow: ShadowRunSession, decision: Decision) -> str:
     raise LookupError("decision does not belong to a session candidate")
 
 
+def bars_error_reason(exc: BaseException) -> str:
+    """The data-error reason for a failed bar request."""
+    if isinstance(exc, MarketDataQualityError):
+        return BARS_FAULT_REASONS[exc.fault]
+    return BARS_ERROR
+
+
 __all__ = [
+    "ACCOUNT_UNAVAILABLE",
+    "BARS_ERROR",
+    "BARS_FAULT_REASONS",
+    "DATA_ERROR_REASONS",
     "DEFAULT_REFRESH_INTERVAL",
     "LATE_POLLS_SKIPPED",
+    "LIQUIDITY_UNAVAILABLE",
     "MIN_PASS_BUDGET",
     "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
+    "QUOTE_UNAVAILABLE",
     "CandidateRefresh",
     "ContractLoader",
     "EntryGate",
@@ -722,6 +775,7 @@ __all__ = [
     "SessionAborted",
     "SessionReport",
     "ShadowSessionRunner",
+    "bars_error_reason",
     "ensure_orb_strategy",
     "ensure_strategy",
     "momo_strategy_spec",
