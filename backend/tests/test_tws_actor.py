@@ -539,3 +539,108 @@ def test_official_scanner_request_uses_corp_filter_and_orb_price_band() -> None:
     assert subscription.stockTypeFilter == "CORP"
     assert (subscription.abovePrice, subscription.belowPrice) == (10.0, 300.0)
     assert subscription.scanCode == "HOT_BY_VOLUME"
+
+
+# --- day-manager metadata and the probe-gated scans --------------------------------------
+
+
+class MetadataClient(FakeTWSClient):
+    """Daily bars with high/low and contract details with IBKR's classification."""
+
+    def reqHistoricalData(self, *args: object) -> None:
+        request_id = int(args[0])
+        for day, high, low in (("20261008", "102", "98.5"), ("20261009", "nan", "99")):
+            self.callbacks.historicalData(
+                request_id,
+                SimpleNamespace(date=day, close="100", volume="5000", high=high, low=low),
+            )
+        self.callbacks.historicalDataEnd(request_id)
+
+    def reqContractDetails(self, request_id: int, contract: object) -> None:
+        details = SimpleNamespace(
+            contract=SimpleNamespace(
+                conId=int(getattr(contract, "conId")),
+                symbol="NVDA",
+                currency="USD",
+                secType="STK",
+                primaryExchange="NASDAQ",
+            ),
+            minTick=0.01,
+            stockType="COMMON",
+            industry="  Technology ",
+            category="Semiconductors\n",
+        )
+        self.callbacks.contractDetails(request_id, details)
+        self.callbacks.contractDetailsEnd(request_id)
+
+
+@pytest.mark.asyncio
+async def test_daily_bars_keep_high_and_low_for_the_atr_and_drop_unusable_ones() -> None:
+    actor = TWSPaperActor(config(), client_factory=lambda callbacks: MetadataClient(callbacks))
+    await actor.connect()
+
+    batch = await actor.daily_trade_bars(101)
+
+    assert [(bar.high, bar.low) for bar in batch.bars] == [
+        (Decimal("102"), Decimal("98.5")),
+        (None, Decimal("99")),
+    ]
+    assert batch.bars[0].close == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_contract_details_carry_industry_and_category_as_plain_text() -> None:
+    actor = TWSPaperActor(config(), client_factory=lambda callbacks: MetadataClient(callbacks))
+    await actor.connect()
+    plain = TWSPaperActor(config(), client_factory=lambda callbacks: FakeTWSClient(callbacks))
+    await plain.connect()
+
+    details = await actor.contract_details(4815747)
+    without = await plain.contract_details(101)
+
+    assert (details.industry, details.category) == ("Technology", "Semiconductors")
+    # Details without the fields stay valid, with the facts unknown.
+    assert (without.industry, without.category) == ("", "")
+
+
+def test_gap_scans_and_scanner_fields_stay_off_until_the_probe_proves_them() -> None:
+    from trading.market import tws_actor
+
+    assert tws_actor.SCREENER_SCAN_CODES == {"HOT_BY_VOLUME", "TOP_PERC_GAIN", "MOST_ACTIVE"}
+    assert tws_actor.CANDIDATE_GAP_SCAN_CODES == ("HIGH_OPEN_GAP", "TOP_OPEN_PERC_GAIN")
+    assert tws_actor.PROVEN_GAP_SCAN_CODES == frozenset()
+    assert tws_actor.PROVEN_SCANNER_FIELDS == {}
+    assert not tws_actor.screener_scan_allowed("HIGH_OPEN_GAP")
+    assert all(tws_actor.screener_scan_allowed(code) for code in tws_actor.SCREENER_SCAN_CODES)
+
+
+@pytest.mark.asyncio
+async def test_an_unproven_gap_scan_is_refused_before_any_request() -> None:
+    client: FakeTWSClient | None = None
+
+    def factory(callbacks):
+        nonlocal client
+        client = FakeTWSClient(callbacks)
+        return client
+
+    actor = TWSPaperActor(config(), client_factory=factory)
+    await actor.connect()
+
+    with pytest.raises(TWSRequestError, match="not allowlisted"):
+        await actor.screener_scan("HIGH_OPEN_GAP")
+    assert client is not None and client.scanner_calls == []
+
+
+def test_proven_fields_apply_to_proven_gap_scans_and_never_to_ranking_scans(monkeypatch) -> None:
+    from trading.market import tws_actor
+
+    monkeypatch.setattr(tws_actor, "PROVEN_GAP_SCAN_CODES", frozenset({"HIGH_OPEN_GAP"}))
+    monkeypatch.setattr(tws_actor, "PROVEN_SCANNER_FIELDS", {"aboveVolume": 1_000_000.0, "bogus": 1.0})
+
+    gap = tws_actor._official_screener_scan_factory("HIGH_OPEN_GAP", 50)
+    ranking = tws_actor._official_screener_scan_factory("HOT_BY_VOLUME", 50)
+
+    assert tws_actor.screener_scan_allowed("HIGH_OPEN_GAP")
+    assert gap.aboveVolume == 1_000_000.0 and not hasattr(gap, "bogus")
+    assert ranking.aboveVolume != 1_000_000.0
+    assert (ranking.abovePrice, ranking.belowPrice, ranking.stockTypeFilter) == (10.0, 300.0, "CORP")

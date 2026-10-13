@@ -126,7 +126,11 @@ class IBKRScannerResult:
 
 @dataclass(frozen=True)
 class IBKRContractDetails:
-    """Qualified contract facts needed before a scanner row becomes a candidate."""
+    """Qualified contract facts needed before a scanner row becomes a candidate.
+
+    ``industry`` and ``category`` are IBKR's classification text, kept as
+    metadata for the day manager; empty when TWS did not report them.
+    """
 
     con_id: int
     symbol: str
@@ -135,6 +139,8 @@ class IBKRContractDetails:
     stock_type: str
     primary_exchange: str
     min_tick: Decimal
+    industry: str = ""
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -196,12 +202,18 @@ class BarBatch:
 
 @dataclass(frozen=True)
 class IBKRDailyBar:
-    """One regular-session daily TRADES bar; ``volume`` is in the API's raw unit."""
+    """One regular-session daily TRADES bar; ``volume`` is in the API's raw unit.
+
+    ``high`` and ``low`` feed the daily ATR only; a bar without them leaves
+    the ATR unknown and never affects qualification.
+    """
 
     con_id: int
     session_date: date
     close: Decimal
     volume: Decimal
+    high: Decimal | None = None
+    low: Decimal | None = None
 
 
 @dataclass(frozen=True)

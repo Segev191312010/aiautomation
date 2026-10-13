@@ -9,6 +9,13 @@ with that one client ID, so each holds ``client-<id>.lock`` beside the
 database for its whole run and a second one exits with a clear message
 instead of fighting over the TWS connection. Outside the sweep window the
 screener loop also runs the daily snapshot retention job.
+
+Each cycle: sweep (the hot-35 ranking group first, then the quote-only day
+universe and held symbols), then, in the idle rest of the interval, admit
+new scan names to the day universe; admission stops
+``ADMISSION_MARGIN_SECONDS`` before the next sweep is due, so it never
+delays one. The session's first sweep also re-checks the prior closes that
+the evening qualification stored (splits overnight).
 """
 from __future__ import annotations
 
@@ -24,15 +31,27 @@ import time as monotonic_time
 from typing import Protocol
 
 from trading.contracts import ShadowRuntimeConfig
+from trading.market.day_universe import (
+    ADMISSION_MARGIN_SECONDS,
+    AdmissionReport,
+    AdmissionSource,
+    admit_scan_names,
+    scan_sightings,
+)
 from trading.market.screener import (
     ContextETFs,
+    PriorCloseRecheck,
     ScanMerge,
     ScanSource,
     ScreenerError,
     SnapshotSource,
     SweepResult,
+    recheck_prior_closes,
+    run_scans,
     run_sweep,
+    universe_con_ids,
 )
+from trading.market import tws_actor as tws_actor_module
 from trading.market.retention import compact_snapshots, next_retention_at, retention_day
 from trading.market.tws_actor import (
     TWSActorConfig,
@@ -73,6 +92,8 @@ CONTRACT_DETAILS_MIN_INTERVAL_SECONDS = 0.05
 # Historical-data requests are paced at one per second.
 DAILY_HISTORY_MIN_INTERVAL_SECONDS = 1.0
 MIN_SWEEP_PAUSE_SECONDS = 1.0
+# `screener run --once` admits day-universe names for at most this long.
+ONCE_ADMISSION_SECONDS = 60.0
 CLIENT_LOCK_TEMPLATE = "client-{client_id}.lock"
 _LOCK_FILE_MODE = 0o600
 
@@ -80,7 +101,7 @@ Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
 
 
-class ScreenerActor(SymbolResolver, SnapshotSource, ScanSource, Protocol):
+class ScreenerActor(SymbolResolver, SnapshotSource, ScanSource, AdmissionSource, Protocol):
     """The market-data surface of the TWS actor the screener depends on."""
 
     @property
@@ -272,6 +293,71 @@ def _scan_merge(actor: ScreenerActor, pacer: RequestPacer, *, enabled: bool) -> 
     )
 
 
+def day_universe_scan_codes() -> tuple[str, ...]:
+    """Day-universe-only scans: the gap codes the probe has proven (none yet)."""
+    return tuple(sorted(tws_actor_module.PROVEN_GAP_SCAN_CODES))
+
+
+async def admit_day_universe(
+    actor: ScreenerActor,
+    sweep: SweepResult,
+    *,
+    session_date: date,
+    context_etfs: ContextETFs,
+    history_pacer: RequestPacer,
+    details_pacer: RequestPacer,
+    clock: Clock,
+    monotonic: Callable[[], float],
+    deadline: float | None,
+) -> AdmissionReport:
+    """Admit the sweep's scan names (plus any proven gap scan) to the day universe.
+
+    The gap scans run here, after the sweep was persisted, so they never
+    touch the hot-35 ranking group or its timing.
+    """
+    scans = dict(sweep.scans)
+    extra_codes = [code for code in day_universe_scan_codes() if code not in scans]
+    if extra_codes:
+        scans.update(await run_scans(actor, extra_codes))
+    exclude = await universe_con_ids() | context_etfs.con_ids
+    report = await admit_scan_names(
+        actor,
+        session_date=session_date,
+        sightings=scan_sightings(scans, exclude=exclude),
+        volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
+        history_pacer=history_pacer,
+        details_pacer=details_pacer,
+        clock=clock,
+        monotonic=monotonic,
+        deadline=deadline,
+    )
+    if report.admitted or report.rejected or report.failed:
+        logger.info(report.summary())
+    return report
+
+
+async def recheck_session_prior_closes(
+    actor: ScreenerActor,
+    sweep: SweepResult,
+    *,
+    session_date: date,
+    history_pacer: RequestPacer,
+    clock: Clock,
+) -> PriorCloseRecheck:
+    report = await recheck_prior_closes(
+        actor,
+        session_date=session_date,
+        payload=sweep.payload,
+        volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
+        pacer=history_pacer,
+        clock=clock,
+    )
+    if report.checked:
+        log = logger.warning if report.still_different else logger.info
+        log(report.summary())
+    return report
+
+
 async def qualify_session(
     session_date: date,
     *,
@@ -298,7 +384,7 @@ async def run_screener_once(
     history_pacer: RequestPacer | None = None,
     include_scans: bool = True,
 ) -> tuple[QualificationReport, SweepResult]:
-    """Qualify (resumably) and sweep the current session once."""
+    """Qualify (resumably), sweep the current session once, then admit day-universe names."""
     session_date = screener_session_date(clock())
     pacer = history_pacer or RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
     config = screener_actor_config(runtime_config)
@@ -307,13 +393,27 @@ async def run_screener_once(
         await connect_actor(actor)
         try:
             qualification = await _qualify(actor, session_date, clock=clock, pacer=pacer)
+            context_etfs = ContextETFs(actor, clock=clock)
             sweep = await run_sweep(
                 actor,
                 session_date=session_date,
                 clock=clock,
                 scan_merge=_scan_merge(actor, pacer, enabled=include_scans),
-                context_etfs=ContextETFs(actor, clock=clock),
+                context_etfs=context_etfs,
+                day_universe=include_scans,
             )
+            if include_scans:
+                await admit_day_universe(
+                    actor,
+                    sweep,
+                    session_date=session_date,
+                    context_etfs=context_etfs,
+                    history_pacer=RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS),
+                    details_pacer=RequestPacer(CONTRACT_DETAILS_MIN_INTERVAL_SECONDS),
+                    clock=clock,
+                    monotonic=monotonic_time.monotonic,
+                    deadline=monotonic_time.monotonic() + ONCE_ADMISSION_SECONDS,
+                )
             return qualification, sweep
         finally:
             await actor.disconnect()
@@ -382,10 +482,15 @@ async def _screener_loop(
     retention: bool,
 ) -> int:
     history_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
+    # Admission paces its own history requests: the hot-35's scan additions
+    # keep their pacer, and so their request timing, exactly as before.
+    admission_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
+    details_pacer = RequestPacer(CONTRACT_DETAILS_MIN_INTERVAL_SECONDS)
     scan_merge = _scan_merge(actor, history_pacer, enabled=include_scans)
     # conIds are stable across reconnects, so the ETFs resolve once per process.
     context_etfs = ContextETFs(actor, clock=clock)
     qualified_dates: set[date] = set()
+    rechecked_dates: set[date] = set()
     retained_for: date | None = None
     failures = 0
     sweeps = 0
@@ -425,14 +530,41 @@ async def _screener_loop(
                         report.qualified,
                         len(report.errors),
                     )
-                await run_sweep(
+                # Day-universe quotes and admission share the interval's idle
+                # time and both stop before the next sweep is due.
+                next_sweep_deadline = started + interval_seconds - ADMISSION_MARGIN_SECONDS
+                sweep = await run_sweep(
                     actor,
                     session_date=session_date,
                     clock=clock,
                     scan_merge=scan_merge,
                     context_etfs=context_etfs,
+                    day_universe=include_scans,
+                    day_universe_deadline=next_sweep_deadline,
                 )
                 sweeps += 1
+                if session_date not in rechecked_dates:
+                    await recheck_session_prior_closes(
+                        actor,
+                        sweep,
+                        session_date=session_date,
+                        history_pacer=history_pacer,
+                        clock=clock,
+                    )
+                    rechecked_dates.add(session_date)
+                if include_scans:
+                    # The idle rest of the interval; never past the next sweep.
+                    await admit_day_universe(
+                        actor,
+                        sweep,
+                        session_date=session_date,
+                        context_etfs=context_etfs,
+                        history_pacer=admission_pacer,
+                        details_pacer=details_pacer,
+                        clock=clock,
+                        monotonic=monotonic,
+                        deadline=next_sweep_deadline,
+                    )
                 if max_sweeps is not None and sweeps >= max_sweeps:
                     break
             except asyncio.CancelledError:

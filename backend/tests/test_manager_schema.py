@@ -1,10 +1,10 @@
-"""The day-manager tables: migration 13 (formed setups) and the unregistered drafts.
+"""The day-manager tables: migrations 13 and 15, and the unregistered phase-2 draft.
 
-Migration 13 holds only ``autotrader_manager_setups``. The other tables are
-drafts (phase 1: migration 15, phase 2: migration 16) that nothing applies
-yet; their constraints and triggers are checked here on scratch databases
-built from migration 13 plus the drafts, so the design is kept until it is
-registered.
+Migration 13 holds only ``autotrader_manager_setups``; migration 15 (phase 1)
+the day universe, the contract facts and the signal outcomes. Phase 2's
+tables are a draft (migration 16) that nothing applies yet; their
+constraints and triggers are checked here on scratch databases built from
+every migration plus the draft, so the design is kept until it is registered.
 """
 from __future__ import annotations
 
@@ -22,10 +22,11 @@ from trading.contracts import FixedUniverse, RuleCondition, StrategySpec
 from trading.operations.db_admin import run_migrate
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.storage.manager_schema import (
-    DRAFT_PHASE1_DDL,
-    DRAFT_PHASE1_TABLES,
     DRAFT_PHASE2_DDL,
     DRAFT_PHASE2_TABLES,
+    MANAGER_PHASE1_SCHEMA,
+    MANAGER_PHASE1_TABLES,
+    MANAGER_SETUPS_SCHEMA,
     MANAGER_TABLES,
 )
 from trading.storage.migrations import MIGRATIONS, inspect_schema
@@ -45,11 +46,17 @@ REGISTERED_TRIGGERS = {
     "autotrader_manager_setups_coherent",
     "autotrader_manager_setups_no_update",
     "autotrader_manager_setups_no_delete",
-}
-REGISTERED_INDEXES = {"idx_autotrader_manager_setups_session"}
-DRAFT_TRIGGERS = {
     "autotrader_manager_day_universe_identity_immutable",
     "autotrader_manager_day_universe_last_seen_monotonic",
+    "autotrader_manager_signal_outcomes_no_update",
+    "autotrader_manager_signal_outcomes_no_delete",
+}
+REGISTERED_INDEXES = {
+    "idx_autotrader_manager_setups_session",
+    "idx_autotrader_manager_day_universe_rank",
+    "idx_autotrader_manager_signal_outcomes_model",
+}
+DRAFT_TRIGGERS = {
     "autotrader_manager_plans_no_update",
     "autotrader_manager_plans_no_delete",
     "autotrader_manager_verdicts_no_update",
@@ -62,14 +69,10 @@ DRAFT_TRIGGERS = {
     "autotrader_manager_spend_identity_immutable",
     "autotrader_manager_spend_monotonic",
     "autotrader_manager_spend_no_delete",
-    "autotrader_manager_signal_outcomes_no_update",
-    "autotrader_manager_signal_outcomes_no_delete",
 }
 DRAFT_INDEXES = {
-    "idx_autotrader_manager_day_universe_rank",
     "idx_autotrader_manager_plans_session",
     "idx_autotrader_manager_verdicts_plan",
-    "idx_autotrader_manager_signal_outcomes_model",
 }
 
 
@@ -87,14 +90,14 @@ def _objects(connection: sqlite3.Connection) -> dict[str, set[str]]:
 
 
 def _apply_drafts(connection: sqlite3.Connection) -> None:
-    """Phase 1 then phase 2, in the order they will be registered (15, 16)."""
-    for statement in (*DRAFT_PHASE1_DDL, *DRAFT_PHASE2_DDL):
+    """Phase 2 on top of every registered migration (it will be 16)."""
+    for statement in DRAFT_PHASE2_DDL:
         connection.execute(statement)
 
 
 @pytest.fixture
 def db(tmp_path) -> Iterator[sqlite3.Connection]:
-    """A scratch database: every migration, the drafts, one MOMO run with BF B."""
+    """A scratch database: every migration, the draft, one MOMO run with BF B."""
     path = migrate_database(tmp_path / "manager.db")
     # Autocommit: a refused statement is undone alone, never the rows before it.
     connection = sqlite3.connect(path, isolation_level=None)
@@ -208,36 +211,62 @@ def _rejects_row(db: sqlite3.Connection, table: str, row: dict[str, object]) -> 
 # --- the migration -------------------------------------------------------------------
 
 
-def test_migration_13_registers_only_the_formed_setups(tmp_path):
+def test_migrations_13_and_15_register_phase_0_and_phase_1(tmp_path):
     path = migrate_database(tmp_path / "registered.db")
     with sqlite3.connect(path) as connection:
         objects = _objects(connection)
 
     assert (MIGRATIONS[12].version, MIGRATIONS[12].name) == (13, "manager-setups")
-    assert objects["table"] == set(MANAGER_TABLES) == {"autotrader_manager_setups"}
+    assert MIGRATIONS[12].schema_payload == MANAGER_SETUPS_SCHEMA
+    assert (MIGRATIONS[14].version, MIGRATIONS[14].name) == (15, "manager-day-universe")
+    assert MIGRATIONS[14].schema_payload == MANAGER_PHASE1_SCHEMA
+    assert MANAGER_TABLES == ("autotrader_manager_setups",)
+    assert objects["table"] == {*MANAGER_TABLES, *MANAGER_PHASE1_TABLES}
     assert objects["trigger"] == REGISTERED_TRIGGERS
     assert REGISTERED_INDEXES <= objects["index"]
     assert objects["view"] == set()
 
 
-def test_the_drafts_are_applied_by_no_migration():
+def test_the_phase_2_draft_is_applied_by_no_migration():
     registered = [statement for migration in MIGRATIONS for statement in migration.schema_payload]
     registered_text = "\n".join(registered)
 
-    assert set(DRAFT_PHASE1_DDL).isdisjoint(registered)
     assert set(DRAFT_PHASE2_DDL).isdisjoint(registered)
-    for table in (*DRAFT_PHASE1_TABLES, *DRAFT_PHASE2_TABLES, "autotrader_manager_switch"):
+    for table in (*DRAFT_PHASE2_TABLES, "autotrader_manager_switch"):
         assert table not in registered_text, table
 
 
-def test_the_drafts_apply_on_top_of_migration_13_in_their_phase_order(db):
+def test_the_draft_applies_on_top_of_every_registered_migration(db):
     objects = _objects(db)
 
-    assert objects["table"] == {*MANAGER_TABLES, *DRAFT_PHASE1_TABLES, *DRAFT_PHASE2_TABLES}
+    assert objects["table"] == {*MANAGER_TABLES, *MANAGER_PHASE1_TABLES, *DRAFT_PHASE2_TABLES}
     assert objects["trigger"] == REGISTERED_TRIGGERS | DRAFT_TRIGGERS
     assert objects["index"] >= REGISTERED_INDEXES | DRAFT_INDEXES
     assert objects["view"] == {"autotrader_manager_switch"}
     assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_migration_15_on_a_version_14_database_keeps_its_data_and_backs_it_up(tmp_path):
+    path = database_at(tmp_path / "autotrader.db", 14)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO autotrader_universe VALUES ('watchlist', 'AAPL', 'NASDAQ', 'AAPL', 265598, 'NASDAQ', 'resolved', NULL, 't')"
+        )
+        tables = _objects(connection)["table"]
+    assert tables == set(MANAGER_TABLES)
+    after_close = datetime.combine(date(2026, 10, 13), time(19, 0), tzinfo=MARKET_TIMEZONE).astimezone(timezone.utc)
+
+    assert run_migrate(path, now=after_close, out=io.StringIO(), err=io.StringIO()) == 0
+
+    assert inspect_schema(path).current
+    [backup] = (tmp_path / "backups").iterdir()
+    assert inspect_schema(backup).applied_version == 14
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM autotrader_universe").fetchone() == (1,)
+        for table in MANAGER_PHASE1_TABLES:
+            assert connection.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_migration_13_on_a_version_12_database_keeps_its_data_and_backs_it_up(tmp_path):
@@ -482,9 +511,42 @@ def test_the_day_universe_tracks_each_name_without_rewriting_its_history(db):
         {"con_id": 2, "qualified": 0, "reason": None},  # a name left out says why
         {"con_id": 3, "best_rank": 0},
         {"con_id": 4, "last_seen": "2026-10-13T15:00:00+00:00"},  # before the first sighting
+        {"con_id": 6, "qualified": 0, "reason": "stock_type_ETF"},  # reasons are tokens
+        {"con_id": 7, "primary_exchange": ""},
     ):
         _rejects_row(db, "autotrader_manager_day_universe", {**row, **overrides})
     assert _insert(db, "autotrader_manager_day_universe", {**row, "con_id": 5, "qualified": 0, "reason": "not_common_stock"}) == 1
+    assert _insert(db, "autotrader_manager_day_universe", {**row, "con_id": 8, "primary_exchange": "NYSE"}) == 1
+
+
+# --- contract facts -----------------------------------------------------------------------
+
+
+def test_contract_facts_are_one_row_per_contract_and_name_their_source(db):
+    row = {
+        "con_id": 4931, "symbol": "BF B", "primary_exchange": "NYSE", "stock_type": "COMMON",
+        "industry": "Consumer, Non-cyclical", "category": "Beverages", "source": "watchlist",
+        "updated_at": TS,
+    }
+    _insert(db, "autotrader_manager_contract_info", row)
+    upsert = (
+        "ON CONFLICT(con_id) DO UPDATE SET industry = excluded.industry,"
+        " source = excluded.source, updated_at = excluded.updated_at"
+    )
+    assert _insert(db, "autotrader_manager_contract_info", {**row, "source": "day_universe", "updated_at": LATER}, upsert=upsert) == 1
+    db.commit()
+
+    assert db.execute("SELECT count(*), source FROM autotrader_manager_contract_info").fetchone() == (1, "day_universe")
+    for overrides in (
+        {"con_id": 0},
+        {"con_id": 2, "source": "assistant"},
+        {"con_id": 3, "industry": ""},
+        {"con_id": 4, "updated_at": "2026-10-13T15:50:00"},
+        {"con_id": 5, "symbol": ""},
+    ):
+        _rejects_row(db, "autotrader_manager_contract_info", {**row, **overrides})
+    unknown = {**row, "con_id": 6, "stock_type": None, "industry": None, "category": None}
+    assert _insert(db, "autotrader_manager_contract_info", unknown) == 1
 
 
 # --- simulated outcomes ---------------------------------------------------------------

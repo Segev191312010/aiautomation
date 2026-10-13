@@ -72,6 +72,9 @@ MIN_AVG_DOLLAR_VOLUME = Decimal("20000000")
 # for the session date.
 ERROR_REASON_PREFIX = "error: "
 PACING_BACKOFF_SECONDS = 15.0
+# The daily ATR stored beside each qualification (metadata for the manager).
+DAILY_ATR_PERIOD = 14
+DAILY_ATR_QUANTUM = Decimal("0.0001")
 
 # IBKR ``stockType`` per conId, recorded at resolution and read by qualification.
 STOCK_TYPES_FILENAME = "universe_stock_types.json"
@@ -273,6 +276,39 @@ class Resolution:
     used_fallback: bool = False
     # IBKR's normalized stockType for a resolved row ('' when not reported).
     stock_type: str | None = None
+    # IBKR's classification from the same contract details (metadata only).
+    facts: ContractFacts | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ContractFacts:
+    """IBKR's description of one contract, kept for the day manager.
+
+    Metadata only: nothing here decides qualification or ranking. Unknown
+    values are None (IBKR reports them as empty text).
+    """
+
+    con_id: int
+    symbol: str
+    primary_exchange: str | None
+    stock_type: str | None
+    industry: str | None
+    category: str | None
+
+    @classmethod
+    def from_details(cls, details: IBKRContractDetails, *, symbol: str) -> ContractFacts:
+        def text(value: str, limit: int) -> str | None:
+            cleaned = " ".join(value.split())[:limit]
+            return cleaned or None
+
+        return cls(
+            con_id=details.con_id,
+            symbol=symbol.strip()[:32],
+            primary_exchange=text(details.primary_exchange.upper(), 16),
+            stock_type=text(normalize_stock_type(details.stock_type), 64),
+            industry=text(details.industry, 128),
+            category=text(details.category, 128),
+        )
 
 
 def details_rejection(details: IBKRContractDetails, ibkr_symbol: str) -> str | None:
@@ -460,6 +496,7 @@ async def resolve_entry(
             ),
             used_fallback=attempt is None and hint is not None,
             stock_type=normalize_stock_type(details.stock_type),
+            facts=ContractFacts.from_details(details, symbol=entry.symbol),
         )
     return Resolution(row("unresolved", error="; ".join(failures)))
 
@@ -510,6 +547,11 @@ async def import_watchlist(
     }
     stock_type_cache().record(stock_types)
     removed = await replace_universe_source(source, rows)
+    facts = [resolution.facts for resolution in resolutions if resolution.facts is not None]
+    try:
+        await record_contract_facts(facts, source="watchlist", now=clock())
+    except Exception:  # noqa: BLE001 - metadata never undoes or fails an import
+        logger.exception("IBKR contract facts were not recorded; the import itself stands")
     non_common = tuple(
         (row.symbol, stock_type)
         for row in rows
@@ -587,6 +629,77 @@ async def replace_universe_source(source: str, rows: Sequence[UniverseRow]) -> t
                 (source, symbol),
             )
     return removed
+
+
+ContractFactsSource = Literal["watchlist", "day_universe"]
+
+# Known facts are never erased by a later answer that lacks them.
+_CONTRACT_FACTS_UPSERT = """
+INSERT INTO autotrader_manager_contract_info (
+    con_id, symbol, primary_exchange, stock_type, industry, category, source, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(con_id) DO UPDATE SET
+    symbol = excluded.symbol,
+    primary_exchange = COALESCE(excluded.primary_exchange, autotrader_manager_contract_info.primary_exchange),
+    stock_type = COALESCE(excluded.stock_type, autotrader_manager_contract_info.stock_type),
+    industry = COALESCE(excluded.industry, autotrader_manager_contract_info.industry),
+    category = COALESCE(excluded.category, autotrader_manager_contract_info.category),
+    source = excluded.source,
+    updated_at = excluded.updated_at
+"""
+
+
+async def record_contract_facts(
+    facts: Sequence[ContractFacts], *, source: ContractFactsSource, now: datetime
+) -> int:
+    """Upsert IBKR's facts per conId (one transaction); returns the rows written."""
+    rows = [item for item in facts if item.con_id > 0 and item.symbol]
+    if not rows:
+        return 0
+    stamp = _timestamp(now)
+    async with transaction() as db:
+        for item in rows:
+            await db.execute(
+                _CONTRACT_FACTS_UPSERT,
+                (
+                    item.con_id,
+                    item.symbol,
+                    item.primary_exchange,
+                    item.stock_type,
+                    item.industry,
+                    item.category,
+                    source,
+                    stamp,
+                ),
+            )
+    return len(rows)
+
+
+async def load_contract_facts(con_ids: Iterable[int] | None = None) -> dict[int, ContractFacts]:
+    """Stored facts by conId (all of them when ``con_ids`` is None)."""
+    query = (
+        "SELECT con_id, symbol, primary_exchange, stock_type, industry, category"
+        " FROM autotrader_manager_contract_info"
+    )
+    params: tuple[object, ...] = ()
+    if con_ids is not None:
+        wanted = sorted({int(con_id) for con_id in con_ids})
+        query += " WHERE con_id IN (SELECT value FROM json_each(?))"
+        params = (json.dumps(wanted),)
+    async with get_db() as db:
+        async with db.execute(query, params) as cursor:
+            raw_rows = await cursor.fetchall()
+    return {
+        int(str(raw[0])): ContractFacts(
+            con_id=int(str(raw[0])),
+            symbol=str(raw[1]),
+            primary_exchange=None if raw[2] is None else str(raw[2]),
+            stock_type=None if raw[3] is None else str(raw[3]),
+            industry=None if raw[4] is None else str(raw[4]),
+            category=None if raw[5] is None else str(raw[5]),
+        )
+        for raw in raw_rows
+    }
 
 
 def _universe_row(raw: Sequence[object]) -> UniverseRow:
@@ -685,6 +798,43 @@ def _window(batch: DailyBarBatch, *, session_date: date, lookback: int) -> list[
     return [bar.volume for bar in prior[-lookback:]]
 
 
+def daily_atr(
+    batch: DailyBarBatch, *, session_date: date, period: int = DAILY_ATR_PERIOD
+) -> Decimal | None:
+    """Wilder ATR(``period``) of the prior sessions' daily bars, or None.
+
+    Metadata for the day manager only: it never decides qualification. The
+    window is the last ``2 * period`` prior sessions (Wilder seeded on the
+    first ``period`` true ranges), so the value does not depend on how much
+    history IBKR returned. Unknown when any bar of the window lacks a usable
+    high/low or the history is shorter than ``period``.
+    """
+    if period < 1:
+        raise ValueError("period must be positive")
+    prior = sorted(
+        (bar for bar in batch.bars if bar.session_date < session_date),
+        key=lambda bar: bar.session_date,
+    )
+    window = prior[-2 * period :]
+    if len(window) < period:
+        return None
+    true_ranges: list[Decimal] = []
+    previous_close: Decimal | None = None
+    for bar in window:
+        high, low = bar.high, bar.low
+        if high is None or low is None or high < low or not bar.close.is_finite():
+            return None
+        if previous_close is None:
+            true_ranges.append(high - low)
+        else:
+            true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+        previous_close = bar.close
+    average = sum(true_ranges[:period], Decimal("0")) / Decimal(period)
+    for true_range in true_ranges[period:]:
+        average = (average * Decimal(period - 1) + true_range) / Decimal(period)
+    return average.quantize(DAILY_ATR_QUANTUM, rounding=ROUND_HALF_UP)
+
+
 def evaluate_daily_history(
     batch: DailyBarBatch,
     *,
@@ -703,6 +853,7 @@ def evaluate_daily_history(
         prior_close: Decimal | None = None,
         avg_shares: Decimal | None = None,
         avg_dollars: Decimal | None = None,
+        atr: Decimal | None = None,
     ) -> DailyQualification:
         return DailyQualification(
             session_date=session_date,
@@ -711,7 +862,7 @@ def evaluate_daily_history(
             prior_close=prior_close,
             avg_daily_volume_shares=avg_shares,
             avg_dollar_volume=avg_dollars,
-            daily_atr=None,
+            daily_atr=atr,
             qualified=reason is None,
             reason=reason,
             observed_at=observed_at,
@@ -745,6 +896,7 @@ def evaluate_daily_history(
         prior_close=profile.reference_price,
         avg_shares=avg_shares.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
         avg_dollars=avg_dollars.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+        atr=daily_atr(batch, session_date=session_date),
     )
 
 
@@ -861,6 +1013,39 @@ async def qualify_contract(
     raises instead of recording a failure, because neither says anything
     about the contract itself.
     """
+    result = await request_qualification(
+        history,
+        con_id=con_id,
+        symbol=symbol,
+        session_date=session_date,
+        volume_multiplier=volume_multiplier,
+        clock=clock,
+        pacer=pacer,
+        stock_type=stock_type,
+    )
+    await upsert_daily(result)
+    if result.transient:
+        logger.warning("qualification of %s failed: %s", symbol, result.reason)
+    return result
+
+
+async def request_qualification(
+    history: DailyHistorySource,
+    *,
+    con_id: int,
+    symbol: str,
+    session_date: date,
+    volume_multiplier: Decimal,
+    clock: Clock,
+    pacer: RequestPacer,
+    stock_type: str | None = None,
+) -> DailyQualification:
+    """``qualify_contract`` without persisting: the outcome is the caller's to keep.
+
+    The day universe keeps its own outcomes, so nothing it qualifies ever
+    reaches ``autotrader_universe_daily`` (the hot-35's scan additions and
+    the strategies read that table).
+    """
     type_rejection = stock_type_rejection(stock_type)
     if type_rejection is not None:
         rejected = DailyQualification(
@@ -875,7 +1060,6 @@ async def qualify_contract(
             reason=type_rejection,
             observed_at=clock(),
         )
-        await upsert_daily(rejected)
         return rejected
     await pacer.wait()
     try:
@@ -910,9 +1094,6 @@ async def qualify_contract(
             volume_multiplier=volume_multiplier,
             observed_at=clock(),
         )
-    await upsert_daily(result)
-    if result.transient:
-        logger.warning("qualification of %s failed: %s", symbol, result.reason)
     return result
 
 
@@ -980,6 +1161,7 @@ async def qualify_universe(
 
 
 __all__ = [
+    "DAILY_ATR_PERIOD",
     "ERROR_REASON_PREFIX",
     "EXCHANGE_HINTS",
     "MAX_PRICE",
@@ -991,6 +1173,8 @@ __all__ = [
     "STOCK_TYPES_SCHEMA",
     "STOCK_TYPE_REASON_PREFIX",
     "WATCHLIST_SOURCE",
+    "ContractFacts",
+    "ContractFactsSource",
     "DailyQualification",
     "ImportReport",
     "ParsedWatchlist",
@@ -1001,17 +1185,21 @@ __all__ = [
     "UniverseRow",
     "WatchlistEntry",
     "WatchlistFormatError",
+    "daily_atr",
     "details_rejection",
     "entry_rejection",
     "evaluate_daily_history",
     "import_watchlist",
+    "load_contract_facts",
     "load_daily",
     "load_universe",
     "normalize_stock_type",
     "parse_watchlist",
     "qualify_contract",
     "qualify_universe",
+    "record_contract_facts",
     "replace_universe_source",
+    "request_qualification",
     "resolve_entry",
     "resolved_instruments",
     "runtime_directory",

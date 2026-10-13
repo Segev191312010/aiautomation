@@ -61,12 +61,14 @@ from trading.research.recorder import (
 )
 from trading.research.replay import (
     ENTRY_TTL,
+    EXTENDED_BAR_STRATEGIES,
     REGISTERED_STRATEGIES,
     RULES_VERSIONS,
     STRATEGY_FACTORIES,
     UNREPLAYABLE,
     UnreplayableStrategyError,
     flatten_at,
+    no_extended_bars,
     replay_strategy,
     result_payload,
     run_replay_cli,
@@ -631,25 +633,32 @@ def test_replay_simulates_a_vwap_pb_setup_like_any_other(tmp_path):
     }
 
 
-def test_gap_go_is_reported_as_not_replayable_never_faked(tmp_path):
+def test_gap_go_replays_only_extended_days_and_never_fakes_without_them(tmp_path):
     store = _capture_store(tmp_path)
 
-    with pytest.raises(UnreplayableStrategyError, match="needs extended bars"):
-        replay_strategy("gap", store)
-    # The registered name alone decides: no evaluator can stand in for it.
+    result = replay_strategy("gap", store)
+
+    # Regular-hours days alone feed nothing: no pre-market, so no GAP sample.
+    assert (result.sessions, result.trades, result.symbol_days, result.outcomes) == ((), (), 0, {})
+    assert result.metadata["bars"].startswith("extended hours")
+    assert UNREPLAYABLE == {}
+    assert no_extended_bars("gap").reason == "needs_extended_bars"
     with pytest.raises(UnreplayableStrategyError):
-        replay_strategy("gap", store, strategy=ORBStrategy())
-    assert UNREPLAYABLE["gap"].reason == "needs_extended_bars"
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setitem(UNREPLAYABLE, "gap", no_extended_bars("gap"))
+            replay_strategy("gap", store, strategy=ORBStrategy())
 
 
 def test_replay_covers_every_registered_live_strategy():
     from trading.operations import shadow_service
 
     assert REGISTERED_STRATEGIES == tuple(shadow_service.STRATEGIES)
-    assert set(STRATEGY_FACTORIES) | set(UNREPLAYABLE) == set(shadow_service.STRATEGIES)
-    assert not set(STRATEGY_FACTORIES) & set(UNREPLAYABLE)
+    replayable = {**STRATEGY_FACTORIES, **EXTENDED_BAR_STRATEGIES}
+    assert set(replayable) | set(UNREPLAYABLE) == set(shadow_service.STRATEGIES)
+    assert not set(STRATEGY_FACTORIES) & set(EXTENDED_BAR_STRATEGIES)
+    assert not set(replayable) & set(UNREPLAYABLE)
     assert set(RULES_VERSIONS) == set(shadow_service.STRATEGIES)
-    for name, factory in STRATEGY_FACTORIES.items():
+    for name, factory in replayable.items():
         # The replay runs the live evaluator class itself, never a copy.
         assert factory is shadow_service.STRATEGIES[name][0]
 

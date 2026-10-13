@@ -1,4 +1,4 @@
-"""The AI day manager's tables: one registered, the rest drafts.
+"""The AI day manager's tables: phases 0 and 1 registered, phase 2 a draft.
 
 Only what a phase uses is registered as a migration, because a migration
 is frozen once applied (``tests/test_migration_freeze.py``) and an unsettled
@@ -6,14 +6,15 @@ design must not be:
 
 * migration 13 (phase 0): ``MANAGER_SETUPS_SCHEMA``, the formed setups the
   shadow pipeline writes;
-* ``DRAFT_PHASE1_DDL``, registered as migration 15 when phase 1 lands:
-  day_universe, signal_outcomes (14 is the execution engine's ledger);
+* migration 15 (phase 1): ``MANAGER_PHASE1_SCHEMA``, the day universe, the
+  IBKR contract facts the manager reads and the signal outcomes (14 is the
+  execution engine's ledger);
 * ``DRAFT_PHASE2_DDL``, registered as migration 16 when phase 2 lands:
   plans, verdicts, events with the switch view, day_mode, spend.
 
-The drafts are applied by nothing but their tests (on scratch databases),
-which keep their constraints and triggers checked until they are
-registered. Conventions, each enforced by the schema itself:
+The draft is applied by nothing but its tests (on scratch databases), which
+keep its constraints and triggers checked until it is registered.
+Conventions, each enforced by the schema itself:
 
 * timestamps are ISO-8601 UTC text exactly as Python writes them
   (``...+00:00``), so text order is time order;
@@ -28,6 +29,9 @@ Tables (all ``autotrader_manager_*``):
                      pipeline after its decision; the evidence base.
 ``day_universe``     the manager's own per-session names (never part of the
                      hot-35 ranking or its breadth); a working set.
+``contract_info``    IBKR's stock type, industry and category per conId, kept
+                     from contract details the data layer already requests
+                     (watchlist import, day-universe admission).
 ``plans``            every day-plan attempt, valid or not, with its version,
                      prompt, model, cost and outcome token.
 ``verdicts``         the managed reviewer's {step, note} per setup. No foreign
@@ -165,6 +169,8 @@ MANAGER_DAY_UNIVERSE_SCHEMA = (
         session_date TEXT NOT NULL CHECK{_day("session_date")},
         con_id INTEGER NOT NULL CHECK(con_id > 0),
         symbol TEXT NOT NULL CHECK(length(symbol) BETWEEN 1 AND 32),
+        primary_exchange TEXT NULL
+            CHECK(primary_exchange IS NULL OR length(primary_exchange) BETWEEN 1 AND 16),
         first_seen TEXT NOT NULL CHECK{_utc("first_seen")},
         last_seen TEXT NOT NULL CHECK{_utc("last_seen")},
         sources_json TEXT NOT NULL CHECK({_json("sources_json", "array")}
@@ -188,6 +194,20 @@ MANAGER_DAY_UNIVERSE_SCHEMA = (
     BEFORE UPDATE OF last_seen ON autotrader_manager_day_universe
     WHEN julianday(NEW.last_seen) < julianday(OLD.last_seen)
     BEGIN SELECT RAISE(ABORT, 'day-universe last_seen never moves back'); END""",
+)
+
+MANAGER_CONTRACT_INFO_SCHEMA = (
+    f"""CREATE TABLE IF NOT EXISTS autotrader_manager_contract_info (
+        con_id INTEGER PRIMARY KEY CHECK(con_id > 0),
+        symbol TEXT NOT NULL CHECK(length(symbol) BETWEEN 1 AND 32),
+        primary_exchange TEXT NULL
+            CHECK(primary_exchange IS NULL OR length(primary_exchange) BETWEEN 1 AND 16),
+        stock_type TEXT NULL CHECK(stock_type IS NULL OR length(stock_type) <= 64),
+        industry TEXT NULL CHECK(industry IS NULL OR length(industry) BETWEEN 1 AND 128),
+        category TEXT NULL CHECK(category IS NULL OR length(category) BETWEEN 1 AND 128),
+        source TEXT NOT NULL CHECK(source IN ('watchlist', 'day_universe')),
+        updated_at TEXT NOT NULL CHECK{_utc("updated_at")}
+    )""",
 )
 
 MANAGER_PLANS_SCHEMA = (
@@ -326,12 +346,21 @@ MANAGER_OUTCOMES_SCHEMA = (
 
 # Registered: migration 13 (phase 0). Frozen once applied.
 MANAGER_TABLES = ("autotrader_manager_setups",)
+# Registered: migration 15 (phase 1). Frozen once applied.
+MANAGER_PHASE1_SCHEMA = (
+    *MANAGER_DAY_UNIVERSE_SCHEMA,
+    *MANAGER_CONTRACT_INFO_SCHEMA,
+    *MANAGER_OUTCOMES_SCHEMA,
+)
+MANAGER_PHASE1_TABLES = (
+    "autotrader_manager_day_universe",
+    "autotrader_manager_contract_info",
+    "autotrader_manager_signal_outcomes",
+)
 
-# DRAFTS: registered by nothing; only their tests apply them, on scratch
-# databases. Each becomes its own migration, unchanged or reviewed, in the
+# DRAFT: registered by nothing; only its tests apply it, on scratch
+# databases. It becomes its own migration, unchanged or reviewed, in the
 # commit that lands its phase; until then it may still change freely.
-DRAFT_PHASE1_DDL = (*MANAGER_DAY_UNIVERSE_SCHEMA, *MANAGER_OUTCOMES_SCHEMA)  # -> migration 15
-DRAFT_PHASE1_TABLES = ("autotrader_manager_day_universe", "autotrader_manager_signal_outcomes")
 DRAFT_PHASE2_DDL = (  # -> migration 16; plans before verdicts, events before day_mode
     *MANAGER_PLANS_SCHEMA,
     *MANAGER_VERDICTS_SCHEMA,
@@ -348,10 +377,10 @@ DRAFT_PHASE2_TABLES = (
 
 
 __all__ = [
-    "DRAFT_PHASE1_DDL",
-    "DRAFT_PHASE1_TABLES",
     "DRAFT_PHASE2_DDL",
     "DRAFT_PHASE2_TABLES",
+    "MANAGER_PHASE1_SCHEMA",
+    "MANAGER_PHASE1_TABLES",
     "MANAGER_SETUPS_SCHEMA",
     "MANAGER_TABLES",
 ]

@@ -39,6 +39,7 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     # Not yet applied in production (deploy after review, after the close).
     13: ("manager-setups", "6eba0bc8eade14dfdf5c472ef73f1ca72a168598a5a9382911d7bb5452cb51da"),
     14: ("execution-engine-ledger", "01f8962c8d82e11d2617b6f0d4886e960e600c22abfb380ac71e8b6ee2fb7f8c"),
+    15: ("manager-day-universe", "0f5bbbec11e4198af10f2d5b15d4b2367a0fd8353ba7ccb9427896ae616fa41f"),
 }
 
 
