@@ -45,6 +45,11 @@ from trading.orchestration.pipeline import CandidateInput
 from trading.risk.portfolio import portfolio_from_account
 from trading.rules.orb import qualify_candidate
 from trading.scheduler.sessions import MarketSession
+from trading.sendable_identities import (
+    SENDABLE_IDENTITIES,
+    SENDABLE_SPEC_MISMATCH,
+    SendableIdentityError,
+)
 
 logger = logging.getLogger("autotrader.shadow.session")
 
@@ -164,7 +169,12 @@ def momo_strategy_spec() -> StrategySpec:
 
 
 async def ensure_strategy(*, owner_id: str, spec: StrategySpec) -> StrategyRecord:
-    """Return the owner's strategy named ``spec.name``, creating it in SHADOW."""
+    """Return the owner's strategy named ``spec.name``, creating it in SHADOW.
+
+    A sendable identity is reused only while its stored content hash is the
+    hash of the spec this code builds: the PAPER bridge sends by stored name
+    alone, so a record whose content differs must never collect decisions.
+    """
     from trading.storage.repository import (
         create_strategy,
         list_strategies,
@@ -178,7 +188,27 @@ async def ensure_strategy(*, owner_id: str, spec: StrategySpec) -> StrategyRecor
         and record.state in {StrategyState.SHADOW, StrategyState.PAPER}
     ]
     if existing:
-        return max(existing, key=lambda record: record.version)
+        reused = max(existing, key=lambda record: record.version)
+        # content_hash is the stored column; StrategyRecord has already
+        # checked it equals the fingerprint of the stored spec_json.
+        if spec.name in SENDABLE_IDENTITIES and reused.content_hash != spec.fingerprint():
+            logger.critical(
+                "%s: %s record %s v%d stores spec %s but this code builds %s; "
+                "refusing to reuse it",
+                SENDABLE_SPEC_MISMATCH,
+                spec.name,
+                reused.strategy_id,
+                reused.version,
+                reused.content_hash,
+                spec.fingerprint(),
+                stack_info=True,
+            )
+            raise SendableIdentityError(
+                SENDABLE_SPEC_MISMATCH,
+                f"{spec.name} record {reused.strategy_id} v{reused.version} does not "
+                "hold the spec this code builds",
+            )
+        return reused
     record = await create_strategy(spec=spec, owner_id=owner_id, actor=owner_id)
     for target in (StrategyState.BACKTESTING, StrategyState.SHADOW):
         record = await transition_strategy(

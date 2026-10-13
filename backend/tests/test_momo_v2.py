@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from tests.fakes.legacy_strategies import insert_legacy_shadow_strategy
 from trading.contracts import (
     AIReview,
     Candidate,
@@ -451,8 +452,9 @@ async def test_retryable_skips_stay_pending_in_the_leased_session_until_the_cuto
 
     monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "momo-v2.db"))
     await init_db()
-    # Yesterday's catalogue still holds MOMO_HOD_V1; V2 bootstraps its own record.
-    v1 = await ensure_strategy(
+    # Yesterday's catalogue still holds MOMO_HOD_V1 (written before the name
+    # guard, which now refuses it); V2 bootstraps its own record.
+    v1 = await insert_legacy_shadow_strategy(
         owner_id="owner-a", spec=momo_strategy_spec().model_copy(update={"name": "MOMO_HOD_V1"})
     )
     strategy = await ensure_strategy(owner_id="owner-a", spec=momo_strategy_spec())
