@@ -513,6 +513,7 @@ def test_data_error_reasons_and_market_data_faults_are_pinned():
         "request_failed",
         "receipt_in_future",
         "invalid",
+        "competing_login",
     }
     assert DATA_ERROR_REASONS == {
         "account_unavailable",
@@ -525,6 +526,7 @@ def test_data_error_reasons_and_market_data_faults_are_pinned():
         "bars_request_failed",
         "bars_receipt_in_future",
         "bars_invalid",
+        "bars_competing_login",
     }
     for fault in MARKET_DATA_FAULTS:
         assert bars_error_reason(MarketDataQualityError("refused", fault=fault)) == f"bars_{fault}"
@@ -574,6 +576,14 @@ def test_a_refused_request_keeps_ibkrs_own_report():
     elsewhere = "TWS error 165: Trading TWS session is connected from a different IP address"
     competing = _refusal(BarBatch(bars=(), pacing_failed=True, error=elsewhere), now=now)
     assert str(competing).endswith(f"({elsewhere})")
+    # Its own fault, never pacing, even from a batch an older actor flagged as pacing.
+    assert competing.fault == "competing_login"
+    assert bars_error_reason(competing) == "bars_competing_login"
+    flagged = _refusal(BarBatch(bars=(), competing_session=True), now=now)
+    assert (flagged.fault, str(flagged)) == (
+        "competing_login",
+        "IBKR login active elsewhere (phone/web) holds the market data",
+    )
     failed = _refusal(BarBatch(bars=(), error="TWS error 200: No security definition"), now=now)
     assert str(failed) == "IBKR market-data request failed (TWS error 200: No security definition)"
     closed = _refusal(BarBatch(bars=(), connected=False), now=now)

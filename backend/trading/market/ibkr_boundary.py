@@ -13,6 +13,7 @@ from decimal import Decimal
 from functools import lru_cache
 from hashlib import sha256
 import json
+import re
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -39,6 +40,10 @@ FAULT_DISCONNECTED = "disconnected"
 FAULT_REQUEST_FAILED = "request_failed"
 FAULT_RECEIPT_IN_FUTURE = "receipt_in_future"
 FAULT_INVALID = "invalid"
+# The owner's IBKR user is logged in elsewhere (phone app, web) and that
+# session holds the market data. Never pacing: waiting does not help, the
+# owner must log out there.
+FAULT_COMPETING_LOGIN = "competing_login"
 MARKET_DATA_FAULTS = frozenset(
     {
         FAULT_STALE,
@@ -47,8 +52,36 @@ MARKET_DATA_FAULTS = frozenset(
         FAULT_REQUEST_FAILED,
         FAULT_RECEIPT_IN_FUTURE,
         FAULT_INVALID,
+        FAULT_COMPETING_LOGIN,
     }
 )
+COMPETING_LOGIN_MESSAGE = "IBKR login active elsewhere (phone/web) holds the market data"
+
+# "No market data during competing live session": the owner's username is
+# logged in elsewhere (phone/web) and that session owns the data lines.
+COMPETING_SESSION_ERROR_CODE = 10197
+# Historical-data services report the same condition as free text, e.g.
+# "162: ... Trading TWS session is connected from a different IP address".
+_COMPETING_SESSION_TEXT_CODES = frozenset({162, 165})
+_COMPETING_SESSION_TEXT = "different ip address"
+_TWS_ERROR_REPORT = re.compile(r"^TWS error (-?\d+): (.*)$", re.DOTALL)
+
+
+def is_competing_session_error(code: int, message: str) -> bool:
+    """Whether a TWS error means another login session holds the market data."""
+    if code == COMPETING_SESSION_ERROR_CODE:
+        return True
+    return code in _COMPETING_SESSION_TEXT_CODES and _COMPETING_SESSION_TEXT in message.lower()
+
+
+def is_competing_session_report(report: str | None) -> bool:
+    """Recognize the actor's ``TWS error <code>: <message>`` text, e.g. in a bar batch."""
+    if not report:
+        return False
+    match = _TWS_ERROR_REPORT.match(report.strip())
+    if match is None:
+        return False
+    return is_competing_session_error(int(match.group(1)), match.group(2))
 
 
 class MarketDataBoundaryError(ValueError):
@@ -192,12 +225,17 @@ class IBKRTradeBar:
 
 @dataclass(frozen=True)
 class BarBatch:
-    """Data and transport health returned by the connection actor."""
+    """Data and transport health returned by the connection actor.
+
+    ``competing_session``: IBKR refused because the login is active elsewhere;
+    such a batch is never ``pacing_failed``.
+    """
 
     bars: tuple[IBKRTradeBar, ...]
     connected: bool = True
     pacing_failed: bool = False
     error: str | None = None
+    competing_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,6 +260,7 @@ class DailyBarBatch:
     connected: bool = True
     pacing_failed: bool = False
     error: str | None = None
+    competing_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -506,13 +545,17 @@ def _require_healthy_batch(batch: BarBatch | DailyBarBatch) -> None:
     """Transport health first: no bar of a failed request is ever validated.
 
     IBKR's own report is kept: several error codes count as pacing here, and
-    only its text tells a real pacing violation from another refusal.
+    only its text tells a real pacing violation from another refusal. A login
+    active elsewhere (10197, or 162/165 "different IP address") is its own
+    fault, checked before pacing, whatever flag a caller set.
     """
     report = f" ({batch.error})" if batch.error else ""
     if not batch.connected:
         raise MarketDataQualityError(
             "IBKR market-data connection is unavailable" + report, fault=FAULT_DISCONNECTED
         )
+    if batch.competing_session or is_competing_session_report(batch.error):
+        raise MarketDataQualityError(COMPETING_LOGIN_MESSAGE + report, fault=FAULT_COMPETING_LOGIN)
     if batch.pacing_failed:
         raise MarketDataQualityError(
             "IBKR market-data pacing limit blocked the request" + report, fault=FAULT_PACING

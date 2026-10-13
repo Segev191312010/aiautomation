@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
-import re
 import threading
 from typing import Any, Protocol
 
@@ -19,6 +18,7 @@ from trading.market.ibkr_boundary import (
     IBKRScannerResult,
     IBKRTradeBar,
     ScannerRequest,
+    is_competing_session_error,
     is_regular_session_bar,
 )
 from trading.market.snapshots import MarketSnapshot, MarketSnapshotError
@@ -26,6 +26,8 @@ from trading.contracts import AccountSnapshot, QuoteSnapshot, RawAccountPosition
 
 PAPER_TWS_HOST = "127.0.0.1"
 PAPER_TWS_PORT = 7497
+# Codes that may mean pacing. 162 and 165 also carry "different IP address"
+# (a login active elsewhere): that text is a competing login, never pacing.
 PACING_ERROR_CODES = frozenset({162, 165, 366, 420})
 # IBKR codes 2100-2199 are informational warnings (farm status, fractional-size
 # trimming) and may carry a request ID; they never fail the request.
@@ -46,13 +48,6 @@ REAL_TIME_MARKET_DATA = 1
 # The API exposes no line-count query; quotes here hold one line at a time.
 DEFAULT_MARKET_DATA_LINES = 100
 DAILY_HISTORY_DURATION = "2 M"
-# "No market data during competing live session": the owner's username is
-# logged in elsewhere (phone/web) and that session owns the data lines.
-COMPETING_SESSION_ERROR_CODE = 10197
-# Historical-data services report the same condition as free text.
-_COMPETING_SESSION_TEXT_CODES = frozenset({162, 165})
-_COMPETING_SESSION_TEXT = "different ip address"
-_TWS_ERROR_REPORT = re.compile(r"^TWS error (-?\d+): (.*)$", re.DOTALL)
 # Streaming tick types collected by market_snapshot (IBKR TickType ids).
 _TICK_BID = 1
 _TICK_ASK = 2
@@ -116,22 +111,6 @@ class TWSRequestError(TWSActorError):
 class TWSCompetingSessionError(TWSRequestError):
     """Market data is blocked because the IBKR login is active elsewhere."""
 
-
-def is_competing_session_error(code: int, message: str) -> bool:
-    """Whether a TWS error means another login session holds the market data."""
-    if code == COMPETING_SESSION_ERROR_CODE:
-        return True
-    return code in _COMPETING_SESSION_TEXT_CODES and _COMPETING_SESSION_TEXT in message.lower()
-
-
-def is_competing_session_report(report: str | None) -> bool:
-    """Recognize the actor's ``TWS error <code>: <message>`` text, e.g. in a bar batch."""
-    if not report:
-        return False
-    match = _TWS_ERROR_REPORT.match(report.strip())
-    if match is None:
-        return False
-    return is_competing_session_error(int(match.group(1)), match.group(2))
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,6 +543,16 @@ class TWSPaperActor:
         self._pending_account: _PendingAccount | None = None
         self._last_error: str | None = None
         self._callbacks_seen = 0
+        self._competing_session_listener: Callable[[str], None] | None = None
+
+    def set_competing_session_listener(self, listener: Callable[[str], None] | None) -> None:
+        """Called with TWS's report the moment any competing-login error arrives.
+
+        Runs on the API's reader thread, before any request fails, so a
+        process can say so at once even when the error ends up swallowed
+        (a global notice, a quote-only pass). A failing listener is ignored.
+        """
+        self._competing_session_listener = listener
 
     @property
     def connected(self) -> bool:
@@ -1499,6 +1488,13 @@ class TWSPaperActor:
         self._last_error = f"TWS error {code}: {message}"
         competing = is_competing_session_error(code, str(message))
         error_type = TWSCompetingSessionError if competing else TWSRequestError
+        # A login active elsewhere is never pacing, whatever its code.
+        pacing = code in PACING_ERROR_CODES and not competing
+        if competing and self._competing_session_listener is not None:
+            try:
+                self._competing_session_listener(self._last_error)
+            except Exception:  # noqa: BLE001 - a listener never breaks error routing
+                pass
         if request_id == -1:
             if competing:
                 # No stream can deliver data while another login holds it.
@@ -1523,8 +1519,9 @@ class TWSPaperActor:
                 BarBatch(
                     bars=(),
                     connected=self._connected,
-                    pacing_failed=code in PACING_ERROR_CODES,
+                    pacing_failed=pacing,
                     error=self._last_error,
+                    competing_session=competing,
                 ),
             )
         if pending_daily is not None:
@@ -1533,8 +1530,9 @@ class TWSPaperActor:
                 DailyBarBatch(
                     bars=(),
                     connected=self._connected,
-                    pacing_failed=code in PACING_ERROR_CODES,
+                    pacing_failed=pacing,
                     error=self._last_error,
+                    competing_session=competing,
                 ),
             )
         if pending_quote is not None:

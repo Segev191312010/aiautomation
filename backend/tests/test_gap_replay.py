@@ -274,14 +274,88 @@ def test_one_night_fits_the_recorders_window():
     from trading.operations import supervisor
 
     start, end = supervisor.RECORDER_WINDOW
+    assert recorder.RECORDER_WINDOW == supervisor.RECORDER_WINDOW
     window = (datetime.combine(SESSION, end) - datetime.combine(SESSION, start)).total_seconds()
     assert RECORDER_WINDOW_SECONDS == window
-    worst = nightly_budget_seconds(RECORDER_MAX_CONTRACTS, MAX_GAP_CANDIDATES, WATCHLIST_PLANNING_SIZE)
+    # Evening qualification is off (R6): extended bars + the capped RTH pass fit.
+    worst = nightly_budget_seconds(RECORDER_MAX_CONTRACTS, MAX_GAP_CANDIDATES, 0)
     assert worst + RECORDER_MARGIN_SECONDS <= RECORDER_WINDOW_SECONDS
     # The cap leaves room for the whole day universe beside a full watchlist.
     from trading.market.day_universe import DAY_UNIVERSE_MAX
 
     assert RECORDER_MAX_CONTRACTS >= 400 + DAY_UNIVERSE_MAX
+
+
+def test_evening_qualification_is_off_so_08_00_qualifies_as_deployed():
+    """R6: pinned off; switching it on is a reviewed change, not a default."""
+    from trading.market import universe
+    from trading.operations import screener_service
+
+    assert universe.EVENING_QUALIFICATION_ENABLED is False
+    assert recorder.EVENING_QUALIFICATION_ENABLED is False
+    assert screener_service.EVENING_QUALIFICATION_ENABLED is False
+
+
+def test_the_regular_hours_pass_has_a_deadline_inside_the_window_only(monkeypatch):
+    at = lambda hour, minute: datetime.combine(SESSION, time(hour, minute), tzinfo=NEW_YORK)  # noqa: E731
+
+    # Five minutes before the supervisor's 17:30 SIGTERM, whenever it started.
+    for started in (at(16, 20), at(17, 0), at(17, 29)):
+        assert recorder.regular_hours_deadline(started) == at(17, 25).astimezone(UTC)
+    # An owner's manual backfill outside the window has none.
+    for started in (at(16, 19), at(17, 30), at(21, 0), at(9, 0)):
+        assert recorder.regular_hours_deadline(started) is None
+    # With evening qualification switched on, its budget is reserved too.
+    monkeypatch.setattr(recorder, "EVENING_QUALIFICATION_ENABLED", True)
+    reserve = timedelta(seconds=WATCHLIST_PLANNING_SIZE * recorder.QUALIFY_SECONDS_PER_CONTRACT)
+    assert recorder.regular_hours_deadline(at(16, 20)) == (at(17, 25) - reserve).astimezone(UTC)
+    with pytest.raises(ValueError):
+        recorder.regular_hours_deadline(datetime(2026, 10, 12, 16, 20))
+
+
+class SlowHistory:
+    """Each request takes ``seconds`` on a shared fake clock."""
+
+    def __init__(self, clock: list[datetime], seconds: float) -> None:
+        self.clock = clock
+        self.seconds = seconds
+        self.requested: list[int] = []
+
+    async def intraday_trade_bars(self, con_id: int, *, duration: str) -> BarBatch:
+        self.requested.append(con_id)
+        self.clock[0] += timedelta(seconds=self.seconds)
+        return BarBatch(bars=tuple(flat_session(con_id, SESSION)))
+
+    async def daily_trade_bars(self, con_id: int) -> DailyBarBatch:
+        self.clock[0] += timedelta(seconds=self.seconds)
+        return DailyBarBatch(bars=())
+
+
+@pytest.mark.asyncio
+async def test_the_regular_hours_pass_stops_at_its_deadline_and_says_how_far_it_got(tmp_path, caplog):
+    store = BarsStore(ResearchPaths(tmp_path / "research"))
+    now = [datetime.combine(SESSION, time(17, 20), tzinfo=NEW_YORK).astimezone(UTC)]
+    source = SlowHistory(now, seconds=60.0)
+    instruments = [Instrument(con_id, f"S{con_id}") for con_id in range(1, 11)]
+    deadline = recorder.regular_hours_deadline(now[0])
+
+    report = await recorder.backfill(
+        source,
+        con_ids_with_symbols=instruments,
+        days=1,
+        pace_seconds=0,
+        store=store,
+        clock=lambda: now[0],
+        deadline=deadline,
+    )
+
+    # 17:20 -> two minutes per contract -> 17:22, 17:24, 17:26: no third start after 17:25.
+    assert source.requested == [1, 2, 3]
+    assert (report.stopped, report.remaining, report.symbols_written) == (recorder.STOP_DEADLINE, 7, 3)
+    assert "STOPPED early at its 17:25 ET deadline: 3 days written for 3 contracts" in caplog.text
+    assert "7 contracts not attempted" in caplog.text
+    text = recorder.format_backfill_report(report)
+    assert "STOPPED early (deadline); 7 contracts not attempted." in text
 
 
 def _snapshot(db: sqlite3.Connection, observed: datetime, rows: list[dict], day_rows: list[dict]) -> None:
@@ -362,8 +436,7 @@ class NightActor:
         return BarBatch(bars=tuple(gap_day(con_id, SESSION)))
 
 
-@pytest.mark.asyncio
-async def test_the_nightly_run_records_extends_and_qualifies_the_next_session(runtime_db, tmp_path, monkeypatch, capsys):
+def _night(runtime_db: Path, tmp_path: Path, monkeypatch: Any) -> Path:
     from config import cfg
     import trading.operations.settings as settings
 
@@ -387,25 +460,65 @@ async def test_the_nightly_run_records_extends_and_qualifies_the_next_session(ru
         _snapshot(db, et(SESSION, 9, 40), [], [{"con_id": 600, "symbol": "DAYB", "primary_exchange": "NYSE", "gap_pct": "4.0"}])
         db.commit()
     NightActor.instances.clear()
+    return root
+
+
+def _next_session_rows(runtime_db: Path) -> list[tuple[Any, ...]]:
+    with closing(sqlite3.connect(runtime_db)) as db:
+        return db.execute(
+            "SELECT con_id, qualified, daily_atr FROM autotrader_universe_daily WHERE session_date = ? ORDER BY con_id",
+            (NEXT.isoformat(),),
+        ).fetchall()
+
+
+@pytest.mark.asyncio
+async def test_the_nightly_run_records_extended_bars_first_then_regular_hours(runtime_db, tmp_path, monkeypatch, capsys):
+    root = _night(runtime_db, tmp_path, monkeypatch)
+    started = datetime.combine(SESSION, time(16, 20), tzinfo=NEW_YORK).astimezone(UTC)
+
+    assert await recorder.run_backfill_cli(1, clock=lambda: started) == 0
+
+    (actor,) = NightActor.instances
+    # The gap candidate first (it can never be refilled): its all-hours bars and,
+    # with no regular-hours day stored yet, its daily context; then RTH, two each.
+    assert actor.requests[:2] == [("extended", 600), ("daily", 600)]
+    assert [kind for kind, _con_id in actor.requests[2:]] == ["intraday", "daily"] * 6
+    store = BarsStore(ResearchPaths(root))
+    assert set(store.list_con_ids(SESSION)) == {1, 2, 600, 601, 603, 700}
+    extended = store.read_day(SESSION, 600, extended=True)
+    assert extended.prior_close == Decimal("50") and extended.avg_dollar_volume is not None
+    # R6: evening qualification is off; tomorrow's watchlist waits for 08:00.
+    assert _next_session_rows(runtime_db) == []
+    out = capsys.readouterr().out
+    assert out.index("Extended-hours bars 2026-10-12: 1 gap candidates") < out.index("Research backfill:")
+    assert "until 17:25 ET" in out and "qualified tonight" not in out
+
+
+@pytest.mark.asyncio
+async def test_switched_on_the_evening_qualification_runs_last(runtime_db, tmp_path, monkeypatch, capsys):
+    _night(runtime_db, tmp_path, monkeypatch)
+    monkeypatch.setattr(recorder, "EVENING_QUALIFICATION_ENABLED", True)
 
     assert await recorder.run_backfill_cli(1, clock=lambda: EVENING) == 0
 
     (actor,) = NightActor.instances
     kinds = [kind for kind, _con_id in actor.requests]
-    # RTH first (two requests each), then the gap candidate, then tomorrow's watchlist.
-    assert kinds == ["intraday", "daily"] * 6 + ["extended"] + ["daily"] * 2
-    store = BarsStore(ResearchPaths(root))
-    assert set(store.list_con_ids(SESSION)) == {1, 2, 600, 601, 603, 700}
-    assert store.list_con_ids(SESSION, extended=True) == (600,)
-    with closing(sqlite3.connect(runtime_db)) as db:
-        qualified = db.execute(
-            "SELECT con_id, qualified, daily_atr FROM autotrader_universe_daily WHERE session_date = ? ORDER BY con_id",
-            (NEXT.isoformat(),),
-        ).fetchall()
-    assert qualified == [(1, 1, "2.0000"), (2, 1, "2.0000")]
-    out = capsys.readouterr().out
-    assert "Extended-hours bars 2026-10-12: 1 gap candidates" in out
-    assert "Next session 2026-10-13 qualified tonight: 2 of 2 instruments" in out
+    assert kinds == ["extended", "daily"] + ["intraday", "daily"] * 6 + ["daily"] * 2
+    assert _next_session_rows(runtime_db) == [(1, 1, "2.0000"), (2, 1, "2.0000")]
+    assert "Next session 2026-10-13 qualified tonight: 2 of 2 instruments" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_a_night_cut_at_its_deadline_is_a_planned_stop(runtime_db, tmp_path, monkeypatch, capsys):
+    _night(runtime_db, tmp_path, monkeypatch)
+    late = datetime.combine(SESSION, time(17, 26), tzinfo=NEW_YORK).astimezone(UTC)
+
+    assert await recorder.run_backfill_cli(1, clock=lambda: late) == 0
+
+    (actor,) = NightActor.instances
+    # Extended bars are still taken; no regular-hours contract starts after 17:25.
+    assert [kind for kind, _con_id in actor.requests] == ["extended", "daily"]
+    assert "STOPPED early (deadline); 6 contracts not attempted." in capsys.readouterr().out
 
 
 # --- GAP_GO's replay ----------------------------------------------------------------------------
