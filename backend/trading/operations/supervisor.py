@@ -70,6 +70,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import fcntl
 from functools import partial
+import hashlib
 import itertools
 import os
 from pathlib import Path
@@ -110,6 +111,13 @@ BRIDGE_FINISH_BEFORE_CLOSE = timedelta(minutes=5)
 # EX_CONFIG: a refusal a restart cannot fix (non-paper account, future date,
 # unusable config or state). Logged with restart_in=none so the phone alerts.
 BRIDGE_REFUSED_CODE = 78
+BRIDGE_CHILD = "bridge"
+# The bridge file the last independent execution-safety review passed (GO).
+# The supervisor launches no other bridge: an edited, unreviewed bridge is
+# refused (exit 78, phone alert) instead of sending orders unattended. Change
+# this only in the commit that records that review in
+# docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
+REVIEWED_BRIDGE_SHA256 = "7ad34b5824602f725fd04ca8631122b95ad2c86dadf8e2b224cd1942d171022a"
 STRATEGY_STARTS = {
     "orb": time(9, 40),
     "momo": time(9, 55),
@@ -276,7 +284,7 @@ def plan_session(
             base_backoff=SERVICE_BACKOFF,
         ),
         ChildPlan(
-            name="bridge",
+            name=BRIDGE_CHILD,
             argv=(interpreter, bridge, "--date", iso),
             starts_at=at(BRIDGE_START),
             ends_at=session.closes_at.astimezone(UTC),
@@ -357,6 +365,19 @@ class ChildProcess(Protocol):
     async def wait(self) -> int: ...
 
     def send_signal(self, signum: int) -> None: ...
+
+
+class LaunchRefused(Exception):
+    """A launch the launcher declines before exec; ``code`` is reported as the exit."""
+
+    def __init__(self, code: int, reason: str) -> None:
+        super().__init__(reason)
+        self.code = code
+        self.reason = reason
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class Launcher(Protocol):
@@ -611,6 +632,15 @@ class Supervisor:
             return
         try:
             process = await self._launcher.start(child.plan)
+        except LaunchRefused as refused:
+            # Reported as the child's own exit with that code, so a final code
+            # (the bridge's 78) is never retried and the phone hears of it.
+            refused_at = self._clock()
+            self._event(
+                f"LAUNCH_REFUSED {child.plan.name} code={refused.code} reason={refused.reason}"
+            )
+            self._after_exit(child, refused.code, refused_at, timedelta(0))
+            return
         except Exception as exc:  # noqa: BLE001 - a failed launch is retried like an exit
             failed_at = self._clock()
             self._event(f"LAUNCH_FAILED {child.plan.name} error={type(exc).__name__}")
@@ -778,7 +808,11 @@ class _GroupLeader:
 
 
 class SubprocessLauncher:
-    """Spawns each child in its own session, appending its output to ``<name>.log``."""
+    """Spawns each child in its own session, appending its output to ``<name>.log``.
+
+    ``pinned`` maps a child name to the sha256 its script (``argv[1]``) must
+    have; any other content is refused before exec, at every (re)start.
+    """
 
     def __init__(
         self,
@@ -787,17 +821,36 @@ class SubprocessLauncher:
         cwd: Path = BACKEND_DIR,
         environment: Mapping[str, str] | None = None,
         clock: Clock = _utc_now,
+        pinned: Mapping[str, str] | None = None,
     ) -> None:
         self._log_directory = log_directory
         self._cwd = cwd
         self._environment = dict(os.environ if environment is None else environment)
         self._environment.update({"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
         self._clock = clock
+        self._pinned = dict(pinned or {})
 
     def log_path(self, name: str) -> Path:
         return self._log_directory / f"{name}.log"
 
+    def _check_pinned(self, plan: ChildPlan) -> None:
+        expected = self._pinned.get(plan.name)
+        if expected is None:
+            return
+        try:
+            actual = file_sha256(Path(plan.argv[1]))
+        except (IndexError, OSError) as exc:
+            raise LaunchRefused(
+                BRIDGE_REFUSED_CODE, f"unreadable_script error={type(exc).__name__}"
+            ) from exc
+        if actual != expected:
+            raise LaunchRefused(
+                BRIDGE_REFUSED_CODE,
+                f"unreviewed sha256={actual[:12]} reviewed={expected[:12]}",
+            )
+
     async def start(self, plan: ChildPlan) -> ChildProcess:
+        self._check_pinned(plan)
         ensure_private_directory(self._log_directory)
         descriptor = open_private_append(self.log_path(plan.name))
         try:
@@ -949,7 +1002,11 @@ def run_supervisor(
                         f"(stop it: kill {pid}) cmd={command}"
                     )
                 supervisor = Supervisor(
-                    launcher=SubprocessLauncher(paths.log_directory, cwd=backend),
+                    launcher=SubprocessLauncher(
+                        paths.log_directory,
+                        cwd=backend,
+                        pinned={BRIDGE_CHILD: REVIEWED_BRIDGE_SHA256},
+                    ),
                     emit=log,
                     planner=partial(plan_session, python=python, backend=backend),
                     always=always_on_plans(python=python, backend=backend),
@@ -960,6 +1017,21 @@ def run_supervisor(
     except SupervisorAlreadyRunning as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+def bridge_review_line(backend: Path = BACKEND_DIR) -> str:
+    """Whether the bridge on disk is the reviewed one the supervisor will launch."""
+    path = backend / "scripts_local" / "paper_bridge.py"
+    try:
+        actual = file_sha256(path)
+    except OSError:
+        return f"WARNING: bridge {path} unreadable: the supervisor will refuse to start it"
+    if actual == REVIEWED_BRIDGE_SHA256:
+        return f"bridge       reviewed (sha256 {actual[:12]})"
+    return (
+        f"WARNING: bridge sha256 {actual[:12]} is not the reviewed {REVIEWED_BRIDGE_SHA256[:12]}:"
+        " the supervisor will refuse to start it (no orders)"
+    )
 
 
 class _SimulatedClock:
@@ -1098,6 +1170,7 @@ def dry_run_report(
         lines.append(f"{_local(moment, '%H:%M:%S')}  {line.split(' ', 1)[1]}")
     for path in missing_entry_points(python=python, backend=backend):
         lines.append(f"WARNING: missing {path}")
+    lines.append(bridge_review_line(backend))
     for pid, command in unsupervised():
         lines.append(f"WARNING: running outside the supervisor (kill {pid} before `run`): {command}")
     return "\n".join(lines)
@@ -1107,13 +1180,16 @@ __all__ = [
     "BACKEND_DIR",
     "AlreadyRunning",
     "AlwaysOnPlan",
+    "BRIDGE_CHILD",
     "ChildPlan",
     "ChildProcess",
+    "LaunchRefused",
     "Launcher",
     "MAX_BACKOFF",
     "RECORDER_WINDOW",
     "REPLAY_WINDOW",
     "RESEARCH_CHILDREN",
+    "REVIEWED_BRIDGE_SHA256",
     "SERVICE_BACKOFF",
     "STRATEGY_BACKOFF",
     "Supervisor",
@@ -1124,10 +1200,12 @@ __all__ = [
     "TERMINATE_GRACE",
     "VENV_PYTHON",
     "always_on_plans",
+    "bridge_review_line",
     "child_exit_line",
     "child_start_line",
     "dry_run_report",
     "exit_status",
+    "file_sha256",
     "missing_entry_points",
     "open_private_append",
     "plan_session",
