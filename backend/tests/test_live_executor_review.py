@@ -79,15 +79,15 @@ async def test_c2_1_a_filled_owner_sell_the_position_does_not_show_yet_is_never_
     assert h.tws.cancelled == []  # and the stop is never cancelled for a sell that cannot be sent
     assert bracket.flatten_state == "skipped"
     assert h.critical() == [
-        "HELD: account holds 100 sh with 100 sold by other orders that the position does not show yet — no sell"
+        "HELD: account holds 100 sh with 100 that other orders may have sold, not confirmed by the position — no sell"
         " for the 100 sh the engine expects (its stop stays live); act in TWS if not flat"
     ]
 
     h.clock.advance(16)  # the bridge's L-e: still not shown 15 s later is CRITICAL, the shares stay reserved
     await h.engine.tick()
     assert h.critical() == [
-        "HELD: the account position (100 sh) still does not show 100 sh other orders sold 16s ago — those shares"
-        " stay reserved and the engine never sells them; check TWS"
+        "HELD: the account position (100 sh) still does not confirm 100 sh other orders may have sold (16s) —"
+        " those shares stay reserved and the engine never sells them; check TWS"
     ]
     h.tws.move_position(HELD, -100)  # the position update arrives: nothing is reserved any more
     await h.engine.tick()

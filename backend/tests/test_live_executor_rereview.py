@@ -146,7 +146,7 @@ async def test_r3_without_a_baseline_an_unreadable_time_still_counts_as_after_th
 
     # In doubt the shares stay reserved: no sell, the stop stays live, and the owner is told.
     assert sells(h) == [] and bracket.flatten_state == "skipped"
-    assert any("sold by other orders that the position does not show yet" in text for text in h.critical())
+    assert any("that other orders may have sold, not confirmed by the position" in text for text in h.critical())
 
 
 # ---- R-1: a missing snapshot never ends a flatten for good -------------------------------------------------
@@ -259,8 +259,8 @@ async def test_r1_a_rejected_fallback_sell_leaves_the_shares_flagged_unprotected
     h.events()
     await h.engine.tick()
 
-    assert ("HELD: 100 sh UNPROTECTED — the flatten fallback cancelled target and stop and no market sell is"
-            " working; act in TWS") in h.critical()
+    assert ("HELD: 100 sh UNPROTECTED — the flatten fallback cancelled target and stop and its market sell 103"
+            " is Cancelled at IBKR; act in TWS") in h.critical()
 
 
 # ---- R-4: a restart after the stop time finishes or flags a fallback in flight ---------------------------------
@@ -499,3 +499,130 @@ async def test_r6_the_engine_refuses_to_start_on_another_ibapi(tmp_path, monkeyp
         await h.engine.start()
     assert refused.value.code == "code_mismatch" and "ibapi 10.19.4 is installed" in str(refused.value)
     assert h.tws.placed == []
+
+
+# ---- second re-review of 5275373: probes A, B, D and E ----------------------------------------------------
+
+
+def ledger_flatten_state(bracket_id: str) -> str:
+    from config import cfg
+
+    with sqlite3.connect(cfg.DB_PATH) as connection:
+        return connection.execute("SELECT flatten_state FROM autotrader_exec_brackets WHERE id=?",
+                                  (bracket_id,)).fetchone()[0]
+
+
+async def test_rr2_a_after_the_stop_time_the_fallback_acts_on_the_brackets_start_reloaded(
+    tmp_path, monkeypatch
+) -> None:
+    h = await build(tmp_path, monkeypatch)
+    bracket = await fallback_cut_off_before_its_sell(h)
+    owner_sells(h, 100, status="Filled")  # the owner saw UNPROTECTED and sold the 100 by hand
+    h.tws.move_position(HELD, -100)
+    clock = Clock(ny(15, 56))
+    restarted = await h.restart(start=False, clock=clock)
+    restarted.engine.pause = stepping(clock, 2)
+    restarted.events()
+
+    assert await restarted.engine.run() == 0
+
+    out = restarted.events()
+    assert sells(h) == []  # nothing left to sell: the account is flat
+    # The probe decided on the first load's copy ('skipped') while the reloaded bracket stayed
+    # 'cancelling': it held the TWS connection until 16:00 and recorded the fallback as failed.
+    assert clock.value < ny(15, 57)
+    assert ledger_flatten_state(bracket.id) == "skipped"
+    assert not any("without target or stop" in text for kind, text in out if kind == "CRITICAL")
+
+
+async def test_rr2_b_a_cancelled_unfilled_owner_sell_stays_reserved_with_a_may_have_sold_alert(
+    tmp_path, monkeypatch
+) -> None:
+    h = await build(tmp_path, monkeypatch)
+    bracket = await open_bracket(h)
+    h.clock.advance(600)
+    owner_sells(h, 100, status="Cancelled")  # placed and cancelled in TWS; filledQuantity 0 may mean "unknown"
+    h.tws.quotes[HELD] = {"bid": 50.20}
+    h.clock.value = ny(15, 45, 1)
+    h.events()
+    await h.engine.tick()
+
+    # Kept conservative until the drill shows how TWS reports the field (docs/PAPER_EXECUTION_STATUS.md).
+    assert sells(h) == [] and bracket.flatten_state == "skipped"
+    assert h.critical() == [
+        "HELD: account holds 100 sh with 100 that other orders may have sold, not confirmed by the position — no"
+        " sell for the 100 sh the engine expects (its stop stays live); act in TWS if not flat"
+    ]
+
+
+def dropping_market_orders(h: Harness) -> None:
+    """TWS never hears of the engine's market sells: no status, ever."""
+    original = h.tws.placeOrder
+
+    def place(order_id: int, contract: Any, order: Any) -> None:
+        if order.orderType == "MKT":
+            h.tws.placed.append((order_id, order))
+            return
+        original(order_id, contract, order)
+
+    h.tws.placeOrder = place  # type: ignore[method-assign]
+
+
+async def test_rr2_d_a_fallback_sell_tws_never_acknowledges_is_unprotected_after_10_seconds(
+    tmp_path, monkeypatch
+) -> None:
+    h = await build(tmp_path, monkeypatch)
+    await open_bracket(h)
+    h.tws._cancel(h.tws.orders[(CLIENT_ID, 101)])
+    dropping_market_orders(h)
+    h.clock.value = ny(15, 45, 1)
+    h.events()
+    await h.engine.tick()
+    assert sells(h) == [(103, "SELL", "MKT", 100)]
+    assert not any("UNPROTECTED" in text for text in h.critical())  # moments ago: it may still be on its way
+
+    h.clock.advance(11)
+    await h.engine.tick()
+    assert ("HELD: 100 sh UNPROTECTED — the flatten fallback cancelled target and stop and TWS never acknowledged"
+            " its market sell 103 (11s); act in TWS") in h.critical()
+
+    restarted = await h.restart(clock=Clock(ny(15, 50)))  # re-checked after a restart
+    restarted.events()
+    await restarted.engine.tick()
+    assert any("TWS never acknowledged its market sell 103" in text for text in restarted.critical())
+    assert sells(h) == [(103, "SELL", "MKT", 100)]  # never sent twice
+
+
+@pytest.mark.parametrize("reconciled", [True, False], ids=["found-unknown", "still-staged"])
+@pytest.mark.parametrize("restart_at", [ny(15, 56), ny(16, 5)], ids=["before-the-close", "after-the-close"])
+async def test_rr2_e_a_recorded_but_unsent_fallback_sell_is_flagged_unprotected_after_the_stop_time(
+    tmp_path, monkeypatch, restart_at: Any, reconciled: bool
+) -> None:
+    h = await build(tmp_path, monkeypatch)
+    bracket = await open_bracket(h)
+    h.tws._cancel(h.tws.orders[(CLIENT_ID, 101)])
+    h.clock.value = ny(15, 45, 1)
+    original_add = h.engine.ledger.add_flatten_leg
+
+    async def add_then_stop(record: Any, leg: Any, *, payload: Any) -> None:
+        await original_add(record, leg, payload=payload)
+        h.engine.stop_event.set()  # SIGTERM lands between recording the sell and sending it
+
+    h.engine.ledger.add_flatten_leg = add_then_stop  # type: ignore[method-assign]
+    if not reconciled:
+        h.engine.last_reconcile = h.clock.value  # it stops before its reconciliation looks at IBKR
+    await h.engine.tick()
+    assert bracket.flatten_state == "selling" and sells(h) == [] and h.tws.cancelled == [102]
+    clock = Clock(restart_at)
+    restarted = await h.restart(start=False, clock=clock)
+    restarted.engine.pause = stepping(clock, 2)
+    restarted.events()
+
+    assert await restarted.engine.run() == 0
+
+    out = restarted.events()
+    assert sells(h) == []  # a recorded sell is never sent again
+    why = "is unknown at IBKR" if reconciled else "was recorded but never sent"
+    assert ("CRITICAL", f"HELD: 100 sh UNPROTECTED — the flatten fallback cancelled target and stop and its market"
+            f" sell {why}; act in TWS") in out
+    assert ("CRITICAL", "HELD: still open per the execution ledger (100 sh) — act in TWS") not in out

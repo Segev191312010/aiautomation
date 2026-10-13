@@ -163,6 +163,8 @@ BRIDGE_HEARTBEAT_WINDOW = timedelta(seconds=60)  # a bridge heartbeat this recen
 # (python -m scripts_local.paper_bridge). Not test_paper_bridge.py, not paper_bridge_state.json.
 BRIDGE_PROCESS_PATTERN = r"(^|[ /.])paper_bridge(\.py)?( |$)"
 UNSHOWN_SELL_ALERT = timedelta(seconds=15)  # another order's sell the position still does not show [L-e]
+# A fallback market sell TWS has not acknowledged this long after it was placed is not trusted to work.
+FALLBACK_SELL_ACK_GRACE = timedelta(seconds=10)
 # Completion times are TWS's (seconds, maybe another clock): a sell this close to the entry counts as after it.
 FOREIGN_FILL_MARGIN = timedelta(seconds=60)
 SNAPSHOT_MISSING = "TWS did not report a fresh snapshot"
@@ -1755,7 +1757,7 @@ class LiveExecutor:
         if facts.working:
             reasons.append(f"{facts.working} reserved by working sells")
         if facts.unshown:
-            reasons.append(f"{facts.unshown} sold by other orders that the position does not show yet")
+            reasons.append(f"{facts.unshown} that other orders may have sold, not confirmed by the position")
         self.emit("CRITICAL", f"{bracket.symbol}: account holds {share_text(facts.position)} sh with"
                   f" {' and '.join(reasons) or 'nothing reserved'} — no sell for the {facts.held} sh the engine"
                   f" expects ({protection}); act in TWS if not flat")
@@ -2072,9 +2074,9 @@ class LiveExecutor:
         if now - since >= UNSHOWN_SELL_ALERT:  # the bridge's L-e: the shares stay reserved, never released by time
             self.alert_once(
                 (bracket.id, "unshown", str(unshown)),
-                f"{bracket.symbol}: the account position ({share_text(position)} sh) still does not show {unshown} sh"
-                f" other orders sold {int((now - since).total_seconds())}s ago — those shares stay reserved and the"
-                " engine never sells them; check TWS",
+                f"{bracket.symbol}: the account position ({share_text(position)} sh) still does not confirm"
+                f" {unshown} sh other orders may have sold ({int((now - since).total_seconds())}s) — those shares"
+                " stay reserved and the engine never sells them; check TWS",
             )
 
     def check_protection(self, bracket: BracketRecord) -> None:
@@ -2090,16 +2092,36 @@ class LiveExecutor:
         self.report_dead_leg(bracket, "S")
 
     def check_fallback_protection(self, bracket: BracketRecord) -> None:
-        """Shares with no stop, no target and no market sell working are UNPROTECTED: CRITICAL at once (R-1)."""
+        """Shares with no stop, no target and no market sell working are UNPROTECTED: CRITICAL at once (R-1).
+
+        A market sell TWS has not acknowledged 10 s after it was placed (or
+        that a restart found unknown) is not trusted to work either (second
+        re-review, probe D).
+        """
         if any(self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES for code in PROTECTIVE_LEGS):
             return  # a cancel not confirmed yet (PendingCancel): that leg may still fill
+        why = self.fallback_sell_problem(bracket)
+        if why is not None:
+            self.flag_unprotected(bracket, why)
+
+    def fallback_sell_problem(self, bracket: BracketRecord) -> str | None:
+        """Why nothing is selling the shares a fallback took the stop and target from, or None."""
         sell = bracket.legs.get("F")
-        if sell is not None:
-            status = self.mirror.status(sell.order_id)
-            if status is None or status in WORKING_ORDER_STATUSES or status == "Filled":
-                return  # the market sell is on its way, working or filled
-        self.flag_unprotected(bracket, "the flatten fallback cancelled target and stop and no market sell is"
-                              " working")
+        if sell is None:
+            return "the flatten fallback cancelled target and stop and no market sell is working"
+        status = self.leg_status(bracket, "F") or sell.broker_status
+        if status in WORKING_ORDER_STATUSES or status == "Filled":
+            return None  # working, or filled with its executions on the way
+        if status is not None:
+            return (f"the flatten fallback cancelled target and stop and its market sell {sell.order_id} is"
+                    f" {status} at IBKR")
+        if sell.state == "staged":
+            return "the flatten fallback cancelled target and stop and its market sell was recorded but never sent"
+        age = self.now() - sell.created_at
+        if sell.state != "unknown" and age < FALLBACK_SELL_ACK_GRACE:
+            return None  # placed moments ago: TWS's acknowledgement may still be on its way
+        return (f"the flatten fallback cancelled target and stop and TWS never acknowledged its market sell"
+                f" {sell.order_id} ({int(age.total_seconds())}s)")
 
     def flag_unprotected(self, bracket: BracketRecord, why: str) -> None:
         self.alert_once((bracket.id, "unprotected"), f"{bracket.symbol}: {bracket.net_held} sh UNPROTECTED — {why};"
@@ -2760,6 +2782,22 @@ class LiveExecutor:
         await self.run_step("ledger", self.save)
         return EXIT_OK
 
+    @staticmethod
+    def ledger_sell_problem(bracket: BracketRecord) -> str | None:
+        """From the ledger alone: why a 'selling' bracket's market sell is not working, or None."""
+        sell = bracket.legs.get("F")
+        if sell is None:
+            return "the flatten fallback cancelled target and stop and recorded no market sell"
+        if sell.state == "staged":
+            return ("the flatten fallback cancelled target and stop and its market sell was recorded but never"
+                    " sent")
+        if sell.state == "unknown":
+            return "the flatten fallback cancelled target and stop and its market sell is unknown at IBKR"
+        if sell.broker_status in PARENT_CANCELLED_STATUSES:
+            return (f"the flatten fallback cancelled target and stop and its market sell {sell.order_id} was"
+                    f" {sell.broker_status} at IBKR")
+        return None
+
     def fallback_sell_due(self) -> bool:
         """A flatten fallback has cancelled (or is cancelling) target and stop and not sent its market sell."""
         return any(bracket.state == "open" and bracket.flatten_state == "cancelling"
@@ -2792,9 +2830,15 @@ class LiveExecutor:
         unfinished = [bracket for bracket in self.positions_not_flat()
                       if bracket.state == "open" and bracket.flatten_state == "cancelling"]
         for bracket in self.positions_not_flat():
+            # A recorded sell that never went out, is unknown at IBKR or died leaves the shares as bare as
+            # a fallback still cancelling (second re-review, probe E); it is never sent again.
+            unsent = (bracket.state == "open" and bracket.flatten_state == "selling"
+                      and self.ledger_sell_problem(bracket))
             if bracket in unfinished:
                 self.flag_unprotected(bracket, "the flatten fallback was cancelling target and stop when the engine"
                                       " stopped and its market sell was never sent")
+            elif unsent:
+                self.flag_unprotected(bracket, unsent)
             elif bracket.net_held < 0:
                 self.emit("CRITICAL", self.not_flat_message(bracket))
             else:
@@ -2803,6 +2847,8 @@ class LiveExecutor:
         if not unfinished or self.past(self.times.closes_at):
             return EXIT_OK
         await self.start()  # authority, code, no bridge, paper accounts, order ids, reconciliation
+        # start() loaded the ledger again: act on its brackets, never on the first load's copies (probe A).
+        unfinished = [self.brackets[bracket.id] for bracket in unfinished if bracket.id in self.brackets]
         while self.fallback_sell_due() and not self.past(self.times.closes_at):
             code = await self.interrupted()
             if code is not None:
