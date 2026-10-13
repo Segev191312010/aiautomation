@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 import stat
 import sys
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1232,8 +1233,9 @@ def test_cli_telegram_commands(monkeypatch, capsys):
     stub = Stub()
     monkeypatch.setitem(sys.modules, cli.TELEGRAM_BOT_MODULE, stub)
 
-    def schema_check(**_kwargs: object) -> None:
+    def schema_check(**_kwargs: object) -> SimpleNamespace:
         stub.calls.append("schema_check")
+        return SimpleNamespace(current=True)
 
     monkeypatch.setattr(cli, "require_current_schema", schema_check)
 

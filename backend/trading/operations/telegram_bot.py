@@ -23,6 +23,14 @@ Questions. Any other text goes to Claude with read-only data tools only
 and has no way to place, change, or cancel an order. Each call reserves a
 worst-case cost against a $3.00 daily budget first and settles the actual
 cost after; every call is audited in a private JSONL file.
+
+Schema. The assistant never migrates. It starts while only migrations newer
+than ``schema_gate.TELEGRAM_ASSISTANT_REQUIRES`` are pending, so /stop and
+manual exits stay available (a test pins every table this module, the data
+tools and the ledger name to that migration). A later command that needs a
+table from a newer migration must check ``inspect_schema`` and refuse just
+that command with a reply naming `autotraderctl db migrate` while the
+migration is pending; it must not raise the required migration.
 """
 from __future__ import annotations
 

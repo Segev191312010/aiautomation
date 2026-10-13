@@ -31,6 +31,7 @@ from trading.operations.notify_service import (
     startup_text,
 )
 from trading.operations.paths import UserPaths
+from trading.operations.schema_gate import TELEGRAM_ASSISTANT_REQUIRES
 from trading.operations.schema_alert import (
     alert_marker,
     claim_daily_alert,
@@ -99,6 +100,13 @@ def test_the_alert_names_the_command_the_versions_and_what_still_works():
     assert text.startswith("⛔ Database needs migration — run `autotraderctl db migrate` after the close.")
     assert f"schema v{PREVIOUS}, this code needs v{LATEST} (pending: {LATEST})" in text
     assert "--during-session-i-know" in text and "autotraderctl paper stop" in text
+    # Only a newer migration is pending: the assistant (and /stop) keeps working.
+    assert "This chat (/stop, manual orders)" in text
+    assert "the Telegram assistant refuse" not in text
+
+    behind = replace(PENDING, applied=tuple(range(1, TELEGRAM_ASSISTANT_REQUIRES)))
+    assert "the recorder and the Telegram assistant refuse to start" in schema_alert_text(behind)
+    assert "This chat" not in schema_alert_text(behind)
 
     mismatch = replace(
         CURRENT,

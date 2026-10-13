@@ -1,17 +1,19 @@
 """Tell the owner's phone when the database needs migration; no process migrates.
 
-While the schema is not current every child that uses the database refuses
-to start (exit 75) and the supervisor retries it. Two processes can still
-reach Telegram and say so, each at most once per day:
+While the schema is not current the screener, the strategies and the
+recorder refuse to start (exit 75) and the supervisor retries them. Two
+processes can still reach Telegram and say so, each at most once per day:
 
 * the notifier (07:55-16:15 ET on trading days) keeps running, because it
   only reads tables older than any pending migration; it sends the alert
   once per session date (its own delivery state) and folds the children's
   repeated exit-75 restarts into it instead of one message per restart;
-* the always-on Telegram assistant refuses at any hour (e.g. a supervisor
-  restarted after an evening deploy without the migration); before it exits
-  it sends the alert directly, claimed once per ET day with an exclusive
-  marker file, so its restarts every few minutes never repeat it.
+* the always-on Telegram assistant, at any hour (e.g. a supervisor
+  restarted after an evening deploy without the migration): it starts
+  anyway while only migrations newer than its own tables are pending, and
+  refuses any other schema problem; either way it sends the alert directly,
+  claimed once per ET day with an exclusive marker file, so restarts never
+  repeat it.
 
 The alert never migrates anything: it names the command for the owner.
 """
@@ -40,7 +42,11 @@ from trading.operations.paths import (
     UserPaths,
     ensure_private_directory,
 )
-from trading.operations.schema_gate import MIGRATE_COMMAND
+from trading.operations.schema_gate import (
+    MIGRATE_COMMAND,
+    TELEGRAM_ASSISTANT_REQUIRES,
+    tolerates_pending,
+)
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.storage.migrations import SCHEMA_UNREADABLE, SchemaStatus
 
@@ -51,26 +57,33 @@ SESSION_OVERRIDE_FLAG = "--during-session-i-know"
 
 
 def schema_alert_text(status: SchemaStatus) -> str:
-    """Plain text (no Markdown) for the phone."""
-    refusing = (
-        "the screener, the strategies, the recorder and the Telegram assistant refuse to start"
-        " (exit 75) and retry every few minutes"
-    )
+    """Plain text (no Markdown) for the phone, true to what still runs."""
+    children = "the screener, the strategies and the recorder"
+    retry = "refuse to start (exit 75) and retry every few minutes"
     if status.token == SCHEMA_UNREADABLE:
         return (
-            f"⛔ The database cannot be read ({status.describe()}). Until it can, {refusing}."
-            " Nothing was migrated; details: autotraderctl db status"
+            f"⛔ The database cannot be read ({status.describe()}). Until it can, {children} and"
+            f" the Telegram assistant {retry}. Nothing was migrated; details: autotraderctl db status"
         )
     if status.problems:
         return (
             f"⛔ Database schema does not match this code ({status.describe()}). Until it does,"
-            f" {refusing}. Nothing was migrated: deploy the matching code or restore the"
-            " pre-migration backup; details: autotraderctl db status"
+            f" {children} and the Telegram assistant {retry}. Nothing was migrated: deploy the"
+            " matching code or restore the pre-migration backup; details: autotraderctl db status"
+        )
+    if tolerates_pending(status, requires=TELEGRAM_ASSISTANT_REQUIRES):
+        still = (
+            f"Until then {children} {retry}. This chat (/stop, manual orders), the bridge"
+            " and `autotraderctl paper stop` keep working."
+        )
+    else:
+        still = (
+            f"Until then {children} and the Telegram assistant {retry}; the bridge still"
+            " manages open positions and `autotraderctl paper stop` still works."
         )
     return (
         f"⛔ Database needs migration — run `{MIGRATE_COMMAND}` after the close."
-        f" {status.describe()}. Until then {refusing}; the bridge still manages open positions"
-        f" and `autotraderctl paper stop` still works. Inside the session: `{MIGRATE_COMMAND}"
+        f" {status.describe()}. {still} Inside the session: `{MIGRATE_COMMAND}"
         f" {SESSION_OVERRIDE_FLAG}`."
     )
 

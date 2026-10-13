@@ -5,6 +5,7 @@ import ast
 from datetime import date, datetime, timedelta, timezone
 import logging
 from pathlib import Path
+import re
 import sqlite3
 import sys
 
@@ -15,6 +16,7 @@ from tests.test_supervisor import FakeWorld, Script, et, plans_for
 from trading.operations import schema_gate
 from trading.operations.schema_gate import (
     EXIT_SCHEMA_NOT_READY,
+    TELEGRAM_ASSISTANT_REQUIRES,
     SchemaNotReady,
     require_current_schema,
 )
@@ -33,6 +35,31 @@ from trading.storage.migrations import (
 BACKEND = Path(__file__).resolve().parents[1]
 LATEST = MIGRATIONS[-1].version
 PREVIOUS = LATEST - 1
+
+
+class _Records(logging.Handler):
+    """The schema logger's records, whatever its parents' propagation is."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def schema_log():
+    logger = logging.getLogger("autotrader.shadow.schema")
+    handler = _Records()
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
 
 
 def _ledger(path: Path) -> list[int]:
@@ -116,17 +143,16 @@ def test_an_unreadable_file_is_a_named_problem(tmp_path):
 # --- the gate ------------------------------------------------------------------------
 
 
-def test_the_gate_refuses_with_the_token_a_critical_line_and_never_writes(tmp_path, caplog):
+def test_the_gate_refuses_with_the_token_a_critical_line_and_never_writes(tmp_path, schema_log):
     path = database_at(tmp_path / "behind.db", PREVIOUS)
     before = _snapshot(path)
 
-    with caplog.at_level(logging.CRITICAL, logger="autotrader.shadow.schema"):
-        with pytest.raises(SchemaNotReady) as refused:
-            require_current_schema(process="screener run", database=path)
+    with pytest.raises(SchemaNotReady) as refused:
+        require_current_schema(process="screener run", database=path)
 
     assert refused.value.token == SCHEMA_MIGRATION_PENDING
     assert "screener run refuses to start" in str(refused.value)
-    [record] = [item for item in caplog.records if item.name == "autotrader.shadow.schema"]
+    [record] = schema_log.records
     assert record.levelno == logging.CRITICAL
     assert SCHEMA_MIGRATION_PENDING in record.getMessage()
     assert "autotraderctl db migrate" in record.getMessage()
@@ -249,9 +275,20 @@ def test_a_strategy_child_refuses_without_migrating(pending_database, quiet_logs
     _refused(capsys, pending_database, before)
 
 
-def test_the_telegram_assistant_alerts_then_refuses_without_migrating(
-    pending_database, capsys, monkeypatch
-):
+class _Assistant:
+    """Stands in for trading.operations.telegram_bot; records whether it served."""
+
+    def __init__(self) -> None:
+        self.served = 0
+
+    async def run_telegram_assistant(self) -> int:
+        self.served += 1
+        return 0
+
+
+@pytest.fixture
+def assistant(monkeypatch):
+    """The stand-in assistant and every alert it would send (no Keychain, no network)."""
     from trading import cli
     from trading.operations import schema_alert
 
@@ -261,33 +298,149 @@ def test_the_telegram_assistant_alerts_then_refuses_without_migrating(
         alerts.append(status)
         return True
 
-    class Assistant:
-        async def run_telegram_assistant(self) -> int:
-            raise AssertionError("the assistant must not serve while a migration is pending")
-
+    stand_in = _Assistant()
     monkeypatch.setattr(schema_alert, "send_schema_alert", fake_alert)
-    monkeypatch.setitem(sys.modules, cli.TELEGRAM_BOT_MODULE, Assistant())
-    before = _snapshot(pending_database)
+    monkeypatch.setitem(sys.modules, cli.TELEGRAM_BOT_MODULE, stand_in)
+    return stand_in, alerts
+
+
+def _assistant_database(tmp_path: Path, monkeypatch, version: int) -> Path:
+    from config import cfg
+
+    path = database_at(tmp_path / "assistant.db", version)
+    monkeypatch.setattr(cfg, "DB_PATH", str(path))
+    return path
+
+
+def test_the_assistant_keeps_serving_while_only_newer_migrations_are_pending(
+    tmp_path, monkeypatch, assistant, schema_log
+):
+    """/stop and manual exits never wait for a migration the assistant does not use."""
+    from trading import cli
+
+    stand_in, alerts = assistant
+    assert LATEST > TELEGRAM_ASSISTANT_REQUIRES  # a newer migration exists to be pending
+    path = _assistant_database(tmp_path, monkeypatch, TELEGRAM_ASSISTANT_REQUIRES)
+    before = _snapshot(path)
+
+    assert cli.main(["telegram", "run"]) == 0
+
+    assert stand_in.served == 1
+    [status] = alerts  # still one "database needs migration" alert
+    assert status.token == SCHEMA_MIGRATION_PENDING
+    assert min(status.pending) > TELEGRAM_ASSISTANT_REQUIRES
+    [record] = schema_log.records
+    assert record.levelno == logging.WARNING and "starts anyway" in record.getMessage()
+    assert _snapshot(path) == before  # nothing was migrated
+
+
+def test_the_assistant_refuses_when_a_migration_it_needs_is_missing(
+    tmp_path, monkeypatch, assistant, capsys
+):
+    from trading import cli
+
+    stand_in, alerts = assistant
+    path = _assistant_database(tmp_path, monkeypatch, TELEGRAM_ASSISTANT_REQUIRES - 1)
+    before = _snapshot(path)
 
     assert cli.main(["telegram", "run"]) == EXIT_SCHEMA_NOT_READY
 
+    assert stand_in.served == 0
     [status] = alerts
-    assert status.pending == (LATEST,)
-    _refused(capsys, pending_database, before)
+    assert TELEGRAM_ASSISTANT_REQUIRES in status.pending
+    _refused(capsys, path, before)
 
 
-def test_a_failing_alert_never_turns_the_refusal_into_a_crash(pending_database, capsys, monkeypatch):
+@pytest.mark.parametrize(
+    ("tamper", "token"),
+    [
+        ("UPDATE autotrader_schema_migrations SET checksum='tampered' WHERE version=3", SCHEMA_CHECKSUM_MISMATCH),
+        (
+            f"INSERT INTO autotrader_schema_migrations VALUES ({LATEST + 1}, 'from-the-future', 'x', 't')",
+            SCHEMA_NEWER_THAN_CODE,
+        ),
+        ("DELETE FROM autotrader_schema_migrations WHERE version=2", SCHEMA_HISTORY_GAP),
+        (None, SCHEMA_UNREADABLE),
+    ],
+)
+def test_the_assistant_refuses_every_other_schema_problem(
+    tmp_path, monkeypatch, assistant, capsys, tamper, token
+):
+    from config import cfg
+    from trading import cli
+
+    stand_in, alerts = assistant
+    if tamper is None:
+        path = tmp_path / "garbage.db"
+        path.write_bytes(b"not a database" * 200)
+    else:
+        # Even with only a newer migration pending otherwise.
+        path = database_at(tmp_path / "assistant.db", TELEGRAM_ASSISTANT_REQUIRES)
+        with sqlite3.connect(path) as db:
+            db.execute(tamper)
+    monkeypatch.setattr(cfg, "DB_PATH", str(path))
+
+    assert cli.main(["telegram", "run"]) == EXIT_SCHEMA_NOT_READY
+
+    assert stand_in.served == 0
+    assert [status.token for status in alerts] == [token]
+    assert token in capsys.readouterr().err
+
+
+def test_a_failing_alert_never_changes_what_the_assistant_does(
+    tmp_path, monkeypatch, assistant, capsys
+):
     from trading import cli
     from trading.operations import schema_alert
+
+    stand_in, _alerts = assistant
 
     async def broken(status, **_kwargs) -> bool:
         raise RuntimeError("telegram down")
 
     monkeypatch.setattr(schema_alert, "send_schema_alert", broken)
-    monkeypatch.setitem(sys.modules, cli.TELEGRAM_BOT_MODULE, object())
+    _assistant_database(tmp_path, monkeypatch, TELEGRAM_ASSISTANT_REQUIRES)
+    assert cli.main(["telegram", "run"]) == 0 and stand_in.served == 1
 
-    assert cli.main(["telegram", "run"]) == EXIT_SCHEMA_NOT_READY
+    (tmp_path / "assistant.db").unlink()
+    _assistant_database(tmp_path, monkeypatch, TELEGRAM_ASSISTANT_REQUIRES - 1)
+    assert cli.main(["telegram", "run"]) == EXIT_SCHEMA_NOT_READY and stand_in.served == 1
     assert SCHEMA_MIGRATION_PENDING in capsys.readouterr().err
+
+
+def test_only_a_named_requirement_tolerates_newer_pending_migrations(tmp_path):
+    path = database_at(tmp_path / "behind.db", PREVIOUS)
+
+    assert require_current_schema(process="telegram run", database=path, requires=PREVIOUS).pending == (LATEST,)
+    with pytest.raises(SchemaNotReady):
+        require_current_schema(process="screener run", database=path)  # no requirement: exact
+    with pytest.raises(SchemaNotReady):
+        require_current_schema(process="telegram run", database=path, requires=LATEST)
+    missing = tmp_path / "absent.db"
+    with pytest.raises(SchemaNotReady):
+        require_current_schema(process="telegram run", database=missing, requires=PREVIOUS)
+    assert not missing.exists()
+
+
+def test_every_table_the_assistant_names_exists_at_its_required_migration(tmp_path):
+    """Its tables predate any pending migration; a new table needs a graceful refusal."""
+    modules = (
+        BACKEND / "trading" / "operations" / "telegram_bot.py",
+        BACKEND / "trading" / "operations" / "telegram_tools.py",
+        BACKEND / "trading" / "execution" / "manual_orders.py",
+        BACKEND / "trading" / "storage" / "runtime_fence.py",
+    )
+    named = {
+        table
+        for module in modules
+        for table in re.findall(r"\b(autotrader_[a-z0-9_]+)\b", module.read_text(encoding="utf-8"))
+    }
+    path = database_at(tmp_path / "required.db", TELEGRAM_ASSISTANT_REQUIRES)
+    with sqlite3.connect(path) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    assert {"autotrader_manual_orders", "autotrader_execution_fences"} <= named
+    assert named <= tables, sorted(named - tables)
 
 
 @pytest.mark.anyio

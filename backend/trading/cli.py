@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 
 from config import cfg
-from trading.operations.schema_gate import SchemaNotReady, refusal_exit, require_current_schema
+from trading.operations.schema_gate import (
+    TELEGRAM_ASSISTANT_REQUIRES,
+    SchemaNotReady,
+    refusal_exit,
+    require_current_schema,
+)
 from trading.storage.runtime_fence import SQLitePaperKillStore
 
 if TYPE_CHECKING:
@@ -548,15 +553,21 @@ def _telegram_command(arguments: argparse.Namespace) -> int:
         return service.print_owner()
 
     async def serve() -> int:
-        # The always-on assistant never migrates (reverts 7354b89): while a
-        # migration is pending it refuses with exit 75, and the supervisor
-        # retries it. It runs at every hour, so it is the one that tells the
-        # phone right away, at most once per day.
+        # The always-on assistant never migrates (reverts 7354b89). The owner's
+        # /stop and manual exits matter more than strictness: it starts while
+        # only migrations newer than its own tables are pending, and refuses
+        # (exit 75, retried) a missing migration it needs or any other schema
+        # problem. It runs at every hour, so either way it tells the phone
+        # right away, at most once per day.
         try:
-            require_current_schema(process="telegram run")
+            status = require_current_schema(
+                process="telegram run", requires=TELEGRAM_ASSISTANT_REQUIRES
+            )
         except SchemaNotReady as exc:
             await _alert_schema_not_ready(exc.status)
             return refusal_exit(exc)
+        if not status.current:
+            await _alert_schema_not_ready(status)
         return await service.run_telegram_assistant()
 
     try:

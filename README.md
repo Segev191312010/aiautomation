@@ -116,11 +116,16 @@ the ledger does not match the code, it logs one CRITICAL line with the reason
 75. The supervisor retries it with backoff (15 s doubling to 5 minutes), so it
 starts by itself once the database is migrated.
 
+The Telegram assistant is the exception for a pending migration: its tables
+come from migrations up to 12, so it keeps serving (`/stop`, manual orders and
+exits, questions) while only newer migrations are pending. It still refuses a
+missing migration it needs and every other reason above.
+
 The owner hears of it without any process migrating:
 
-- the always-on Telegram assistant sends one alert per day as it refuses, so
-  a supervisor restarted without the migration reaches the phone within
-  minutes, at any hour;
+- the always-on Telegram assistant sends one alert per day as it starts (or
+  refuses), so a supervisor restarted without the migration reaches the
+  phone within minutes, at any hour;
 - the notifier keeps running (it only reads tables older than any pending
   migration), sends one alert per session, and drops the children's repeated
   exit-75 restarts instead of one message per restart;
