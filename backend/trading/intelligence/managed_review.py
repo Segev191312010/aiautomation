@@ -47,7 +47,7 @@ from trading.intelligence.review_provider import (
     StructuredAIReviewProvider,
 )
 
-logger = logging.getLogger("autotrader.manager.review")
+logger = logging.getLogger("autotrader.shadow.manager.review")
 
 # Mirrors trading.manager.constants (a test pins them equal); kept literal so
 # the intelligence layer never imports the manager.

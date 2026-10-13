@@ -548,3 +548,112 @@ def test_estimated_cost_per_plan_from_a_full_context_pack():
     assert 15000 < len(text) < 30000
     assert estimate_cost(DAY_PLAN_V1, text) < Decimal("0.40")
     assert timedelta(minutes=75) == PLAN_TTL
+
+
+# --- nothing in a plan attempt crashes the manager (review R4) ---------------------------
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_sweep_never_stops_the_manager_day(db):
+    """Reviewer probe: a sweep payload that is not an object used to crash run_manager_day."""
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE autotrader_screener_snapshots SET payload_json='[]'")
+    clock = FakeClock(et(9, 0))
+    transport = FakePlanTransport(*[plan_answer([])] * 7)
+
+    report = await run_manager_day(session=market_session(SESSION), clock=clock, sleep=clock.sleep,
+                                   transport=transport, running=RUNNING, context_builder=context_builder())
+
+    assert report.valid == 7 and len(transport.requests) == 7
+    assert all(json.loads(user)["candidates"] == [] for _system, user in transport.requests)
+
+
+@pytest.mark.anyio
+async def test_a_context_the_database_cannot_give_is_a_named_outcome_without_a_call(db):
+    async def broken(session, *, now, slot, running):
+        raise sqlite3.OperationalError("database is locked")
+
+    clock = FakeClock(et(9, 0))
+    transport = FakePlanTransport()
+
+    report = await run_manager_day(session=market_session(SESSION), clock=clock, sleep=clock.sleep,
+                                   transport=transport, running=RUNNING, context_builder=broken)
+
+    assert transport.requests == []
+    assert report.outcomes == {"context_unavailable": 14}  # every slot, and its retry
+    stored = await list_plans(SESSION)
+    assert {plan.outcome for plan in stored} == {"context_unavailable"} and len(stored) == 14
+    assert (await read_spend(spend_date=SESSION, purpose=PLAN_SPEND_PURPOSE)).calls == 0
+
+
+@pytest.mark.anyio
+async def test_store_and_ledger_failures_are_logged_critical_and_never_raised(db, monkeypatch):
+    import logging
+
+    from trading.manager import planner, store
+
+    lines: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(record.getMessage())
+
+    async def fail(**_kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    async def fail_insert(_record):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    capture = Capture(level=logging.CRITICAL)
+    logging.getLogger("autotrader.shadow.manager.planner").addHandler(capture)
+    try:
+        monkeypatch.setattr(planner, "settle_spend", fail)
+        monkeypatch.setattr(planner, "insert_plan", fail_insert)
+        record = await _write(FakeClock(et(9, 20)), FakePlanTransport(plan_answer([(4931, ["momo"], "ok")])))
+    finally:
+        logging.getLogger("autotrader.shadow.manager.planner").removeHandler(capture)
+
+    assert record.outcome == PLAN_VALID  # decided, though not stored
+    assert any(text.startswith("spend_settle_failed: plan 20261013-0920-1") for text in lines)
+    assert any(text.startswith("plan_store_failed: plan 20261013-0920-1") for text in lines)
+    assert await list_plans(SESSION) == []  # no stored plan: managed strategies stay neutral
+    # The reservation stays charged (the settlement never ran).
+    assert (await read_spend(spend_date=SESSION, purpose=PLAN_SPEND_PURPOSE)).reserved_usd > 0
+
+    monkeypatch.setattr(planner, "reserve_spend", fail)
+    monkeypatch.setattr(planner, "insert_plan", store.insert_plan)
+    transport = FakePlanTransport()
+    record = await _write(FakeClock(et(9, 46)), transport, slot=et(9, 46))
+    assert record.outcome == "spend_unavailable" and transport.requests == []
+
+
+def test_the_managers_lines_reach_shadow_log_with_timestamps(tmp_path):
+    """Both manager children configure the shadow logger; manager tripwires go there too."""
+    import logging
+    import re
+
+    from trading.operations.logging import configure_shadow_logging
+    from trading.operations.paths import UserPaths
+
+    paths = UserPaths(home=tmp_path / "home")
+    shadow = logging.getLogger("autotrader.shadow")
+    saved = (list(shadow.handlers), shadow.propagate, shadow.level)
+    try:
+        configure_shadow_logging(user_paths=paths)
+        logging.getLogger("autotrader.shadow.manager.managed").critical(
+            "manager_widening_detected: decision d1 BF B: final quantity above the policy quantity"
+        )
+        logging.getLogger("autotrader.shadow.manager.planner").error("plan 20261013-0920-1 failed: ai_timeout ($0.36)")
+        for handler in shadow.handlers:
+            handler.flush()
+        text = paths.shadow_log_file.read_text(encoding="utf-8")
+    finally:
+        for handler in list(shadow.handlers):
+            shadow.removeHandler(handler)
+            handler.close()
+        for handler in saved[0]:
+            shadow.addHandler(handler)
+        shadow.propagate, shadow.level = saved[1], saved[2]
+    stamp = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4}"
+    assert re.search(stamp + r" CRITICAL autotrader\.shadow\.manager\.managed manager_widening_detected: ", text)
+    assert re.search(stamp + r" ERROR autotrader\.shadow\.manager\.planner plan 20261013-0920-1 failed", text)

@@ -58,7 +58,7 @@ from trading.manager.store import (
 from trading.manager.switch import DayLatch, SwitchState, latch_day_mode, read_switch
 from trading.risk.engine import policy_quantity, scaled_quantity
 
-logger = logging.getLogger("autotrader.manager.managed")
+logger = logging.getLogger("autotrader.shadow.manager.managed")
 
 MANAGED = "managed"
 NEUTRAL = "neutral"

@@ -136,7 +136,7 @@ def test_the_wire_schema_is_strict_while_parsing_stays_lenient():
 def test_one_bad_focus_entry_is_dropped_and_named_and_the_others_kept(entry, detail, widening, caplog):
     answer = _answer()
     answer["focus"] = [*answer["focus"], entry]  # type: ignore[misc]
-    with caplog.at_level(logging.WARNING, logger="autotrader.manager.plan"):
+    with caplog.at_level(logging.WARNING, logger="autotrader.shadow.manager.plan"):
         result = _narrow(answer)
 
     assert result.outcome == PLAN_VALID

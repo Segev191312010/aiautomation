@@ -68,7 +68,16 @@ AI_REFUSAL = "ai_refusal"
 AI_TRUNCATED = "ai_truncated"
 AI_UNAVAILABLE = "ai_unavailable"
 AI_ORDER_FIELD_ECHO = "ai_order_field_echo"
+# The request was never sent (the schema could not be built, the connection
+# never opened): nothing was billed, nothing is charged.
+AI_REQUEST_NOT_SENT = "ai_request_not_sent"
+# The API answered with an error status: not billed, nothing is charged.
+AI_API_ERROR = "ai_api_error"
 BUDGET_EXHAUSTED = "budget_exhausted"
+# The database could not give the context pack, or the spend ledger could not
+# reserve: no call is made.
+CONTEXT_UNAVAILABLE = "context_unavailable"
+SPEND_UNAVAILABLE = "spend_unavailable"
 PLAN_OUTCOMES = frozenset(
     {
         PLAN_VALID,
@@ -78,9 +87,19 @@ PLAN_OUTCOMES = frozenset(
         AI_TRUNCATED,
         AI_UNAVAILABLE,
         AI_ORDER_FIELD_ECHO,
+        AI_REQUEST_NOT_SENT,
+        AI_API_ERROR,
         BUDGET_EXHAUSTED,
+        CONTEXT_UNAVAILABLE,
+        SPEND_UNAVAILABLE,
     }
 )
+# Logged CRITICAL when a plan row or a spend settlement could not be written
+# (the plan is then absent: managed strategies stay neutral; the reservation
+# stays charged).
+PLAN_STORE_FAILED = "plan_store_failed"
+SPEND_SETTLE_FAILED = "spend_settle_failed"
+MANAGER_SLOT_FAILED = "manager_slot_failed"
 
 # Narrow-only gate tokens: one bad entry is dropped, never the whole plan.
 AI_INVALID_ENTRY = "ai_invalid_entry"

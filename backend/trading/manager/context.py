@@ -37,7 +37,7 @@ from trading.manager.constants import (
 from trading.manager.plan import GateStates
 from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
 
-logger = logging.getLogger("autotrader.manager.context")
+logger = logging.getLogger("autotrader.shadow.manager.context")
 
 # The pinned bridge's MAX_OPEN (moderate pilot); a test reads the bridge's
 # source to keep the two equal.
@@ -160,7 +160,14 @@ async def _sweep_rows(db: Any, session_date: date, now: datetime) -> list[dict[s
         row = await cursor.fetchone()
     if row is None:
         return []
-    rows = json.loads(str(row[0])).get("rows", [])
+    try:
+        payload = json.loads(str(row[0]))
+    except ValueError:
+        logger.error("the newest sweep is not JSON; the plan sees no sweep rows")
+        return []
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return []
     return [item for item in rows if isinstance(item, dict) and isinstance(item.get("con_id"), int)]
 
 

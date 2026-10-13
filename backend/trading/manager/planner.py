@@ -31,12 +31,19 @@ from trading.intelligence.anthropic_transport import (
 from trading.intelligence.manager_prompts import DAY_PLAN_PROMPT_ID, day_plan_prompt
 from trading.intelligence.pricing import ModelPricing
 from trading.manager.constants import (
+    AI_API_ERROR,
     AI_MALFORMED,
     AI_REFUSAL,
+    AI_REQUEST_NOT_SENT,
     AI_TIMEOUT,
     AI_TRUNCATED,
     AI_UNAVAILABLE,
     BUDGET_EXHAUSTED,
+    CONTEXT_UNAVAILABLE,
+    MANAGER_SLOT_FAILED,
+    PLAN_STORE_FAILED,
+    SPEND_SETTLE_FAILED,
+    SPEND_UNAVAILABLE,
     MANAGER_DAILY_BUDGET_USD,
     MANAGER_EFFORT,
     MANAGER_MODEL,
@@ -62,7 +69,7 @@ from trading.manager.store import (
 )
 from trading.scheduler.sessions import MarketSession
 
-logger = logging.getLogger("autotrader.manager.planner")
+logger = logging.getLogger("autotrader.shadow.manager.planner")
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_ATTEMPTS_PER_SLOT = 2
@@ -97,6 +104,34 @@ class PlanParseError(RuntimeError):
     """The answer did not parse as a DayPlanOutput; its cost is unknown."""
 
 
+class PlanNotSent(RuntimeError):
+    """The request never left this process (or never reached the API): not billed."""
+
+
+class PlanAPIError(RuntimeError):
+    """The API answered with an error status: not billed."""
+
+    def __init__(self, status_code: object) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def plan_output_schema() -> dict[str, Any]:
+    """The JSON schema ``messages.parse`` sends for ``DayPlanOutput``.
+
+    Built exactly as the SDK builds it, so a schema the SDK refuses (it raises
+    before any request) is caught here first and named, never charged.
+    """
+    from anthropic.lib._parse._transform import transform_schema
+    from pydantic import TypeAdapter
+
+    return transform_schema(TypeAdapter(DayPlanOutput).json_schema())
+
+
+# httpx's own names for failures that happen before a request reaches the API.
+_NOT_CONNECTED = frozenset({"ConnectError", "ConnectTimeout"})
+
+
 def _usage(usage: object, name: str) -> int:
     value = getattr(usage, name, None)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -126,6 +161,12 @@ class AnthropicPlanTransport:
 
     async def plan(self, *, system: str, user: str) -> PlanResponse:
         try:
+            plan_output_schema()
+        except Exception as exc:  # noqa: BLE001 - the SDK would raise the same before sending
+            raise PlanNotSent(f"schema: {type(exc).__name__}: {exc}") from exc
+        from anthropic import APIConnectionError, APIStatusError, APITimeoutError
+
+        try:
             response = await self._client.messages.parse(
                 model=self._model,
                 max_tokens=self._max_tokens,
@@ -136,6 +177,15 @@ class AnthropicPlanTransport:
                 extra_headers={"anthropic-beta": FALLBACK_BETA},
                 extra_body={"fallbacks": "default"},
             )
+        except APITimeoutError as exc:
+            # Sent and maybe generated: charged as a timeout.
+            raise asyncio.TimeoutError("API timeout") from exc
+        except APIConnectionError as exc:
+            if type(exc.__cause__).__name__ in _NOT_CONNECTED:
+                raise PlanNotSent(f"connection: {type(exc.__cause__).__name__}") from exc
+            raise
+        except APIStatusError as exc:
+            raise PlanAPIError(exc.status_code) from exc
         except (ValidationError, ValueError) as exc:
             # The SDK parses before returning, so the usage is lost with it.
             raise PlanParseError(type(exc).__name__) from exc
@@ -203,31 +253,52 @@ async def write_plan(
     prompt_id: str = DAY_PLAN_PROMPT_ID,
     timeout_seconds: float = PLAN_TIMEOUT_SECONDS,
 ) -> PlanRecord:
-    """One plan attempt for one slot; always appends exactly one plan row."""
+    """One plan attempt for one slot; appends one plan row with a named outcome.
+
+    Nothing here raises for a plan: a context the database cannot give, a
+    ledger that cannot reserve, a call that fails, a row or a settlement that
+    cannot be written each end in a named outcome or a CRITICAL line, and
+    managed strategies stay neutral while no valid plan is stored.
+    """
     slot = slot_label(slot_at)
     plan_id = plan_id_for(session.session_date, slot, attempt)
     system = day_plan_prompt(prompt_id)
-    context = await context_builder(session, now=clock(), slot=slot, running=tuple(running))
-    user = context.encoded()
-    estimate = estimate_cost(system, user)
-    base = dict(
+    identity = dict(
         plan_id=plan_id,
         session_date=session.session_date,
         slot=slot,
         manager_version=MANAGER_VERSION,
         prompt_id=prompt_id,
         model=MANAGER_MODEL,
+    )
+    try:
+        context = await context_builder(session, now=clock(), slot=slot, running=tuple(running))
+        user = context.encoded()
+    except Exception as exc:  # noqa: BLE001 - a named outcome, never a crash
+        logger.error("%s: plan %s: %s: %s", CONTEXT_UNAVAILABLE, plan_id, type(exc).__name__, exc)
+        record = PlanRecord(created_at=clock(), outcome=CONTEXT_UNAVAILABLE, candidates=(), gates={}, **identity)
+        await _store(record)
+        return record
+    estimate = estimate_cost(system, user)
+    base = dict(
         candidates=tuple(row.con_id for row in context.candidates),
         gates=context.gates.payload(),
         context_digest=context.digest(),
+        **identity,
     )
-    reserved = await reserve_spend(
-        spend_date=session.session_date,
-        purpose=PLAN_SPEND_PURPOSE,
-        budget_usd=budget_usd,
-        estimate_usd=estimate,
-        now=clock(),
-    )
+    try:
+        reserved = await reserve_spend(
+            spend_date=session.session_date,
+            purpose=PLAN_SPEND_PURPOSE,
+            budget_usd=budget_usd,
+            estimate_usd=estimate,
+            now=clock(),
+        )
+    except Exception as exc:  # noqa: BLE001 - no reservation, no call
+        logger.error("%s: plan %s: %s", SPEND_UNAVAILABLE, plan_id, type(exc).__name__)
+        record = PlanRecord(created_at=clock(), outcome=SPEND_UNAVAILABLE, **base)
+        await _store(record)
+        return record
     if not reserved:
         logger.critical(
             "%s: the manager's $%s for %s is spent; no new plans today (managed "
@@ -237,12 +308,14 @@ async def write_plan(
             session.session_date.isoformat(),
         )
         record = PlanRecord(created_at=clock(), outcome=BUDGET_EXHAUSTED, **base)
-        await insert_plan(record)
+        await _store(record)
         return record
 
     started = monotonic_time.monotonic()
     # Until the answer says otherwise the reservation is the cost: a timeout or
     # a parse failure may still be billed, so spend is never undercounted.
+    # A request that was never sent, or that the API refused with an error
+    # status, is not billed and costs nothing.
     cost = estimate
     response: PlanResponse | None = None
     narrowed: NarrowResult | None = None
@@ -268,18 +341,29 @@ async def write_plan(
             outcome = narrowed.outcome
     except asyncio.TimeoutError:
         outcome = AI_TIMEOUT
+    except PlanNotSent as exc:
+        logger.critical("%s: plan %s: %s", AI_REQUEST_NOT_SENT, plan_id, exc)
+        outcome, cost = AI_REQUEST_NOT_SENT, Decimal("0")
+    except PlanAPIError as exc:
+        logger.error("%s: plan %s: %s", AI_API_ERROR, plan_id, exc)
+        outcome, cost = AI_API_ERROR, Decimal("0")
     except PlanParseError:
         outcome = AI_MALFORMED
     except Exception as exc:  # noqa: BLE001 - any failure is a named outcome, never a crash
         logger.error("plan call failed: %s", type(exc).__name__)
         outcome = AI_UNAVAILABLE
-    finally:
+    try:
         await settle_spend(
             spend_date=session.session_date,
             purpose=PLAN_SPEND_PURPOSE,
             estimate_usd=estimate,
             actual_usd=cost,
             now=clock(),
+        )
+    except Exception as exc:  # noqa: BLE001 - the reservation stays charged
+        logger.critical(
+            "%s: plan %s: %s; its reservation of $%s stays charged",
+            SPEND_SETTLE_FAILED, plan_id, type(exc).__name__, estimate,
         )
     latency_ms = max(0, int((monotonic_time.monotonic() - started) * 1000))
     created_at = clock()
@@ -296,7 +380,7 @@ async def write_plan(
         latency_ms=latency_ms,
         **base,
     )
-    await insert_plan(record)
+    await _store(record)
     if outcome == PLAN_VALID:
         logger.info(
             "plan %s valid: regime %s, focus %d, dropped %d, $%s",
@@ -309,6 +393,16 @@ async def write_plan(
     else:
         logger.error("plan %s failed: %s ($%s)", plan_id, outcome, cost)
     return record
+
+
+async def _store(record: PlanRecord) -> None:
+    try:
+        await insert_plan(record)
+    except Exception as exc:  # noqa: BLE001 - logged CRITICAL; no stored plan means neutral
+        logger.critical(
+            "%s: plan %s (%s) not stored: %s: %s",
+            PLAN_STORE_FAILED, record.plan_id, record.outcome, type(exc).__name__, exc,
+        )
 
 
 @dataclass(slots=True)
@@ -350,10 +444,17 @@ async def run_manager_day(
         if clock() >= following:
             continue
         label = slot_label(slot_at)
-        if await slot_has_valid_plan(session.session_date, label):
-            continue
+        try:
+            if await slot_has_valid_plan(session.session_date, label):
+                continue
+        except Exception as exc:  # noqa: BLE001 - the slot is planned as if new
+            logger.error("%s: slot %s: %s", MANAGER_SLOT_FAILED, label, type(exc).__name__)
         await _sleep_until(slot_at, clock=clock, sleep=sleep)
-        done = await slot_attempts(session.session_date, label)
+        try:
+            done = await slot_attempts(session.session_date, label)
+        except Exception as exc:  # noqa: BLE001 - attempt numbers then start at 1
+            logger.error("%s: slot %s: %s", MANAGER_SLOT_FAILED, label, type(exc).__name__)
+            done = 0
         for attempt in range(done + 1, MAX_ATTEMPTS_PER_SLOT + 1):
             if attempt > 1:
                 # The retry comes a few minutes after the failure, never at once.
@@ -390,10 +491,13 @@ __all__ = [
     "AnthropicPlanTransport",
     "MAX_ATTEMPTS_PER_SLOT",
     "ManagerDayReport",
+    "PlanAPIError",
+    "PlanNotSent",
     "PlanParseError",
     "PlanResponse",
     "PlanTransport",
     "estimate_cost",
+    "plan_output_schema",
     "run_manager_day",
     "running_strategies",
     "write_plan",

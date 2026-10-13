@@ -53,7 +53,7 @@ from trading.manager.constants import (
     STRATEGY_NOT_RUNNING,
 )
 
-logger = logging.getLogger("autotrader.manager.plan")
+logger = logging.getLogger("autotrader.shadow.manager.plan")
 
 _STEP_ENUM = [float(step) for step in DAY_STEPS]
 # The wire objects keep unknown keys (so an echoed order field is seen and
@@ -69,7 +69,10 @@ class StrategyStepOutput(BaseModel):
 
     model_config = _WIRE_CONFIG
 
-    strategy: Any = Field(description="A running strategy, exactly as listed in running_strategies.")
+    strategy: Any = Field(
+        description="A running strategy, exactly as listed in running_strategies.",
+        json_schema_extra={"type": "string"},
+    )
     step: Any = Field(
         description="Day size step: 0 switches the strategy off for the day; 1 keeps full size.",
         json_schema_extra={"type": "number", "enum": _STEP_ENUM},

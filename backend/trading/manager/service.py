@@ -19,7 +19,7 @@ from typing import Any, TextIO
 from trading.manager.constants import PLAN_TIMEOUT_SECONDS
 from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession, market_session
 
-logger = logging.getLogger("autotrader.manager.service")
+logger = logging.getLogger("autotrader.shadow.manager.service")
 
 MIGRATE_HINT = "run `autotraderctl db migrate` after the close"
 CLI_ACTOR = "owner (autotraderctl)"
