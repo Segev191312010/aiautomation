@@ -226,7 +226,9 @@ def test_an_answer_that_is_not_a_plan_gets_no_plan_and_its_named_outcome(answer,
     [
         (GateStates(kill_switch=True), {"momo", "orb", "vwap", "gap"}),
         (GateStates(day_stop=True), {"momo", "orb", "vwap", "gap"}),
-        (GateStates(risk_off=True), {"momo"}),
+        # risk_off is not clamped into a plan: the runtime gate pauses managed
+        # MOMO exactly while V2 pauses, never for a plan's whole 75 minutes.
+        (GateStates(risk_off=True), set()),
     ],
 )
 def test_a_refresh_never_re_enables_what_a_deterministic_gate_switched_off(gates, held):

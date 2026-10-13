@@ -13,9 +13,9 @@ Two models describe one plan:
   is dropped with ``ai_invalid_entry`` (a CRITICAL tripwire when it tried to
   widen); the others are kept. A day step outside the fixed set is dropped
   (``ai_invalid_step``) and that strategy keeps the neutral step 1, which is
-  its unmanaged behaviour. Strategies a deterministic gate holds off (the
-  kill switch, the day stop, risk_off) stay off whatever the model says, so
-  a refresh never re-enables them.
+  its unmanaged behaviour. Strategies the kill switch or the day stop hold
+  off stay off whatever the model says, so a refresh never re-enables them;
+  risk_off is left to the runtime gate, which pauses exactly while V2 does.
 """
 from __future__ import annotations
 
@@ -208,12 +208,19 @@ class DayPlan(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class GateStates:
-    """The deterministic gates at plan time; a plan never re-enables what they hold off."""
+    """The deterministic gates at plan time; a plan never re-enables what they hold off.
+
+    The kill switch and the day stop hold for the rest of the day, so a plan
+    keeps every strategy off while either is set. risk_off is not clamped
+    into the plan: it can clear within minutes, and the runtime gate (V2's own
+    risk_off gate, ANDed with the plan) already pauses managed MOMO exactly
+    while V2 pauses, never longer. It is reported to the model as context.
+    """
 
     kill_switch: bool = False
     day_stop: bool = False
     risk_off: bool = False
-    # Families the risk_off regime pauses (MOMO's family today).
+    # Families the risk_off regime pauses (MOMO's family today), at runtime.
     risk_off_families: frozenset[str] = frozenset({"momo"})
 
     def held_off(self, strategy: str) -> str | None:
@@ -221,8 +228,6 @@ class GateStates:
             return "kill_switch"
         if self.day_stop:
             return "day_stop"
-        if self.risk_off and strategy in self.risk_off_families:
-            return "risk_off"
         return None
 
     def payload(self) -> dict[str, object]:
