@@ -5,13 +5,27 @@ finding; each fails on the behaviour the finding described.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import re
+import signal
 import sqlite3
+import subprocess
+import sys
+import time
 from typing import Any
 
 import pytest
 
 from tests.fakes.engine_harness import CLIENT_ID, Clock, Harness, build, ny, stepping
 from tests.test_live_executor_review import HELD, open_bracket, owner_sells, sells
+from trading.execution.live_executor import (
+    BRIDGE_PROCESS_PATTERN,
+    ExecutionRefused,
+    bridge_database,
+    latest_bridge_heartbeat,
+    running_bridge_processes,
+)
 
 
 def without_baseline(h: Harness, bracket: Any) -> None:
@@ -283,3 +297,96 @@ async def test_r4_after_the_close_a_fallback_in_flight_is_only_flagged(tmp_path,
         "HELD: 100 sh UNPROTECTED — the flatten fallback was cancelling target and stop when the engine stopped"
         " and its market sell was never sent; act in TWS"
     ]
+
+
+# ---- R-5: the bridge interlock ----------------------------------------------------------------------------
+
+BRIDGE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts_local" / "paper_bridge.py"
+
+
+def test_r5_the_interlock_reads_the_database_the_bridge_writes_its_heartbeat_into() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("paper_bridge_for_the_interlock", BRIDGE_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bridge  # dataclasses resolve annotations through sys.modules
+    try:
+        spec.loader.exec_module(bridge)
+    finally:
+        sys.modules.pop(spec.name, None)
+    assert bridge_database() == bridge.DB  # whatever database the engine itself is given
+
+
+async def test_r5_an_engine_on_another_database_still_sees_the_bridges_heartbeat(tmp_path, monkeypatch) -> None:
+    from config import cfg
+    from db.core import init_db
+    from trading.execution.manual_orders import write_bridge_heartbeat
+
+    bridge_db = tmp_path / "bridge" / "autotrader.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(bridge_db))
+    await init_db()
+    await write_bridge_heartbeat("running", now=ny(10, 0), pid=4242)  # the bridge's ledger
+    h = await build(tmp_path / "engine", monkeypatch, start=False)  # the engine runs on another database
+    h.engine.bridge_database = bridge_db
+    h.engine.bridge_heartbeat = h.engine.read_bridge_heartbeat  # the engine's own reader (the harness stubs it)
+
+    with pytest.raises(ExecutionRefused) as refused:
+        await h.engine.start()
+    assert refused.value.code == "bridge_running" and "heartbeat 5s ago" in str(refused.value)
+
+
+async def test_r5_the_heartbeat_is_read_only_and_anything_unreadable_counts_as_a_running_bridge(
+    tmp_path, monkeypatch
+) -> None:
+    absent = tmp_path / "absent.db"
+    assert await latest_bridge_heartbeat(absent) is None and not absent.exists()  # never creates a database
+    empty = tmp_path / "empty.db"
+    sqlite3.connect(empty).close()
+    assert await latest_bridge_heartbeat(empty) is None  # no bridge ever wrote a heartbeat there
+    corrupt = tmp_path / "corrupt.db"
+    corrupt.write_bytes(b"not a database " * 100)
+    with pytest.raises(sqlite3.DatabaseError):
+        await latest_bridge_heartbeat(corrupt)
+
+    h = await build(tmp_path / "engine", monkeypatch, start=False)
+    h.engine.bridge_database = corrupt
+    h.engine.bridge_heartbeat = h.engine.read_bridge_heartbeat
+    with pytest.raises(ExecutionRefused) as refused:
+        await h.engine.start()
+    assert "the bridge heartbeat is unreadable" in str(refused.value)
+
+
+def test_r5_the_process_pattern_matches_the_supervisors_launch_line() -> None:
+    from datetime import date
+
+    from trading.operations.supervisor import BRIDGE_CHILD, plan_session
+    from trading.scheduler.sessions import market_session
+
+    session = market_session(date(2026, 10, 13))
+    assert session is not None
+    [bridge] = [plan for plan in plan_session(session) if plan.name == BRIDGE_CHILD]
+    assert re.search(BRIDGE_PROCESS_PATTERN, " ".join(bridge.argv))
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/pgrep").is_file(), reason="macOS pgrep only")
+def test_r5_real_pgrep_finds_every_process_carrying_the_bridge_in_its_arguments(tmp_path) -> None:
+    def dummy(*arguments: str) -> subprocess.Popen[bytes]:
+        # /bin/sh, never python: the supervisor's own scan cannot take it for an unsupervised bridge.
+        return subprocess.Popen(["/bin/sh", "-c", "sleep 30; true", "dummy", *arguments], start_new_session=True)
+
+    script = dummy(str(tmp_path / "scripts_local" / "paper_bridge.py"), "--date", "2026-10-13")
+    module = dummy("-m", "scripts_local.paper_bridge")
+    other = dummy(str(tmp_path / "tests" / "test_paper_bridge.py"))
+    try:
+        deadline = time.monotonic() + 5
+        found: set[int] = set()
+        while time.monotonic() < deadline and not {script.pid, module.pid} <= found:
+            found = {pid for pid, _ in running_bridge_processes()}  # the real /usr/bin/pgrep
+            time.sleep(0.05)
+        assert {script.pid, module.pid} <= found
+        assert other.pid not in found
+    finally:
+        for process in (script, module, other):
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)

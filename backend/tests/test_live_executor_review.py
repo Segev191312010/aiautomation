@@ -634,10 +634,19 @@ async def test_saved_fills_are_never_written_again_every_tick(tmp_path, monkeypa
     assert len(writes) == 1 and len(writes[0]) == 1
 
 
+def read_heartbeats_from_the_ledger(h: Harness) -> None:
+    """The test bridge writes its heartbeat into the test ledger (the real bridge's is never read here)."""
+    from config import cfg
+
+    h.engine.bridge_database = Path(cfg.DB_PATH)
+    h.engine.bridge_heartbeat = h.engine.read_bridge_heartbeat  # the engine's own reader (the harness stubs it)
+
+
 async def test_the_engine_never_starts_while_the_bridge_runs(tmp_path, monkeypatch) -> None:
     from trading.execution.manual_orders import write_bridge_heartbeat
 
     h = await build(tmp_path, monkeypatch, start=False)
+    read_heartbeats_from_the_ledger(h)
     h.engine.bridge_processes = lambda: [(4242, "python scripts_local/paper_bridge.py --date 2026-10-13")]
     with pytest.raises(ExecutionRefused) as refused:
         await h.engine.start()
@@ -666,6 +675,7 @@ async def test_a_bridge_that_appears_later_pauses_new_entries(tmp_path, monkeypa
     from trading.execution.manual_orders import write_bridge_heartbeat
 
     h = await build(tmp_path, monkeypatch)
+    read_heartbeats_from_the_ledger(h)
     h.clock.advance(121)
     await write_bridge_heartbeat("running", now=h.clock.value, pid=4242)
     await h.decide("NEW", con_id=7001)
@@ -683,8 +693,11 @@ async def test_a_bridge_that_appears_later_pauses_new_entries(tmp_path, monkeypa
     ("/Users/x/backend/.venv/bin/python /Users/x/backend/scripts_local/paper_bridge.py --date 2026-10-13", True),
     ("python3 scripts_local/paper_bridge.py", True),
     ("python paper_bridge.py", True),
+    ("/Users/x/.venv/bin/python -m scripts_local.paper_bridge --date 2026-10-13", True),
+    ("python -m paper_bridge", True),
     ("/Users/x/.venv/bin/python -m pytest tests/test_paper_bridge.py", False),
     ("/Users/x/.venv/bin/python autotraderctl.py run", False),
+    ("tail -f /Users/x/.local/share/autotrader-v1/paper_bridge_state.json", False),
 ])
 def test_the_bridge_process_pattern_finds_the_bridge_and_nothing_else(command: str, bridge: bool) -> None:
     assert bool(re.search(BRIDGE_PROCESS_PATTERN, command)) is bridge

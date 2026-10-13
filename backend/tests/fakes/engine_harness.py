@@ -147,8 +147,13 @@ def make_engine(tws: FakeTws, clock: Clock, lines: list[str], *, session_date: d
         return None
 
     engine.fallback_quote = no_screener_quote
-    # Never the real process table: the live bridge may be running on this machine.
+    # Never the real process table or the real bridge database: the live bridge may be running here.
     engine.bridge_processes = lambda: []
+
+    async def no_bridge_heartbeat() -> None:
+        return None
+
+    engine.bridge_heartbeat = no_bridge_heartbeat
     return engine
 
 

@@ -43,6 +43,7 @@ ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "trading/execution/manual_orders.py",
     "trading/execution/promotion.py",
     "trading/execution/tws_state.py",
+    "trading/operations/paths.py",
     "trading/risk/book.py",
     "trading/scheduler/sessions.py",
     "trading/storage/execution_ledger.py",

@@ -88,6 +88,7 @@ from datetime import date, datetime, time as clock_time, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal, InvalidOperation
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -95,6 +96,8 @@ import threading
 import time
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import aiosqlite
 
 from db.core import get_db
 from trading.execution.promotion import (
@@ -113,6 +116,7 @@ from trading.execution.tws_state import (
     decimal_or_none,
     whole,
 )
+from trading.operations.paths import UserPaths
 from trading.risk.book import NewTrade, evaluate_new_trade
 from trading.storage.execution_ledger import (
     BRACKET_LEGS,
@@ -152,8 +156,10 @@ FALLBACK_DEAD_STATUSES = frozenset({"Cancelled", "ApiCancelled", "Filled"})
 # A slow TWS (no accounts or order id in time) is transient: exit 75 so a supervisor retries.
 TRANSIENT_REFUSALS = frozenset({"accounts_unknown", "no_order_id"})
 BRIDGE_HEARTBEAT_WINDOW = timedelta(seconds=60)  # a bridge heartbeat this recent means the bridge runs
-# The bridge script as an argument of any process (pgrep -f, extended regex); test_paper_bridge.py is not it.
-BRIDGE_PROCESS_PATTERN = r"(^|[ /])paper_bridge\.py( |$)"
+# The bridge in any process's arguments (pgrep -f, extended regex): the supervisor's launch line
+# (.../scripts_local/paper_bridge.py --date D), a hand start and the module form
+# (python -m scripts_local.paper_bridge). Not test_paper_bridge.py, not paper_bridge_state.json.
+BRIDGE_PROCESS_PATTERN = r"(^|[ /.])paper_bridge(\.py)?( |$)"
 UNSHOWN_SELL_ALERT = timedelta(seconds=15)  # another order's sell the position still does not show [L-e]
 # Completion times are TWS's (seconds, maybe another clock): a sell this close to the entry counts as after it.
 FOREIGN_FILL_MARGIN = timedelta(seconds=60)
@@ -306,12 +312,37 @@ def running_bridge_processes() -> list[tuple[int, str]]:
     return found
 
 
-async def latest_bridge_heartbeat() -> datetime | None:
-    """When the bridge last wrote its heartbeat into the ledger (migration 12), or None."""
-    from trading.execution.manual_orders import read_bridge_heartbeat
+def bridge_database() -> Path:
+    """The database the PAPER bridge writes its heartbeat into, whatever database the engine uses.
 
-    heartbeat = await read_bridge_heartbeat()
-    return None if heartbeat is None else heartbeat.updated_at
+    The bridge's ledger is the canonical one under the user's home
+    (``paper_bridge.DB``); it writes no heartbeat into any other.
+    """
+    return UserPaths.current().database_file
+
+
+async def latest_bridge_heartbeat(database: Path) -> datetime | None:
+    """When the bridge last wrote its heartbeat (migration 12 table), read-only; None if it never did.
+
+    A missing database or table means no bridge ever ran with it. Anything
+    else unreadable raises: the interlock then counts the bridge as running.
+    """
+    if not database.is_file():
+        return None
+    async with aiosqlite.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True) as db:
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='autotrader_bridge_heartbeat'"
+        ) as cursor:
+            if await cursor.fetchone() is None:
+                return None
+        async with db.execute("SELECT updated_at FROM autotrader_bridge_heartbeat WHERE id=1") as cursor:
+            row = await cursor.fetchone()
+    if row is None:
+        return None
+    stamp = datetime.fromisoformat(str(row[0]))
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("bridge heartbeat time has no time zone")
+    return stamp
 
 
 def parse_time(value: object) -> datetime | None:
@@ -713,7 +744,8 @@ class LiveExecutor:
         self.pause: Callable[[float], Awaitable[None]] = asyncio.sleep
         # The bridge interlock: two order senders on one account could each sell the same shares.
         self.bridge_processes: Callable[[], list[tuple[int, str]]] = running_bridge_processes
-        self.bridge_heartbeat: Callable[[], Awaitable[datetime | None]] = latest_bridge_heartbeat
+        self.bridge_database = bridge_database()
+        self.bridge_heartbeat: Callable[[], Awaitable[datetime | None]] = self.read_bridge_heartbeat
         self.quote_timeout = QUOTE_TIMEOUT_S
         self.sync_timeout = SYNC_TIMEOUT_S
         self.loop_seconds = LOOP_SECONDS
@@ -904,6 +936,10 @@ class LiveExecutor:
         if self.authority.code_digest != on_disk:
             raise ExecutionAuthorityError("code_mismatch", f"the authority names engine code"
                                           f" {self.authority.code_digest[:12]}, this process runs {on_disk[:12]}")
+
+    async def read_bridge_heartbeat(self) -> datetime | None:
+        """The bridge's heartbeat from the bridge's own database (review R-5), never the engine's."""
+        return await latest_bridge_heartbeat(self.bridge_database)
 
     async def bridge_problem(self) -> str | None:
         """Why the PAPER bridge may be running, or None; anything unreadable counts as running."""
