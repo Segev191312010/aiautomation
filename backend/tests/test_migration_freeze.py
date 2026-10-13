@@ -34,7 +34,11 @@ PRODUCTION_MIGRATIONS: dict[int, tuple[str, str]] = {
 # migration is pinned in the commit that adds it; once `autotraderctl db
 # migrate` applies it to the owner's database it moves to
 # PRODUCTION_MIGRATIONS and is frozen like the others.
-PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {**PRODUCTION_MIGRATIONS}
+PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
+    **PRODUCTION_MIGRATIONS,
+    # Not yet applied in production (deploy after review, after the close).
+    13: ("manager-ledger", "d3bb349fd7dcf98226ac5be61ea84f6a85298d079ffef57e4e411f14ead59823"),
+}
 
 
 def _current() -> dict[int, tuple[str, str]]:

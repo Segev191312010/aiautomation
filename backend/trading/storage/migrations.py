@@ -36,6 +36,7 @@ from trading.storage.schema import (
     STRATEGY_SCHEMA_STATEMENTS,
 )
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
+from trading.storage.manager_schema import MANAGER_SCHEMA
 from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
 
 
@@ -279,6 +280,10 @@ async def _manual_orders_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANUAL_ORDERS_SCHEMA)
 
 
+async def _manager_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, MANAGER_SCHEMA)
+
+
 async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
     columns = await _table_columns(db, "autotrader_bracket_groups")
     additions = (
@@ -385,6 +390,13 @@ MIGRATIONS = (
     Migration(
         12, "manual-orders-ledger", "v1-manual-orders-ledger-20261012",
         _manual_orders_ledger, MANUAL_ORDERS_SCHEMA,
+    ),
+    # Every AI day-manager table at once (trading/storage/manager_schema.py).
+    # The unmerged C2 branch also numbered its ledger 13; it renumbers when
+    # it merges after its own review.
+    Migration(
+        13, "manager-ledger", "v1-manager-ledger-20261013",
+        _manager_ledger, MANAGER_SCHEMA,
     ),
 )
 
