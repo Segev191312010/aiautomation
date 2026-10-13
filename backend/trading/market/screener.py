@@ -1047,6 +1047,19 @@ class _ExtrasStopped(Exception):
     """The quote-only pass hit a run of failures; the ranking group stands."""
 
 
+def _valid_rows(items: Sequence[RankedObservation]) -> tuple[RankedObservation, ...]:
+    """Quote-only rows that satisfy the row contract; any other is logged and left out."""
+    valid: list[RankedObservation] = []
+    for item in items:
+        try:
+            payload_row(item)
+        except ValueError as exc:
+            logger.error("held row %s left out: %s", item.observation.instrument.symbol, exc)
+            continue
+        valid.append(item)
+    return tuple(valid)
+
+
 @dataclass(slots=True)
 class _ExtrasPass:
     observed: dict[int, Observation] = field(default_factory=dict)
@@ -1212,6 +1225,8 @@ async def day_universe_instruments(
                 avg_daily_volume_shares=member.avg_daily_volume_shares,
             )
             for member in members[:DAY_UNIVERSE_MAX]
+            # The row contract's symbol limit; admission never stores longer ones.
+            if len(member.symbol) <= 16
         ),
         context_ids,
     )
@@ -1319,18 +1334,24 @@ async def run_sweep(
     observed = {item.instrument.con_id: item for item in observations}
     observed.update(extra_pass.observed)
     held_only = [item for item in held_names if item.con_id not in ranking_ids]
-    trailing = unranked([observed[item.con_id] for item in held_only if item.con_id in observed])
+    trailing = _valid_rows(
+        unranked([observed[item.con_id] for item in held_only if item.con_id in observed])
+    )
     section: DayUniverseSection | None = None
     if day_universe:
         quoted_members = [observed[item.con_id] for item in members if item.con_id in observed]
-        section = DayUniverseSection(
-            size=len(members),
-            quoted=len(quoted_members),
-            errors=len(members) - len(quoted_members),
-            complete=extra_pass.complete,
-            seconds=extra_pass.seconds,
-            rows=tuple(day_universe_row(item) for item in rank_day_universe(quoted_members)),
-        )
+        try:
+            section = DayUniverseSection(
+                size=len(members),
+                quoted=len(quoted_members),
+                errors=len(members) - len(quoted_members),
+                complete=extra_pass.complete,
+                seconds=extra_pass.seconds,
+                rows=tuple(day_universe_row(item) for item in rank_day_universe(quoted_members)),
+            )
+        except (ValueError, ScreenerError) as exc:
+            # The ranking group is persisted whatever its quote-only companions do.
+            logger.error("day universe left out of this sweep: %s", exc)
     payload = build_payload(
         session_date=session_date,
         observed_at=observed_at,

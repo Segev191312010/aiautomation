@@ -662,6 +662,29 @@ async def test_a_lost_connection_in_the_extras_pass_persists_the_ranking_group_t
 
 
 @pytest.mark.asyncio
+async def test_a_broken_day_universe_list_is_left_out_and_the_ranking_group_still_persists(
+    database, monkeypatch
+) -> None:
+    await seed_golden_universe()
+    reference = await golden_sweep(golden_source(), day_universe=False, held=False)
+    insert_day_names(database, [*GOLDEN_DAY[:3], ("SEVENTEENCHARSLONG", 690)])
+    await upsert_daily(qualified_row("SEVENTEENCHARSLONG", 690))
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("day universe rows must be sorted by score, highest first")
+
+    monkeypatch.setattr(screener_module, "rank_day_universe", broken)
+    result = await golden_sweep(golden_source(), day_universe=True)
+
+    assert result.payload.day_universe is None
+    rows = len(reference.payload.rows)
+    assert ranking_document(result.payload, rows) == ranking_document(reference.payload, rows)
+    # A symbol over the row contract's 16 characters is never quoted at all.
+    members = await screener_module.day_universe_instruments(DAY, frozenset())
+    assert [item.con_id for item in members] == [601, 602, 603]
+
+
+@pytest.mark.asyncio
 async def test_a_sweep_without_the_day_universe_serializes_exactly_as_before(database) -> None:
     await seed_golden_universe()
     result = await golden_sweep(golden_source(), day_universe=False)

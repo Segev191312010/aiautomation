@@ -63,6 +63,8 @@ ADMISSION_SECONDS_PER_NAME = 1.5
 ADMISSION_MARGIN_SECONDS = 5.0
 # Reasons are snake_case tokens (the table enforces it).
 REASON_CONTRACT_MISMATCH = "contract_details_mismatch"
+# The screener row contract's symbol limit (ScreenerRow, DayUniverseRow).
+MAX_SYMBOL_LENGTH = 16
 _REASON_LIMIT = 64
 _NON_TOKEN = re.compile(r"[^a-z0-9]+")
 
@@ -127,6 +129,8 @@ def scan_sightings(
         for result in results:
             if result.con_id <= 0 or result.con_id in exclude or not result.symbol.strip():
                 continue
+            if len(result.symbol.strip()) > MAX_SYMBOL_LENGTH:
+                continue
             if result.currency.strip().upper() != "USD":
                 continue
             if result.security_type.strip().upper() != "STK":
@@ -140,7 +144,7 @@ def scan_sightings(
         ScanSighting(
             con_id=result.con_id,
             symbol=result.symbol.strip(),
-            primary_exchange=result.primary_exchange.strip().upper() or None,
+            primary_exchange=result.primary_exchange.strip().upper()[:16] or None,
             best_rank=rank,
             scan_codes=tuple(sorted(codes[result.con_id])),
         )
