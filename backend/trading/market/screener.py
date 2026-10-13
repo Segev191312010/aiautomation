@@ -78,6 +78,9 @@ TICK_VOLUME_MULTIPLIER = Decimal("1")
 # Snapshots are taken in chunks so a dead feed is noticed between chunks;
 # within a chunk the actor bounds concurrent lines and message rate.
 SNAPSHOT_CHUNK_SIZE = 50
+# The day universe is quoted in smaller chunks, so its pass stops within a
+# few seconds of its deadline while the lines stay busy within a chunk.
+DAY_UNIVERSE_CHUNK_SIZE = 20
 # A run of failures means the feed itself is down; stop instead of spending
 # minutes timing out on every remaining instrument.
 MAX_CONSECUTIVE_SNAPSHOT_ERRORS = 25
@@ -1117,19 +1120,26 @@ async def _quote_extras(
     *,
     session: MarketSession | None,
     monotonic: Callable[[], float],
+    deadline: float | None = None,
+    chunk_size: int = SNAPSHOT_CHUNK_SIZE,
 ) -> _ExtrasPass:
     """Quote day-universe and held names after the ranking group, in their own pass.
 
     Nothing here can change or abort the ranking group's sweep: a run of
     failures only ends this pass, and a competing login or lost connection
     is kept for the caller to raise once the ranking group is persisted.
+    With ``deadline`` (``monotonic`` seconds) no chunk starts after it.
     """
     outcome = _ExtrasPass()
     started = monotonic()
     consecutive = 0
     try:
-        for offset in range(0, len(extras), SNAPSHOT_CHUNK_SIZE):
-            chunk = extras[offset : offset + SNAPSHOT_CHUNK_SIZE]
+        for offset in range(0, len(extras), chunk_size):
+            if deadline is not None and monotonic() >= deadline:
+                raise _ExtrasStopped(
+                    f"interval deadline reached; {len(extras) - offset} names left for the next sweep"
+                )
+            chunk = extras[offset : offset + chunk_size]
             results = await source.market_snapshots([item.con_id for item in chunk])
             if len(results) != len(chunk):
                 raise _ExtrasStopped("snapshot batch returned a different number of results")
@@ -1147,7 +1157,7 @@ async def _quote_extras(
                 consecutive = 0
     except _ExtrasStopped as exc:
         outcome.complete = False
-        logger.error("day-universe and held quotes stopped early: %s", exc)
+        logger.warning("quote-only names stopped early: %s", exc)
     except (TWSCompetingSessionError, TWSConnectionError) as exc:
         outcome.complete = False
         outcome.interrupted = exc
@@ -1285,6 +1295,7 @@ async def run_sweep(
     context_etfs: ContextETFs | None = None,
     day_universe: bool = False,
     held: bool = True,
+    day_universe_deadline: float | None = None,
 ) -> SweepResult:
     """Snapshot every qualified instrument once, rank, and persist the sweep.
 
@@ -1301,9 +1312,12 @@ async def run_sweep(
     rows), and persists the sweep: at the same point as before the day
     universe existed, so the hot list's readers never wait for more. With
     ``day_universe`` it afterwards quotes the day universe in its own pass
-    and attaches its own list to the persisted sweep (``attach_day_universe``).
-    Neither pass can change or abort the ranking group; a competing login
-    or lost connection in them raises after the sweep is persisted.
+    and attaches its own list to the persisted sweep (``attach_day_universe``);
+    with ``day_universe_deadline`` (``monotonic`` seconds, the screener's next
+    sweep) that pass stops in time, best-ranked names first, so it never
+    stretches the sweep cadence either. Neither pass can change or abort the
+    ranking group; a competing login or lost connection in them raises after
+    the sweep is persisted.
     """
     universe_size, instruments = await load_screener_universe(session_date)
     context_instruments: tuple[ContextInstrument, ...] = ()
@@ -1424,6 +1438,7 @@ async def run_sweep(
             },
             session=session,
             monotonic=monotonic,
+            deadline=day_universe_deadline,
         )
     return SweepResult(
         snapshot_id=snapshot_id,
@@ -1443,17 +1458,26 @@ async def _sweep_day_universe(
     observed: Mapping[int, Observation],
     session: MarketSession | None,
     monotonic: Callable[[], float],
+    deadline: float | None,
 ) -> ScreenerPayload:
     """Quote the day universe after the sweep is persisted and attach its own list.
 
     Names the sweep already quoted reuse that snapshot; the rest get their
-    own pass. A competing login or lost connection still attaches what was
+    own pass, best scan rank first, in small chunks so a ``deadline`` is met
+    closely. A competing login or lost connection still attaches what was
     quoted (``complete`` false), then raises.
     """
     session_date = date.fromisoformat(payload.session_date)
     members = await day_universe_instruments(session_date, context_ids)
     pending = [item for item in members if item.con_id not in observed]
-    member_pass = await _quote_extras(source, pending, session=session, monotonic=monotonic)
+    member_pass = await _quote_extras(
+        source,
+        pending,
+        session=session,
+        monotonic=monotonic,
+        deadline=deadline,
+        chunk_size=DAY_UNIVERSE_CHUNK_SIZE,
+    )
     quotes = {**observed, **member_pass.observed}
     quoted = [quotes[item.con_id] for item in members if item.con_id in quotes]
     try:

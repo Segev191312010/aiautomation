@@ -542,8 +542,13 @@ async def test_golden_the_hot_35_and_the_regime_ignore_day_universe_and_held_row
     assert {row.con_id for row in section.rows} & ranking_ids == {601, 602, 603, 604, 605, 606, 607}
     calls = [con_id for batch in source.batches for con_id in batch]
     assert len(calls) == len(set(calls))
-    # After the whole ranking group: the held symbol, then the day universe.
-    assert source.batches[-2:] == [[700], [600 + index for index in range(8, 41)]]
+    # After the whole ranking group: the held symbol, then the day universe
+    # (D08..D40, best scan rank first, in chunks of 20).
+    assert source.batches[-3:] == [
+        [700],
+        [600 + index for index in range(8, 28)],
+        [600 + index for index in range(28, 41)],
+    ]
 
 
 class PersistWatch(FakeMarket):
@@ -685,6 +690,51 @@ async def test_failing_extras_never_abort_or_change_the_ranking_group(database, 
             "SELECT payload_json FROM autotrader_screener_snapshots WHERE id = ?", (result.snapshot_id,)
         ).fetchone()
     assert ScreenerPayload.model_validate_json(stored) == result.payload
+
+
+class TimedMarket(FakeMarket):
+    """Every snapshot batch takes ``batch_seconds`` on a manual monotonic clock."""
+
+    def __init__(self, *args: Any, batch_seconds: float, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.batch_seconds = batch_seconds
+        self.elapsed = 0.0
+
+    def monotonic(self) -> float:
+        return self.elapsed
+
+    async def market_snapshots(self, con_ids: Any, *, timeout_seconds: float = 3.0) -> Any:
+        self.elapsed += self.batch_seconds
+        return await super().market_snapshots(con_ids, timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.asyncio
+async def test_the_day_universe_pass_stops_at_the_next_sweeps_deadline_best_ranks_first(database) -> None:
+    await seed_golden_universe()
+    insert_day_names(database, GOLDEN_DAY)
+    template = golden_source()
+    source = TimedMarket(template.answers, template.scans, template.histories, batch_seconds=10.0)
+
+    # ETFs + two ranking chunks take 30 s; a day-universe chunk may start until 35 s.
+    result = await run_sweep(
+        source,
+        session_date=DAY,
+        clock=lambda: GOLDEN_OBSERVED,
+        monotonic=source.monotonic,
+        scan_merge=merge(source),
+        context_etfs=ContextETFs(FakeResolver()),
+        day_universe=True,
+        held=False,
+        day_universe_deadline=35.0,
+    )
+
+    section = result.payload.day_universe
+    assert section is not None and section.complete is False
+    # D01..D07 came with the ranking group; one chunk of 20 more fit (D08..D27).
+    assert {row.symbol for row in section.rows} == {f"D{index:02d}" for index in range(1, 28)} - {"D11"}
+    assert section.quoted + section.errors == section.size == 40
+    assert result.payload.sweep_seconds == 30.0 and section.seconds == 10.0
+    assert len(hotlist_rows(result.payload)) == 35
 
 
 @pytest.mark.asyncio

@@ -527,6 +527,9 @@ async def _screener_loop(
                         report.qualified,
                         len(report.errors),
                     )
+                # Day-universe quotes and admission share the interval's idle
+                # time and both stop before the next sweep is due.
+                next_sweep_deadline = started + interval_seconds - ADMISSION_MARGIN_SECONDS
                 sweep = await run_sweep(
                     actor,
                     session_date=session_date,
@@ -534,6 +537,7 @@ async def _screener_loop(
                     scan_merge=scan_merge,
                     context_etfs=context_etfs,
                     day_universe=include_scans,
+                    day_universe_deadline=next_sweep_deadline,
                 )
                 sweeps += 1
                 if session_date not in rechecked_dates:
@@ -556,7 +560,7 @@ async def _screener_loop(
                         details_pacer=details_pacer,
                         clock=clock,
                         monotonic=monotonic,
-                        deadline=started + interval_seconds - ADMISSION_MARGIN_SECONDS,
+                        deadline=next_sweep_deadline,
                     )
                 if max_sweeps is not None and sweeps >= max_sweeps:
                     break
