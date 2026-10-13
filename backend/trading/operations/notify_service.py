@@ -1,7 +1,10 @@
 """Push the trading day's important events to the owner's phone via Telegram.
 
 ``run_notifier`` follows one session date until 16:15 ET and forwards:
-  a. decisions Claude reviewed (a real setup), from the shadow database;
+  a. decisions Claude reviewed (a real setup), from the shadow database:
+     real MOMO's (a sendable identity) at once, as before; managed MOMO's
+     (AP_MOMO_HOD_V1) and the simulated strategies' in one digest every
+     30 minutes (ET :00 and :30), flushed before the daily report;
   b. PAPER bridge order lines (SENT, FILL, EXIT, CLOSED, CANCEL, CANCELLED,
      FLATTEN, FLAT, CRITICAL, and loss-limit or kill-switch skips);
   c. supervisor child exits;
@@ -9,7 +12,11 @@
   e. the 16:05 ET daily report, closing with the last market context;
   f. market updates at 09:15, 12:00 and 15:30 ET and market regime changes,
      from the screener's market context;
-  g. a database that needs migration, once per session (see below).
+  g. a database that needs migration, once per session (see below);
+  h. the AI day manager (migration 16): a plan summary after the 09:20 and
+     09:46 plans, and one alert per outage (no plan in force, a failed or
+     timed-out plan, the plan budget spent). While migration 16 is pending
+     these are skipped; everything else is unchanged.
 
 It only reads the database, the logs, and the bridge state file: nothing here
 can place, modify, or cancel an order. What was delivered, how far each log
@@ -73,7 +80,8 @@ from trading.operations.paths import (
 )
 from trading.operations.schema_alert import schema_alert_text
 from trading.operations.schema_gate import EXIT_SCHEMA_NOT_READY
-from trading.scheduler.sessions import MARKET_TIMEZONE
+from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
+from trading.sendable_identities import carries_sendable_prefix
 from trading.storage.migrations import SchemaStatus, inspect_schema
 
 if TYPE_CHECKING:
@@ -125,7 +133,14 @@ LOG_FILES = {
     "screener": "screener.log",
     "momo": "momo.log",
     "orb": "orb.log",
+    "momo-ap": "momo-ap.log",
 }
+# Shadow decisions (managed and simulated) reach the phone in one digest per
+# half hour; only real MOMO's are sent one by one.
+DIGEST_INTERVAL_MINUTES = 30
+DIGEST_LINES_PER_STRATEGY = 8
+MANAGER_POLL_SECONDS = 30.0
+PLAN_SUMMARY_SLOTS = ("09:20", "09:46")
 BRIDGE_FORWARD_KINDS = frozenset(
     {"SENT", "FILL", "EXIT", "CLOSED", "CANCEL", "CANCELLED", "FLATTEN", "FLAT", "CRITICAL"}
 )
@@ -806,6 +821,76 @@ async def load_signal_decisions(session_date: date) -> list[SignalDecision]:
     return decisions
 
 
+def is_real_decision(decision: SignalDecision) -> bool:
+    """A decision the PAPER bridge may send (a MOMO_HOD name): at once, as before."""
+    return carries_sendable_prefix(decision.strategy)
+
+
+def digest_boundary(now: datetime) -> datetime:
+    """The latest ET :00 or :30 at or before ``now``: one digest per half hour."""
+    local = now.astimezone(MARKET_TIMEZONE)
+    minute = local.minute - local.minute % DIGEST_INTERVAL_MINUTES
+    return local.replace(minute=minute, second=0, microsecond=0)
+
+
+async def load_managed_rows(session_date: date) -> dict[str, Mapping[str, Any]]:
+    """Managed decisions' narrowing (migration 16), by decision id; empty without it."""
+    try:
+        from trading.manager.store import managed_decisions
+
+        rows = await managed_decisions(session_date)
+    except (aiosqlite.Error, OSError):
+        return {}
+    return {str(row["decision_id"]): row for row in rows}
+
+
+def _digest_line(decision: SignalDecision, managed: Mapping[str, Any] | None) -> str:
+    _emoji, headline = _OUTCOME_HEADLINES.get(decision.outcome, ("", decision.outcome))
+    line = f"• {decision.symbol} {headline}"
+    risk = decision.risk or {}
+    intent = risk.get("intent")
+    if isinstance(intent, Mapping):
+        line += f" {intent.get('quantity')} @ {intent.get('entry_limit')}"
+    elif decision.outcome == "risk_blocked":
+        codes = risk.get("codes")
+        if isinstance(codes, list) and codes:
+            line += f" ({', '.join(str(code) for code in codes[:2])})"
+    failure = decision.review.get("failure_reason")
+    if failure:
+        line += f" ({failure})"
+    if managed is not None:
+        if managed.get("mode") == "managed":
+            line += (
+                f" · plan {str(managed.get('plan_id') or '?').split('-', 1)[-1]}"
+                f" · steps {managed.get('day_step')}×{managed.get('setup_step')}"
+            )
+            if managed.get("policy_qty") is not None:
+                line += f" of {managed.get('policy_qty')}"
+        else:
+            line += f" · neutral ({managed.get('neutral_reason')})"
+    return line
+
+
+def format_digest(
+    decisions: Sequence[SignalDecision],
+    managed: Mapping[str, Mapping[str, Any]],
+    at: datetime,
+) -> str:
+    """Shadow decisions since the last digest, grouped by strategy (plain text)."""
+    by_strategy: dict[str, list[SignalDecision]] = defaultdict(list)
+    for decision in decisions:
+        by_strategy[decision.strategy].append(decision)
+    lines = [f"🗂 Shadow digest {at.astimezone(MARKET_TIMEZONE):%H:%M} ET · {len(decisions)} decisions (no orders)"]
+    for strategy in sorted(by_strategy):
+        items = by_strategy[strategy]
+        lines.append(f"{strategy}:")
+        for decision in items[:DIGEST_LINES_PER_STRATEGY]:
+            lines.append(_digest_line(decision, managed.get(decision.decision_id)))
+        if len(items) > DIGEST_LINES_PER_STRATEGY:
+            lines.append(f"• … {len(items) - DIGEST_LINES_PER_STRATEGY} more (/signals)")
+    return "\n".join(lines)
+
+
 def _setup_lines(intent: Mapping[str, Any]) -> list[str]:
     quantity = _int(intent.get("quantity"))
     entry = _decimal(intent.get("entry_limit"))
@@ -1196,6 +1281,9 @@ class _NotifierSession:
         self._skipped_updates: set[str] = set()
         self._next_schema_check = float("-inf")
         self._schema_status: SchemaStatus | None = None
+        self._digest: dict[str, SignalDecision] = {}
+        self._digest_members: dict[str, list[str]] = {}
+        self._next_manager_poll = float("-inf")
 
     async def run(self) -> None:
         for name, tailer in self._tailers.items():
@@ -1213,13 +1301,17 @@ class _NotifierSession:
             await self._environment.sleep(LOOP_TICK_SECONDS)
 
     async def shutdown(self) -> None:
-        """Flush held fills and redeliveries, drain the sender, persist state."""
+        """Flush held fills, the digest and redeliveries, drain the sender, persist state."""
         try:
             self._poll_logs()
         except Exception:  # noqa: BLE001 - shutdown always drains and saves
             logger.exception("final log poll failed")
         for text in self._fills.drain():
             self._send(text)
+        try:
+            await self._maybe_send_digest(final=True)
+        except Exception:  # noqa: BLE001 - shutdown always drains and saves
+            logger.exception("final digest failed")
         for outbound in self._retries:
             self._enqueue(outbound)
         self._retries.clear()
@@ -1241,6 +1333,13 @@ class _NotifierSession:
         if self._environment.monotonic() >= self._next_decision_poll:
             self._next_decision_poll = self._environment.monotonic() + DECISION_POLL_SECONDS
             await self._poll_decisions()
+        await self._maybe_send_digest()
+        if self._environment.monotonic() >= self._next_manager_poll:
+            self._next_manager_poll = self._environment.monotonic() + MANAGER_POLL_SECONDS
+            try:
+                await self._poll_manager()
+            except Exception:  # noqa: BLE001 - manager news never blocks the rest
+                self._log_quietly("manager", logging.ERROR, "manager poll failed", exc_info=True)
         if self._environment.monotonic() >= self._next_market_poll:
             self._next_market_poll = self._environment.monotonic() + MARKET_POLL_SECONDS
             try:
@@ -1332,10 +1431,70 @@ class _NotifierSession:
             key = f"decision:{decision.decision_id}"
             if key in self._state.delivered or key in self._in_flight:
                 continue
+            if not is_real_decision(decision):
+                # Managed and simulated (shadow) decisions wait for the digest.
+                self._digest.setdefault(key, decision)
+                continue
             self._send(format_decision(decision), key=key)
             logger.info(
                 "queued %s for %s (%s)", decision.outcome, decision.symbol, decision.strategy
             )
+
+    async def _maybe_send_digest(self, *, final: bool = False) -> None:
+        """One digest per ET half hour with the shadow decisions since the last."""
+        if not self._digest:
+            return
+        now = self._environment.clock()
+        # The decisions it carries, not the digest's key, keep a restart from
+        # repeating one; a final flush (report, shutdown) has its own key.
+        key = f"digest:final-{now:%H%M%S}" if final else f"digest:{digest_boundary(now):%H%M}"
+        if key in self._state.delivered or key in self._in_flight:
+            return
+        pending = [
+            (member, decision)
+            for member, decision in self._digest.items()
+            if member not in self._state.delivered and member not in self._in_flight
+        ]
+        self._digest.clear()
+        if not pending:
+            return
+        managed = await load_managed_rows(self._session_date)
+        text = format_digest([decision for _member, decision in pending], managed, now)
+        members = [member for member, _decision in pending]
+        self._digest_members[key] = members
+        self._in_flight.update(members)
+        self._send(text, key=key)
+        logger.info("digest %s queued with %d shadow decisions", key, len(members))
+
+    async def _poll_manager(self) -> None:
+        """Plan summaries after the 09:20 and 09:46 plans; one alert per outage."""
+        from trading.manager.report import format_plan, manager_outage, symbols_for
+        from trading.manager.store import list_plans
+
+        session = market_session(self._session_date)
+        if session is None:
+            return
+        try:
+            plans = await list_plans(self._session_date)
+        except aiosqlite.OperationalError:
+            # Migration 16 is pending: the schema alert already says so.
+            return
+        for slot in PLAN_SUMMARY_SLOTS:
+            key = f"plan:{slot.replace(':', '')}"
+            if key in self._state.delivered or key in self._in_flight:
+                continue
+            plan = next((item for item in plans if item.slot == slot and item.valid), None)
+            if plan is None or plan.plan is None:
+                continue
+            symbols = await symbols_for([entry.con_id for entry in plan.plan.focus])
+            self._send(format_plan(plan, symbols=symbols), key=key)
+            logger.info("plan summary %s queued", plan.plan_id)
+        outage = manager_outage(plans, session, self._environment.clock())
+        if outage is not None:
+            key, text = outage
+            if key not in self._state.delivered and key not in self._in_flight:
+                self._send(text, key=key)
+                logger.warning("manager outage alert queued: %s", key)
 
     async def _poll_market(self) -> None:
         now = self._environment.clock()
@@ -1429,6 +1588,7 @@ class _NotifierSession:
             return
         for held in self._fills.drain():
             self._send(held)
+        await self._maybe_send_digest(final=True)
         self._send(format_daily_report(report), key="report")
         logger.info("daily report queued for %s", self._session_date.isoformat())
 
@@ -1487,6 +1647,10 @@ class _NotifierSession:
             return
         self._in_flight.discard(outbound.key)
         self._state.delivered[outbound.key] = result
+        # A digest settles every decision it carried.
+        for member in self._digest_members.pop(outbound.key, ()):
+            self._in_flight.discard(member)
+            self._state.delivered[member] = result
         self._state.dirty = True
 
     def _redeliver_due(self) -> None:

@@ -771,8 +771,11 @@ async def test_run_notifier_forwards_every_source_once_and_resumes_after_restart
     assert all(payload["chat_id"] == CHAT_ID for method, payload in telegram.calls if method == "sendMessage")
     assert all("parse_mode" not in payload for _, payload in telegram.calls)
     headlines = [text.splitlines()[0] for text in sent]
+    # Shadow strategies' decisions come in the half-hourly digest, not one by one.
+    digests = [text for text in sent if text.startswith("🗂 Shadow digest")]
+    assert len(digests) == 1 and "ORB_V1:\n• MMED risk blocked" in digests[0]
+    assert not any(headline.startswith("🛑 ORB_V1") for headline in headlines)
     for headline in (
-        "🛑 ORB_V1 · MMED · risk blocked",
         "🔔 MOMO_HOD_V1 · BF B · WOULD BUY",
         "🚫 MOMO_HOD_V1 · XYZ · AI blocked",
         "🤔 MOMO_HOD_V1 · FIGS · Claude abstained",
@@ -808,10 +811,12 @@ async def test_run_notifier_forwards_every_source_once_and_resumes_after_restart
 
     assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, clock)) == 0
 
-    assert [text.splitlines()[0] for text in restarted.sent()] == [
+    resent = restarted.sent()
+    assert [text.splitlines()[0] for text in resent] == [
         "✅ FLAT: no open engine positions · 16:09:00 ET",
-        "🔔 ORB_V1 · NEW · WOULD BUY",
+        "🗂 Shadow digest 16:15 ET · 1 decisions (no orders)",
     ]
+    assert "ORB_V1:\n• NEW WOULD BUY" in resent[1]
 
 
 @pytest.mark.anyio
