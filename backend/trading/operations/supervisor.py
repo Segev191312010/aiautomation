@@ -117,7 +117,7 @@ BRIDGE_CHILD = "bridge"
 # refused (exit 78, phone alert) instead of sending orders unattended. Change
 # this only in the commit that records that review in
 # docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
-REVIEWED_BRIDGE_SHA256 = "0" * 64
+REVIEWED_BRIDGE_SHA256 = "7ad34b5824602f725fd04ca8631122b95ad2c86dadf8e2b224cd1942d171022a"
 STRATEGY_STARTS = {
     "orb": time(9, 40),
     "momo": time(9, 55),

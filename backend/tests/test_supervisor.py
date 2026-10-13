@@ -367,6 +367,15 @@ async def test_unpinned_children_launch_whatever_their_script(tmp_path):
     assert await process.wait() == 0
 
 
+def test_the_pinned_bridge_is_the_file_on_disk():
+    # Moving the pin is a review decision: only the commit that records a GO in
+    # docs/PAPER_EXECUTION_STATUS.md changes REVIEWED_BRIDGE_SHA256. A bridge
+    # edit without a new review fails here, and the supervisor would refuse it.
+    bridge = BACKEND_DIR / "scripts_local" / "paper_bridge.py"
+
+    assert supervisor_module.file_sha256(bridge) == supervisor_module.REVIEWED_BRIDGE_SHA256
+
+
 def test_the_dry_run_says_whether_the_bridge_is_the_reviewed_one(tmp_path, monkeypatch):
     script = tmp_path / "scripts_local" / "paper_bridge.py"
     script.parent.mkdir()
