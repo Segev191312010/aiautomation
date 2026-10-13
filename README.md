@@ -166,3 +166,19 @@ Deploy runbook (every phase):
 4. `autotraderctl run --dry-run`: no `!!! DATABASE NOT READY` line.
 5. Check the next morning's `CHILD_START` lines in `supervisor.log`.
 6. Watch the first session.
+
+Rollback restores the code and the database together. Older code refuses a
+database migrated past it, so reverting only the code would take down
+`autotraderctl paper stop`, Telegram `/stop`, manual orders, the screener and
+every strategy (only the pinned bridge would keep running):
+
+1. Stop the supervisor: `autotraderctl shadow agent disable`.
+2. Delete `autotrader.db-wal` and `autotrader.db-shm`, then copy the backup
+   that `db migrate` printed over `autotrader.db`.
+3. Check out the commit that was running before the deploy.
+4. `autotraderctl db status` must exit 0, and `autotraderctl run --dry-run`
+   must show no `!!!` line.
+5. Start the supervisor again: `autotraderctl shadow agent enable`.
+
+Rows written between the migration and the rollback are lost. If
+`db migrate` itself fails, the database is untouched: just revert the merge.
