@@ -39,9 +39,7 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     # Not yet applied in production (deploy after review, after the close).
     13: ("manager-setups", "6eba0bc8eade14dfdf5c472ef73f1ca72a168598a5a9382911d7bb5452cb51da"),
     14: ("execution-engine-ledger", "01f8962c8d82e11d2617b6f0d4886e960e600c22abfb380ac71e8b6ee2fb7f8c"),
-    # STAND-IN for phase 1's own registration of DRAFT_PHASE1_DDL: at merge,
-    # keep phase 1's pin for 15 and drop this one.
-    15: ("manager-day-universe", "7d065aec21019127d6a29369dd6757ba7b06fa40484e6abdd98a044894b65b1c"),
+    15: ("manager-day-universe", "0f5bbbec11e4198af10f2d5b15d4b2367a0fd8353ba7ccb9427896ae616fa41f"),
     # Phase 2, the AI day manager in shadow (plans, verdicts, managed
     # decisions, the switch and its day latch, spend).
     16: ("manager-day-plans", "b1cdc0f64c350802c525767209b98386fa9b0b01b270fa44b75cec3ce2ff2278"),

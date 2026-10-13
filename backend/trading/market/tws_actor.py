@@ -77,8 +77,24 @@ MAX_SNAPSHOT_LINES = 10
 # keeps a batch under TWS's 50 messages/second client limit.
 SNAPSHOT_START_INTERVAL_SECONDS = 0.05
 # Scans the live screener may merge; the frozen ORB scan() is unaffected.
+# These three feed the hot-35 ranking group, so changing them changes the real
+# MOMO's inputs and needs its own review.
 SCREENER_SCAN_CODES = frozenset({"HOT_BY_VOLUME", "TOP_PERC_GAIN", "MOST_ACTIVE"})
 SCREENER_SCAN_ROWS = 50
+# Gap scans the day universe (never the hot-35) would add from 08:00. Each
+# joins PROVEN_GAP_SCAN_CODES only once `autotraderctl shadow probe
+# --scanner-only` has shown TWS serving it for STK.US.MAJOR, pre-market and in
+# regular hours, with the screener's own parameters.
+CANDIDATE_GAP_SCAN_CODES = ("HIGH_OPEN_GAP", "TOP_OPEN_PERC_GAIN")
+# TODO(probe): empty until `shadow probe --scanner-only` proves a code above.
+PROVEN_GAP_SCAN_CODES: frozenset[str] = frozenset()
+# Built-in ScannerSubscription fields (no TagValue filters) the probe tries;
+# TWS may silently ignore a field or read it in other units.
+CANDIDATE_SCANNER_FIELDS = ("aboveVolume", "marketCapAbove")
+# TODO(probe): empty until `shadow probe --scanner-only` shows a field filters
+# as intended. A proven field applies to the proven gap codes only: the three
+# ranking-group scans keep their reviewed parameters.
+PROVEN_SCANNER_FIELDS: dict[str, float] = {}
 
 
 class TWSActorError(RuntimeError):
@@ -445,7 +461,23 @@ def _official_screener_scan_factory(scan_code: str, number_of_rows: int) -> Any:
     subscription.numberOfRows = number_of_rows
     subscription.abovePrice = 10.0
     subscription.belowPrice = 300.0
+    for name, value in screener_scan_fields(scan_code).items():
+        setattr(subscription, name, value)
     return subscription
+
+
+def screener_scan_fields(scan_code: str) -> dict[str, float]:
+    """Probe-proven built-in fields for ``scan_code``; never for a ranking-group scan."""
+    if scan_code in SCREENER_SCAN_CODES or scan_code not in PROVEN_GAP_SCAN_CODES:
+        return {}
+    return {
+        name: value for name, value in PROVEN_SCANNER_FIELDS.items() if name in CANDIDATE_SCANNER_FIELDS
+    }
+
+
+def screener_scan_allowed(scan_code: str) -> bool:
+    """The three ranking-group scans, plus any gap scan the probe has proven."""
+    return scan_code in SCREENER_SCAN_CODES or scan_code in PROVEN_GAP_SCAN_CODES
 
 
 def _official_contract_factory(con_id: int) -> Any:
@@ -672,7 +704,7 @@ class TWSPaperActor:
         Kept apart from ``scan()``, whose single frozen ORB request must not
         change; rows are returned unfiltered for the caller to vet.
         """
-        if scan_code not in SCREENER_SCAN_CODES:
+        if not screener_scan_allowed(scan_code):
             raise TWSRequestError(f"scan code {scan_code!r} is not allowlisted for the screener")
         self._require_connected()
         async with self._request_gate:
@@ -1234,6 +1266,8 @@ class TWSPaperActor:
                 stock_type=str(getattr(raw, "stockType", "") or ""),
                 primary_exchange=str(getattr(contract, "primaryExchange", "") or ""),
                 min_tick=Decimal(str(getattr(raw, "minTick"))),
+                industry=_detail_text(raw, "industry"),
+                category=_detail_text(raw, "category"),
             )
         except Exception:
             self._set_future_exception(
@@ -1631,6 +1665,8 @@ class TWSPaperActor:
             session_date=_parse_ibkr_session_date(getattr(raw, "date")),
             close=Decimal(str(getattr(raw, "close"))),
             volume=Decimal(str(getattr(raw, "volume"))),
+            high=_optional_price(getattr(raw, "high", None)),
+            low=_optional_price(getattr(raw, "low", None)),
         )
 
     def _cancel_scanner(self, request_id: int) -> None:
@@ -1673,6 +1709,23 @@ def _snapshot_missing(snapshot: _PendingMarketSnapshot) -> list[str]:
     if _TICK_CLOSE not in prices:
         missing.append("prior close")
     return missing
+
+
+def _detail_text(raw: Any, name: str) -> str:
+    """One whitespace-collapsed ContractDetails text field ('' when absent)."""
+    value = getattr(raw, name, "")
+    return " ".join(str(value or "").split())[:128]
+
+
+def _optional_price(value: Any) -> Decimal | None:
+    """A finite positive price, else None: metadata never fails a bar callback."""
+    if value is None:
+        return None
+    try:
+        price = Decimal(str(value))
+    except Exception:
+        return None
+    return price if price.is_finite() and 0 < price < Decimal("1e9") else None
 
 
 def _parse_ibkr_timestamp(value: Any) -> datetime:

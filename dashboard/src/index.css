@@ -611,6 +611,15 @@ th[aria-sort='ascending'] {
   font-weight: 700;
 }
 
+.screener td.source {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.screener td.source-scan {
+  color: var(--accent);
+}
+
 /* ---------- chart ---------- */
 
 .chart-frame {
