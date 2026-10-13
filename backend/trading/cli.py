@@ -496,8 +496,16 @@ def _telegram_command(arguments: argparse.Namespace) -> int:
         return 1
     if arguments.action == "whoami":
         return service.print_owner()
+
+    async def serve() -> int:
+        # The always-on assistant is often the first process to open the
+        # database after a reboot or a new migration: it migrates like every
+        # other entry point instead of refusing until the 07:55 screener has.
+        await init_db()
+        return await service.run_telegram_assistant()
+
     try:
-        return asyncio.run(_cancel_on_sigterm(service.run_telegram_assistant()))
+        return asyncio.run(_cancel_on_sigterm(serve()))
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
     except Exception as exc:  # noqa: BLE001 - type only: a message could carry the bot token
