@@ -36,7 +36,7 @@ from trading.storage.schema import (
     STRATEGY_SCHEMA_STATEMENTS,
 )
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
-from trading.storage.manager_schema import MANAGER_SCHEMA
+from trading.storage.manager_schema import MANAGER_SETUPS_SCHEMA
 from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
 
 
@@ -280,8 +280,8 @@ async def _manual_orders_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANUAL_ORDERS_SCHEMA)
 
 
-async def _manager_ledger(db: aiosqlite.Connection) -> None:
-    await _execute_all(db, MANAGER_SCHEMA)
+async def _manager_setups_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, MANAGER_SETUPS_SCHEMA)
 
 
 async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
@@ -391,12 +391,14 @@ MIGRATIONS = (
         12, "manual-orders-ledger", "v1-manual-orders-ledger-20261012",
         _manual_orders_ledger, MANUAL_ORDERS_SCHEMA,
     ),
-    # Every AI day-manager table at once (trading/storage/manager_schema.py).
-    # The unmerged C2 branch also numbered its ledger 13; it renumbers when
-    # it merges after its own review.
+    # Phase 0: only the formed setups the pipeline writes. The other day-
+    # manager tables stay unregistered drafts in manager_schema.py until
+    # their phase lands (14: phase 1, 15: phase 2), so nothing unsettled is
+    # frozen. The unmerged C2 branch also numbered its ledger 13; it
+    # renumbers when it merges after its own review.
     Migration(
-        13, "manager-ledger", "v1-manager-ledger-20261013",
-        _manager_ledger, MANAGER_SCHEMA,
+        13, "manager-setups", "v1-manager-setups-20261013",
+        _manager_setups_ledger, MANAGER_SETUPS_SCHEMA,
     ),
 )
 

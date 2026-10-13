@@ -1,7 +1,19 @@
-"""Migration 13: every table of the AI day manager, designed once.
+"""The AI day manager's tables: one registered, the rest drafts.
 
-Frozen once applied (``tests/test_migration_freeze.py``): later changes go
-into a new migration. Conventions, each enforced by the schema itself:
+Only what a phase uses is registered as a migration, because a migration
+is frozen once applied (``tests/test_migration_freeze.py``) and an unsettled
+design must not be:
+
+* migration 13 (phase 0): ``MANAGER_SETUPS_SCHEMA``, the formed setups the
+  shadow pipeline writes;
+* ``DRAFT_PHASE1_DDL``, registered as migration 14 when phase 1 lands:
+  day_universe, signal_outcomes;
+* ``DRAFT_PHASE2_DDL``, registered as migration 15 when phase 2 lands:
+  plans, verdicts, events with the switch view, day_mode, spend.
+
+The drafts are applied by nothing but their tests (on scratch databases),
+which keep their constraints and triggers checked until they are
+registered. Conventions, each enforced by the schema itself:
 
 * timestamps are ISO-8601 UTC text exactly as Python writes them
   (``...+00:00``), so text order is time order;
@@ -312,26 +324,34 @@ MANAGER_OUTCOMES_SCHEMA = (
     *_append_only("autotrader_manager_signal_outcomes", "signal outcomes"),
 )
 
-MANAGER_SCHEMA = (
-    *MANAGER_SETUPS_SCHEMA,
-    *MANAGER_DAY_UNIVERSE_SCHEMA,
+# Registered: migration 13 (phase 0). Frozen once applied.
+MANAGER_TABLES = ("autotrader_manager_setups",)
+
+# DRAFTS: registered by nothing; only their tests apply them, on scratch
+# databases. Each becomes its own migration, unchanged or reviewed, in the
+# commit that lands its phase; until then it may still change freely.
+DRAFT_PHASE1_DDL = (*MANAGER_DAY_UNIVERSE_SCHEMA, *MANAGER_OUTCOMES_SCHEMA)  # -> migration 14
+DRAFT_PHASE1_TABLES = ("autotrader_manager_day_universe", "autotrader_manager_signal_outcomes")
+DRAFT_PHASE2_DDL = (  # -> migration 15; plans before verdicts, events before day_mode
     *MANAGER_PLANS_SCHEMA,
     *MANAGER_VERDICTS_SCHEMA,
     *MANAGER_SWITCH_SCHEMA,
     *MANAGER_SPEND_SCHEMA,
-    *MANAGER_OUTCOMES_SCHEMA,
 )
-
-MANAGER_TABLES = (
-    "autotrader_manager_setups",
-    "autotrader_manager_day_universe",
+DRAFT_PHASE2_TABLES = (
     "autotrader_manager_plans",
     "autotrader_manager_verdicts",
     "autotrader_manager_events",
     "autotrader_manager_day_mode",
     "autotrader_manager_spend",
-    "autotrader_manager_signal_outcomes",
 )
 
 
-__all__ = ["MANAGER_SCHEMA", "MANAGER_TABLES"]
+__all__ = [
+    "DRAFT_PHASE1_DDL",
+    "DRAFT_PHASE1_TABLES",
+    "DRAFT_PHASE2_DDL",
+    "DRAFT_PHASE2_TABLES",
+    "MANAGER_SETUPS_SCHEMA",
+    "MANAGER_TABLES",
+]

@@ -1,4 +1,11 @@
-"""Migration 13: the AI day-manager tables, their constraints and append-only logs."""
+"""The day-manager tables: migration 13 (formed setups) and the unregistered drafts.
+
+Migration 13 holds only ``autotrader_manager_setups``. The other tables are
+drafts (phase 1: migration 14, phase 2: migration 15) that nothing applies
+yet; their constraints and triggers are checked here on scratch databases
+built from migration 13 plus the drafts, so the design is kept until it is
+registered.
+"""
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -14,7 +21,13 @@ from tests.schema_support import database_at, migrate_database
 from trading.contracts import FixedUniverse, RuleCondition, StrategySpec
 from trading.operations.db_admin import run_migrate
 from trading.scheduler.sessions import MARKET_TIMEZONE
-from trading.storage.manager_schema import MANAGER_TABLES
+from trading.storage.manager_schema import (
+    DRAFT_PHASE1_DDL,
+    DRAFT_PHASE1_TABLES,
+    DRAFT_PHASE2_DDL,
+    DRAFT_PHASE2_TABLES,
+    MANAGER_TABLES,
+)
 from trading.storage.migrations import MIGRATIONS, inspect_schema
 
 TS = "2026-10-13T15:50:00+00:00"
@@ -28,10 +41,13 @@ SPEC = StrategySpec(
     rationale="Schema fixture.",
 )
 
-EXPECTED_TRIGGERS = {
+REGISTERED_TRIGGERS = {
     "autotrader_manager_setups_coherent",
     "autotrader_manager_setups_no_update",
     "autotrader_manager_setups_no_delete",
+}
+REGISTERED_INDEXES = {"idx_autotrader_manager_setups_session"}
+DRAFT_TRIGGERS = {
     "autotrader_manager_day_universe_identity_immutable",
     "autotrader_manager_day_universe_last_seen_monotonic",
     "autotrader_manager_plans_no_update",
@@ -49,8 +65,7 @@ EXPECTED_TRIGGERS = {
     "autotrader_manager_signal_outcomes_no_update",
     "autotrader_manager_signal_outcomes_no_delete",
 }
-EXPECTED_INDEXES = {
-    "idx_autotrader_manager_setups_session",
+DRAFT_INDEXES = {
     "idx_autotrader_manager_day_universe_rank",
     "idx_autotrader_manager_plans_session",
     "idx_autotrader_manager_verdicts_plan",
@@ -58,13 +73,33 @@ EXPECTED_INDEXES = {
 }
 
 
+def _objects(connection: sqlite3.Connection) -> dict[str, set[str]]:
+    return {
+        kind: {
+            name
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type=? AND name LIKE '%autotrader_manager%'",
+                (kind,),
+            )
+        }
+        for kind in ("table", "trigger", "index", "view")
+    }
+
+
+def _apply_drafts(connection: sqlite3.Connection) -> None:
+    """Phase 1 then phase 2, in the order they will be registered (14, 15)."""
+    for statement in (*DRAFT_PHASE1_DDL, *DRAFT_PHASE2_DDL):
+        connection.execute(statement)
+
+
 @pytest.fixture
 def db(tmp_path) -> Iterator[sqlite3.Connection]:
-    """A migrated database holding one MOMO run with one candidate (BF B)."""
+    """A scratch database: every migration, the drafts, one MOMO run with BF B."""
     path = migrate_database(tmp_path / "manager.db")
     # Autocommit: a refused statement is undone alone, never the rows before it.
     connection = sqlite3.connect(path, isolation_level=None)
     connection.execute("PRAGMA foreign_keys=ON")
+    _apply_drafts(connection)
     connection.execute("INSERT INTO autotrader_strategy_identities VALUES ('strategy-momo', 'owner', ?, NULL)", (TS,))
     connection.execute(
         """INSERT INTO autotrader_strategy_versions
@@ -173,17 +208,36 @@ def _rejects_row(db: sqlite3.Connection, table: str, row: dict[str, object]) -> 
 # --- the migration -------------------------------------------------------------------
 
 
-def test_migration_13_creates_every_manager_object(db):
-    objects = {
-        kind: {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type=? AND name LIKE '%autotrader_manager%'", (kind,))}
-        for kind in ("table", "trigger", "index", "view")
-    }
+def test_migration_13_registers_only_the_formed_setups(tmp_path):
+    path = migrate_database(tmp_path / "registered.db")
+    with sqlite3.connect(path) as connection:
+        objects = _objects(connection)
 
-    assert MIGRATIONS[12].version == 13 and MIGRATIONS[12].name == "manager-ledger"
-    assert objects["table"] == set(MANAGER_TABLES)
-    assert objects["trigger"] == EXPECTED_TRIGGERS
-    assert objects["index"] >= EXPECTED_INDEXES
+    assert (MIGRATIONS[12].version, MIGRATIONS[12].name) == (13, "manager-setups")
+    assert objects["table"] == set(MANAGER_TABLES) == {"autotrader_manager_setups"}
+    assert objects["trigger"] == REGISTERED_TRIGGERS
+    assert REGISTERED_INDEXES <= objects["index"]
+    assert objects["view"] == set()
+
+
+def test_the_drafts_are_applied_by_no_migration():
+    registered = [statement for migration in MIGRATIONS for statement in migration.schema_payload]
+    registered_text = "\n".join(registered)
+
+    assert set(DRAFT_PHASE1_DDL).isdisjoint(registered)
+    assert set(DRAFT_PHASE2_DDL).isdisjoint(registered)
+    for table in (*DRAFT_PHASE1_TABLES, *DRAFT_PHASE2_TABLES, "autotrader_manager_switch"):
+        assert table not in registered_text, table
+
+
+def test_the_drafts_apply_on_top_of_migration_13_in_their_phase_order(db):
+    objects = _objects(db)
+
+    assert objects["table"] == {*MANAGER_TABLES, *DRAFT_PHASE1_TABLES, *DRAFT_PHASE2_TABLES}
+    assert objects["trigger"] == REGISTERED_TRIGGERS | DRAFT_TRIGGERS
+    assert objects["index"] >= REGISTERED_INDEXES | DRAFT_INDEXES
     assert objects["view"] == {"autotrader_manager_switch"}
+    assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 def test_migration_13_on_a_version_12_database_keeps_its_data_and_backs_it_up(tmp_path):

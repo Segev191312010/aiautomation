@@ -37,7 +37,7 @@ PRODUCTION_MIGRATIONS: dict[int, tuple[str, str]] = {
 PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     **PRODUCTION_MIGRATIONS,
     # Not yet applied in production (deploy after review, after the close).
-    13: ("manager-ledger", "d3bb349fd7dcf98226ac5be61ea84f6a85298d079ffef57e4e411f14ead59823"),
+    13: ("manager-setups", "6eba0bc8eade14dfdf5c472ef73f1ca72a168598a5a9382911d7bb5452cb51da"),
 }
 
 

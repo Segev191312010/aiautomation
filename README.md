@@ -142,14 +142,21 @@ The owner hears of it without any process migrating:
    version before and after.
 
 Applied migrations are frozen (`tests/test_migration_freeze.py`): a schema
-change is always a new migration, never an edit. To undo one, stop the
-supervisor, delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the
-backup over `autotrader.db`.
+change is always a new migration, never an edit. So a migration holds only
+what its phase uses: migration 13 adds `autotrader_manager_setups` (every
+setup the rules form). The other AI day-manager tables are unregistered
+drafts in `backend/trading/storage/manager_schema.py`, checked by their tests
+on scratch databases and registered when their phase lands (14: phase 1, day
+universe and signal outcomes; 15: phase 2, plans, verdicts, the autopilot
+switch, the day latch and spend). To undo a migration, stop the supervisor,
+delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the backup over
+`autotrader.db`.
 
 Deploy runbook (every phase):
 
 1. Merge after 18:30 ET.
-2. `autotraderctl db migrate` (note the backup path it prints).
+2. `autotraderctl db migrate` (note the backup path it prints; for phase 0 it
+   is v12 to v13, `backups/autotrader.<UTC time>.v12-to-v13.db`).
 3. Restart the supervisor (it keeps the old plan in memory).
 4. `autotraderctl run --dry-run`: no `!!! DATABASE NOT READY` line.
 5. Check the next morning's `CHILD_START` lines in `supervisor.log`.
