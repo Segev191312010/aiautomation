@@ -35,6 +35,7 @@ from trading.storage.schema import (
     SHADOW_RUNTIME_SCHEMA_STATEMENTS,
     STRATEGY_SCHEMA_STATEMENTS,
 )
+from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION, EXECUTION_LEDGER_SCHEMA
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
 from trading.storage.manager_schema import MANAGER_SETUPS_SCHEMA
 from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
@@ -284,6 +285,10 @@ async def _manager_setups_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANAGER_SETUPS_SCHEMA)
 
 
+async def _live_execution_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, EXECUTION_LEDGER_SCHEMA)
+
+
 async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
     columns = await _table_columns(db, "autotrader_bracket_groups")
     additions = (
@@ -393,12 +398,18 @@ MIGRATIONS = (
     ),
     # Phase 0: only the formed setups the pipeline writes. The other day-
     # manager tables stay unregistered drafts in manager_schema.py until
-    # their phase lands (14: phase 1, 15: phase 2), so nothing unsettled is
-    # frozen. The unmerged C2 branch also numbered its ledger 13; it
-    # renumbers when it merges after its own review.
+    # their phase lands (15: phase 1, 16: phase 2), so nothing unsettled is
+    # frozen.
     Migration(
         13, "manager-setups", "v1-manager-setups-20261013",
         _manager_setups_ledger, MANAGER_SETUPS_SCHEMA,
+    ),
+    # The PAPER execution engine's ledger, ahead of the engine itself (which
+    # stays unmerged and unwired on its own branch): its empty tables reach the
+    # owner's database only through `autotraderctl db migrate`.
+    Migration(
+        EXECUTION_LEDGER_MIGRATION, "execution-engine-ledger", "v1-execution-engine-ledger-20261013",
+        _live_execution_ledger, EXECUTION_LEDGER_SCHEMA,
     ),
 )
 

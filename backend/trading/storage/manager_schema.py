@@ -6,9 +6,9 @@ design must not be:
 
 * migration 13 (phase 0): ``MANAGER_SETUPS_SCHEMA``, the formed setups the
   shadow pipeline writes;
-* ``DRAFT_PHASE1_DDL``, registered as migration 14 when phase 1 lands:
-  day_universe, signal_outcomes;
-* ``DRAFT_PHASE2_DDL``, registered as migration 15 when phase 2 lands:
+* ``DRAFT_PHASE1_DDL``, registered as migration 15 when phase 1 lands:
+  day_universe, signal_outcomes (14 is the execution engine's ledger);
+* ``DRAFT_PHASE2_DDL``, registered as migration 16 when phase 2 lands:
   plans, verdicts, events with the switch view, day_mode, spend.
 
 The drafts are applied by nothing but their tests (on scratch databases),
@@ -330,9 +330,9 @@ MANAGER_TABLES = ("autotrader_manager_setups",)
 # DRAFTS: registered by nothing; only their tests apply them, on scratch
 # databases. Each becomes its own migration, unchanged or reviewed, in the
 # commit that lands its phase; until then it may still change freely.
-DRAFT_PHASE1_DDL = (*MANAGER_DAY_UNIVERSE_SCHEMA, *MANAGER_OUTCOMES_SCHEMA)  # -> migration 14
+DRAFT_PHASE1_DDL = (*MANAGER_DAY_UNIVERSE_SCHEMA, *MANAGER_OUTCOMES_SCHEMA)  # -> migration 15
 DRAFT_PHASE1_TABLES = ("autotrader_manager_day_universe", "autotrader_manager_signal_outcomes")
-DRAFT_PHASE2_DDL = (  # -> migration 15; plans before verdicts, events before day_mode
+DRAFT_PHASE2_DDL = (  # -> migration 16; plans before verdicts, events before day_mode
     *MANAGER_PLANS_SCHEMA,
     *MANAGER_VERDICTS_SCHEMA,
     *MANAGER_SWITCH_SCHEMA,

@@ -149,11 +149,14 @@ The owner hears of it without any process migrating:
 Applied migrations are frozen (`tests/test_migration_freeze.py`): a schema
 change is always a new migration, never an edit. So a migration holds only
 what its phase uses: migration 13 adds `autotrader_manager_setups` (every
-setup the rules form). The other AI day-manager tables are unregistered
-drafts in `backend/trading/storage/manager_schema.py`, checked by their tests
-on scratch databases and registered when their phase lands (14: phase 1, day
-universe and signal outcomes; 15: phase 2, plans, verdicts, the autopilot
-switch, the day latch and spend). To undo a migration, stop the supervisor,
+setup the rules form), and migration 14 the PAPER execution engine's ledger
+(`autotrader_exec_*`, empty until the engine, reviewed and unwired on its own
+branch, runs a supervised drill; `backend/trading/storage/execution_ledger_schema.py`).
+The other AI day-manager tables are unregistered drafts in
+`backend/trading/storage/manager_schema.py`, checked by their tests on scratch
+databases and registered when their phase lands (15: phase 1, day universe
+and signal outcomes; 16: phase 2, plans, verdicts, the autopilot switch, the
+day latch and spend). To undo a migration, stop the supervisor,
 delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the backup over
 `autotrader.db`.
 
@@ -161,7 +164,8 @@ Deploy runbook (every phase):
 
 1. Merge after 18:30 ET.
 2. `autotraderctl db migrate` (note the backup path it prints; for phase 0 it
-   is v12 to v13, `backups/autotrader.<UTC time>.v12-to-v13.db`).
+   is v12 to v13, `backups/autotrader.<UTC time>.v12-to-v13.db`, or v12 to v14
+   when the execution-ledger migration has merged too).
 3. Restart the supervisor (it keeps the old plan in memory).
 4. `autotraderctl run --dry-run`: no `!!! DATABASE NOT READY` line.
 5. Check the next morning's `CHILD_START` lines in `supervisor.log`.
