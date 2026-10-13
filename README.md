@@ -11,6 +11,13 @@ Autotrader V1 is a clean rebuild of the trading system around typed strategy con
   Telegram assistant. A LaunchAgent can start it at login.
 - **AI:** Claude reviews every deterministic setup (PROPOSE/ABSTAIN) and answers
   owner questions with read-only tools; it never creates orders.
+- **AI day manager (shadow):** the `manager` child writes day plans (09:20,
+  09:46, hourly 10:30–14:30 ET; at most $5 a day) that may only narrow: a
+  focus inside the deterministic candidates, strategies off for the day, size
+  steps down. Managed MOMO (`momo-ap`, AP_MOMO_HOD_V1, never sendable) follows
+  them in shadow; without a valid plan it runs exactly as MOMO_HOD_V2.
+  `autotraderctl manager on|off|status` and Telegram `/autopilot`, `/plan` are
+  the owner's switch; real MOMO_HOD_V2 is unchanged either way.
 - **Owner orders:** any order from the pinned Telegram chat via a strict
   deterministic parser and validator; sent by the single order sender.
 - **Evidence:** every decision is recorded; `trading/research/` records real
@@ -152,11 +159,12 @@ what its phase uses: migration 13 adds `autotrader_manager_setups` (every
 setup the rules form), and migration 14 the PAPER execution engine's ledger
 (`autotrader_exec_*`, empty until the engine, reviewed and unwired on its own
 branch, runs a supervised drill; `backend/trading/storage/execution_ledger_schema.py`).
-The other AI day-manager tables are unregistered drafts in
-`backend/trading/storage/manager_schema.py`, checked by their tests on scratch
-databases and registered when their phase lands (15: phase 1, day universe
-and signal outcomes; 16: phase 2, plans, verdicts, the autopilot switch, the
-day latch and spend). To undo a migration, stop the supervisor,
+Migration 16 holds phase 2's tables (`backend/trading/storage/manager_schema.py`):
+plans, verdicts, managed decisions, the autopilot switch with its day latch,
+and the spend ledger. Phase 1's tables (15: day universe and signal outcomes)
+are registered when phase 1 lands. While 16 is pending, `autotraderctl manager
+on|off|status`, `/autopilot` and `/plan` refuse with a reply naming
+`autotraderctl db migrate`; nothing else changes. To undo a migration, stop the supervisor,
 delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the backup over
 `autotrader.db`.
 
