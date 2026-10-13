@@ -1,13 +1,23 @@
-"""Transactional, checksummed migrations for the Autotrader V1 SQLite domain."""
+"""Transactional, checksummed migrations for the Autotrader V1 SQLite domain.
+
+Only ``autotraderctl db migrate`` applies migrations (with a lock and a
+verified backup). Every other process reads the ledger with
+:func:`inspect_schema` and refuses to start unless the schema is exactly the
+code's: no process migrates implicitly at start.
+"""
 from __future__ import annotations
 
+from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import inspect
 import json
 from pathlib import Path
+import sqlite3
 from typing import Awaitable, Callable
+from urllib.parse import quote
 from uuid import uuid4
 
 import aiosqlite
@@ -379,6 +389,151 @@ MIGRATIONS = (
 )
 
 
+# Named reasons a database is not usable by this code. A child that finds one
+# refuses to start; `autotraderctl db status` prints them.
+SCHEMA_MIGRATION_PENDING = "schema_migration_pending"
+SCHEMA_CHECKSUM_MISMATCH = "schema_checksum_mismatch"
+SCHEMA_NEWER_THAN_CODE = "schema_newer_than_code"
+SCHEMA_HISTORY_GAP = "schema_history_gap"
+SCHEMA_UNREADABLE = "schema_unreadable"
+# A read-only check never waits long: WAL readers are not blocked by writers.
+SCHEMA_READ_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaProblem:
+    """A recorded history this code must not run on (named token + detail)."""
+
+    token: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaStatus:
+    """A database's migration ledger compared with the code's migrations."""
+
+    database: str
+    exists: bool
+    applied: tuple[int, ...]
+    known: tuple[int, ...]
+    problems: tuple[SchemaProblem, ...] = ()
+
+    @property
+    def pending(self) -> tuple[int, ...]:
+        done = set(self.applied)
+        return tuple(version for version in self.known if version not in done)
+
+    @property
+    def current(self) -> bool:
+        """Exactly the code's schema: every known migration applied, nothing else."""
+        return self.exists and not self.problems and not self.pending
+
+    @property
+    def token(self) -> str | None:
+        if self.problems:
+            return self.problems[0].token
+        if self.pending:
+            return SCHEMA_MIGRATION_PENDING
+        return None
+
+    @property
+    def applied_version(self) -> int:
+        return max(self.applied, default=0)
+
+    @property
+    def code_version(self) -> int:
+        return max(self.known, default=0)
+
+    def describe(self) -> str:
+        """One line for logs, the terminal and the phone."""
+        if self.current:
+            return f"schema v{self.applied_version} is current"
+        if self.problems:
+            return "; ".join(f"{problem.token}: {problem.detail}" for problem in self.problems)
+        state = f"schema v{self.applied_version}" if self.exists else "no database file"
+        pending = ", ".join(str(version) for version in self.pending)
+        return f"{state}, this code needs v{self.code_version} (pending: {pending})"
+
+
+def _history_problems(
+    rows: Iterable[tuple[object, object, object]],
+) -> tuple[frozenset[int], tuple[SchemaProblem, ...]]:
+    """Compare a ledger's ``(version, name, checksum)`` rows with ``MIGRATIONS``.
+
+    The one comparison behind both :func:`apply_migrations` (which refuses on
+    the first problem) and :func:`inspect_schema` (which reports them), so a
+    child's start check and the migrate command cannot disagree.
+    """
+    expected = {migration.version: migration for migration in MIGRATIONS}
+    applied: set[int] = set()
+    problems: list[SchemaProblem] = []
+    for version, name, checksum in rows:
+        number = int(str(version))
+        applied.add(number)
+        migration = expected.get(number)
+        if migration is None:
+            problems.append(
+                SchemaProblem(
+                    SCHEMA_NEWER_THAN_CODE,
+                    f"database migration {number} is newer than this application",
+                )
+            )
+        elif str(name) != migration.name or str(checksum) != migration.checksum:
+            problems.append(
+                SchemaProblem(SCHEMA_CHECKSUM_MISMATCH, f"database migration {number} checksum mismatch")
+            )
+    if applied and applied != set(range(1, max(applied) + 1)):
+        problems.append(
+            SchemaProblem(SCHEMA_HISTORY_GAP, "database migration history contains a gap")
+        )
+    return frozenset(applied), tuple(problems)
+
+
+def inspect_schema(database: str | Path) -> SchemaStatus:
+    """Read a database's migration ledger through a read-only handle.
+
+    Never creates, migrates or writes the database: a missing file reports
+    every migration as pending, and an unreadable one as ``schema_unreadable``.
+    """
+    known = tuple(migration.version for migration in MIGRATIONS)
+    if str(database) == ":memory:":
+        return SchemaStatus(database=":memory:", exists=False, applied=(), known=known)
+    path = Path(database).expanduser()
+    if not path.is_file():
+        return SchemaStatus(database=str(path), exists=False, applied=(), known=known)
+    uri = f"file:{quote(str(path.resolve()))}?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=SCHEMA_READ_TIMEOUT_SECONDS)) as db:
+            ledger = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='autotrader_schema_migrations'"
+            ).fetchone()
+            rows = (
+                db.execute(
+                    "SELECT version, name, checksum FROM autotrader_schema_migrations ORDER BY version"
+                ).fetchall()
+                if ledger is not None
+                else []
+            )
+    except sqlite3.Error as exc:
+        return SchemaStatus(
+            database=str(path),
+            exists=True,
+            applied=(),
+            known=known,
+            problems=(
+                SchemaProblem(SCHEMA_UNREADABLE, f"database unreadable: {type(exc).__name__}: {exc}"),
+            ),
+        )
+    applied, problems = _history_problems(rows)
+    return SchemaStatus(
+        database=str(path),
+        exists=True,
+        applied=tuple(sorted(applied)),
+        known=known,
+        problems=problems,
+    )
+
+
 async def backup_database(db: aiosqlite.Connection, destination: str | Path) -> Path:
     """Create a non-overwriting SQLite backup before applying migrations."""
     backup_path = Path(destination)
@@ -397,6 +552,11 @@ async def backup_database(db: aiosqlite.Connection, destination: str | Path) -> 
 async def apply_migrations(
     db: aiosqlite.Connection, *, backup_path: str | Path | None = None
 ) -> None:
+    """Apply every pending migration in one transaction.
+
+    Called only by ``autotraderctl db migrate`` (through ``db.core.init_db``)
+    and by tests; a source-level test keeps every runtime entry point away.
+    """
     if backup_path is not None:
         await backup_database(db, backup_path)
     await db.execute("BEGIN IMMEDIATE")
@@ -406,17 +566,9 @@ async def apply_migrations(
             "SELECT version, name, checksum FROM autotrader_schema_migrations ORDER BY version"
         ) as cursor:
             applied_rows = await cursor.fetchall()
-        expected = {migration.version: migration for migration in MIGRATIONS}
-        applied_versions: set[int] = set()
-        for version, name, checksum in applied_rows:
-            migration = expected.get(int(version))
-            if migration is None:
-                raise RuntimeError(f"database migration {version} is newer than this application")
-            if str(name) != migration.name or str(checksum) != migration.checksum:
-                raise RuntimeError(f"database migration {version} checksum mismatch")
-            applied_versions.add(int(version))
-        if applied_versions and applied_versions != set(range(1, max(applied_versions) + 1)):
-            raise RuntimeError("database migration history contains a gap")
+        applied_versions, problems = _history_problems(applied_rows)
+        if problems:
+            raise RuntimeError(problems[0].detail)
 
         for migration in MIGRATIONS:
             if migration.version in applied_versions:

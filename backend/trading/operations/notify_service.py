@@ -8,12 +8,20 @@
   d. competing IBKR logins and lost TWS connections seen in the data logs;
   e. the 16:05 ET daily report, closing with the last market context;
   f. market updates at 09:15, 12:00 and 15:30 ET and market regime changes,
-     from the screener's market context.
+     from the screener's market context;
+  g. a database that needs migration, once per session (see below).
 
 It only reads the database, the logs, and the bridge state file: nothing here
 can place, modify, or cancel an order. What was delivered, how far each log
 was read, whether the report went out, and the regime last reported are kept
 per date in a private state file, so a restart neither resends nor skips.
+
+Unlike every other child it starts while a migration is pending: it never
+writes the database and reads only tables that exist since migrations 2 and
+11, so it keeps forwarding the bridge and the supervisor. It checks the
+schema (read-only) at start and every five minutes; while the schema is not
+current it sends one alert per session and drops the children's repeated
+exit-75 restarts instead of sending one message per restart.
 """
 from __future__ import annotations
 
@@ -63,7 +71,10 @@ from trading.operations.paths import (
     atomic_private_write,
     ensure_private_file,
 )
+from trading.operations.schema_alert import schema_alert_text
+from trading.operations.schema_gate import EXIT_SCHEMA_NOT_READY
 from trading.scheduler.sessions import MARKET_TIMEZONE
+from trading.storage.migrations import SchemaStatus, inspect_schema
 
 if TYPE_CHECKING:
     from trading.market.context import MarketContext
@@ -100,6 +111,10 @@ MARKET_CONTEXT_MAX_AGE = timedelta(minutes=5)
 # stops at 16:00 and the report goes out at 16:05.
 CLOSE_CONTEXT_MAX_AGE = timedelta(hours=24)
 REGIME_ALERT_INTERVAL = timedelta(minutes=15)
+# A migration that becomes pending (or a mismatched schema) reaches the phone
+# within this long; the first check runs before the first log poll.
+SCHEMA_CHECK_SECONDS = 300.0
+SCHEMA_ALERT_KEY = "schema_alert"
 # Pre-market regime swings only set the baseline that the 09:15 update reports.
 REGIME_ALERTS_FROM = MARKET_UPDATE_TIMES[0]
 HOT_NAMES_IN_UPDATE = 5
@@ -180,6 +195,13 @@ async def _latest_hot_list(session_date: date) -> Sequence[HotListRow]:
     return await latest_hotlist(session_date)
 
 
+def _current_schema_status() -> SchemaStatus:
+    """Read-only: the notifier never migrates, it only reports."""
+    from config import cfg
+
+    return inspect_schema(cfg.DB_PATH)
+
+
 @dataclass(frozen=True, slots=True)
 class NotifyEnvironment:
     """Everything the notifier touches outside the process; tests substitute each."""
@@ -194,6 +216,7 @@ class NotifyEnvironment:
     configure_logging: bool = True
     read_market_context: MarketContextReader = _latest_market_context
     read_hot_list: HotListReader = _latest_hot_list
+    read_schema_status: Callable[[], SchemaStatus] = _current_schema_status
 
     @classmethod
     def current(cls) -> NotifyEnvironment:
@@ -623,6 +646,14 @@ def supervisor_event_text(line: str) -> str | None:
             return None
         return f"⚙️ {name} exited (code {code}), not restarting"
     return f"⚙️ {name} exited (code {code}), restarting in {_seconds_text(restart)} s"
+
+
+def child_exit_code(line: str) -> int | None:
+    """The exit code of a ``CHILD_EXIT`` line, or None for any other line."""
+    match = _CHILD_EXIT.search(line)
+    if match is None:
+        return None
+    return _int(match.group("code"))
 
 
 def ibkr_session_problem(line: str, *, include_connection_lost: bool = True) -> str | None:
@@ -1163,6 +1194,8 @@ class _NotifierSession:
         self._report_retry_at = float("-inf")
         self._quiet_until: dict[str, float] = {}
         self._skipped_updates: set[str] = set()
+        self._next_schema_check = float("-inf")
+        self._schema_status: SchemaStatus | None = None
 
     async def run(self) -> None:
         for name, tailer in self._tailers.items():
@@ -1197,6 +1230,11 @@ class _NotifierSession:
             tailer.close()
 
     async def _cycle(self) -> None:
+        # Before the logs: a pending migration's exit-75 restarts are folded
+        # into one alert from the very first poll.
+        if self._environment.monotonic() >= self._next_schema_check:
+            self._next_schema_check = self._environment.monotonic() + SCHEMA_CHECK_SECONDS
+            await self._check_schema()
         self._poll_logs()
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
@@ -1222,8 +1260,40 @@ class _NotifierSession:
             for line in tailer.poll():
                 self._handle_line(name, line)
 
+    async def _check_schema(self) -> None:
+        """Read-only ledger check; never migrates. One alert per session date."""
+        try:
+            status = await asyncio.to_thread(self._environment.read_schema_status)
+        except Exception as exc:  # noqa: BLE001 - the rest of the notifier carries on
+            self._log_quietly("schema", logging.WARNING, "schema check failed: %s", type(exc).__name__)
+            return
+        self._schema_status = status
+        if status.current:
+            return
+        self._log_quietly(
+            "schema",
+            logging.CRITICAL,
+            "%s: %s; trading children refuse to start until `autotraderctl db migrate`",
+            status.token,
+            status.describe(),
+        )
+        if SCHEMA_ALERT_KEY in self._state.delivered or SCHEMA_ALERT_KEY in self._in_flight:
+            return
+        self._send(schema_alert_text(status), key=SCHEMA_ALERT_KEY)
+
+    def _schema_refusal(self, line: str) -> bool:
+        """A child's exit 75 while the schema is not current: already in the alert."""
+        status = self._schema_status
+        return (
+            status is not None
+            and not status.current
+            and child_exit_code(line) == EXIT_SCHEMA_NOT_READY
+        )
+
     def _handle_line(self, source: str, line: str) -> None:
         if source == "supervisor":
+            if self._schema_refusal(line):
+                return
             text = supervisor_event_text(line)
             if text:
                 self._send(text)
@@ -1626,6 +1696,8 @@ __all__ = [
     "MISSING_FILE_CHECKPOINT",
     "REGIME_ALERT_INTERVAL",
     "REPORT_AT",
+    "SCHEMA_ALERT_KEY",
+    "SCHEMA_CHECK_SECONDS",
     "SESSION_END",
     "SETUP_INSTRUCTIONS",
     "TEST_MESSAGE",
@@ -1639,6 +1711,7 @@ __all__ = [
     "SignalDecision",
     "bridge_event_text",
     "bridge_state_files",
+    "child_exit_code",
     "collect_daily_report",
     "format_daily_report",
     "format_decision",

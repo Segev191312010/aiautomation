@@ -44,6 +44,12 @@ async def transaction():
 
 
 async def init_db() -> None:
+    """Create or upgrade the schema: ``autotraderctl db migrate`` and tests only.
+
+    No runtime process calls this at start (they refuse a pending migration
+    instead); ``db migrate`` takes its lock and a verified backup first. A
+    source-level test pins the callers.
+    """
     async with get_db() as db:
         await db.execute(
             """

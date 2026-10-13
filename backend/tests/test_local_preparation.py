@@ -43,10 +43,11 @@ def test_failures_are_sanitized(monkeypatch):
 def test_cli_preflight_does_not_initialize_database(monkeypatch, capsys):
     from trading import cli
 
-    async def forbidden():
-        raise AssertionError("preparation must not initialize a database")
+    def forbidden(**_kwargs):
+        raise AssertionError("preparation must not open the database")
 
-    monkeypatch.setattr(cli, "init_db", forbidden)
+    assert not hasattr(cli, "init_db")  # no CLI path migrates implicitly
+    monkeypatch.setattr(cli, "require_current_schema", forbidden)
     async def preflight():
         return {"ready": False, "orders_enabled": False, "checks": []}
 
