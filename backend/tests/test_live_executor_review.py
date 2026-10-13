@@ -8,6 +8,7 @@ execution, a fill rewritten every tick, the bridge interlock) are at the end.
 from __future__ import annotations
 
 import ast
+import copy
 from decimal import Decimal
 from pathlib import Path
 import re
@@ -143,6 +144,23 @@ async def test_c2_1_owner_sells_before_the_entry_reserve_nothing(tmp_path, monke
     assert sells(h) == [(101, "SELL", "LMT", 100)]  # the whole position is repriced: nothing is reserved
 
 
+@pytest.mark.parametrize("target_live", [True, False], ids=["reprice", "fallback"])
+async def test_c2_1_without_a_fresh_snapshot_nothing_is_sold(tmp_path, monkeypatch, target_live: bool) -> None:
+    h = await build(tmp_path, monkeypatch)
+    bracket = await open_bracket(h)
+    if not target_live:
+        h.tws._cancel(h.tws.orders[(CLIENT_ID, 101)])
+    h.tws.quotes[HELD] = {"bid": 50.20}
+    h.tws.answer_snapshots = False  # TWS does not answer: what other clients sold is unknown
+    h.clock.value = ny(15, 45, 1)
+    h.events()
+    await h.engine.tick()
+
+    assert sells(h) == [] and h.tws.cancelled == []  # in doubt: alert, never sell
+    assert bracket.flatten_state == "failed"
+    assert "HELD: flatten not sent — TWS did not report a fresh snapshot; act in TWS" in h.critical()
+
+
 @pytest.mark.parametrize(("text", "expected"), [
     ("20261013 15:44:02 America/New_York", ny(15, 44, 2)),
     ("20261013-15:44:02 US/Eastern", ny(15, 44, 2)),
@@ -211,6 +229,22 @@ async def test_c2_2_new_order_ids_skip_a_live_order_the_ledger_does_not_know(tmp
     assert h.placed_ids() == [101, 102, 103]  # placeOrder on 100 would have modified the foreign stop
     assert (foreign.order.action, foreign.order.orderType, foreign.order.totalQuantity) == ("SELL", "STP", 50)
     assert ("INFO", "next order id raised from 100 to 101: ids up to 100 are in use at TWS") in h.events()
+
+
+async def test_c2_2_order_ids_stay_above_the_ledger_when_tws_reports_none_of_its_orders(
+    tmp_path, monkeypatch
+) -> None:
+    h = await build(tmp_path, monkeypatch)
+    await h.decide("AAPL", con_id=7001)
+    await h.engine.tick()
+    h.tws.cancelOrder(100)  # the whole bracket ends unfilled: TWS will report no open order and no execution
+    await h.engine.tick()
+    h.tws.restart_tws(next_valid_id=1)
+    restarted = await h.restart()
+    await restarted.decide("TSLA", con_id=7002)
+    await restarted.engine.tick()
+
+    assert h.placed_ids() == [100, 101, 102, 103, 104, 105]  # only the ledger still knows 100-102
 
 
 # ---- C2-3: a slow TWS is transient (exit 75), an unsafe one permanent (exit 78) ---------------------
@@ -297,6 +331,25 @@ async def test_c2_4_a_reprice_sent_before_a_restart_is_never_resent_with_a_size_
     assert sorted(h.tws.cancelled) == [101, 102]
     assert ("HELD: TWS does not show the flatten of target 101 sent before the restart (49.94) — not re-sent;"
             " act in TWS") in restarted.critical()
+
+
+async def test_c2_4_a_reprice_tws_applied_before_a_restart_is_confirmed_by_its_price(tmp_path, monkeypatch) -> None:
+    h = await build(tmp_path, monkeypatch)
+    await open_bracket(h)
+    owner_sells(h, 40)
+    h.tws.quotes[HELD] = {"bid": 50.20}
+    h.tws.modify_mode = "silent"
+    h.clock.value = ny(15, 45, 1)
+    await h.engine.tick()
+    target = h.tws.orders[(CLIENT_ID, 101)]
+    target.order = copy.copy(h.tws.placed[-1][1])  # TWS applied it; its echo was lost with the engine
+
+    restarted = await h.restart(clock=Clock(ny(15, 45, 10)))
+    for _ in range(2):
+        await restarted.engine.tick()
+
+    assert sells(h) == [(101, "SELL", "LMT", 60)] and h.tws.cancelled == []  # TWS shows 60 @ 49.94: done
+    assert restarted.bracket("HELD").flatten_state == "repriced"
 
 
 # ---- C2-5: the fallback cancels an Inactive leg and sells only once it is cancelled -----------------
