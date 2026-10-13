@@ -31,10 +31,12 @@ _STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap")
 _UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers")
 # Three weeks of five-minute bars: enough sessions for a first replay sample.
 DEFAULT_BACKFILL_DAYS = 21
-# The nightly recording reaches back a week: stored sessions cost no request,
-# and a night the recorder missed (TWS down, Mac asleep) is filled in by the
-# next one instead of staying a hole in the replay sample.
-RECORD_LOOKBACK_DAYS = 5
+# The nightly recording keeps the whole replay sample filled: a contract with
+# nothing missing sends no request, and one request reaches back to its oldest
+# missing session. So the first night stores all three weeks (~30 minutes for
+# ~400 contracts, inside the recorder's window) without a manual backfill, and
+# a night the recorder missed (TWS down, Mac asleep) is filled in by the next.
+RECORD_LOOKBACK_DAYS = DEFAULT_BACKFILL_DAYS
 EXIT_INTERRUPTED = 130
 # An orderly SIGTERM stop is a clean exit, as in paper_bridge.py: the
 # supervisor's window-end stop must not read as a failure on the owner's phone.
@@ -186,7 +188,7 @@ def _parser() -> argparse.ArgumentParser:
         "record",
         help=(
             "store the newest closed sessions (the nightly recording: backfill --days"
-            f" {RECORD_LOOKBACK_DAYS}, so a missed night is filled in)"
+            f" {RECORD_LOOKBACK_DAYS}; only missing sessions are requested)"
         ),
     )
     research_replay = research_actions.add_parser(

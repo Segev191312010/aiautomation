@@ -159,7 +159,7 @@ def test_research_cli_runs_the_recorder_and_the_replay(research_cli):
     assert cli.main(["research", "replay"]) == 2
 
     assert [call[:2] for call in calls if call[0] == "backfill"] == [
-        ("backfill", 21), ("backfill", 3), ("backfill", 5), ("backfill", 5),
+        ("backfill", 21), ("backfill", 3), ("backfill", 21), ("backfill", 21),
     ]
     assert [call for call in calls if call[0] == "replay"] == [
         ("replay", [], "weekly"),
@@ -175,7 +175,7 @@ def test_research_cli_db_path_applies_to_the_universe_read_only(research_cli, tm
 
     assert cli.main(["--db-path", str(database), "research", "record"]) == 0
 
-    assert calls[-1] == ("backfill", 5, str(database))
+    assert calls[-1] == ("backfill", 21, str(database))
     assert cfg.DB_PATH == original
     with pytest.raises(SystemExit) as error:
         cli.main(["--db-path", str(database), "research", "replay"])

@@ -20,8 +20,9 @@ exits because a day ended (launchd's KeepAlive would only restart it).
 
 The learning loop runs after the close: the recorder stores the session that
 just closed in the research bar store (read-only TWS data client 28; it takes
-no date because it always records the newest closed sessions, reaching back a
-week so a missed night is filled in at no extra request), then the replay
+no date because it always records the newest closed sessions, and reaches back
+three weeks, so the first night fills the sample and a missed night is filled
+in by the next), then the replay
 walks every stored session through each strategy's rules, writes the reports
 and, on the week's last session, sends their summary to Telegram. Both run
 once: any clean exit is final, a failure is retried inside the window. Their
