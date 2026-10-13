@@ -8,6 +8,7 @@ and market context, pinned to a digest produced by the deployed sweep code.
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -40,7 +41,9 @@ from tests.test_screener import (
 )
 from trading.market import screener as screener_module
 from trading.market.day_universe import (
+    DAY_UNIVERSE_DAILY_FILENAME,
     DAY_UNIVERSE_MAX,
+    DayUniverseDaily,
     DAY_UNIVERSE_PREMARKET_MAX,
     SCAN_ADDITIONS_PER_SWEEP,
     ScanSighting,
@@ -329,7 +332,17 @@ async def test_admission_checks_the_stock_type_then_qualifies_once_and_keeps_con
     assert (facts[50].industry, facts[50].category, facts[53].stock_type) == (
         "Technology", "Semiconductors", "ETF",
     )
-    assert [member.con_id for member in await load_day_universe_members(DAY)] == [50, 52]
+    # Principle 1: the hot-35's table holds only what its own path wrote.
+    assert [row.con_id for row in await load_daily(DAY)] == [52]
+    own = DayUniverseDaily().load(DAY)
+    assert sorted(own) == [50, 51, 52]
+    assert (own[50].qualified, own[51].reason) == (True, "price_out_of_range")
+    members = await load_day_universe_members(DAY)
+    assert [(member.con_id, member.avg_daily_volume_shares) for member in members] == [
+        (50, Decimal("50000000.00")),
+        (52, Decimal("8000000")),
+    ]
+    assert members[0].avg_dollar_volume == Decimal("2500000000.00")
 
     # Known names are only refreshed; the failed one is retried.
     later = datetime(2026, 10, 12, 15, 0, tzinfo=UTC)
@@ -347,6 +360,29 @@ async def test_admission_checks_the_stock_type_then_qualifies_once_and_keeps_con
     assert (cached.best_rank, cached.sources, cached.last_seen, cached.first_seen) == (
         1, ("HOT_BY_VOLUME", "MOST_ACTIVE"), later, NOW,
     )
+
+
+@pytest.mark.asyncio
+async def test_the_day_universes_own_qualifications_live_beside_the_database_for_one_session(
+    database, caplog
+) -> None:
+    store = DayUniverseDaily()
+    assert store.path == database.parent / DAY_UNIVERSE_DAILY_FILENAME
+    first = qualified_row("AAA", 50, avg="1000")
+    store.record([first, replace(first, con_id=51, symbol="BBB", qualified=False, reason="error: pacing",
+                                 prior_close=None, avg_daily_volume_shares=None, avg_dollar_volume=None)])
+
+    assert store.load(DAY) == {50: first}  # transient outcomes are never kept
+    assert store.path.stat().st_mode & 0o777 == 0o600
+    assert store.load(DAY + timedelta(days=1)) == {}
+    # A new session replaces the old one: the file never outlives its session.
+    later = replace(first, session_date=DAY + timedelta(days=1))
+    store.record([later])
+    assert store.load(DAY) == {} and store.load(DAY + timedelta(days=1)) == {50: later}
+    # An unreadable file reads as empty: members stay, without a volume baseline.
+    store.path.write_text("{not json", encoding="utf-8")
+    assert store.load(DAY + timedelta(days=1)) == {}
+    assert "unreadable" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -608,6 +644,223 @@ async def test_golden_holds_for_any_snapshots(database, monkeypatch, seed) -> No
     assert ranking_document(with_extras.payload, ranking_rows) == ranking_document(without.payload, ranking_rows)
     assert hotlist_rows(with_extras.payload) == hotlist_rows(without.payload)
     assert with_extras.market_context == without.market_context
+
+
+# --- the golden timeline: admission between sweeps never moves the hot-35 ------------------
+#
+# Five sweeps a minute apart. The scans list 45 non-watchlist names every
+# sweep, rotated by 15 ranks each time, so the hot-35's own path (at most 15
+# qualifications and 15 additions a sweep) keeps meeting names it has not
+# qualified yet, while admission (up to 40 a sweep) has. Had admission's
+# outcomes reached autotrader_universe_daily, the additions would differ from
+# sweep 1 on (test_..._would_catch_a_coupled_admission shows it).
+
+TIMELINE_SWEEPS = 5
+TIMELINE_WATCHLIST = [(f"T{index:02d}", 300 + index) for index in range(1, 61)]
+TIMELINE_SCAN = [(f"N{index:02d}", 800 + index) for index in range(1, 46)]
+TIMELINE_START = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)  # 10:00 ET
+# sha256 of every sweep's ranking-group rows and market context
+# (timeline_digest) that the DEPLOYED sweep code (screener.py of 694cc1a)
+# produces on this timeline, computed by running that file itself. Never
+# update it to make a test pass.
+TIMELINE_DIGEST = "c81c82c6248353511d76dc705fba881b836be815ad1f29b7e03b120352cc7c1e"
+
+
+def timeline_observed(sweep: int) -> datetime:
+    return TIMELINE_START + timedelta(minutes=sweep)
+
+
+def timeline_scans(sweep: int) -> dict[str, list[Any]]:
+    shift = (15 * sweep) % len(TIMELINE_SCAN)
+    rotated = TIMELINE_SCAN[shift:] + TIMELINE_SCAN[:shift]
+    return {
+        "HOT_BY_VOLUME": [scan_row(con_id, symbol, rank) for rank, (symbol, con_id) in enumerate(rotated, start=1)],
+        "TOP_PERC_GAIN": [
+            scan_row(con_id, symbol, rank) for rank, (symbol, con_id) in enumerate(rotated[::-1][:12], start=1)
+        ],
+    }
+
+
+def timeline_histories() -> dict[int, DailyBarBatch]:
+    # Every fourth scan name trades above $300 and never qualifies.
+    return {
+        con_id: history_batch(con_id, close="400" if index % 4 == 0 else "50")
+        for index, (_symbol, con_id) in enumerate(TIMELINE_SCAN, start=1)
+    }
+
+
+def timeline_snapshots(sweep: int) -> dict[int, MarketSnapshot | Exception]:
+    rng = random.Random(GOLDEN_SEED * 100 + sweep)
+    observed = timeline_observed(sweep).astimezone(ET)
+    answers: dict[int, MarketSnapshot | Exception] = dict(etf_answers(observed))
+    for _symbol, con_id in [*TIMELINE_WATCHLIST, *TIMELINE_SCAN]:
+        prior = Decimal(rng.randint(1500, 25000)) / 100
+        last = (prior * (1 + Decimal(rng.randint(-900, 1500)) / 10000)).quantize(Decimal("0.01"))
+        answers[con_id] = MarketSnapshot(
+            con_id=con_id,
+            observed_at=observed,
+            prior_close=prior,
+            last=last,
+            open=prior,
+            day_high=max(last, prior) + Decimal(rng.randint(0, 300)) / 100,
+            day_low=max(min(last, prior) - Decimal(rng.randint(0, 300)) / 100, Decimal("1")),
+            volume_raw=Decimal(rng.randint(100_000, 9_000_000)),
+        )
+    return answers
+
+
+async def seed_timeline_universe() -> None:
+    rng = random.Random(GOLDEN_SEED + 2)
+    await replace_universe_source(
+        "watchlist", [universe_row(symbol, con_id) for symbol, con_id in TIMELINE_WATCHLIST]
+    )
+    for symbol, con_id in TIMELINE_WATCHLIST:
+        await upsert_daily(qualified_row(symbol, con_id, avg=str(rng.randint(500_000, 20_000_000))))
+
+
+def timeline_source(sweep: int) -> FakeMarket:
+    details = {con_id: stock_details(con_id, symbol) for symbol, con_id in TIMELINE_SCAN}
+    details[803] = stock_details(803, "N03", stock_type="ADR")  # the day universe refuses it
+    return FakeMarket(timeline_snapshots(sweep), timeline_scans(sweep), timeline_histories(), details)  # type: ignore[arg-type]
+
+
+def timeline_record(payload: Any, history_calls: list[int]) -> dict[str, Any]:
+    """One sweep as the real MOMO sees it: ranking rows, hot-35, market, requests.
+
+    The timeline has no held symbols, so every row is a ranking-group row.
+    """
+    rows = list(payload.rows)
+    return {
+        "additions": [row.con_id for row in rows if row.source == "ibkr_scan"],
+        "hot": [(row.hot_rank, row.symbol, row.score) for row in rows if row.hot],
+        "rows": [row.model_dump(mode="json") for row in rows],
+        "market": payload.market,
+        "history_requests": list(history_calls),
+    }
+
+
+def timeline_digest(records: list[dict[str, Any]]) -> str:
+    document = [{"rows": record["rows"], "market": record["market"]} for record in records]
+    return sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+async def run_timeline(
+    *, admission: bool, coupled: bool = False, sweep_function: Any = None, context_class: Any = None
+) -> tuple[list[dict[str, Any]], list[list[int]]]:
+    """Five sweeps; with ``admission`` the day universe admits names between them.
+
+    ``coupled`` copies admission's outcomes into autotrader_universe_daily,
+    as an admission writing that table would (the negative control).
+    ``sweep_function``/``context_class`` let the deployed screener.py run the
+    same timeline (its run_sweep has no day-universe options).
+    """
+    deployed = sweep_function is not None
+    sweep_function = sweep_function or run_sweep
+    etfs = (context_class or ContextETFs)(FakeResolver())
+    # The hot-35's own pacer, kept across sweeps as the screener keeps it.
+    legacy_pacer = RequestPacer(0)
+    records: list[dict[str, Any]] = []
+    admitted: list[list[int]] = []
+    for sweep in range(TIMELINE_SWEEPS):
+        source = timeline_source(sweep)
+        options: dict[str, Any] = {} if deployed else {"day_universe": admission, "held": admission}
+        result = await sweep_function(
+            source,
+            session_date=DAY,
+            clock=lambda sweep=sweep: timeline_observed(sweep),
+            scan_merge=production_scan_merge(source, legacy_pacer),
+            context_etfs=etfs,
+            **options,
+        )
+        records.append(timeline_record(result.payload, source.history_calls))
+        if not admission:
+            continue
+        before = len(source.history_calls)
+        report = await service.admit_day_universe(
+            source,
+            result,
+            session_date=DAY,
+            context_etfs=etfs,
+            history_pacer=RequestPacer(0),
+            details_pacer=RequestPacer(0),
+            clock=lambda sweep=sweep: timeline_observed(sweep) + timedelta(seconds=40),
+            monotonic=lambda: 0.0,
+            deadline=None,
+        )
+        admitted.append(source.history_calls[before:])
+        assert report.failed == 0
+        if coupled:
+            for row in DayUniverseDaily().load(DAY).values():
+                await upsert_daily(row)
+    return records, admitted
+
+
+def production_scan_merge(source: FakeMarket, pacer: RequestPacer) -> Any:
+    """The production scan merge (15 additions, 15 qualifications a sweep)."""
+    from trading.market.screener import ScanMerge
+
+    return ScanMerge(source=source, volume_multiplier=Decimal("100"), history_pacer=pacer)
+
+
+async def _fresh_database(path: Path) -> None:
+    from config import cfg
+    from db.core import init_db
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.DB_PATH = str(path)
+    await init_db()
+
+
+@pytest.mark.asyncio
+async def test_golden_timeline_legacy_additions_and_hot_35_ignore_admission_sweep_by_sweep(
+    database, tmp_path
+) -> None:
+    """Principle 1, timing included: admission runs first, yet every sweep is the deployed one."""
+    await seed_timeline_universe()
+    with_admission, admission_requests = await run_timeline(admission=True)
+    day_names = await load_day_universe(DAY)
+    daily_with = {row.con_id: (row.qualified, row.reason) for row in await load_daily(DAY)}
+
+    await _fresh_database(tmp_path / "baseline" / "screener.db")
+    await seed_timeline_universe()
+    baseline, _ = await run_timeline(admission=False)
+    daily_without = {row.con_id: (row.qualified, row.reason) for row in await load_daily(DAY)}
+
+    for sweep, (got, expected) in enumerate(zip(with_admission, baseline)):
+        # The same additions, from the same legacy requests, at the same sweep.
+        assert got["history_requests"] == expected["history_requests"], sweep
+        assert got["additions"] == expected["additions"], sweep
+        assert got["hot"] == expected["hot"], sweep
+        assert got["rows"] == expected["rows"], sweep
+        assert got["market"] == expected["market"], sweep
+    assert all(len(record["hot"]) == 35 for record in baseline)
+    # The hot-35's table holds exactly what its own path wrote.
+    assert daily_with == daily_without
+    assert timeline_digest(baseline) == TIMELINE_DIGEST
+    assert timeline_digest(with_admission) == TIMELINE_DIGEST
+    # Admission really ran ahead of the legacy path: after sweep 0 it qualified
+    # 25 names the legacy path had not reached, with its own requests.
+    assert [len(requests) for requests in admission_requests] == [25, 5, 0, 0, 0]
+    assert not set(admission_requests[0]) & set(baseline[0]["history_requests"])
+    assert len([name for name in day_names if name.qualified]) >= 30
+    # N03 is an ADR: refused by the day universe, still a hot-35 scan addition.
+    assert any(name.con_id == 803 and name.reason == "stock_type_adr" for name in day_names)
+    assert 803 in with_admission[0]["additions"]
+
+
+@pytest.mark.asyncio
+async def test_golden_timeline_would_catch_a_coupled_admission(database, tmp_path) -> None:
+    """Negative control: admission outcomes in the hot-35's table would move its additions."""
+    await seed_timeline_universe()
+    coupled, _ = await run_timeline(admission=True, coupled=True)
+
+    await _fresh_database(tmp_path / "baseline" / "screener.db")
+    await seed_timeline_universe()
+    baseline, _ = await run_timeline(admission=False)
+
+    assert coupled[0]["additions"] == baseline[0]["additions"]  # admission runs after sweep 0
+    assert any(got["additions"] != expected["additions"] for got, expected in zip(coupled, baseline))
+    assert timeline_digest(coupled) != timeline_digest(baseline)
 
 
 def test_the_day_universe_ranks_on_its_own_percentiles() -> None:

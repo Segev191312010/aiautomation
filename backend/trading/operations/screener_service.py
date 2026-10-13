@@ -408,7 +408,7 @@ async def run_screener_once(
                     sweep,
                     session_date=session_date,
                     context_etfs=context_etfs,
-                    history_pacer=pacer,
+                    history_pacer=RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS),
                     details_pacer=RequestPacer(CONTRACT_DETAILS_MIN_INTERVAL_SECONDS),
                     clock=clock,
                     monotonic=monotonic_time.monotonic,
@@ -482,6 +482,9 @@ async def _screener_loop(
     retention: bool,
 ) -> int:
     history_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
+    # Admission paces its own history requests: the hot-35's scan additions
+    # keep their pacer, and so their request timing, exactly as before.
+    admission_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
     details_pacer = RequestPacer(CONTRACT_DETAILS_MIN_INTERVAL_SECONDS)
     scan_merge = _scan_merge(actor, history_pacer, enabled=include_scans)
     # conIds are stable across reconnects, so the ETFs resolve once per process.
@@ -556,7 +559,7 @@ async def _screener_loop(
                         sweep,
                         session_date=session_date,
                         context_etfs=context_etfs,
-                        history_pacer=history_pacer,
+                        history_pacer=admission_pacer,
                         details_pacer=details_pacer,
                         clock=clock,
                         monotonic=monotonic,
