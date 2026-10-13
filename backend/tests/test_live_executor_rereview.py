@@ -5,6 +5,7 @@ finding; each fails on the behaviour the finding described.
 """
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import re
@@ -390,3 +391,67 @@ def test_r5_real_pgrep_finds_every_process_carrying_the_bridge_in_its_arguments(
         for process in (script, module, other):
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=5)
+
+
+# ---- R-6: the digest binds the whole import graph ------------------------------------------------------------
+
+BACKEND = Path(__file__).resolve().parents[1]
+
+
+def _module_file(module: str) -> Path | None:
+    path = BACKEND.joinpath(*module.split("."))
+    if path.with_suffix(".py").is_file():
+        return path.with_suffix(".py")
+    if (path / "__init__.py").is_file():
+        return path / "__init__.py"
+    return None
+
+
+def _imported_modules(path: Path) -> set[str]:
+    """Every module an ``import`` statement anywhere in the file may load (relative ones resolved)."""
+    package = path.relative_to(BACKEND).parent.parts
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            found |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            parts = [*package[: len(package) - node.level + 1]] if node.level else []
+            base = ".".join([*parts, *(node.module.split(".") if node.module else [])])
+            found |= {base, *(f"{base}.{alias.name}" for alias in node.names)}
+    return found
+
+
+def engine_import_graph(entry_points: tuple[str, ...]) -> set[str]:
+    """Backend files a running engine may execute: the entry points, everything they import, and every
+    package ``__init__`` on the way (importing a.b.c runs a/__init__ and a/b/__init__ first)."""
+    seen: set[Path] = set()
+    todo = [BACKEND / relative for relative in entry_points]
+    while todo:
+        path = todo.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        for module in _imported_modules(path):
+            parts = module.split(".")
+            packages = [_module_file(".".join(parts[:end])) for end in range(1, len(parts))]
+            todo += [item for item in [*packages, _module_file(module)] if item is not None]
+    return {path.relative_to(BACKEND).as_posix() for path in seen}
+
+
+def test_r6_the_code_digest_binds_the_engines_whole_import_graph() -> None:
+    from trading.execution.promotion import ENGINE_ENTRY_POINTS, ENGINE_SOURCE_FILES
+
+    graph = engine_import_graph(ENGINE_ENTRY_POINTS)
+    # The review's examples: package __init__ modules imported for their side effects, and db/core.py.
+    assert {"trading/__init__.py", "trading/risk/__init__.py", "trading/scheduler/__init__.py",
+            "db/core.py"} <= graph
+    missing = graph - set(ENGINE_SOURCE_FILES)
+    assert not missing, f"the engine runs {sorted(missing)}, which the promotion does not bind"
+    assert all((BACKEND / relative).is_file() for relative in ENGINE_SOURCE_FILES)
+
+
+def test_r6_the_import_graph_follows_package_inits_and_lazy_imports() -> None:
+    graph = engine_import_graph(("trading/execution/live_executor.py",))
+    assert "trading/execution/manual_orders.py" in graph  # imported inside a function
+    assert "trading/scheduler/decision_keys.py" in graph  # only through trading/scheduler/__init__.py
+    assert "config.py" in graph  # through db/core.py

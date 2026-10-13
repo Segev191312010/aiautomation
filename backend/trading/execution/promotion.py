@@ -9,8 +9,9 @@ grant it:
   (``MOMO_HOD``, owner decision 2026-10-12) can be promoted, and a record for
   any other name grants nothing even if it is written into the table by hand;
 * a grant binds the SHA-256 of the engine's source files (the engine and every
-  trading module it imports), so any change to the order-sending code needs a
-  new explicit grant after its review, and the engine refuses to start when the
+  backend module it imports, transitively, package ``__init__`` modules
+  included), so any change to the code an engine process runs needs a new
+  explicit grant after its review, and the engine refuses to start when the
   code it runs is not the code its authority names;
 * a revoke ends every grant of that strategy and account;
 * operator configuration (:class:`ExecutionSwitches`) can only switch entries
@@ -35,20 +36,49 @@ from db.core import get_db, transaction
 
 # Owner decision 2026-10-12: only MOMO_HOD strategies may send PAPER orders.
 PROMOTABLE_STRATEGY_PREFIXES: tuple[str, ...] = ("MOMO_HOD",)
-# The files whose exact content a promotion binds (relative to backend/): the engine and every
-# trading module it imports, the kill switch, the manual-order and bridge records and the
-# session calendar included (a test keeps this list complete).
+# The modules a running engine starts from (relative to backend/).
+ENGINE_ENTRY_POINTS: tuple[str, ...] = ("trading/execution/live_executor.py",)
+# The files whose exact content a promotion binds (relative to backend/): every backend module the
+# entry points import, directly or not, at import time or inside a function, with every package
+# __init__ on the way, whose side-effect imports run too (review R-6). A test walks the import
+# graph and keeps this list complete.
 ENGINE_SOURCE_FILES: tuple[str, ...] = (
+    "auth.py",
+    "config.py",
+    "db/__init__.py",
+    "db/core.py",
+    "trading/__init__.py",
+    "trading/authority.py",
+    "trading/contracts.py",
+    "trading/execution/__init__.py",
+    "trading/execution/ibkr_paper.py",
     "trading/execution/live_executor.py",
     "trading/execution/manual_orders.py",
     "trading/execution/promotion.py",
+    "trading/execution/tws_paper_transport.py",
     "trading/execution/tws_state.py",
+    "trading/operations/__init__.py",
     "trading/operations/paths.py",
+    "trading/operations/settings.py",
+    "trading/receipt_signing.py",
+    "trading/risk/__init__.py",
     "trading/risk/book.py",
+    "trading/risk/engine.py",
+    "trading/risk/portfolio.py",
+    "trading/runtime.py",
+    "trading/scheduler/__init__.py",
+    "trading/scheduler/decision_keys.py",
+    "trading/scheduler/lease.py",
     "trading/scheduler/sessions.py",
+    "trading/storage/__init__.py",
+    "trading/storage/broker_inbox.py",
     "trading/storage/execution_ledger.py",
     "trading/storage/execution_ledger_schema.py",
+    "trading/storage/live_market.py",
+    "trading/storage/manual_orders_schema.py",
+    "trading/storage/migrations.py",
     "trading/storage/runtime_fence.py",
+    "trading/storage/schema.py",
 )
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 _SWITCH_KEYS = frozenset({"entries_enabled", "disabled_strategies"})
@@ -285,6 +315,7 @@ class EngineAuthority:
 
 
 __all__ = [
+    "ENGINE_ENTRY_POINTS",
     "ENGINE_SOURCE_FILES",
     "PROMOTABLE_STRATEGY_PREFIXES",
     "AuthorityCode",
