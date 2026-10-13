@@ -5,13 +5,25 @@ ranks the movers, and appends one ``screener.v1`` payload. The dashboard and
 strategies read only persisted payloads; ranking is pure so identical inputs
 always produce the identical hot list. With the context ETFs configured the
 payload also carries the sweep's ``market_context.v1`` document.
+
+The hot-35 ranking group is the qualified watchlist plus at most 15 scan
+additions, exactly as before the day manager. Two kinds of names are quoted
+after that group, in their own pass, and never ranked with it:
+
+* the day universe (``trading.market.day_universe``), ranked in its own list
+  under ``day_universe``; the manager and the simulations read it, the real
+  MOMO never does;
+* symbols the order bridge may hold (the session's accepted decisions of a
+  sendable strategy name) that left the ranking group: they trail ``rows``
+  unranked (score 0, never hot) so the bridge's flatten fallback always finds
+  a fresh ``rows[].{symbol,con_id,bid,last}`` quote.
 """
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Sequence, Set
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from collections.abc import Callable, Mapping, Sequence, Set
+from dataclasses import dataclass, field
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 import json
 import logging
@@ -28,6 +40,7 @@ from trading.market.context import (
     MarketContext,
     build_market_context,
 )
+from trading.market.day_universe import DAY_UNIVERSE_MAX, load_day_universe_members
 from trading.market.ibkr_boundary import IBKRScannerResult
 from trading.market.snapshots import MarketSnapshot
 from trading.market.tws_actor import (
@@ -44,7 +57,8 @@ from trading.market.universe import (
     load_daily,
     qualify_contract,
 )
-from trading.scheduler.sessions import MarketSession, market_session
+from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession, market_session
+from trading.sendable_identities import carries_sendable_prefix
 
 logger = logging.getLogger("autotrader.shadow.screener")
 
@@ -67,11 +81,18 @@ SNAPSHOT_CHUNK_SIZE = 50
 # minutes timing out on every remaining instrument.
 MAX_CONSECUTIVE_SNAPSHOT_ERRORS = 25
 SOURCES = ("watchlist", "ibkr_scan")
+# The hot-35 ranking group's scans and additions: the real MOMO's inputs.
 SCAN_CODES = ("HOT_BY_VOLUME", "TOP_PERC_GAIN", "MOST_ACTIVE")
 MAX_SCAN_ADDITIONS = 15
 # Daily-history requests are paced at one per second, so qualifying scan
 # symbols is bounded per sweep; qualified rows are reused all session.
 MAX_SCAN_QUALIFICATIONS_PER_SWEEP = 15
+# Held and day-universe rows are quoted, never ranked with the hot-35 group.
+UNRANKED_SCORE = Decimal("0")
+# The first sweep compares each evening-qualified prior close with TWS's own
+# close tick; a larger relative gap (a split, a correction) re-qualifies the
+# contract with the morning's history, as an 08:00 qualification would.
+PRIOR_CLOSE_RECHECK_TOLERANCE = Decimal("0.02")
 # A context ETF that failed to resolve is retried this long after the
 # failure, so one transient error cannot leave the regime without SPY/QQQ
 # for the life of the process; resolved conIds are never re-requested.
@@ -234,6 +255,34 @@ def rank_observations(
     return tuple(ranked)
 
 
+def rank_day_universe(observations: Sequence[Observation]) -> tuple[RankedObservation, ...]:
+    """The day universe's own ranking: the hot-35 score, over its names only.
+
+    Same weights and tie-break as ``rank_observations`` but its own
+    percentiles, so the two lists never influence each other; every row is
+    ranked (no gain required). ``hot_rank`` carries the list position.
+    """
+    change = percentile_ranks([item.metrics.change_pct for item in observations])
+    rvol = percentile_ranks([item.metrics.rvol for item in observations])
+    high = percentile_ranks([item.metrics.pct_from_high for item in observations])
+    scored = sorted(
+        (
+            (item, CHANGE_WEIGHT * change[index] + RVOL_WEIGHT * rvol[index] + HIGH_WEIGHT * high[index])
+            for index, item in enumerate(observations)
+        ),
+        key=lambda pair: (
+            -pair[1],
+            -pair[0].metrics.change_pct,
+            pair[0].instrument.symbol,
+            pair[0].instrument.con_id,
+        ),
+    )
+    return tuple(
+        RankedObservation(observation=item, score=score, hot_rank=position)
+        for position, (item, score) in enumerate(scored, start=1)
+    )
+
+
 # --- screener.v1 payload --------------------------------------------------------
 
 DecimalText = Annotated[str, StringConstraints(pattern=r"^-?\d+(\.\d+)?$")]
@@ -272,6 +321,64 @@ class ScreenerRow(BaseModel):
         return self
 
 
+class DayUniverseRow(BaseModel):
+    """One day-universe name in its own ranking (``rank`` 1..n by its own score)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rank: int = Field(ge=1)
+    symbol: str = Field(min_length=1, max_length=16)
+    con_id: int = Field(gt=0)
+    primary_exchange: str | None
+    last: DecimalText | None
+    bid: DecimalText | None
+    ask: DecimalText | None
+    prior_close: DecimalText | None
+    open: DecimalText | None
+    day_high: DecimalText | None
+    day_low: DecimalText | None
+    change_pct: DecimalText | None
+    gap_pct: DecimalText | None
+    volume_shares: DecimalText | None
+    rvol: DecimalText | None
+    dollar_volume: DecimalText | None
+    pct_from_high: DecimalText | None
+    score: DecimalText
+
+
+class DayUniverseSection(BaseModel):
+    """The sweep's quotes of the day universe; never part of ``rows`` or the hot list.
+
+    ``size`` counts the session's qualified names at the sweep; each is either
+    quoted (a row) or an error. ``complete`` is false when the pass stopped
+    early (a failing feed), so unattempted names count as errors.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    size: int = Field(ge=0, le=DAY_UNIVERSE_MAX)
+    quoted: int = Field(ge=0)
+    errors: int = Field(ge=0)
+    complete: bool
+    seconds: float = Field(ge=0)
+    rows: tuple[DayUniverseRow, ...]
+
+    @model_validator(mode="after")
+    def validate_section(self) -> DayUniverseSection:
+        if self.quoted != len(self.rows):
+            raise ValueError("day universe: quoted must equal the number of rows")
+        if self.size != self.quoted + self.errors:
+            raise ValueError("day universe: every name is either quoted or an error")
+        scores = [Decimal(row.score) for row in self.rows]
+        if scores != sorted(scores, reverse=True):
+            raise ValueError("day universe rows must be sorted by score, highest first")
+        if [row.rank for row in self.rows] != list(range(1, len(self.rows) + 1)):
+            raise ValueError("day universe ranks must run 1..n in score order")
+        if len({row.con_id for row in self.rows}) != len(self.rows):
+            raise ValueError("a conId appears at most once in the day universe")
+        return self
+
+
 class ScreenerPayload(BaseModel):
     """The persisted sweep contract consumed by the dashboard and strategies."""
 
@@ -290,6 +397,9 @@ class ScreenerPayload(BaseModel):
     # Its own reader (trading.market.context) validates it, so a context
     # problem can never make the hot list unreadable.
     market: dict[str, Any] | None = None
+    # The day universe's own list, absent on sweeps without it. Strategies
+    # reading the hot list and the breadth never look here.
+    day_universe: DayUniverseSection | None = None
 
     @model_validator(mode="after")
     def validate_sweep(self) -> ScreenerPayload:
@@ -312,10 +422,12 @@ class ScreenerPayload(BaseModel):
         return self
 
     def to_json(self) -> str:
-        # A sweep without market context serializes byte-for-byte as before.
-        exclude = {"market"} if self.market is None else None
+        # A sweep without market context or day universe serializes
+        # byte-for-byte as before either existed.
+        exclude = {name for name in ("market", "day_universe") if getattr(self, name) is None}
         return json.dumps(
-            self.model_dump(mode="json", by_alias=True, exclude=exclude), separators=(",", ":")
+            self.model_dump(mode="json", by_alias=True, exclude=exclude or None),
+            separators=(",", ":"),
         )
 
 
@@ -368,6 +480,25 @@ def payload_row(ranked: RankedObservation) -> ScreenerRow:
     )
 
 
+def day_universe_row(ranked: RankedObservation) -> DayUniverseRow:
+    """A day-universe row; ``hot_rank`` of ``rank_day_universe`` is its rank."""
+    row = payload_row(
+        RankedObservation(observation=ranked.observation, score=ranked.score, hot_rank=None)
+    )
+    if ranked.hot_rank is None:
+        raise ScreenerError("a day-universe row needs its rank")
+    values = row.model_dump(exclude={"source", "hot", "hot_rank"})
+    return DayUniverseRow(rank=ranked.hot_rank, **values)
+
+
+def unranked(observations: Sequence[Observation]) -> tuple[RankedObservation, ...]:
+    """Quoted-only rows (held symbols outside the ranking group), by symbol."""
+    ordered = sorted(observations, key=lambda item: (item.instrument.symbol, item.instrument.con_id))
+    return tuple(
+        RankedObservation(observation=item, score=UNRANKED_SCORE, hot_rank=None) for item in ordered
+    )
+
+
 def build_payload(
     *,
     session_date: date,
@@ -377,20 +508,25 @@ def build_payload(
     qualified: int,
     errors: int,
     ranked: Sequence[RankedObservation],
+    trailing: Sequence[RankedObservation] = (),
+    day_universe: DayUniverseSection | None = None,
 ) -> ScreenerPayload:
-    return ScreenerPayload.model_validate(
-        {
-            "schema": SCHEMA_VERSION,
-            "session_date": session_date.isoformat(),
-            "observed_at": utc_iso(observed_at),
-            "sweep_seconds": round(max(0.0, sweep_seconds), 1),
-            "universe_size": universe_size,
-            "qualified": qualified,
-            "quoted": len(ranked),
-            "errors": errors,
-            "rows": [payload_row(item) for item in ranked],
-        }
-    )
+    """``rows`` are ``ranked`` (the hot-35 group, as ranked) then ``trailing``."""
+    rows = [*ranked, *trailing]
+    document: dict[str, Any] = {
+        "schema": SCHEMA_VERSION,
+        "session_date": session_date.isoformat(),
+        "observed_at": utc_iso(observed_at),
+        "sweep_seconds": round(max(0.0, sweep_seconds), 1),
+        "universe_size": universe_size,
+        "qualified": qualified,
+        "quoted": len(rows),
+        "errors": errors,
+        "rows": [payload_row(item) for item in rows],
+    }
+    if day_universe is not None:
+        document["day_universe"] = day_universe
+    return ScreenerPayload.model_validate(document)
 
 
 def with_market_context(payload: ScreenerPayload, context: MarketContext) -> ScreenerPayload:
@@ -507,6 +643,19 @@ async def latest_hotlist(session_date: date) -> tuple[HotListRow, ...]:
     return () if payload is None else hotlist_rows(payload)
 
 
+async def latest_day_universe(
+    session_date: date,
+) -> tuple[datetime, DayUniverseSection] | None:
+    """The newest sweep's day-universe list with that sweep's start, or None.
+
+    For the day manager and the simulations only; callers own freshness.
+    """
+    payload = await latest_snapshot(session_date)
+    if payload is None or payload.day_universe is None:
+        return None
+    return datetime.fromisoformat(payload.observed_at), payload.day_universe
+
+
 async def load_screener_universe(
     session_date: date,
 ) -> tuple[int, tuple[ScreenerInstrument, ...]]:
@@ -591,26 +740,42 @@ def scan_candidates(
     return tuple(item[2] for item in ordered)
 
 
+ScanResults = Mapping[str, Sequence[IBKRScannerResult]]
+
+
+async def run_scans(source: ScanSource, codes: Sequence[str]) -> dict[str, tuple[IBKRScannerResult, ...]]:
+    """Each scan once, in ``codes`` order; a failed scan is logged and left out."""
+    results: dict[str, tuple[IBKRScannerResult, ...]] = {}
+    for code in codes:
+        try:
+            results[code] = tuple(await source.screener_scan(code))
+        except (TWSCompetingSessionError, TWSConnectionError):
+            raise
+        except TWSRequestError as exc:
+            logger.warning("IBKR scan %s failed: %s", code, exc)
+    return results
+
+
 async def scan_additions(
     merge: ScanMerge,
     *,
     session_date: date,
     exclude: Set[int],
     clock: Clock = _utc_now,
+    scans: ScanResults | None = None,
 ) -> tuple[ScreenerInstrument, ...]:
-    """Qualified scan symbols outside ``exclude``, at most ``merge.max_additions``."""
-    scans: list[Sequence[IBKRScannerResult]] = []
-    for code in SCAN_CODES:
-        try:
-            scans.append(await merge.source.screener_scan(code))
-        except (TWSCompetingSessionError, TWSConnectionError):
-            raise
-        except TWSRequestError as exc:
-            logger.warning("IBKR scan %s failed: %s", code, exc)
+    """Qualified scan symbols outside ``exclude``, at most ``merge.max_additions``.
+
+    Only the ``SCAN_CODES`` results count, in that order, whatever else
+    ``scans`` holds: these additions are part of the hot-35 ranking group.
+    """
+    if scans is None:
+        scans = await run_scans(merge.source, SCAN_CODES)
+    ranking_scans = [scans[code] for code in SCAN_CODES if code in scans]
     daily = {row.con_id: row for row in await load_daily(session_date)}
     additions: list[ScreenerInstrument] = []
     qualified_now = 0
-    for candidate in scan_candidates(scans, exclude=exclude):
+    for candidate in scan_candidates(ranking_scans, exclude=exclude):
         if len(additions) >= merge.max_additions:
             break
         row = daily.get(candidate.con_id)
@@ -647,6 +812,68 @@ async def universe_con_ids() -> frozenset[int]:
             "SELECT con_id FROM autotrader_universe WHERE con_id IS NOT NULL"
         ) as cursor:
             return frozenset(int(str(raw[0])) for raw in await cursor.fetchall())
+
+
+# --- symbols the order bridge may hold --------------------------------------------------
+
+# The pinned bridge's own predicate (paper_bridge.DECISIONS_SQL): accepted
+# decisions of the session; the strategy name comes from the run's version.
+_ACCEPTED_DECISIONS = """
+    SELECT c.con_id, c.symbol,
+           CASE WHEN json_valid(c.contract_json)
+                THEN json_extract(c.contract_json, '$.primary_exchange') END,
+           v.spec_json, d2.avg_daily_volume_shares
+    FROM autotrader_candidate_decisions d
+    JOIN autotrader_runs r ON r.id = d.run_id
+    JOIN autotrader_candidates c ON c.id = d.candidate_id
+    LEFT JOIN autotrader_strategy_versions v
+      ON v.strategy_id = r.strategy_id AND v.version = r.strategy_version
+    LEFT JOIN autotrader_universe_daily d2
+      ON d2.session_date = r.session_date AND d2.con_id = c.con_id
+    WHERE d.outcome = 'shadow_accepted' AND r.session_date = ?
+"""
+
+
+def _strategy_name(spec_json: object) -> str:
+    if not isinstance(spec_json, str):
+        return ""
+    try:
+        spec = json.loads(spec_json)
+    except ValueError:
+        return ""
+    name = spec.get("name") if isinstance(spec, dict) else None
+    return name if isinstance(name, str) else ""
+
+
+async def held_instruments(session_date: date) -> tuple[ScreenerInstrument, ...]:
+    """Contracts the order bridge may hold: the session's sendable accepted decisions.
+
+    A superset of the bridge's positions (it may never have sent one), read
+    with the bridge's own predicate, so its flatten fallback always finds a
+    screener quote for every bracket. Quoted only, never ranked; their rows
+    say ``ibkr_scan`` so they can never count toward the watchlist breadth.
+    """
+    async with get_db() as db:
+        async with db.execute(_ACCEPTED_DECISIONS, (session_date.isoformat(),)) as cursor:
+            raw_rows = await cursor.fetchall()
+    held: dict[int, ScreenerInstrument] = {}
+    for con_id, symbol, exchange, spec_json, average in raw_rows:
+        if not carries_sendable_prefix(_strategy_name(spec_json)):
+            continue
+        identifier = int(str(con_id))
+        if identifier <= 0 or not 1 <= len(str(symbol or "").strip()) <= 16:
+            continue
+        held.setdefault(
+            identifier,
+            ScreenerInstrument(
+                symbol=str(symbol).strip(),
+                con_id=identifier,
+                primary_exchange=str(exchange).strip().upper() or None if exchange else None,
+                source="ibkr_scan",
+                avg_daily_volume_shares=None if average is None else Decimal(str(average)),
+            ),
+        )
+    return tuple(sorted(held.values(), key=lambda item: (item.symbol, item.con_id)))
 
 
 # --- market context ETFs -------------------------------------------------------------
@@ -793,6 +1020,201 @@ class SweepResult:
     payload: ScreenerPayload
     error_samples: tuple[str, ...]
     market_context: MarketContext | None = None
+    # The sweep's own scan results (code -> rows), for the day universe's
+    # admission after the sweep: no scan is requested twice.
+    scans: Mapping[str, tuple[IBKRScannerResult, ...]] = field(default_factory=dict)
+
+
+def _observe(
+    instrument: ScreenerInstrument,
+    result: MarketSnapshot | Exception,
+    session: MarketSession | None,
+) -> Observation:
+    """One snapshot result as an observation; a request or data problem raises."""
+    if isinstance(result, Exception):
+        raise result
+    if result.con_id != instrument.con_id:
+        raise TWSRequestError("snapshot returned for a different contract")
+    metrics = compute_metrics(
+        result,
+        avg_daily_volume_shares=instrument.avg_daily_volume_shares,
+        session=session,
+    )
+    return Observation(instrument=instrument, snapshot=result, metrics=metrics)
+
+
+class _ExtrasStopped(Exception):
+    """The quote-only pass hit a run of failures; the ranking group stands."""
+
+
+@dataclass(slots=True)
+class _ExtrasPass:
+    observed: dict[int, Observation] = field(default_factory=dict)
+    complete: bool = True
+    seconds: float = 0.0
+    interrupted: BaseException | None = None
+
+
+async def _quote_extras(
+    source: SnapshotSource,
+    extras: Sequence[ScreenerInstrument],
+    *,
+    session: MarketSession | None,
+    monotonic: Callable[[], float],
+) -> _ExtrasPass:
+    """Quote day-universe and held names after the ranking group, in their own pass.
+
+    Nothing here can change or abort the ranking group's sweep: a run of
+    failures only ends this pass, and a competing login or lost connection
+    is kept for the caller to raise once the ranking group is persisted.
+    """
+    outcome = _ExtrasPass()
+    started = monotonic()
+    consecutive = 0
+    try:
+        for offset in range(0, len(extras), SNAPSHOT_CHUNK_SIZE):
+            chunk = extras[offset : offset + SNAPSHOT_CHUNK_SIZE]
+            results = await source.market_snapshots([item.con_id for item in chunk])
+            if len(results) != len(chunk):
+                raise _ExtrasStopped("snapshot batch returned a different number of results")
+            for instrument, result in zip(chunk, results):
+                try:
+                    outcome.observed[instrument.con_id] = _observe(instrument, result, session)
+                except (TWSCompetingSessionError, TWSConnectionError):
+                    raise
+                except (TWSRequestError, ScreenerError) as exc:
+                    logger.debug("extra snapshot failed for %s: %s", instrument.symbol, exc)
+                    consecutive += 1
+                    if consecutive >= MAX_CONSECUTIVE_SNAPSHOT_ERRORS:
+                        raise _ExtrasStopped(f"{consecutive} consecutive failures; last: {exc}") from exc
+                    continue
+                consecutive = 0
+    except _ExtrasStopped as exc:
+        outcome.complete = False
+        logger.error("day-universe and held quotes stopped early: %s", exc)
+    except (TWSCompetingSessionError, TWSConnectionError) as exc:
+        outcome.complete = False
+        outcome.interrupted = exc
+    outcome.seconds = round(max(0.0, monotonic() - started), 1)
+    return outcome
+
+
+class RecheckSource(SnapshotSource, DailyHistorySource, Protocol):
+    """Quotes and daily history: what the prior-close re-check needs."""
+
+
+@dataclass(frozen=True, slots=True)
+class PriorCloseRecheck:
+    """The first sweep's comparison of evening qualifications with TWS's close."""
+
+    checked: int
+    requalified: tuple[str, ...] = ()
+    still_different: tuple[str, ...] = ()
+
+    def summary(self) -> str:
+        text = f"prior-close re-check: {self.checked} evening rows, {len(self.requalified)} re-qualified"
+        if self.requalified:
+            text += f" ({', '.join(self.requalified)})"
+        if self.still_different:
+            text += f"; still different after re-qualifying: {', '.join(self.still_different)}"
+        return text
+
+
+def _relative_gap(quoted: Decimal, stored: Decimal) -> Decimal:
+    return abs(quoted - stored) / stored
+
+
+async def recheck_prior_closes(
+    source: RecheckSource,
+    *,
+    session_date: date,
+    payload: ScreenerPayload,
+    volume_multiplier: Decimal,
+    pacer: RequestPacer,
+    clock: Clock = _utc_now,
+    tolerance: Decimal = PRIOR_CLOSE_RECHECK_TOLERANCE,
+) -> PriorCloseRecheck:
+    """Re-qualify evening-qualified contracts whose prior close TWS now reports differently.
+
+    Qualification runs the evening before the session (after the recorder),
+    when a split taking effect at the next open is not yet in the history.
+    The session's first sweep therefore compares every row qualified before
+    07:00 ET of the session with TWS's close tick: the sweep's own quote, or
+    one extra snapshot batch for rows the sweep does not quote (e.g. a $350
+    stock rejected as out of range that splits 2:1). A relative gap above
+    ``tolerance`` re-qualifies the contract exactly as an 08:00
+    qualification would. A competing login or lost connection raises.
+    """
+    cutoff = datetime.combine(session_date, dt_time(7, 0), tzinfo=MARKET_TIMEZONE)
+    evening = [
+        row
+        for row in await load_daily(session_date)
+        if row.prior_close is not None and row.prior_close > 0 and row.observed_at < cutoff
+    ]
+    if not evening:
+        return PriorCloseRecheck(checked=0)
+    quoted: dict[int, Decimal] = {
+        row.con_id: Decimal(row.prior_close) for row in payload.rows if row.prior_close is not None
+    }
+    unquoted = [row for row in evening if row.con_id not in quoted]
+    for offset in range(0, len(unquoted), SNAPSHOT_CHUNK_SIZE):
+        chunk = unquoted[offset : offset + SNAPSHOT_CHUNK_SIZE]
+        results = await source.market_snapshots([row.con_id for row in chunk])
+        for row, result in zip(chunk, results):
+            if isinstance(result, (TWSCompetingSessionError, TWSConnectionError)):
+                raise result
+            if isinstance(result, MarketSnapshot) and result.con_id == row.con_id:
+                quoted[row.con_id] = result.prior_close
+    requalified: list[str] = []
+    still_different: list[str] = []
+    for row in evening:
+        stored = row.prior_close
+        reported = quoted.get(row.con_id)
+        if stored is None or reported is None or _relative_gap(reported, stored) <= tolerance:
+            continue
+        logger.warning(
+            "prior close of %s changed overnight (%s stored, %s reported); re-qualifying",
+            row.symbol,
+            stored,
+            reported,
+        )
+        fresh = await qualify_contract(
+            source,
+            con_id=row.con_id,
+            symbol=row.symbol,
+            session_date=session_date,
+            volume_multiplier=volume_multiplier,
+            clock=clock,
+            pacer=pacer,
+        )
+        requalified.append(row.symbol)
+        if fresh.prior_close is None or _relative_gap(reported, fresh.prior_close) > tolerance:
+            still_different.append(row.symbol)
+    return PriorCloseRecheck(
+        checked=len(evening),
+        requalified=tuple(requalified),
+        still_different=tuple(still_different),
+    )
+
+
+async def day_universe_instruments(
+    session_date: date, context_ids: Set[int]
+) -> tuple[ScreenerInstrument, ...]:
+    """The session's qualified day-universe names as quotable instruments."""
+    members = await load_day_universe_members(session_date)
+    return without_context_etfs(
+        tuple(
+            ScreenerInstrument(
+                symbol=member.symbol,
+                con_id=member.con_id,
+                primary_exchange=member.primary_exchange,
+                source="ibkr_scan",
+                avg_daily_volume_shares=member.avg_daily_volume_shares,
+            )
+            for member in members[:DAY_UNIVERSE_MAX]
+        ),
+        context_ids,
+    )
 
 
 async def run_sweep(
@@ -803,6 +1225,8 @@ async def run_sweep(
     monotonic: Callable[[], float] = time.monotonic,
     scan_merge: ScanMerge | None = None,
     context_etfs: ContextETFs | None = None,
+    day_universe: bool = False,
+    held: bool = True,
 ) -> SweepResult:
     """Snapshot every qualified instrument once, rank, and persist the sweep.
 
@@ -810,8 +1234,16 @@ async def run_sweep(
     movers outside the stored universe. With ``context_etfs`` it snapshots
     the context ETFs first, in their own batch, and stores the market
     context under ``market``; those ETFs never become rows. A competing
-    login or lost connection aborts without persisting: a partial sweep
-    would rank a different universe than the one that qualified.
+    login or lost connection during that ranking group aborts without
+    persisting: a partial sweep would rank a different universe than the
+    one that qualified.
+
+    Afterwards, in a second pass that can neither change nor abort the
+    ranking group, it quotes the day universe (``day_universe``: its own
+    list under ``day_universe``) and, with ``held``, the symbols the order
+    bridge may hold that left the ranking group (trailing, unranked rows).
+    A competing login or lost connection in that pass still persists the
+    ranking group, then raises.
     """
     universe_size, instruments = await load_screener_universe(session_date)
     context_instruments: tuple[ContextInstrument, ...] = ()
@@ -830,18 +1262,22 @@ async def run_sweep(
     etf_snapshots: dict[str, MarketSnapshot] | None = None
     if context_etfs is not None:
         etf_snapshots = await snapshot_context(source, context_instruments)
+    scans: dict[str, tuple[IBKRScannerResult, ...]] = {}
     if scan_merge is not None:
+        scans = await run_scans(scan_merge.source, SCAN_CODES)
         additions = without_context_etfs(
             await scan_additions(
                 scan_merge,
                 session_date=session_date,
                 exclude=await universe_con_ids() | context_ids,
                 clock=clock,
+                scans=scans,
             ),
             context_ids,
         )
         instruments = instruments + additions
         universe_size += len(additions)
+    # --- the hot-35 ranking group: exactly as before the day universe ---
     observations: list[Observation] = []
     errors: list[str] = []
     consecutive = 0
@@ -852,15 +1288,7 @@ async def run_sweep(
             raise ScreenerError("snapshot batch returned a different number of results")
         for instrument, result in zip(chunk, results):
             try:
-                if isinstance(result, Exception):
-                    raise result
-                if result.con_id != instrument.con_id:
-                    raise TWSRequestError("snapshot returned for a different contract")
-                metrics = compute_metrics(
-                    result,
-                    avg_daily_volume_shares=instrument.avg_daily_volume_shares,
-                    session=session,
-                )
+                observation = _observe(instrument, result, session)
             except (TWSCompetingSessionError, TWSConnectionError):
                 raise
             except (TWSRequestError, ScreenerError) as exc:
@@ -873,18 +1301,46 @@ async def run_sweep(
                     ) from exc
                 continue
             consecutive = 0
-            observations.append(
-                Observation(instrument=instrument, snapshot=result, metrics=metrics)
-            )
+            observations.append(observation)
     ranked = rank_observations(observations)
+    # --- quote-only names: never ranked with the group above ---
+    ranking_ids = {item.con_id for item in instruments}
+    members = await day_universe_instruments(session_date, context_ids) if day_universe else ()
+    held_names = (
+        without_context_etfs(await held_instruments(session_date), context_ids) if held else ()
+    )
+    extras: dict[int, ScreenerInstrument] = {}
+    for item in (*members, *held_names):
+        if item.con_id not in ranking_ids:
+            extras.setdefault(item.con_id, item)
+    extra_pass = await _quote_extras(
+        source, tuple(extras.values()), session=session, monotonic=monotonic
+    )
+    observed = {item.instrument.con_id: item for item in observations}
+    observed.update(extra_pass.observed)
+    held_only = [item for item in held_names if item.con_id not in ranking_ids]
+    trailing = unranked([observed[item.con_id] for item in held_only if item.con_id in observed])
+    section: DayUniverseSection | None = None
+    if day_universe:
+        quoted_members = [observed[item.con_id] for item in members if item.con_id in observed]
+        section = DayUniverseSection(
+            size=len(members),
+            quoted=len(quoted_members),
+            errors=len(members) - len(quoted_members),
+            complete=extra_pass.complete,
+            seconds=extra_pass.seconds,
+            rows=tuple(day_universe_row(item) for item in rank_day_universe(quoted_members)),
+        )
     payload = build_payload(
         session_date=session_date,
         observed_at=observed_at,
         sweep_seconds=monotonic() - started,
         universe_size=universe_size,
-        qualified=len(instruments),
-        errors=len(errors),
+        qualified=len(instruments) + len(held_only),
+        errors=len(errors) + len(held_only) - len(trailing),
         ranked=ranked,
+        trailing=trailing,
+        day_universe=section,
     )
     context: MarketContext | None = None
     if etf_snapshots is not None:
@@ -905,30 +1361,51 @@ async def run_sweep(
         sum(1 for row in payload.rows if row.hot),
         payload.sweep_seconds,
     )
+    if section is not None or trailing:
+        logger.info(
+            "sweep %s: day universe quoted=%d/%d%s held-only=%d extra seconds=%.1f",
+            session_date.isoformat(),
+            0 if section is None else section.quoted,
+            0 if section is None else section.size,
+            "" if extra_pass.complete else " (incomplete)",
+            len(trailing),
+            extra_pass.seconds,
+        )
     if context is not None:
         logger.info("market %s", context.summary)
     if errors:
         logger.warning("sweep snapshot errors (first 5): %s", "; ".join(errors[:5]))
+    if extra_pass.interrupted is not None:
+        # The ranking group is persisted; the connection problem still surfaces.
+        raise extra_pass.interrupted
     return SweepResult(
         snapshot_id=snapshot_id,
         payload=payload,
         error_samples=tuple(errors[:10]),
         market_context=context,
+        scans=scans,
     )
 
 
 __all__ = [
     "CONTEXT_RESOLVE_RETRY",
     "HOT_LIST_SIZE",
+    "PRIOR_CLOSE_RECHECK_TOLERANCE",
     "SCAN_CODES",
     "SCHEMA_VERSION",
     "TICK_VOLUME_MULTIPLIER",
+    "UNRANKED_SCORE",
     "ContextETFs",
     "ContextInstrument",
+    "DayUniverseRow",
+    "DayUniverseSection",
     "HotListRow",
     "Observation",
+    "PriorCloseRecheck",
     "RankedObservation",
+    "RecheckSource",
     "ScanMerge",
+    "ScanResults",
     "ScanSource",
     "ScreenerError",
     "ScreenerInstrument",
@@ -938,20 +1415,28 @@ __all__ = [
     "SweepResult",
     "build_payload",
     "compute_metrics",
+    "day_universe_instruments",
+    "day_universe_row",
     "elapsed_fraction",
+    "held_instruments",
     "hotlist_rows",
+    "latest_day_universe",
     "latest_hotlist",
     "latest_snapshot",
     "load_screener_universe",
     "percentile_ranks",
     "persist_snapshot",
     "price_text",
+    "rank_day_universe",
     "rank_observations",
+    "recheck_prior_closes",
+    "run_scans",
     "run_sweep",
     "scan_additions",
     "scan_candidates",
     "snapshot_context",
     "universe_con_ids",
+    "unranked",
     "utc_iso",
     "with_market_context",
     "without_context_etfs",
