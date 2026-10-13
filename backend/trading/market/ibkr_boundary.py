@@ -491,17 +491,24 @@ def validate_completed_trade_bars(
 
 
 def _require_healthy_batch(batch: BarBatch | DailyBarBatch) -> None:
-    """Transport health first: no bar of a failed request is ever validated."""
+    """Transport health first: no bar of a failed request is ever validated.
+
+    IBKR's own report is kept: several error codes count as pacing here, and
+    only its text tells a real pacing violation from another refusal.
+    """
+    report = f" ({batch.error})" if batch.error else ""
     if not batch.connected:
         raise MarketDataQualityError(
-            "IBKR market-data connection is unavailable", fault=FAULT_DISCONNECTED
+            "IBKR market-data connection is unavailable" + report, fault=FAULT_DISCONNECTED
         )
     if batch.pacing_failed:
         raise MarketDataQualityError(
-            "IBKR market-data pacing limit blocked the request", fault=FAULT_PACING
+            "IBKR market-data pacing limit blocked the request" + report, fault=FAULT_PACING
         )
     if batch.error:
-        raise MarketDataQualityError("IBKR market-data request failed", fault=FAULT_REQUEST_FAILED)
+        raise MarketDataQualityError(
+            "IBKR market-data request failed" + report, fault=FAULT_REQUEST_FAILED
+        )
 
 
 def liquidity_profile(

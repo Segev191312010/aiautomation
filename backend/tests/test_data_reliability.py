@@ -546,6 +546,25 @@ def test_every_bar_refusal_names_its_fault():
     assert daily.value.fault == FAULT_PACING
 
 
+def test_a_refused_request_keeps_ibkrs_own_report():
+    # The actor maps 162, 165, 366 and 420 to pacing; only IBKR's text tells
+    # a pacing violation from, say, a login active elsewhere.
+    now = et(10, 0, 5)
+    violation = "TWS error 162: Historical Market Data Service error message:pacing violation"
+    pacing = _refusal(BarBatch(bars=(), pacing_failed=True, error=violation), now=now)
+    assert (pacing.fault, str(pacing)) == (
+        FAULT_PACING,
+        f"IBKR market-data pacing limit blocked the request ({violation})",
+    )
+    elsewhere = "TWS error 165: Trading TWS session is connected from a different IP address"
+    competing = _refusal(BarBatch(bars=(), pacing_failed=True, error=elsewhere), now=now)
+    assert str(competing).endswith(f"({elsewhere})")
+    failed = _refusal(BarBatch(bars=(), error="TWS error 200: No security definition"), now=now)
+    assert str(failed) == "IBKR market-data request failed (TWS error 200: No security definition)"
+    closed = _refusal(BarBatch(bars=(), connected=False), now=now)
+    assert str(closed) == "IBKR market-data connection is unavailable"
+
+
 def test_an_unregistered_reason_is_still_counted_and_raises_a_critical():
     report = SessionReport(run_id="run", session_date=SESSION)
     with _log_lines("autotrader.shadow.session") as log:
