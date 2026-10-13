@@ -1243,14 +1243,18 @@ def test_default_plan_runs_the_shadow_strategies_and_the_learning_loop_in_their_
 
     plans = {plan.name: plan for plan in plan_session(market_session(date(2026, 10, 13)))}
     assert list(plans) == [
-        "screener", "notifier", "bridge", "orb", "momo", "gap", "vwap", "recorder", "replay",
+        "screener", "notifier", "bridge", "orb-v2", "momo", "gap-v2", "vwap-v2", "recorder", "replay",
     ]
     ny = ZoneInfo("America/New_York")
-    assert plans["gap"].starts_at.astimezone(ny).time() == time(9, 28)
-    assert plans["gap"].finishes_at.astimezone(ny).time() == time(10, 30)
-    assert plans["vwap"].starts_at.astimezone(ny).time() == time(10, 25)
-    assert plans["vwap"].finishes_at.astimezone(ny).time() == time(14, 30)
-    assert "gappers" in plans["gap"].argv and "watchlist" in plans["vwap"].argv
+    # The all-session simulations replace ORB_V1, GAP_GO_V1 and VWAP_PB_V1: 09:28-15:31.
+    for name in ("orb-v2", "gap-v2", "vwap-v2"):
+        assert window(plans[name]) == ("09:28", "15:31", "15:30"), name
+        assert plans[name].argv[4:6] == ("--strategy", name)
+        assert plans[name].base_backoff == timedelta(seconds=95)
+    assert window(plans["momo"]) == ("09:55", "15:01", "15:00")
+    assert "all-gappers" in plans["gap-v2"].argv and "watchlist" in plans["vwap-v2"].argv
+    assert "scanner" in plans["orb-v2"].argv
+    assert not {"orb", "gap", "vwap"} & set(plans)
     # After the close: record the session that just closed, then replay the store.
     control = str(BACKEND_DIR / "autotraderctl.py")
     assert plans["recorder"].argv == (str(VENV_PYTHON), control, "research", "record")
