@@ -597,21 +597,24 @@ def status_change_text(view: OrderView) -> str | None:
     """The phone message for a row's new status, or None when it is not news."""
     label = view.label
     status = view.status
+    # A /closeall row carries what it could not sell or close; the owner sees it with every status.
+    notes = f" — {view.error}" if view.side == "CLOSE ALL" and view.error else ""
     if status in {"queued", "sending"}:
         return None
     if status == "sent":
-        return f"📤 Sent to IBKR: {label}"
+        return f"📤 Sent to IBKR: {label}{notes}"
     if status == "partially_filled":
         return (
             f"💵 Partly filled {label}: {view.filled_qty or '?'} of {view.qty or '?'}"
             + (f" @ avg {view.avg_fill_price}" if view.avg_fill_price else "")
+            + notes
         )
     if status == "filled":
         shares = f" {view.filled_qty} sh" if view.filled_qty and not view.qty else ""
-        return f"✅ Filled {label}{shares}" + (f" @ avg {view.avg_fill_price}" if view.avg_fill_price else "")
+        return f"✅ Filled {label}{shares}" + (f" @ avg {view.avg_fill_price}" if view.avg_fill_price else "") + notes
     if status == "cancelled":
         filled = f" ({view.filled_qty} filled before)" if view.filled_qty not in {"", "0"} else ""
-        return f"↩️ Cancelled {label}{filled}"
+        return f"↩️ Cancelled {label}{filled}{notes}"
     if status == "rejected":
         return f"❌ Rejected {label} — {view.error or 'no reason given'}"
     if status == "error":
@@ -1751,6 +1754,8 @@ class ManualOrdersDesk:
         for view in views:
             if view.status == "cancelled":
                 lines.append(f"• {view.label}: cancelled before it was sent")
+            elif view.order_type == "bot bracket":  # the bridge never cancels a bot close it started
+                lines.append(f"• {view.label}: closing a bot bracket cannot be cancelled; the bridge keeps closing it")
             else:
                 lines.append(f"• {view.label}: the bridge is cancelling it at IBKR")
         if not views:

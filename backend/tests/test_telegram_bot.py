@@ -1578,6 +1578,67 @@ async def test_bot_held_symbols_only_allow_close_which_flattens_the_bracket(tmp_
     assert close.reply == f"🟢 Queued CLOSE AAPL bot bracket · #{short} · /cancel {short}"
 
 
+async def test_l4_a_bot_close_the_bridge_started_is_never_reported_as_being_cancelled(tmp_path, monkeypatch):
+    world = await desk_world(tmp_path, monkeypatch, DeskActor(positions=[("AAPL", 265598, 100)]))
+    bridge_state(world.paths, {"d1": {"symbol": "AAPL", "status": "open", "qty": 100, "filled": 100}})
+    close = await world.send("/close AAPL")
+    claimed = await world.ledger.claim_next_order(TRADE_NOW)  # the bridge takes it and starts closing
+    assert claimed is not None and claimed.id == close.order_id
+    assert await world.ledger.update_order_status(close.order_id, "sent", now=TRADE_NOW)
+    short = close.order_id[:6]
+
+    cancel = await world.send(f"/cancel {short}")
+
+    # The bridge refuses to cancel a bot close it started; the reply must say so, not "cancelling".
+    assert cancel.reply == (
+        f"↩️ Cancel #{short}:\n• #{short} CLOSE AAPL bot bracket: closing a bot bracket cannot be cancelled;"
+        " the bridge keeps closing it"
+    )
+
+
+@pytest.mark.parametrize(("status", "head"), [
+    ("sent", "📤 Sent to IBKR: #abc123 CLOSE ALL"),
+    ("partially_filled", "💵 Partly filled #abc123 CLOSE ALL: 50 of ?"),
+    ("filled", "✅ Filled #abc123 CLOSE ALL 50 sh"),
+    ("cancelled", "↩️ Cancelled #abc123 CLOSE ALL (50 filled before)"),
+])
+def test_r3_a_closeall_reply_always_shows_what_was_not_sold(status: str, head: str) -> None:
+    from trading.operations.telegram_tools import order_view
+
+    row = {"id": "abc123" + "0" * 26, "action": "CLOSE_ALL", "status": status, "filled_qty": 50,
+           "error": "AAPL: spread 2.13% over 1% — not sold"}
+
+    assert bot.status_change_text(order_view(row)) == f"{head} — AAPL: spread 2.13% over 1% — not sold"
+
+
+async def test_l1_an_unreadable_kill_switch_blocks_buys_and_never_sells(tmp_path, monkeypatch):
+    world = await desk_world(tmp_path, monkeypatch, DeskActor(positions=[("TSLA", 76792991, 80)], bid="249.90",
+                                                              ask="250.10"))
+
+    async def unreadable() -> bool:
+        raise OSError("fence unreadable")
+
+    world.kill.is_stopped = unreadable  # type: ignore[method-assign]
+
+    buy = await world.send("/buy 100 AAPL")
+    assert buy.code == "kill_switch", buy.reply
+    sell = await world.send("/sell 10 TSLA")
+    assert sell.accepted, sell.reply
+
+
+async def test_l1_an_unreadable_bridge_heartbeat_counts_as_offline(tmp_path, monkeypatch):
+    world = await desk_world(tmp_path, monkeypatch)
+
+    async def unreadable(now: datetime) -> float:
+        raise OSError("heartbeat unreadable")
+
+    monkeypatch.setattr(world.ledger, "bridge_heartbeat_age", unreadable)
+
+    submission = await world.send("/buy 100 AAPL")
+
+    assert submission.code == "bridge_offline", submission.reply
+
+
 async def test_an_unreadable_bridge_state_fails_closed(tmp_path, monkeypatch):
     world = await desk_world(tmp_path, monkeypatch)
     path = world.paths.data_directory / "bridge" / "2026-10-13.json"
