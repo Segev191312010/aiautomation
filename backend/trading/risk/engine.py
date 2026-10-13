@@ -14,6 +14,7 @@ from trading.contracts import (
     TradeIntent,
     fingerprint_payload,
 )
+from trading.risk.book import OPEN_RISK_PCT
 
 
 def _percent_amount(value: Decimal, percentage: Decimal) -> Decimal:
@@ -74,7 +75,12 @@ def size_and_evaluate_trade(
         codes.append("risk_budget_too_small")
 
     actual_risk = unit_risk * max(quantity, 0)
-    if actual_risk + portfolio.reserved_risk > risk_budget:
+    # The per-trade budget bounds this trade alone (it sized the quantity above).
+    # Risk already reserved by other approved trades shares the aggregate
+    # open-risk budget; comparing the sum with the per-trade budget wrongly
+    # refused a second trade while one reservation was open.
+    open_risk_budget = _percent_amount(portfolio.net_liquidation, OPEN_RISK_PCT)
+    if actual_risk + portfolio.reserved_risk > open_risk_budget:
         codes.append("risk_reservation_limit_exceeded")
 
     reward_to_risk = (setup.target_price - setup.entry_limit) / unit_risk

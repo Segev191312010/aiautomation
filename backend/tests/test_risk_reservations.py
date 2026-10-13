@@ -285,3 +285,74 @@ async def test_concurrent_reservations_are_serialized_and_exposure_limited(tmp_p
         return_exceptions=True,
     )
     assert all(isinstance(result, (DuplicateReservationError, ReservationError)) for result in same_symbol_results)
+
+
+def _wide_stop_setup(*, run_id: str, candidate_id: str, strategy_id: str, symbol: str) -> RuleSetup:
+    """Entry 100, stop 97: notional bounds the size (150 sh), so each trade risks 0.45%."""
+    return RuleSetup(
+        run_id=run_id,
+        candidate_id=candidate_id,
+        strategy_id=strategy_id,
+        strategy_version=1,
+        symbol=symbol,
+        opening_range_high="100",
+        opening_range_low="97",
+        atr="3",
+        entry_limit="100",
+        stop_price="97",
+        target_price="106",
+        bar_fingerprints=(HASH,),
+        quote_fingerprint=HASH,
+        detected_at=datetime(2026, 8, 27, 14, 0, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.anyio
+async def test_aggregate_reservations_share_the_open_risk_budget_not_the_per_trade_one(
+    tmp_path, monkeypatch
+):
+    """Regression: the sum of active reservations was compared with the 0.5% per-trade budget.
+
+    Two 0.45% trades (0.9% together) fit the 1.5% open-risk budget; the old
+    code refused the second with "risk reservation budget exceeded".
+    """
+    run, first, second, strategy_id = await _fixture(tmp_path, monkeypatch, second_symbol=True)
+    assert second is not None
+    now = datetime(2026, 8, 27, 14, 0, tzinfo=timezone.utc)
+    portfolio = PortfolioSnapshot(observed_at=now, net_liquidation="100000")
+    policy = RiskPolicy()
+    approvals = [
+        _approval(
+            _wide_stop_setup(run_id=run.id, candidate_id=candidate.id, strategy_id=strategy_id, symbol=symbol),
+            policy=policy, portfolio=portfolio, now=now,
+        )
+        for candidate, symbol in ((first, "AAPL"), (second, "MSFT"))
+    ]
+    assert all(approval.approved for approval in approvals)
+    assert [approval.intent.risk_amount for approval in approvals] == [Decimal("450"), Decimal("450")]
+    repository = RiskReservationRepository()
+
+    reserved = [
+        await repository.reserve(
+            owner_id="owner-a", run_id=run.id, candidate_id=candidate.id,
+            approval=approval, policy=policy, portfolio=portfolio, now=now,
+        )
+        for candidate, approval in zip((first, second), approvals)
+    ]
+
+    assert [record.state for record in reserved] == ["active", "active"]
+    assert sum((record.risk_amount for record in reserved), Decimal("0")) == Decimal("900")
+
+
+@pytest.mark.anyio
+async def test_a_trade_beyond_the_open_risk_budget_is_refused(tmp_path, monkeypatch):
+    run, first, _, strategy_id = await _fixture(tmp_path, monkeypatch)
+    now = datetime(2026, 8, 27, 14, 0, tzinfo=timezone.utc)
+    portfolio = PortfolioSnapshot(observed_at=now, net_liquidation="100000", reserved_risk="1100")
+    policy = RiskPolicy()
+    approval = _approval(
+        _wide_stop_setup(run_id=run.id, candidate_id=first.id, strategy_id=strategy_id, symbol="AAPL"),
+        policy=policy, portfolio=portfolio, now=now,
+    )
+    assert not approval.approved  # the engine already sees 1100 + 450 > 1500
+    assert "risk_reservation_limit_exceeded" in approval.codes
