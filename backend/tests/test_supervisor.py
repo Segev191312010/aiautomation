@@ -24,6 +24,7 @@ from trading.operations.supervisor import (
     STRATEGY_BACKOFF,
     VENV_PYTHON,
     ChildPlan,
+    LaunchRefused,
     SubprocessLauncher,
     Supervisor,
     SupervisorAlreadyRunning,
@@ -82,6 +83,7 @@ class Script:
     code: int = 0
     ignore_sigterm: bool = False
     launch_error: bool = False
+    refused: bool = False
 
 
 class FakeChild:
@@ -137,6 +139,8 @@ class FakeWorld:
         self.launches.append((self.now, plan.name))
         if script.launch_error:
             raise OSError("exec format error")
+        if script.refused:
+            raise LaunchRefused(78, "unreviewed sha256=1f856f7ee6be reviewed=000000000000")
         child = FakeChild(self, plan.name, next(self._pids), script)
         self.children.append(child)
         return child
@@ -285,6 +289,100 @@ async def test_half_day_bridge_stop_at_its_own_close_is_not_restarted():
         "2026-11-27T14:25:00+00:00 CHILD_START bridge pid=100",
         "2026-11-27T17:55:00+00:00 CHILD_EXIT bridge code=0 restart_in=none",
     ]
+
+
+async def test_a_refused_bridge_is_final_and_reported_with_its_reason():
+    world = FakeWorld(et(TUESDAY, 9, 20), {"bridge": [Script(refused=True)]})
+
+    def bridge_and_notifier(session):
+        return [plan for plan in plans_for(session) if plan.name in ("bridge", "notifier")]
+
+    world.stop_at = et(TUESDAY, 9, 40)
+    await world.supervisor_for(planner=bridge_and_notifier).run(session_date=TUESDAY)
+
+    # One attempt at 09:25, never retried: a restart cannot review the code.
+    assert world.launch_times("bridge") == [et(TUESDAY, 9, 25)]
+    assert [line.split(" ", 1)[1] for line in world.lines if "bridge" in line] == [
+        "LAUNCH_REFUSED bridge code=78 reason=unreviewed sha256=1f856f7ee6be reviewed=000000000000",
+        "CHILD_EXIT bridge code=78 restart_in=none",
+    ]
+    # The rest of the day is unaffected: the notifier runs until the stop.
+    assert world.child_lines("notifier") == [
+        "2026-10-13T13:20:00+00:00 CHILD_START notifier pid=100",
+        "2026-10-13T13:40:00+00:00 CHILD_EXIT notifier code=143 restart_in=none",
+    ]
+
+
+def _script(tmp_path: Path, body: str = "print('bridge ran')") -> Path:
+    script = tmp_path / "paper_bridge.py"
+    script.write_text(body + "\n", encoding="utf-8")
+    return script
+
+
+def _pinned_plan(script: Path) -> ChildPlan:
+    now = datetime.now(UTC)
+    return ChildPlan(
+        name="bridge",
+        argv=(sys.executable, str(script), "--date", "2026-10-13"),
+        starts_at=now,
+        ends_at=now + timedelta(seconds=30),
+        finishes_at=now + timedelta(seconds=30),
+        base_backoff=timedelta(seconds=15),
+        final_codes=frozenset({78}),
+    )
+
+
+async def test_the_launcher_starts_only_the_reviewed_bridge(tmp_path):
+    script = _script(tmp_path)
+    reviewed = supervisor_module.file_sha256(script)
+    logs = tmp_path / "logs"
+    launcher = SubprocessLauncher(logs, cwd=tmp_path, pinned={"bridge": reviewed})
+
+    process = await launcher.start(_pinned_plan(script))
+    assert await process.wait() == 0
+    assert "bridge ran" in (logs / "bridge.log").read_text()
+
+    # Edited after the review: refused before exec, at every (re)start.
+    script.write_text("print('edited bridge ran')\n", encoding="utf-8")
+    for _ in range(2):
+        with pytest.raises(LaunchRefused) as refused:
+            await launcher.start(_pinned_plan(script))
+        assert refused.value.code == 78
+        assert refused.value.reason.startswith("unreviewed sha256=")
+        assert f"reviewed={reviewed[:12]}" in refused.value.reason
+    assert "edited bridge ran" not in (logs / "bridge.log").read_text()
+
+    script.unlink()
+    with pytest.raises(LaunchRefused) as missing:
+        await launcher.start(_pinned_plan(script))
+    assert missing.value.reason == "unreadable_script error=FileNotFoundError"
+
+
+async def test_unpinned_children_launch_whatever_their_script(tmp_path):
+    script = _script(tmp_path)
+    launcher = SubprocessLauncher(tmp_path / "logs", cwd=tmp_path, pinned={"other": "0" * 64})
+
+    process = await launcher.start(_pinned_plan(script))
+
+    assert await process.wait() == 0
+
+
+def test_the_dry_run_says_whether_the_bridge_is_the_reviewed_one(tmp_path, monkeypatch):
+    script = tmp_path / "scripts_local" / "paper_bridge.py"
+    script.parent.mkdir()
+    script.write_text("print('bridge')\n", encoding="utf-8")
+    digest = supervisor_module.file_sha256(script)
+
+    monkeypatch.setattr(supervisor_module, "REVIEWED_BRIDGE_SHA256", digest)
+    assert supervisor_module.bridge_review_line(tmp_path) == f"bridge       reviewed (sha256 {digest[:12]})"
+
+    monkeypatch.setattr(supervisor_module, "REVIEWED_BRIDGE_SHA256", "f" * 64)
+    line = supervisor_module.bridge_review_line(tmp_path)
+    assert line.startswith(f"WARNING: bridge sha256 {digest[:12]} is not the reviewed ffffffffffff")
+    assert "refuse to start it" in line
+
+    script.unlink()
+    assert "unreadable" in supervisor_module.bridge_review_line(tmp_path)
 
 
 def test_strategy_without_an_entry_window_is_not_planned():

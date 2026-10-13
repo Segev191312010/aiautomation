@@ -507,6 +507,17 @@ def test_supervisor_child_exits_and_ibkr_session_problems():
         "⚙️ bridge exited (code -15), not restarting"
     )
     assert supervisor_event_text("CHILD_START momo pid=123") is None
+    refused = (
+        "2026-10-13T13:25:00+00:00 LAUNCH_REFUSED bridge code=78"
+        " reason=unreviewed sha256=1f856f7ee6be reviewed=000000000000"
+    )
+    assert supervisor_event_text(refused) == (
+        "⛔ bridge NOT started: its code is not the reviewed version, so no orders"
+        " will be sent until it is reviewed (supervisor.log)"
+    )
+    assert supervisor_event_text(
+        "LAUNCH_REFUSED bridge code=78 reason=unreadable_script error=FileNotFoundError"
+    ) == "⛔ bridge NOT started: unreadable_script (supervisor.log)"
 
     competing = (
         "ERROR autotrader.shadow.screener IBKR login active elsewhere (phone/web) — log out there;"

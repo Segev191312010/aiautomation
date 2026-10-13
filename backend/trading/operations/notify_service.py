@@ -524,6 +524,9 @@ _CHILD_EXIT = re.compile(
     r"\bCHILD_EXIT\s+(?P<name>\S+)\s+code=(?P<code>[^\s,]+),?\s+restart_in=(?P<restart>[^\s,]+)"
 )
 _NO_RESTART = frozenset({"none", "never", "no", "null", "-"})
+_LAUNCH_REFUSED = re.compile(
+    r"\bLAUNCH_REFUSED\s+(?P<name>\S+)\s+code=(?P<code>\S+)\s+reason=(?P<reason>\S+)"
+)
 # The phrases IBKR (10197, and 162/165 "different IP address") and our own
 # TWS actor use; a bare "competing" or a number elsewhere in a line is not one.
 _COMPETING_LOGIN = re.compile(
@@ -595,7 +598,20 @@ def _seconds_text(value: str) -> str:
 
 
 def supervisor_event_text(line: str) -> str | None:
-    """``CHILD_EXIT <name> code=<n> restart_in=<x>``; a clean final exit is not news."""
+    """``CHILD_EXIT <name> code=<n> restart_in=<x>``; a clean final exit is not news.
+
+    ``LAUNCH_REFUSED`` (the supervisor declined to start a child, e.g. a bridge
+    that is not the reviewed one) says why, since no orders follow from it.
+    """
+    refused = _LAUNCH_REFUSED.search(line)
+    if refused is not None:
+        name = refused.group("name")
+        if refused.group("reason") == "unreviewed":
+            return (
+                f"⛔ {name} NOT started: its code is not the reviewed version, so no orders"
+                " will be sent until it is reviewed (supervisor.log)"
+            )
+        return f"⛔ {name} NOT started: {refused.group('reason')} (supervisor.log)"
     match = _CHILD_EXIT.search(line)
     if match is None:
         return None
