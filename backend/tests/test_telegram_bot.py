@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 import stat
 import sys
+from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1232,15 +1233,17 @@ def test_cli_telegram_commands(monkeypatch, capsys):
     stub = Stub()
     monkeypatch.setitem(sys.modules, cli.TELEGRAM_BOT_MODULE, stub)
 
-    async def init_db() -> None:
-        stub.calls.append("init_db")
+    def schema_check(**_kwargs: object) -> SimpleNamespace:
+        stub.calls.append("schema_check")
+        return SimpleNamespace(current=True)
 
-    monkeypatch.setattr(cli, "init_db", init_db)
+    monkeypatch.setattr(cli, "require_current_schema", schema_check)
 
     assert cli.main(["telegram", "whoami"]) == 0
     assert cli.main(["telegram", "run"]) == 1
-    # The schema is migrated before the assistant opens the manual-order ledger.
-    assert stub.calls == ["whoami", "init_db", "run"]
+    # The schema is checked (never migrated) before the assistant opens the
+    # manual-order ledger.
+    assert stub.calls == ["whoami", "schema_check", "run"]
     error = capsys.readouterr().err
     assert "RuntimeError" in error and TOKEN not in error
     with pytest.raises(SystemExit) as refused:

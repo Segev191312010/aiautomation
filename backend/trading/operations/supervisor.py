@@ -48,6 +48,11 @@ restarted after any exit, whatever its code, with the same 15 s to 5 minute
 backoff. At a window end, or when the supervisor receives SIGTERM, SIGINT or
 SIGHUP, the child gets SIGTERM and, 20 s later, SIGKILL.
 
+No child migrates the database. One that finds a migration pending exits 75
+(``trading.operations.schema_gate``), which is never final: it is retried
+like any failure and starts by itself once ``autotraderctl db migrate`` has
+run. The dry run reads the schema (read-only) and says so on its second line.
+
 Log contract. ``supervisor.log`` lines
 
     <ISO UTC> CHILD_START <name> pid=<n>
@@ -1034,6 +1039,21 @@ def bridge_review_line(backend: Path = BACKEND_DIR) -> str:
     )
 
 
+def schema_lines(database: str | Path) -> tuple[str, ...]:
+    """Read-only (the dry run never opens the database for writing): whether
+    the children will find the schema they need, loudly when they will not."""
+    from trading.storage.migrations import inspect_schema
+
+    status = inspect_schema(database)
+    if status.current:
+        return (f"database     schema v{status.applied_version} current ({status.database})",)
+    return (
+        f"!!! DATABASE NOT READY ({status.token}): {status.describe()} ({status.database})",
+        "!!! the screener, the strategies and the recorder will refuse to start (exit 75,"
+        " retried with backoff) until `autotraderctl db migrate` (after the close)",
+    )
+
+
 class _SimulatedClock:
     def __init__(self, start: datetime) -> None:
         self.now = start
@@ -1114,8 +1134,14 @@ def dry_run_report(
     python: Path = VENV_PYTHON,
     backend: Path = BACKEND_DIR,
     unsupervised: Callable[[], list[tuple[int, str]]] = unsupervised_children,
+    database: str | Path | None = None,
 ) -> str:
     """The planned child timeline for one session, simulated; launches and writes nothing."""
+    if database is None:
+        from config import cfg
+
+        database = cfg.DB_PATH
+    schema = schema_lines(database)
     current = now or _utc_now()
     planner = partial(plan_session, python=python, backend=backend)
     if session_date is None:
@@ -1135,6 +1161,7 @@ def dry_run_report(
     logs = (user_paths or UserPaths.current()).log_directory
     lines = [
         "DRY RUN: nothing is launched and no log is written.",
+        *(line for line in schema if line.startswith("!!!")),
         f"session      {session.session_date.isoformat()} ({session.session_date:%a}), "
         f"XNYS {_local(session.opens_at)}-{_local(session.closes_at)} ET"
         + (" (half day)" if session.half_day else ""),
@@ -1171,6 +1198,7 @@ def dry_run_report(
     for path in missing_entry_points(python=python, backend=backend):
         lines.append(f"WARNING: missing {path}")
     lines.append(bridge_review_line(backend))
+    lines.extend(schema)
     for pid, command in unsupervised():
         lines.append(f"WARNING: running outside the supervisor (kill {pid} before `run`): {command}")
     return "\n".join(lines)
@@ -1210,6 +1238,7 @@ __all__ = [
     "open_private_append",
     "plan_session",
     "run_supervisor",
+    "schema_lines",
     "simulate_session",
     "single_instance",
     "strategy_cutoff",

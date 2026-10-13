@@ -5,18 +5,21 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from db.core import init_db
 from middleware import RateLimitMiddleware, RequestLogMiddleware, SecurityHeadersMiddleware
 from routers.auth import router as auth_router
 from routers.autotrader_routes import router as autotrader_router
 from routers.live_routes import router as live_router
 from startup import validate_startup
+from trading.operations.schema_gate import require_current_schema
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await validate_startup()
-    await init_db()
+    # The API never migrates: only `autotraderctl db migrate` changes the
+    # schema (lock, verified backup, outside the trading day). A pending
+    # migration stops startup with the named token instead.
+    require_current_schema(process="api")
     yield
 
 

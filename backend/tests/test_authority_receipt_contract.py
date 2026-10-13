@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from trading.contracts import AuthorityReceipt
-from trading.storage.migrations import apply_migrations
+from trading.storage.migrations import MIGRATIONS, apply_migrations
 
 
 HASH = "a" * 64
@@ -191,7 +191,7 @@ async def test_attestation_migration_is_idempotent(tmp_path):
             "SELECT version, checksum, applied_at FROM autotrader_schema_migrations ORDER BY version"
         ) as cursor:
             second_run = await cursor.fetchall()
-        assert [row[0] for row in second_run] == list(range(1, 13))
+        assert [row[0] for row in second_run] == [migration.version for migration in MIGRATIONS]
         assert second_run == first_run
     finally:
         await database.close()

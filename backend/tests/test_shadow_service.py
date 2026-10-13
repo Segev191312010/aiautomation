@@ -365,10 +365,11 @@ def quiet_shadow_cli(monkeypatch):
 
     initialized: list[bool] = []
 
-    async def fake_init_db() -> None:
+    def fake_schema_check(**_kwargs: object) -> None:
+        # Children only check the schema (read-only); they never migrate.
         initialized.append(True)
 
-    monkeypatch.setattr(cli, "init_db", fake_init_db)
+    monkeypatch.setattr(cli, "require_current_schema", fake_schema_check)
     monkeypatch.setattr(settings, "load_shadow_runtime_config", runtime_config)
     monkeypatch.setattr(
         shadow_logging,

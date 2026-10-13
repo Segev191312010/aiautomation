@@ -37,10 +37,14 @@ plans/AUTOTRADER_V1_SPEC.md        governing product contract
 python3.11 -m venv backend/.venv
 backend/.venv/bin/pip install -r backend/requirements-dev.txt
 cp backend/.env.example backend/.env
+(cd backend && .venv/bin/python autotraderctl.py db migrate)   # creates the database
 
 cd dashboard
 npm ci
 ```
+
+No process creates or migrates the database by itself (see
+[Schema migrations](#schema-migrations)).
 
 Run the API:
 
@@ -56,9 +60,11 @@ cd dashboard
 npm run dev
 ```
 
-Or run the loopback-only Compose stack:
+Or run the loopback-only Compose stack (migrate its database first, and again
+after an update that adds a migration):
 
 ```bash
+docker compose run --rm backend python autotraderctl.py db migrate
 docker compose up --build
 ```
 
@@ -76,7 +82,9 @@ The first command runs backend tests, frontend typecheck/build/tests, and skips 
 ## Data Safety
 
 - Docker writes the V1 database to `/data/autotrader_v1.db`.
-- Local runtime defaults to `backend/trading_bot.db` only for compatibility with the preserved local file; use `DB_PATH` for a new V1 database.
+- The local runtime uses `~/.local/share/autotrader-v1/autotrader.db` unless
+  `DB_PATH` is set. That is the live database even from a git worktree: run
+  tests and experiments with `DB_PATH` (and `HOME`) pointing at temporary files.
 - `.env` and SQLite files are local artifacts and are never committed.
 - `docs/archive/` holds owner work from the retired system (including the old TradingView/Claude paper runbook); it is not a current V1 contract.
 
@@ -88,9 +96,73 @@ cd backend
 .venv/bin/python autotraderctl.py shadow agent install|enable|disable|status
 .venv/bin/python autotraderctl.py notify test                        # Telegram check
 .venv/bin/python autotraderctl.py paper stop                         # kill switch
+.venv/bin/python autotraderctl.py db status                          # schema, read-only
+.venv/bin/python autotraderctl.py db migrate                         # after the close
 ```
 
 Owner prerequisites: TWS or IB Gateway logged into the PAPER account on
 127.0.0.1:7497 with auto-restart enabled, the Anthropic and Telegram keys in the
 macOS Keychain, `~/.config/autotrader-v1/config.toml`, the Mac on AC power during
 market hours, and no other IBKR session receiving market data.
+
+### Schema migrations
+
+No process migrates the database by itself. Every process that uses it (the
+screener, the strategies, the recorder, the Telegram assistant, the API)
+checks the migration ledger read-only at start. If a migration is pending, or
+the ledger does not match the code, it logs one CRITICAL line with the reason
+(`schema_migration_pending`, `schema_checksum_mismatch`,
+`schema_newer_than_code`, `schema_history_gap`, `schema_unreadable`) and exits
+75. The supervisor retries it with backoff (15 s doubling to 5 minutes), so it
+starts by itself once the database is migrated.
+
+The Telegram assistant is the exception for a pending migration: its tables
+come from migrations up to 12, so it keeps serving (`/stop`, manual orders and
+exits, questions) while only newer migrations are pending. It still refuses a
+missing migration it needs and every other reason above.
+
+The owner hears of it without any process migrating:
+
+- the always-on Telegram assistant sends one alert per day as it starts (or
+  refuses), so a supervisor restarted without the migration reaches the
+  phone within minutes, at any hour;
+- the notifier keeps running (it only reads tables older than any pending
+  migration), sends one alert per session, and drops the children's repeated
+  exit-75 restarts instead of one message per restart;
+- `autotraderctl run --dry-run` prints `!!! DATABASE NOT READY` on its second line.
+
+`autotraderctl paper stop` works on any existing database, migrated or not.
+
+`autotraderctl db migrate` is the only way the schema changes:
+
+1. it takes an exclusive lock beside the database;
+2. it refuses a ledger that does not match the code (deploy the matching code
+   or restore a backup) and does nothing when no migration is pending;
+3. it refuses inside the supervised trading day (07:55–18:30 ET on trading
+   days, half days included, from the supervisor's own plan) unless
+   `--during-session-i-know` is given;
+4. it writes a timestamped backup to `backups/` beside the database with
+   SQLite's backup API, verifies it and prints its path; no backup, no migration;
+5. it applies the pending migrations in one transaction and prints the
+   version before and after.
+
+Applied migrations are frozen (`tests/test_migration_freeze.py`): a schema
+change is always a new migration, never an edit. So a migration holds only
+what its phase uses: migration 13 adds `autotrader_manager_setups` (every
+setup the rules form). The other AI day-manager tables are unregistered
+drafts in `backend/trading/storage/manager_schema.py`, checked by their tests
+on scratch databases and registered when their phase lands (14: phase 1, day
+universe and signal outcomes; 15: phase 2, plans, verdicts, the autopilot
+switch, the day latch and spend). To undo a migration, stop the supervisor,
+delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the backup over
+`autotrader.db`.
+
+Deploy runbook (every phase):
+
+1. Merge after 18:30 ET.
+2. `autotraderctl db migrate` (note the backup path it prints; for phase 0 it
+   is v12 to v13, `backups/autotrader.<UTC time>.v12-to-v13.db`).
+3. Restart the supervisor (it keeps the old plan in memory).
+4. `autotraderctl run --dry-run`: no `!!! DATABASE NOT READY` line.
+5. Check the next morning's `CHILD_START` lines in `supervisor.log`.
+6. Watch the first session.

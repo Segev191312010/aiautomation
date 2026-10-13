@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import logging
 
 from trading.contracts import (
     AIReview,
@@ -32,10 +33,17 @@ from trading.rules.strategy import (
     is_data_rejection,
 )
 from trading.scheduler.decision_keys import decision_key
+from trading.storage.manager_setups import FormedSetup, formed_setup, record_formed_setup
 from trading.storage.repository import record_decision
 
 
+logger = logging.getLogger("autotrader.shadow.pipeline")
+
 DecisionRecorder = Callable[..., Awaitable[None]]
+SetupRecorder = Callable[[FormedSetup], Awaitable[object]]
+# Named token of the one failure the pipeline swallows: evidence that could
+# not be saved. The decision it follows is already recorded and unchanged.
+SETUP_PERSIST_FAILED = "setup_persist_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +172,7 @@ class ShadowPipeline:
         decision_recorder: DecisionRecorder = record_decision,
         strategy: StrategyEvaluator = ORBStrategy(),
         mode: EngineMode = EngineMode.SHADOW,
+        setup_recorder: SetupRecorder = record_formed_setup,
     ) -> None:
         if not isinstance(strategy, StrategyEvaluator):
             raise TypeError("strategy must implement StrategyEvaluator")
@@ -171,6 +180,7 @@ class ShadowPipeline:
         self._decision_recorder = decision_recorder
         self._strategy = strategy
         self._mode = mode
+        self._setup_recorder = setup_recorder
 
         async def defer_recording(**_: object) -> None:
             return None
@@ -188,6 +198,10 @@ class ShadowPipeline:
     @property
     def mode(self) -> EngineMode:
         return self._mode
+
+    @property
+    def setup_recorder(self) -> SetupRecorder:
+        return self._setup_recorder
 
     async def run(
         self,
@@ -382,6 +396,11 @@ class ShadowPipeline:
                 }
             )
         await self._record(decision, strategy.owner_id)
+        # Evidence after the decision, never before it: the decision's inputs,
+        # outcome and write time are exactly those of a pipeline without it.
+        await self._persist_setup(
+            setup=setup, strategy=strategy, item=item, session_date=session_day
+        )
         return Assessment(decision=decision)
 
     async def record_data_blocked(
@@ -411,6 +430,34 @@ class ShadowPipeline:
 
     async def _record(self, decision: Decision, owner_id: str) -> None:
         await self._decision_recorder(decision=decision, owner_id=owner_id)
+
+    async def _persist_setup(
+        self,
+        *,
+        setup: RuleSetup,
+        strategy: StrategyRecord,
+        item: CandidateInput,
+        session_date: date,
+    ) -> None:
+        """Save the formed setup; any failure is logged and never reaches a decision."""
+        try:
+            row = formed_setup(
+                setup=setup,
+                strategy=strategy,
+                candidate=item.candidate,
+                bars=item.bars,
+                session_date=session_date,
+            )
+            await self._setup_recorder(row)
+        except Exception:  # noqa: BLE001 - evidence must never block or alter a decision
+            logger.error(
+                "%s: run %s candidate %s setup %s",
+                SETUP_PERSIST_FAILED,
+                setup.run_id,
+                setup.candidate_id,
+                setup.fingerprint(),
+                exc_info=True,
+            )
 
     def _require_strategy_setup(
         self,
