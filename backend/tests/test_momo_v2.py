@@ -565,6 +565,186 @@ async def test_retryable_skips_stay_pending_in_the_leased_session_until_the_cuto
     assert (bf_b.risk.intent.quantity, bf_b.risk.intent.stop_price) == (3726, Decimal("26.51"))
 
 
+class _ReplayMarket:
+    """The session runner's data for BF B and FIGS: their real bars and quotes."""
+
+    def __init__(self, clock: dict[str, datetime]) -> None:
+        self.clock = clock
+        self.bar_requests: list[tuple[str, datetime]] = []
+        self.by_con_id = {replay.con_id: replay for replay in (BF_B, FIGS)}
+
+    async def completed_bars(self, *, con_id: int, now: datetime) -> tuple[CompletedBar, ...]:
+        replay = self.by_con_id[con_id]
+        self.bar_requests.append((replay.symbol, self.clock["now"]))
+        return replay.bars_until(self.clock["now"])
+
+    async def quote(self, *, con_id: int) -> QuoteSnapshot:
+        return self.by_con_id[con_id].quote(self.clock["now"])
+
+    async def liquidity(self, *, con_id: int, session_date: date) -> Any:
+        raise AssertionError("the hot list seeds liquidity")
+
+    async def scanner_snapshot(self, *, scanner_run_id: str) -> Any:
+        raise AssertionError("MOMO takes the hot list, not a scan")
+
+
+def _decision_projection(decision: dict[str, Any], symbols: dict[str, str]) -> tuple[Any, ...]:
+    """Everything a decision decides; timestamps, ids and quote-time fingerprints aside."""
+    review = decision["ai_review"] or {}
+    risk = decision["risk"] or {}
+    intent = risk.get("intent") or {}
+    return (
+        symbols[decision["candidate_id"]],
+        decision["outcome"],
+        review.get("decision"),
+        risk.get("approved"),
+        tuple(risk.get("codes") or ()),
+        tuple(intent.get(key) for key in ("quantity", "entry_limit", "stop_price", "target_price")),
+    )
+
+
+def _setup_projection(setup: RuleSetup) -> tuple[Any, ...]:
+    provenance = setup.causal_provenance
+    return (
+        setup.symbol,
+        setup.entry_limit,
+        setup.stop_price,
+        setup.target_price,
+        setup.atr,
+        tuple(sorted(setup.levels.items())),
+        setup.detected_at,
+        provenance.breakout_bar_fingerprint if provenance else None,
+        provenance.atr_bar_fingerprints if provenance else None,
+    )
+
+
+@pytest.mark.anyio
+async def test_v2_decides_the_same_at_the_old_and_the_new_poll_slot(tmp_path, monkeypatch):
+    """Golden: MOMO's slot moved from 5 s to 15 s after each close; identical
+    bars still give identical setups, reviews, sizes and outcomes."""
+    from config import cfg
+    from db.core import init_db
+    from trading.contracts import AccountSnapshot
+    from trading.market.ibkr_boundary import LiquidityProfile
+    from trading.operations.shadow_service import (
+        WATCHLIST_BAR_MAX_AGE,
+        poll_schedule,
+        strategy_entry_window,
+    )
+    from trading.orchestration.session_runner import PollSchedule, ShadowSessionRunner
+    from trading.scheduler.sessions import market_session
+    from trading.storage.repository import list_decisions
+
+    window_start = strategy_entry_window("momo", SESSION)[0]
+
+    async def day(label: str, schedule: PollSchedule):
+        # One ledger per day: the shadow lease admits one run per strategy and date.
+        monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / f"momo-golden-{label}.db"))
+        await init_db()
+        strategy = await ensure_strategy(owner_id="owner-a", spec=momo_strategy_spec())
+        clock = {"now": _et(SESSION, 9, 50)}
+        market = _ReplayMarket(clock)
+        setups: list[RuleSetup] = []
+
+        class Provider:
+            async def propose_trade(self, *, setup: RuleSetup) -> AIReview:
+                setups.append(setup)
+                return _proposal(setup)
+
+        async def sleep(seconds: float) -> None:
+            clock["now"] += timedelta(seconds=seconds)
+
+        async def read_account() -> AccountSnapshot:
+            return AccountSnapshot(
+                paper_account_id="DU1234567",
+                client_id=20,
+                observed_at=clock["now"],
+                net_liquidation=Decimal("665000"),
+                available_funds=Decimal("665000"),
+                realized_day_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+            )
+
+        async def hot_list(run: Run):
+            parameters: dict[str, object] = {"source": "screener_hotlist", "top": 35}
+            scanner = ScannerRun(
+                id=f"{run.id}-hotlist",
+                run_id=run.id,
+                parameters=parameters,
+                parameters_fingerprint=fingerprint_payload(parameters),
+                status="completed",
+                started_at=clock["now"],
+            )
+            candidates = tuple(
+                replay.candidate(scanner.id, rank) for rank, replay in enumerate((BF_B, FIGS), 1)
+            )
+            liquidity = {
+                replay.con_id: LiquidityProfile(
+                    con_id=replay.con_id,
+                    reference_price=replay.reference_price,
+                    average_dollar_volume=replay.average_dollar_volume,
+                    sessions_used=20,
+                    last_session_date=PRIOR,
+                )
+                for replay in (BF_B, FIGS)
+            }
+            return scanner, candidates, liquidity
+
+        runner = ShadowSessionRunner(
+            market=market,
+            read_account=read_account,
+            runner=RepositoryBackedShadowRunner(
+                pipeline=ShadowPipeline(proposal_provider=Provider(), strategy=MomoStrategy()),
+                clock=lambda: clock["now"],
+                lease_ttl=timedelta(hours=6),
+                lease_renew_interval=timedelta(hours=1),
+            ),
+            clock=lambda: clock["now"],
+            poll_schedule=schedule,
+            sleep=sleep,
+        )
+        report = await runner.run(
+            session=market_session(SESSION),
+            strategy=strategy,
+            policy=RiskPolicy(),
+            source_sha="abcdef1",
+            policy_fingerprints={
+                "risk": RiskPolicy().fingerprint(),
+                "momo_hod": MomoConfig().fingerprint(),
+            },
+            run_id=f"momo-golden-{label}",
+            candidate_source=hot_list,
+            window_start=window_start,
+        )
+        symbols = {replay.candidate(f"momo-golden-{label}-hotlist").id: replay.symbol for replay in (BF_B, FIGS)}
+        stored = await list_decisions(owner_id="owner-a", run_id=report.run_id)
+        decisions = sorted(_decision_projection(item, symbols) for item in stored)
+        return report, market, decisions, [_setup_projection(setup) for setup in setups]
+
+    # The slot V2 ran with until this change, under the same freshness limit.
+    old = await day("5s", PollSchedule(offset=timedelta(seconds=5), bar_max_age=WATCHLIST_BAR_MAX_AGE))
+    new = await day("15s", poll_schedule("momo", "watchlist"))
+
+    old_report, old_market, old_decisions, old_setups = old
+    new_report, new_market, new_decisions, new_setups = new
+    assert new_decisions == old_decisions
+    assert new_setups == old_setups
+    assert (new_report.polls, new_report.data_errors) == (old_report.polls, old_report.data_errors) == (60, 0)
+    assert dict(new_report.outcomes) == dict(old_report.outcomes)
+    # Only the moment moved: every request comes 10 s later in the same bar.
+    assert [(symbol, at - timedelta(seconds=10)) for symbol, at in new_market.bar_requests] == (
+        old_market.bar_requests
+    )
+    assert old_market.bar_requests[0] == ("BF B", _et(SESSION, 10, 0, 5))
+    # And it is V2's known day: BF B bought at 11:50 with the wide stop, FIGS skipped.
+    assert new_decisions == [
+        ("BF B", "shadow_accepted", "PROPOSE", True, (), (3726, "26.77", "26.51", "27.29")),
+        ("FIGS", "rule_rejected", None, None, (), (None, None, None, None)),
+    ]
+    assert [setup[0] for setup in new_setups] == ["BF B"]
+    assert new_setups[0][6] == BF_B.signal_end
+
+
 def test_v2_identity_is_consistent_across_rules_catalogue_and_prompt():
     config = MomoConfig()
     assert (

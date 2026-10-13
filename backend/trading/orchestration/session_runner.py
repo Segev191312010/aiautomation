@@ -44,7 +44,7 @@ from trading.orchestration.persistence import RepositoryBackedShadowRunner, Shad
 from trading.orchestration.pipeline import CandidateInput
 from trading.risk.portfolio import portfolio_from_account
 from trading.rules.orb import qualify_candidate
-from trading.scheduler.sessions import MarketSession
+from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
 from trading.sendable_identities import (
     SENDABLE_IDENTITIES,
     SENDABLE_SPEC_MISMATCH,
@@ -56,12 +56,16 @@ logger = logging.getLogger("autotrader.shadow.session")
 ORB_STRATEGY_NAME = "ORB_V1"
 MOMO_STRATEGY_NAME = "MOMO_HOD_V2"
 BAR_INTERVAL = timedelta(minutes=5)
-# Poll a few seconds after each bar closes so IBKR has finalized that bar.
-POLL_DELAY_AFTER_BAR_CLOSE = timedelta(seconds=5)
+# The least time a poll gets, from its slot to its freshness limit, to fetch
+# every pending candidate: what the original 30 s limit left a poll made 5 s
+# after the close.
+MIN_PASS_BUDGET = timedelta(seconds=25)
 SCANNER_ATTEMPTS = 3
 SCANNER_RETRY_DELAY = timedelta(seconds=20)
 # How often a dynamic run asks its candidate refresh for newly hot symbols.
 DEFAULT_REFRESH_INTERVAL = timedelta(minutes=15)
+# Log tag for a poll slot reached too late to find fresh bars.
+LATE_POLLS_SKIPPED = "late_polls_skipped"
 
 
 class SessionMarketData(Protocol):
@@ -107,6 +111,7 @@ class SessionReport:
     outcomes: Counter[str] = field(default_factory=Counter)
     polls: int = 0
     paused_polls: int = 0
+    late_polls_skipped: int = 0
     data_errors: int = 0
 
     def summary(self) -> dict[str, object]:
@@ -118,8 +123,37 @@ class SessionReport:
             "outcomes": dict(self.outcomes),
             "polls": self.polls,
             "paused_polls": self.paused_polls,
+            "late_polls_skipped": self.late_polls_skipped,
             "data_errors": self.data_errors,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class PollSchedule:
+    """When one strategy child polls inside every five-minute bar.
+
+    ``offset`` is the poll's delay after each bar close, and ``bar_max_age``
+    the freshness limit its bars are validated against, so the run has
+    ``bar_max_age - offset`` to fetch every pending candidate (its pass budget).
+    """
+
+    offset: timedelta
+    bar_max_age: timedelta
+
+    def __post_init__(self) -> None:
+        if self.offset <= timedelta(0):
+            raise ValueError("a poll must follow the bar close it evaluates")
+        if self.bar_max_age >= BAR_INTERVAL:
+            # Under one interval, a bar that passes is always the latest completed one.
+            raise ValueError("the bar freshness limit must stay under one bar interval")
+        if self.bar_max_age - self.offset < MIN_PASS_BUDGET:
+            # Otherwise most, or all, of every pass would be refused as stale.
+            raise ValueError("the poll offset leaves too little time under the freshness limit")
+
+    @property
+    def late_poll_limit(self) -> timedelta:
+        """How late a slot may still be polled: while half its pass budget remains."""
+        return (self.bar_max_age - self.offset) / 2
 
 
 def orb_strategy_spec() -> StrategySpec:
@@ -237,6 +271,7 @@ class ShadowSessionRunner:
         read_account: AccountReader,
         runner: RepositoryBackedShadowRunner,
         clock: Callable[[], datetime],
+        poll_schedule: PollSchedule,
         sleep: Sleeper = asyncio.sleep,
         reconnect: Reconnector | None = None,
         holder_id: str | None = None,
@@ -245,11 +280,16 @@ class ShadowSessionRunner:
         bars_fetcher: BarsFetcher | None = None,
         contract_loader: ContractLoader | None = None,
     ) -> None:
-        """``entry_gate`` may pause assessments poll by poll; ``entry_gate_name``
+        """``poll_schedule`` places every poll inside its bar (a required
+        choice: children sharing symbols must not poll together).
+        ``entry_gate`` may pause assessments poll by poll; ``entry_gate_name``
         labels its log lines (``<name> paused: <reason>``). ``contract_loader``
         runs before every quote request, so candidates that joined without a
         loaded contract (a refresh, or a resumed run) still quote on their tick
         grid."""
+        if not isinstance(poll_schedule, PollSchedule):
+            raise TypeError("poll_schedule must be a PollSchedule")
+        self._poll_schedule = poll_schedule
         self._market = market
         self._read_account = read_account
         self._runner = runner
@@ -336,7 +376,7 @@ class ShadowSessionRunner:
             latest: dict[str, CandidateInput] = {}
             cutoff = shadow.cutoff
             refreshed_at = self._now()
-            poll_at = self._first_poll(session, window_start)
+            poll_at = self._first_poll(session, report, window_start)
             # A dynamic run polls on with nothing pending: a refresh may still add.
             while poll_at < cutoff and (dynamic or shadow.pending()):
                 await self._sleep_until(poll_at)
@@ -362,7 +402,7 @@ class ShadowSessionRunner:
                         # Paused candidates stay pending; the cutoff sweep below
                         # still makes every one of them terminal.
                         report.paused_polls += 1
-                poll_at = poll_at + BAR_INTERVAL
+                poll_at = self._due_poll(poll_at + BAR_INTERVAL, report)
             # Only the sweep completes a dynamic run, even with nothing pending.
             if dynamic or shadow.pending():
                 await self._sleep_until(cutoff)
@@ -611,17 +651,47 @@ class ShadowSessionRunner:
         except Exception as exc:  # noqa: BLE001 - retried on the next request
             logger.warning("TWS reconnect failed: %s", type(exc).__name__)
 
-    def _first_poll(self, session: MarketSession, window_start: datetime | None = None) -> datetime:
-        """First bar close at or after the window opens, and not in the past.
+    def _first_poll(
+        self,
+        session: MarketSession,
+        report: SessionReport,
+        window_start: datetime | None = None,
+    ) -> datetime:
+        """This child's slot after the window's first bar close, or the slot due now.
 
         A strategy with its own window (GAP_GO opens at 09:35) polls from that
         window; scan-driven ORB keeps the session's first signal bar (09:50).
         """
         first = window_start if window_start is not None else session.first_signal_at
+        return self._due_poll(first + self._poll_schedule.offset, report)
+
+    def _due_poll(self, slot: datetime, report: SessionReport) -> datetime:
+        """``slot`` if it is still ahead or only a little late; else the next slot.
+
+        Bars are refused once older than ``bar_max_age``, and a slot reached
+        late (a restart mid-bar, a slow pass) starts its pass with bars that
+        much older. It still runs while half its pass budget remains; later,
+        most of its requests would be refused as stale (2026-10-12: MOMO began
+        a pass 78 s after its slot and 28 of its 35 bar requests were refused),
+        so the run waits for the next bar's slot instead.
+        """
         now = self._now()
-        while first + POLL_DELAY_AFTER_BAR_CLOSE < now - BAR_INTERVAL:
-            first += BAR_INTERVAL
-        return first + POLL_DELAY_AFTER_BAR_CLOSE
+        if slot >= now:
+            return slot
+        # Slots before the current bar's belong to history, not to this pass.
+        slot += BAR_INTERVAL * ((now - slot) // BAR_INTERVAL)
+        late = now - slot
+        if late <= self._poll_schedule.late_poll_limit:
+            return slot
+        report.late_polls_skipped += 1
+        logger.warning(
+            "skipping the %s ET poll [%s]: %d s late, past the %d s a late poll may start",
+            slot.astimezone(MARKET_TIMEZONE).strftime("%H:%M:%S"),
+            LATE_POLLS_SKIPPED,
+            late.total_seconds(),
+            self._poll_schedule.late_poll_limit.total_seconds(),
+        )
+        return slot + BAR_INTERVAL
 
     def _now(self) -> datetime:
         return self._clock().astimezone(timezone.utc)
@@ -641,11 +711,14 @@ def _decision_symbol(shadow: ShadowRunSession, decision: Decision) -> str:
 
 __all__ = [
     "DEFAULT_REFRESH_INTERVAL",
+    "LATE_POLLS_SKIPPED",
+    "MIN_PASS_BUDGET",
     "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
     "CandidateRefresh",
     "ContractLoader",
     "EntryGate",
+    "PollSchedule",
     "SessionAborted",
     "SessionReport",
     "ShadowSessionRunner",

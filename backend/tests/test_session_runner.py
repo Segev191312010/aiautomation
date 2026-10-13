@@ -19,6 +19,7 @@ from trading.market.ibkr_boundary import (
     LiquidityProfile,
     qualify_scanner_results,
 )
+from trading.operations.shadow_service import poll_schedule
 from trading.orchestration import RepositoryBackedShadowRunner, ShadowPipeline
 from trading.orchestration.session_runner import (
     ORB_STRATEGY_NAME,
@@ -33,6 +34,8 @@ SESSION = date(2026, 8, 27)
 OPEN = datetime(2026, 8, 27, 13, 30, tzinfo=timezone.utc)
 HASH = "c" * 64
 BREAKOUT_START = OPEN + timedelta(minutes=40)  # 10:10-10:15 New York
+# ORB's production slot: 30 s after each bar close.
+ORB_SCHEDULE = poll_schedule("orb", "scanner")
 
 
 def _bar(con_id: int, start: datetime, *, high: str, close: str) -> CompletedBar:
@@ -178,6 +181,7 @@ async def test_simulated_day_decides_every_candidate(tmp_path, monkeypatch):
             lease_renew_interval=timedelta(hours=1),
         ),
         clock=lambda: clock["now"],
+        poll_schedule=ORB_SCHEDULE,
         sleep=sleep,
     )
 
@@ -200,7 +204,7 @@ async def test_simulated_day_decides_every_candidate(tmp_path, monkeypatch):
     # Quotes are requested only at the breakout, never for quiet candidates.
     assert market.quotes == [101]
     assert provider.calls == 1
-    # Polls run 09:50:05 through 11:55:05 while two candidates stay pending.
+    # Polls run 09:50:30 through 11:55:30 while two candidates stay pending.
     assert report.polls == 26
     assert clock["now"] >= datetime(2026, 8, 27, 16, 0, tzinfo=timezone.utc)
     stored = await list_decisions(owner_id="demo", run_id=report.run_id)
@@ -228,6 +232,7 @@ async def test_unanswered_scanner_aborts_the_session(tmp_path, monkeypatch):
             pipeline=ShadowPipeline(proposal_provider=Provider()), clock=lambda: clock["now"]
         ),
         clock=lambda: clock["now"],
+        poll_schedule=ORB_SCHEDULE,
         sleep=sleep,
         reconnect=reconnect,
     )

@@ -40,10 +40,13 @@ from trading.orchestration import (
     ShadowPipeline,
 )
 from trading.orchestration.session_runner import (
+    BAR_INTERVAL,
+    MIN_PASS_BUDGET,
     momo_strategy_spec,
     orb_strategy_spec,
     ensure_strategy,
     EntryGate,
+    PollSchedule,
     SessionAborted,
     SessionReport,
     ShadowSessionRunner,
@@ -75,6 +78,7 @@ from trading.scheduler.sessions import (
     market_session,
     next_market_session,
 )
+from trading.sendable_identities import SENDABLE_IDENTITIES
 
 if TYPE_CHECKING:
     from trading.market.context import MarketContext
@@ -148,6 +152,20 @@ STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3, "vwap": 5, "gap": 6}
 # single-symbol limit. Anything under one bar interval still guarantees the
 # newest bar is the latest completed one.
 WATCHLIST_BAR_MAX_AGE = timedelta(seconds=240)
+# IBKR refuses a historical-data request identical to one made within the last
+# 15 s by any client of the same TWS (a pacing violation), and children that
+# share symbols send identical bar requests. Their polls stay this far apart.
+MIN_POLL_SEPARATION = timedelta(seconds=15)
+# Strategy -> poll delay after every bar close. Real MOMO polls first, so its
+# requests lead every bar and a collision normally costs a shadow child's later
+# request; VWAP reads MOMO's own hot list and polls last, furthest behind it.
+# Each delay also gives IBKR time to finalize the closed bar.
+STRATEGY_POLL_OFFSETS = {
+    "momo": timedelta(seconds=15),
+    "orb": timedelta(seconds=30),
+    "gap": timedelta(seconds=45),
+    "vwap": timedelta(seconds=60),
+}
 # Strategies whose reviews see the screener's market context and whose entries
 # pause while the market is risk_off. ORB is left out so its runs (and run
 # fingerprints) are unchanged.
@@ -247,6 +265,57 @@ def strategy_entry_window(strategy_name: str, session_date: date) -> tuple[datet
     return entry_window_utc(STRATEGIES[strategy_name][0](), session_date)
 
 
+def poll_offset_problems(offsets: Mapping[str, timedelta]) -> list[str]:
+    """Every way ``offsets`` breaks the polling contract; empty when it holds."""
+    problems: list[str] = []
+    if set(offsets) != set(STRATEGIES):
+        problems.append("poll offsets must name exactly the strategy registry")
+    if any(not timedelta(0) < offset < BAR_INTERVAL for offset in offsets.values()):
+        problems.append("every poll offset must fall inside its bar")
+    ordered = sorted(offsets.items(), key=lambda item: item[1])
+    for (earlier, early_at), (later, late_at) in zip(ordered, ordered[1:]):
+        if late_at - early_at < MIN_POLL_SEPARATION:
+            problems.append(f"{earlier} and {later} poll {late_at - early_at} apart")
+    sendable = {
+        name: name in STRATEGIES and STRATEGIES[name][1]().name in SENDABLE_IDENTITIES
+        for name in offsets
+    }
+    sendable_at = [offsets[name] for name, sends in sendable.items() if sends]
+    shadow_at = [offsets[name] for name, sends in sendable.items() if not sends]
+    if sendable_at and shadow_at and max(sendable_at) >= min(shadow_at):
+        problems.append("every sendable strategy must poll before every shadow strategy")
+    return problems
+
+
+def bar_freshness_limit(strategy_name: str, universe: str) -> timedelta:
+    """How old a run's newest completed bar may be when it arrives.
+
+    Hot-list and gapper runs fetch up to 35 symbols one after another and
+    allow ``WATCHLIST_BAR_MAX_AGE``. A scanner run keeps exactly the budget its
+    30 s limit gave a poll 5 s after the close, now counted from its own slot.
+    """
+    _require_strategy(strategy_name, universe)
+    if universe == "scanner":
+        return STRATEGY_POLL_OFFSETS[strategy_name] + MIN_PASS_BUDGET
+    return WATCHLIST_BAR_MAX_AGE
+
+
+def poll_schedule(strategy_name: str, universe: str) -> PollSchedule:
+    """The run's poll slot and freshness limit; refuses a broken offset table.
+
+    Refused before any database write, Keychain read or TWS connection.
+    """
+    _require_strategy(strategy_name, universe)
+    problems = poll_offset_problems(STRATEGY_POLL_OFFSETS)
+    if problems:
+        logger.critical("poll_offsets_invalid: %s", "; ".join(problems), stack_info=True)
+        raise SessionAborted("poll_offsets_invalid: " + "; ".join(problems))
+    return PollSchedule(
+        offset=STRATEGY_POLL_OFFSETS[strategy_name],
+        bar_max_age=bar_freshness_limit(strategy_name, universe),
+    )
+
+
 def _window_closed(strategy_name: str, session_date: date, cutoff: datetime) -> SessionAborted:
     local_cutoff = cutoff.astimezone(MARKET_TIMEZONE)
     return SessionAborted(
@@ -306,10 +375,12 @@ async def run_shadow_session(
     evaluator: StrategyEvaluator = evaluator_factory()
     window_start, window_cutoff = entry_window_utc(evaluator, session.session_date)
     # Refuse before any database write, Keychain read, or TWS connection: a
-    # closed window, or a review prompt that is missing or written for another
-    # strategy kind (review_prompt_for raises).
+    # closed window, a broken poll-offset table (poll_schedule raises), or a
+    # review prompt that is missing or written for another strategy kind
+    # (review_prompt_for raises).
     if clock() >= window_cutoff:
         raise _window_closed(strategy_name, session.session_date, window_cutoff)
+    schedule = poll_schedule(strategy_name, universe)
     prompt_id = strategy_prompt or config.prompt_id
     system_prompt = review_prompt_for(prompt_id, strategy_kind=evaluator.strategy_kind)
     strategy = await ensure_strategy(owner_id=owner_id, spec=spec_factory())
@@ -356,7 +427,8 @@ async def run_shadow_session(
         actor=actor,
         host=PAPER_TWS_HOST,
         volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
-        **({"bar_max_age": WATCHLIST_BAR_MAX_AGE} if universe != "scanner" else {}),
+        # The limit the runner schedules its polls against is the one enforced.
+        bar_max_age=schedule.bar_max_age,
     )
 
     async def watchlist_source(run):
@@ -401,6 +473,7 @@ async def run_shadow_session(
                 clock=clock,
             ),
             clock=clock,
+            poll_schedule=schedule,
             sleep=sleep,
             reconnect=reconnect,
             holder_id=f"{socket.gethostname()}:{os.getpid()}",
@@ -510,11 +583,17 @@ __all__ = [
     "MARKET_AWARE_STRATEGIES",
     "MARKET_CONTEXT_MAX_AGE",
     "MARKET_REGIME_RULE",
+    "MIN_POLL_SEPARATION",
     "MOMO_REVIEW_PROMPT_ID",
     "STRATEGIES",
+    "STRATEGY_POLL_OFFSETS",
     "UNIVERSES",
+    "WATCHLIST_BAR_MAX_AGE",
+    "bar_freshness_limit",
     "fresh_run_label",
     "market_context_provider",
+    "poll_offset_problems",
+    "poll_schedule",
     "policy_fingerprints",
     "risk_off_entry_gate",
     "run_shadow_day",

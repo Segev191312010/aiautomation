@@ -32,6 +32,7 @@ from trading.orchestration import (
     ShadowPipeline,
     ShadowPersistenceConflictError,
 )
+from trading.operations.shadow_service import poll_schedule
 from trading.orchestration.persistence import MAX_CANDIDATE_RANK
 from trading.orchestration.session_runner import ShadowSessionRunner, ensure_orb_strategy
 from trading.orchestration.watchlist_source import HotListUnavailable
@@ -41,6 +42,8 @@ from trading.storage.repository import list_decisions
 ET = ZoneInfo("America/New_York")
 SESSION = date(2026, 8, 27)
 HASH = "d" * 64
+# ORB's rules on the dynamic hot list: its production slot, 30 s after each close.
+SCHEDULE = poll_schedule("orb", "watchlist")
 
 
 def et(hour: int, minute: int = 0, second: int = 0) -> datetime:
@@ -552,6 +555,7 @@ def _session_runner(clock, market: FakeMarket, provider: Provider, *, crash_at=N
         read_account=_account_reader(clock, crash_at),
         runner=_runner(clock, provider),
         clock=lambda: clock["now"],
+        poll_schedule=SCHEDULE,
         sleep=sleep,
         holder_id=holder,
         contract_loader=market.load_contract,
@@ -596,13 +600,13 @@ async def test_symbol_that_heats_up_mid_session_is_evaluated_at_the_next_poll(
         )
 
     # Refreshes run every 15 minutes before a poll, from the first poll on.
-    assert hot_list.refreshes[:3] == [et(9, 50, 5), et(10, 5, 5), et(10, 20, 5)]
+    assert hot_list.refreshes[:3] == [et(9, 50, 30), et(10, 5, 30), et(10, 20, 30)]
     assert any(
         line.startswith("WARNING candidate refresh failed: screener snapshot") for line in log
     )
     assert "INFO refresh added 1 candidates: NVDA" in log
     # NVDA's bars are first requested in the poll right after it turned hot.
-    assert min(at for con_id, at in market.bar_requests if con_id == 103) == et(10, 20, 5)
+    assert min(at for con_id, at in market.bar_requests if con_id == 103) == et(10, 20, 30)
     # Quotes only at breakouts, each after the runner loaded the contract.
     assert market.quotes == [101, 103] and market.loaded == {101, 103}
     assert provider.symbols == ["AAPL", "NVDA"]
@@ -678,6 +682,7 @@ async def test_candidate_refresh_needs_a_candidate_source_and_a_positive_interva
             pipeline=ShadowPipeline(proposal_provider=Provider()), clock=lambda: OPEN
         ),
         clock=lambda: OPEN,
+        poll_schedule=SCHEDULE,
     )
     record = StrategyRecord.model_construct(strategy_id="s" * 32, owner_id="demo", version=1)
     common = dict(
