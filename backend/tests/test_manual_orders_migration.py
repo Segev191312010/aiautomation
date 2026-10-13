@@ -35,15 +35,20 @@ NEW_TRIGGERS = {
 NEW_INDEXES = {"idx_autotrader_manual_orders_status"}
 
 
+def _migration_12() -> migrations.Migration:
+    return next(item for item in migrations.MIGRATIONS if item.version == 12)
+
+
 def test_migration_12_identity_and_checksum_are_pinned() -> None:
-    migration = migrations.MIGRATIONS[-1]
+    migration = _migration_12()
     assert (migration.version, migration.name, migration.signature) == (
         12, "manual-orders-ledger", "v1-manual-orders-ledger-20261012"
     )
     assert migration.schema_payload == MANUAL_ORDERS_SCHEMA
     assert migration.checksum == MIGRATION_12_CHECKSUM
-    assert migration.checksum == migrations.MIGRATIONS[-1].checksum  # stable across reads
-    assert [item.version for item in migrations.MIGRATIONS] == list(range(1, 13))
+    assert migration.checksum == _migration_12().checksum  # stable across reads
+    assert [item.version for item in migrations.MIGRATIONS] == list(range(1, len(migrations.MIGRATIONS) + 1))
+    assert len(migrations.MIGRATIONS) >= 12
 
 
 async def _schema(path: Path) -> dict[str, set[str]]:
@@ -93,14 +98,14 @@ def _assert_migration_12_present(schema: dict[str, set[str]]) -> None:
 
 
 @pytest.mark.anyio
-async def test_fresh_database_gets_all_twelve_migrations(tmp_path, monkeypatch) -> None:
+async def test_fresh_database_gets_every_migration(tmp_path, monkeypatch) -> None:
     path = tmp_path / "fresh.db"
     monkeypatch.setattr(cfg, "DB_PATH", str(path))
     await init_db()
     first = await _ledger(path)
     await init_db()
     assert await _ledger(path) == first  # idempotent: nothing re-applied
-    assert [version for version, _, _ in first] == list(range(1, 13))
+    assert [version for version, _, _ in first] == [item.version for item in migrations.MIGRATIONS]
     assert [checksum for _, checksum, _ in first] == [item.checksum for item in migrations.MIGRATIONS]
     _assert_migration_12_present(await _schema(path))
     assert await _integrity(path) == ("ok", [])
@@ -125,8 +130,8 @@ async def test_migration_12_applies_on_top_of_a_version_11_database(tmp_path, mo
     async with aiosqlite.connect(path) as db:
         await migrations.apply_migrations(db, backup_path=backup)
     ledger = await _ledger(path)
-    assert [version for version, _, _ in ledger] == list(range(1, 13))
-    assert ledger[-1][1] == MIGRATION_12_CHECKSUM
+    assert [version for version, _, _ in ledger] == [item.version for item in full]
+    assert ledger[11][1] == MIGRATION_12_CHECKSUM
     _assert_migration_12_present(await _schema(path))
     assert (await _row_counts(path))["autotrader_universe"] == 1
     assert [version for version, _, _ in await _ledger(backup)] == list(range(1, 12))
@@ -160,11 +165,11 @@ async def test_migration_12_applies_cleanly_to_a_copy_of_the_live_database(tmp_p
     monkeypatch.setattr(cfg, "DB_PATH", str(copy))
     await init_db()
     ledger = await _ledger(copy)
-    assert [version for version, _, _ in ledger] == list(range(1, 13))
+    assert [version for version, _, _ in ledger] == [item.version for item in migrations.MIGRATIONS]
     assert [checksum for _, checksum, _ in ledger] == [item.checksum for item in migrations.MIGRATIONS]
     _assert_migration_12_present(await _schema(copy))
     after = await _row_counts(copy)
-    assert after["autotrader_schema_migrations"] == 12 >= before["autotrader_schema_migrations"]
+    assert after["autotrader_schema_migrations"] == len(migrations.MIGRATIONS) >= before["autotrader_schema_migrations"]
     untouched = {
         table: count for table, count in before.items()
         if table not in ("users", "autotrader_schema_migrations")
