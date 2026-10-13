@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 
 from trading.authority import EngineAuthority
 from trading.contracts import (
@@ -49,7 +50,11 @@ class AutotraderEngine:
         portfolio: PortfolioSnapshot,
         policy: RiskPolicy,
         admitted_symbols: frozenset[str],
+        size_multiplier: Decimal = Decimal("1"),
     ) -> Decision:
+        """``size_multiplier`` (in (0, 1]) is the AI day manager's narrowing of a
+        managed setup; every unmanaged caller keeps the default and the
+        unscaled policy size."""
         # Authority is deliberately constructed at the boundary. There is no
         # injectable production seam that could widen the enabled mode set.
         EngineAuthority().require_mode(mode)
@@ -68,6 +73,7 @@ class AutotraderEngine:
                 setup=setup,
                 review=review,
                 admitted_symbols=admitted_symbols,
+                size_multiplier=size_multiplier,
             )
             outcome = DecisionOutcome.SHADOW_ACCEPTED if risk.approved else DecisionOutcome.RISK_BLOCKED
 
