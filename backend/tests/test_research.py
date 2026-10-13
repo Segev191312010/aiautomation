@@ -645,10 +645,19 @@ def test_gap_go_is_reported_as_not_replayable_never_faked(tmp_path):
 def test_replay_covers_every_registered_live_strategy():
     from trading.operations import shadow_service
 
-    assert REGISTERED_STRATEGIES == tuple(shadow_service.STRATEGIES)
-    assert set(STRATEGY_FACTORIES) | set(UNREPLAYABLE) == set(shadow_service.STRATEGIES)
+    # A managed entry (AI day manager) runs its family's rules: the rules-only
+    # replay covers it as that family.
+    rule_sets = tuple(
+        name for name in shadow_service.STRATEGIES if name not in shadow_service.MANAGED_STRATEGIES
+    )
+    for name in shadow_service.MANAGED_STRATEGIES:
+        family = shadow_service.strategy_family(name)
+        assert family in rule_sets
+        assert shadow_service.STRATEGIES[name][0] is shadow_service.STRATEGIES[family][0]
+    assert REGISTERED_STRATEGIES == rule_sets
+    assert set(STRATEGY_FACTORIES) | set(UNREPLAYABLE) == set(rule_sets)
     assert not set(STRATEGY_FACTORIES) & set(UNREPLAYABLE)
-    assert set(RULES_VERSIONS) == set(shadow_service.STRATEGIES)
+    assert set(RULES_VERSIONS) == set(rule_sets)
     for name, factory in STRATEGY_FACTORIES.items():
         # The replay runs the live evaluator class itself, never a copy.
         assert factory is shadow_service.STRATEGIES[name][0]

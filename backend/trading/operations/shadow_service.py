@@ -24,7 +24,12 @@ from trading.intelligence.anthropic_transport import (
     MarketContextProvider,
     build_anthropic_client,
 )
-from trading.intelligence.prompts import review_prompt, review_prompt_for
+from trading.intelligence.prompts import (
+    MOMO_MANAGED_REVIEW_PROMPT_ID,
+    review_prompt,
+    review_prompt_for,
+)
+from trading.intelligence.provider import TradeProposalProvider
 from trading.intelligence.review_provider import ReviewSessionLimits, StructuredAIReviewProvider
 from trading.market.ibkr_boundary import PaperIBKRMarketData
 from trading.market.tws_actor import (
@@ -42,6 +47,7 @@ from trading.orchestration import (
 from trading.orchestration.session_runner import (
     BAR_INTERVAL,
     MIN_PASS_BUDGET,
+    ap_momo_strategy_spec,
     momo_strategy_spec,
     orb_strategy_spec,
     ensure_strategy,
@@ -81,6 +87,7 @@ from trading.scheduler.sessions import (
 from trading.sendable_identities import SENDABLE_IDENTITIES
 
 if TYPE_CHECKING:
+    from trading.manager.managed import ManagedStrategy
     from trading.market.context import MarketContext
 
 logger = logging.getLogger("autotrader.shadow.service")
@@ -136,7 +143,16 @@ STRATEGIES = {
     # bridge records but never sends their decisions.
     "vwap": (VwapPbStrategy, vwap_pb_strategy_spec, VWAP_REVIEW_PROMPT_ID),
     "gap": (GapGoStrategy, gap_go_strategy_spec, GAP_REVIEW_PROMPT_ID),
+    # Managed MOMO (shadow, AI day manager): MOMO_HOD_V2's rules, and V2's
+    # prompt for its neutral reviews. Never sendable (see AP_MOMO_STRATEGY_NAME).
+    "momo-ap": (MomoStrategy, ap_momo_strategy_spec, MOMO_REVIEW_PROMPT_ID),
 }
+# Each registry entry's family: the key every "momo"-style check reads
+# (risk_off gate, market context, MomoConfig fingerprint), so managed MOMO
+# keeps MOMO's gates. An entry not listed is its own family.
+STRATEGY_FAMILIES = {"momo-ap": "momo"}
+# Entries run under the AI day manager (trading.manager.managed).
+MANAGED_STRATEGIES = frozenset({"momo-ap"})
 UNIVERSES = ("scanner", "watchlist", "gappers")
 # Universes whose runs add symbols that heat up after the window opens. The
 # hot list moves all day; gappers are an opening set and ORB keeps its scan.
@@ -145,8 +161,9 @@ DYNAMIC_UNIVERSES = frozenset({"watchlist"})
 # so each gets its own data client: data_client_id + offset (the screener uses
 # data_client_id + 2 and the order bridge uses order_client_id).
 # Client map with data 17 / orders 18: orb 17, screener 19, momo 20, telegram 21,
-# vwap 22, gap 23 (research and probes use 25-29).
-STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3, "vwap": 5, "gap": 6}
+# vwap 22, gap 23, momo-ap 24 (research and probes use 25-29). The manager
+# child holds no TWS client.
+STRATEGY_CLIENT_OFFSET = {"orb": 0, "momo": 3, "vwap": 5, "gap": 6, "momo-ap": 7}
 # A hot-list session fetches bars for up to 35 symbols one after another (~90 s
 # live), so the newest completed bar is legitimately older than the 30 s
 # single-symbol limit. Anything under one bar interval still guarantees the
@@ -165,11 +182,24 @@ STRATEGY_POLL_OFFSETS = {
     "orb": timedelta(seconds=30),
     "gap": timedelta(seconds=45),
     "vwap": timedelta(seconds=60),
+    # Managed MOMO reads MOMO's own hot list, after every other child; its
+    # 120 s pass budget covers a full hot-35 pass (~90 s live).
+    "momo-ap": timedelta(seconds=120),
 }
-# Strategies whose reviews see the screener's market context and whose entries
+
+
+def strategy_family(strategy_name: str) -> str:
+    """The family a registry entry's gates and fingerprints follow."""
+    return STRATEGY_FAMILIES.get(strategy_name, strategy_name)
+
+
+# Families whose reviews see the screener's market context and whose entries
 # pause while the market is risk_off. ORB is left out so its runs (and run
 # fingerprints) are unchanged.
-MARKET_AWARE_STRATEGIES = frozenset({"momo"})
+MARKET_AWARE_FAMILIES = frozenset({"momo"})
+MARKET_AWARE_STRATEGIES = frozenset(
+    name for name in STRATEGIES if strategy_family(name) in MARKET_AWARE_FAMILIES
+)
 MARKET_REGIME_RULE = "momo pauses in risk_off"
 # The screener writes a context about every 80 s; anything older than this is
 # treated as no context (reviews see it as unavailable, the gate stays open).
@@ -241,14 +271,22 @@ def policy_fingerprints(
         "review_model": sha256(config.model_id.encode("utf-8")).hexdigest(),
         "runtime_config": config.fingerprint(),
     }
-    if strategy_name == "momo":
+    family = strategy_family(strategy_name)
+    if family == "momo":
         prints["momo_hod"] = MomoConfig().fingerprint()
     if strategy_name == "vwap":
         prints["vwap_pb"] = VwapPbConfig().fingerprint()
     if strategy_name == "gap":
         prints["gap_go"] = GapGoConfig().fingerprint()
-    if strategy_name in MARKET_AWARE_STRATEGIES:
+    if family in MARKET_AWARE_FAMILIES:
         prints["market_regime_rule"] = MARKET_REGIME_RULE
+    if strategy_name in MANAGED_STRATEGIES:
+        from trading.manager.constants import MANAGER_VERSION
+
+        prints["manager"] = MANAGER_VERSION
+        prints["managed_review_prompt"] = sha256(
+            review_prompt(MOMO_MANAGED_REVIEW_PROMPT_ID).encode("utf-8")
+        ).hexdigest()
     return prints
 
 
@@ -395,7 +433,7 @@ async def run_shadow_session(
         max_calls=config.max_ai_calls,
         max_cost_usd=config.max_ai_cost_usd,
     )
-    market_aware = strategy_name in MARKET_AWARE_STRATEGIES
+    market_aware = strategy_family(strategy_name) in MARKET_AWARE_FAMILIES
     api_key = read_anthropic_api_key()
     provider = StructuredAIReviewProvider(
         transport=AnthropicMessagesTransport(
@@ -416,6 +454,21 @@ async def run_shadow_session(
         limits=limits,
         session_id=run_id,
     )
+    review_provider: TradeProposalProvider = provider
+    controller = None
+    if strategy_name in MANAGED_STRATEGIES:
+        controller, review_provider = await _managed_session(
+            strategy_name=strategy_name,
+            evaluator=evaluator,
+            session=session,
+            config=config,
+            neutral=provider,
+            neutral_prompt_id=prompt_id,
+            limits=limits,
+            run_id=run_id,
+            api_key=api_key,
+            clock=clock,
+        )
     actor = TWSPaperActor(
         TWSActorConfig(
             account=config.paper_account_id,
@@ -458,6 +511,12 @@ async def run_shadow_session(
         logger.info("reconnected to TWS")
 
     dynamic = universe in DYNAMIC_UNIVERSES
+    risk_off_gate = (
+        risk_off_entry_gate(session.session_date, clock=clock, reader=_read_market_context)
+        if market_aware
+        else None
+    )
+    entry_gate = controller.entry_gate(risk_off_gate) if controller is not None else risk_off_gate
     connect_at = session.scanner_at if universe == "scanner" else window_start
     await _sleep_until(connect_at - CONNECT_LEAD, clock=clock, sleep=sleep)
     await actor.connect()
@@ -469,7 +528,9 @@ async def run_shadow_session(
             market=market,
             read_account=actor.account_snapshot,
             runner=RepositoryBackedShadowRunner(
-                pipeline=ShadowPipeline(proposal_provider=provider, strategy=evaluator),
+                pipeline=ShadowPipeline(
+                    proposal_provider=review_provider, strategy=evaluator, sizing=controller
+                ),
                 clock=clock,
             ),
             clock=clock,
@@ -477,16 +538,11 @@ async def run_shadow_session(
             sleep=sleep,
             reconnect=reconnect,
             holder_id=f"{socket.gethostname()}:{os.getpid()}",
-            entry_gate=(
-                risk_off_entry_gate(
-                    session.session_date, clock=clock, reader=_read_market_context
-                )
-                if market_aware
-                else None
-            ),
+            entry_gate=entry_gate,
             entry_gate_name=strategy_name,
             bars_fetcher=gap_bars if strategy_name == "gap" else None,
             contract_loader=load_contract if dynamic else None,
+            candidate_filter=controller.admits if controller is not None else None,
         )
         report = await runner.run(
             session=session,
@@ -512,6 +568,57 @@ async def run_shadow_session(
         return report
     finally:
         await actor.disconnect()
+
+
+async def _managed_session(
+    *,
+    strategy_name: str,
+    evaluator: StrategyEvaluator,
+    session: MarketSession,
+    config: ShadowRuntimeConfig,
+    neutral: StructuredAIReviewProvider,
+    neutral_prompt_id: str,
+    limits: ReviewSessionLimits,
+    run_id: str,
+    api_key: str,
+    clock: Clock,
+) -> tuple[ManagedStrategy, TradeProposalProvider]:
+    """The day manager's controller (it latches the switch) and the managed reviewer.
+
+    Imported on use: an unmanaged session never loads the manager.
+    """
+    from trading.intelligence.managed_review import ClaudeManagedReviewer, ManagedReviewProvider
+    from trading.manager.managed import ManagedStrategy
+
+    managed_prompt = review_prompt_for(
+        MOMO_MANAGED_REVIEW_PROMPT_ID, strategy_kind=evaluator.strategy_kind
+    )
+    controller = await ManagedStrategy.open(
+        session_date=session.session_date, family=strategy_family(strategy_name), clock=clock
+    )
+    reviewer = ClaudeManagedReviewer(
+        client=build_anthropic_client(api_key=api_key, timeout_seconds=limits.timeout_seconds),
+        model_id=config.model_id,
+        prompt_id=MOMO_MANAGED_REVIEW_PROMPT_ID,
+        system_prompt=managed_prompt,
+        limits=limits,
+        session_id=run_id,
+        context_provider=market_context_provider(
+            session.session_date, clock=clock, reader=_read_market_context
+        ),
+    )
+    provider = ManagedReviewProvider(
+        neutral=neutral,
+        managed=reviewer,
+        context_for=controller.review_context,
+        on_verdict=controller.on_verdict,
+        limits=limits,
+        neutral_model_id=config.model_id,
+        neutral_prompt_id=neutral_prompt_id,
+        managed_model_id=config.model_id,
+        managed_prompt_id=MOMO_MANAGED_REVIEW_PROMPT_ID,
+    )
+    return controller, provider
 
 
 async def run_shadow_day(
@@ -580,12 +687,15 @@ async def _sleep_until(moment: datetime, *, clock: Clock, sleep: Sleeper) -> Non
 __all__ = [
     "DYNAMIC_UNIVERSES",
     "IBKR_API_VOLUME_MULTIPLIER",
+    "MANAGED_STRATEGIES",
+    "MARKET_AWARE_FAMILIES",
     "MARKET_AWARE_STRATEGIES",
     "MARKET_CONTEXT_MAX_AGE",
     "MARKET_REGIME_RULE",
     "MIN_POLL_SEPARATION",
     "MOMO_REVIEW_PROMPT_ID",
     "STRATEGIES",
+    "STRATEGY_FAMILIES",
     "STRATEGY_POLL_OFFSETS",
     "UNIVERSES",
     "WATCHLIST_BAR_MAX_AGE",
@@ -601,4 +711,5 @@ __all__ = [
     "session_for_strategy",
     "source_sha",
     "strategy_entry_window",
+    "strategy_family",
 ]

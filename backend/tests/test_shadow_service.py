@@ -349,6 +349,7 @@ def test_cli_shadow_run_flags_and_removed_daemon():
         "retry",
     )
     assert cli._STRATEGY_CHOICES == tuple(shadow_service.STRATEGIES)
+    assert cli._MANAGED_STRATEGY_CHOICES == tuple(sorted(shadow_service.MANAGED_STRATEGIES))
     assert cli._UNIVERSE_CHOICES == shadow_service.UNIVERSES
     assert parser.parse_args(["shadow", "agent", "status"]).agent_action == "status"
     for removed in (["shadow", "daemon"], ["shadow", "run", "--strategy", "bogus"]):

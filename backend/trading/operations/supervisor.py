@@ -10,11 +10,18 @@ inside America/New_York windows:
     momo      09:55-15:01  autotraderctl.py shadow run --strategy momo --universe watchlist --date D
     gap       09:28-10:31  autotraderctl.py shadow run --strategy gap --universe gappers --date D
     vwap      10:25-14:31  autotraderctl.py shadow run --strategy vwap --universe watchlist --date D
+    manager   09:15-14:40  autotraderctl.py manager run --date D   (day plans; shadow, no TWS)
+    momo-ap   09:55-15:01  autotraderctl.py shadow run --strategy momo-ap --universe watchlist --date D
     recorder  16:20-17:30  autotraderctl.py research record
     replay    17:35-18:30  autotraderctl.py research replay
 
 A strategy window ends one minute after that strategy's own entry cutoff, so a
-half day's earlier MOMO cutoff moves its window in. Between sessions, and on
+half day's earlier MOMO cutoff moves its window in. The AI day manager's
+children run in shadow whatever the autopilot switch says: ``manager`` writes
+the day plans (Claude and the database only, no TWS client) from five
+minutes before its first slot to ten minutes after its last (half-day
+aware), and ``momo-ap`` is managed MOMO (AP_MOMO_HOD_V1, never sendable) in
+MOMO's own window. Between sessions, and on
 closed days, the process sleeps until the next session's 07:55 ET; it never
 exits because a day ended (launchd's KeepAlive would only restart it).
 
@@ -141,6 +148,13 @@ RESEARCH_CHILDREN: dict[str, tuple[tuple[time, time], tuple[str, ...]]] = {
     "recorder": (RECORDER_WINDOW, ("research", "record")),
     "replay": (REPLAY_WINDOW, ("research", "replay")),
 }
+# The AI day manager (phase 2, shadow only). ``manager`` plans around its slots;
+# the managed strategies run in their own entry windows like the others.
+MANAGER_CHILD = "manager"
+MANAGER_LEAD = timedelta(minutes=5)
+MANAGER_TAIL = timedelta(minutes=10)
+MANAGED_STRATEGY_STARTS = {"momo-ap": time(9, 55)}
+MANAGED_STRATEGY_UNIVERSES = {"momo-ap": "watchlist"}
 
 # A restarted strategy must find its predecessor's shadow-run lease expired.
 STRATEGY_BACKOFF = DEFAULT_LEASE_TTL + timedelta(seconds=5)
@@ -323,6 +337,9 @@ def plan_session(
                 base_backoff=STRATEGY_BACKOFF,
             )
         )
+    plans.extend(
+        manager_plans(session, python=python, backend=backend, cutoff_for=cutoff_for)
+    )
     for name, ((start, end), command) in RESEARCH_CHILDREN.items():
         plans.append(
             ChildPlan(
@@ -334,6 +351,62 @@ def plan_session(
                 # a failure is retried with the service backoff inside the window.
                 finishes_at=at(start),
                 base_backoff=SERVICE_BACKOFF,
+            )
+        )
+    return tuple(plans)
+
+
+def manager_plans(
+    session: MarketSession,
+    *,
+    python: Path = VENV_PYTHON,
+    backend: Path = BACKEND_DIR,
+    cutoff_for: StrategyCutoff = strategy_cutoff,
+) -> tuple[ChildPlan, ...]:
+    """The AI day manager's children: the planner and the managed strategies (shadow)."""
+    from trading.manager.schedule import planning_window
+
+    day = session.session_date
+    iso = day.isoformat()
+    interpreter = str(python)
+    control = str(backend / "autotraderctl.py")
+    plans: list[ChildPlan] = []
+    first, last = planning_window(session)
+    plans.append(
+        ChildPlan(
+            name=MANAGER_CHILD,
+            argv=(interpreter, control, "manager", "run", "--date", iso),
+            starts_at=first - MANAGER_LEAD,
+            ends_at=last + MANAGER_TAIL,
+            # It exits 0 by itself after its last slot (and that slot's retry).
+            finishes_at=last,
+            base_backoff=SERVICE_BACKOFF,
+        )
+    )
+    for name, start in MANAGED_STRATEGY_STARTS.items():
+        starts_at = datetime.combine(day, start, tzinfo=MARKET_TIMEZONE).astimezone(UTC)
+        cutoff = cutoff_for(name, day).astimezone(UTC)
+        if cutoff <= starts_at:
+            continue
+        plans.append(
+            ChildPlan(
+                name=name,
+                argv=(
+                    interpreter,
+                    control,
+                    "shadow",
+                    "run",
+                    "--strategy",
+                    name,
+                    "--universe",
+                    MANAGED_STRATEGY_UNIVERSES[name],
+                    "--date",
+                    iso,
+                ),
+                starts_at=starts_at,
+                ends_at=cutoff + STRATEGY_WINDOW_TAIL,
+                finishes_at=cutoff,
+                base_backoff=STRATEGY_BACKOFF,
             )
         )
     return tuple(plans)

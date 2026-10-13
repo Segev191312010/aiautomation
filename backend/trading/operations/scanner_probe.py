@@ -51,7 +51,7 @@ PROBE_CLIENT_ID = 29
 # telegram_tools.TELEGRAM_TWS_CLIENT_ID, recorder.RESEARCH_CLIENT_ID), kept
 # literal so the probe imports none of those modules; a test derives the same
 # ids from them.
-_DATA_CLIENT_OFFSETS = (0, 2, 3, 5, 6)  # orb, screener, momo, vwap, gap
+_DATA_CLIENT_OFFSETS = (0, 2, 3, 5, 6, 7)  # orb, screener, momo, vwap, gap, momo-ap
 _FIXED_CLIENT_IDS = (21, 28)  # Telegram assistant, research recorder
 DOCUMENTED_DATA_CLIENT_ID = 17
 DOCUMENTED_ORDER_CLIENT_ID = 18

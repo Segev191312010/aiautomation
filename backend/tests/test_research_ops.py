@@ -100,9 +100,14 @@ def test_research_cli_parses_backfill_record_and_replay():
 
 
 def test_replay_strategy_choices_are_the_registered_strategies():
-    replay = cli._parser().parse_args(["research", "replay", "--strategy", *cli._STRATEGY_CHOICES])
+    replay = cli._parser().parse_args(
+        ["research", "replay", "--strategy", *cli._REPLAY_STRATEGY_CHOICES]
+    )
 
     assert tuple(replay.strategies) == replay_module.REGISTERED_STRATEGIES
+    # A managed entry replays as its family's rules; it has no replay of its own.
+    with pytest.raises(SystemExit):
+        cli._parser().parse_args(["research", "replay", "--strategy", "momo-ap"])
 
 
 def test_the_supervised_research_commands_parse_to_the_nightly_defaults():

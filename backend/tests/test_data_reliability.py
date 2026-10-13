@@ -56,7 +56,7 @@ from trading.operations.shadow_service import (
     poll_schedule,
     strategy_entry_window,
 )
-from trading.operations.supervisor import STRATEGY_UNIVERSES
+from trading.operations.supervisor import MANAGED_STRATEGY_UNIVERSES, STRATEGY_UNIVERSES
 from trading.orchestration import RepositoryBackedShadowRunner, ShadowPipeline
 from trading.orchestration.session_runner import (
     BAR_INTERVAL,
@@ -117,8 +117,11 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
         "orb": timedelta(seconds=30),
         "gap": timedelta(seconds=45),
         "vwap": timedelta(seconds=60),
+        "momo-ap": timedelta(seconds=120),
     }
-    assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES) == set(STRATEGY_UNIVERSES)
+    assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES) == set(STRATEGY_UNIVERSES) | set(
+        MANAGED_STRATEGY_UNIVERSES
+    )
     # IBKR refuses an identical historical request within 15 s of the first.
     assert MIN_POLL_SEPARATION == timedelta(seconds=15)
     for (first, first_at), (second, second_at) in combinations(STRATEGY_POLL_OFFSETS.items(), 2):
@@ -126,8 +129,11 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
     # Real MOMO asks first: a collision costs a shadow child, never MOMO.
     assert min(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "momo"
     assert momo_strategy_spec().name == "MOMO_HOD_V2"
-    # VWAP polls MOMO's own hot list, so it polls furthest behind it.
-    assert max(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "vwap"
+    # Managed MOMO and VWAP poll MOMO's own hot list, so they poll furthest
+    # behind it; managed MOMO last of all.
+    assert max(STRATEGY_POLL_OFFSETS, key=STRATEGY_POLL_OFFSETS.__getitem__) == "momo-ap"
+    unmanaged = {name: at for name, at in STRATEGY_POLL_OFFSETS.items() if name != "momo-ap"}
+    assert max(unmanaged, key=unmanaged.__getitem__) == "vwap"
     assert poll_offset_problems(STRATEGY_POLL_OFFSETS) == []
 
 
@@ -155,11 +161,13 @@ def test_a_broken_offset_table_refuses_every_session_loudly(monkeypatch, offsets
 
 
 def test_each_child_keeps_a_pass_budget_under_its_freshness_limit():
-    schedules = {name: poll_schedule(name, universe) for name, universe in STRATEGY_UNIVERSES.items()}
+    universes = {**STRATEGY_UNIVERSES, **MANAGED_STRATEGY_UNIVERSES}
+    schedules = {name: poll_schedule(name, universe) for name, universe in universes.items()}
     assert {name: schedule.bar_max_age for name, schedule in schedules.items()} == {
         "momo": WATCHLIST_BAR_MAX_AGE,
         "vwap": WATCHLIST_BAR_MAX_AGE,
         "gap": WATCHLIST_BAR_MAX_AGE,
+        "momo-ap": WATCHLIST_BAR_MAX_AGE,
         # A scanner run keeps its old 25 s after its slot (30 s at +5 s before).
         "orb": timedelta(seconds=55),
     }
@@ -169,6 +177,7 @@ def test_each_child_keeps_a_pass_budget_under_its_freshness_limit():
         "orb": timedelta(seconds=12.5),
         "gap": timedelta(seconds=97.5),
         "vwap": timedelta(seconds=90),
+        "momo-ap": timedelta(seconds=60),
     }
     for schedule in schedules.values():
         assert schedule.bar_max_age < BAR_INTERVAL
