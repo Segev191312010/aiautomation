@@ -143,6 +143,8 @@ def research_cli(monkeypatch):
     monkeypatch.setattr(
         cli, "_interactive_research_logger", lambda: logging.getLogger("autotrader.shadow.research")
     )
+    # The schema gate has its own tests (test_schema_gate.py); here it passes.
+    monkeypatch.setattr(cli, "require_current_schema", lambda **_kwargs: None)
     return calls, returns
 
 

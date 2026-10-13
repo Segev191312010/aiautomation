@@ -24,12 +24,18 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 
 from config import cfg
-from db.core import init_db
+from trading.operations.schema_gate import (
+    TELEGRAM_ASSISTANT_REQUIRES,
+    SchemaNotReady,
+    refusal_exit,
+    require_current_schema,
+)
 from trading.storage.runtime_fence import SQLitePaperKillStore
 
 if TYPE_CHECKING:
     from trading.market.screener import SweepResult
     from trading.market.universe import ImportReport, QualificationReport
+    from trading.storage.migrations import SchemaStatus
 
 
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
@@ -255,6 +261,30 @@ def _parser() -> argparse.ArgumentParser:
     execution_run.add_argument("--confirm", action="store_true",
                                help="required: the engine sends PAPER orders for promoted strategies")
 
+    database = domains.add_parser(
+        "db", help="the database schema: the only place migrations are applied"
+    )
+    database.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    database_actions = database.add_subparsers(dest="action", required=True)
+    migrate = database_actions.add_parser(
+        "migrate",
+        help=(
+            "apply pending migrations: exclusive lock, verified backup first, refused inside"
+            " the supervised trading day (07:55-18:30 ET)"
+        ),
+    )
+    migrate.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    migrate.add_argument(
+        "--during-session-i-know",
+        action="store_true",
+        dest="during_session",
+        help="migrate inside the trading day anyway (children restart against the new schema)",
+    )
+    database_status = database_actions.add_parser(
+        "status", help="read-only: applied and pending migrations (exit 75 when not current)"
+    )
+    database_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+
     supervise = domains.add_parser(
         "run",
         help="supervise each trading day's screener, bridge, strategies and notifier (foreground)",
@@ -307,7 +337,16 @@ async def _execute(arguments: argparse.Namespace) -> int:
     if requested_db_path is not None:
         cfg.DB_PATH = str(requested_db_path.expanduser())
     try:
-        await init_db()
+        # The kill switch never migrates and never waits for a migration: it
+        # writes only the fence row of an existing database, whatever else is
+        # pending, so the owner can always stop new PAPER entries.
+        database = Path(cfg.DB_PATH).expanduser()
+        if not database.is_file():
+            print(
+                f"error: no database at {database}; create it with `autotraderctl db migrate`",
+                file=sys.stderr,
+            )
+            return 1
         kill_store = SQLitePaperKillStore()
         if arguments.action == "stop":
             await kill_store.stop(reason=arguments.reason)
@@ -334,8 +373,11 @@ async def _backup_before_promote(database: Path) -> Path:
         return await backup_database(db, directory / f"{database.stem}.before-execution-promote-{stamp}.db")
 
 
+EXIT_SCHEMA_REFUSED = 78  # EX_CONFIG: promote and revoke never migrate; a retry cannot fix it
+
+
 async def _execution_command(arguments: argparse.Namespace) -> int:
-    """Authority records only: nothing here connects to TWS or sends an order."""
+    """Authority records only: nothing here connects to TWS, sends an order or migrates."""
     from trading.execution.promotion import (
         ExecutionAuthorityError,
         active_strategies,
@@ -345,7 +387,9 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
         require_grantable,
         revoke_promotion,
     )
+    from trading.operations.schema_gate import MIGRATE_COMMAND
     from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION
+    from trading.storage.migrations import inspect_schema
 
     if arguments.action == "promote" and not arguments.confirm:
         print("error: promote writes PAPER authority for the execution engine; re-run with --confirm",
@@ -378,14 +422,23 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
             if not accounts:
                 print("no promotion records")
             return 0
+        # promote and revoke write one authority row into the existing ledger and never migrate: the
+        # owner's database is migrated only by `autotraderctl db migrate` from the deployed main line.
+        verb = "promoted" if arguments.action == "promote" else "revoked"
         if arguments.action == "promote":
             require_grantable(arguments.strategy, arguments.account)  # refused before the database is touched
-            # A grant is written into the live database (migrations included): never without a backup.
-            database = Path(cfg.DB_PATH).expanduser()
-            if cfg.DB_PATH == ":memory:" or not database.is_file():
-                print(f"error: no autotrader database at {database} — promote writes into the existing database"
-                      " (check --db-path); nothing promoted", file=sys.stderr)
-                return 1
+        database = Path(cfg.DB_PATH).expanduser()
+        if cfg.DB_PATH == ":memory:" or not database.is_file():
+            print(f"error: no autotrader database at {database} (check --db-path); nothing {verb}",
+                  file=sys.stderr)
+            return EXIT_SCHEMA_REFUSED
+        schema = inspect_schema(database)
+        if not schema.current:
+            print(f"error: the database schema is not this code's ({schema.describe()}); run"
+                  f" `{MIGRATE_COMMAND}` from the deployed main line once it knows migration"
+                  f" {EXECUTION_LEDGER_MIGRATION}, then retry; nothing {verb}", file=sys.stderr)
+            return EXIT_SCHEMA_REFUSED
+        if arguments.action == "promote":
             try:
                 backup = await _backup_before_promote(database)
             except (OSError, RuntimeError, aiosqlite.Error) as exc:
@@ -393,7 +446,6 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
                       file=sys.stderr)
                 return 1
             print(f"database backed up to {backup}")
-        await init_db()
         if arguments.action == "promote":
             record = await grant_promotion(
                 strategy_name=arguments.strategy, account=arguments.account, actor="owner via autotraderctl",
@@ -465,7 +517,8 @@ def _shadow_run(arguments: argparse.Namespace) -> int:
         session = session_for_strategy(
             arguments.strategy, now=datetime.now(timezone.utc), requested=arguments.date
         )
-        await init_db()
+        # Never migrates: a pending migration refuses with exit 75.
+        require_current_schema(process=label)
         report = await run_shadow_day(
             config=load_shadow_runtime_config(),
             owner_id=DEMO_USER_ID,
@@ -481,6 +534,8 @@ def _shadow_run(arguments: argparse.Namespace) -> int:
         return asyncio.run(_cancel_on_sigterm(session_run()))
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
+    except SchemaNotReady as exc:
+        return refusal_exit(exc)
     except SessionAborted as exc:
         logger.error("%s aborted: %s", label, exc)
         print(f"error: {label}: {exc}", file=sys.stderr)
@@ -556,7 +611,8 @@ def _market_data_command(arguments: argparse.Namespace) -> int:
         cfg.DB_PATH = str(requested_db_path.expanduser())
 
     async def command() -> int:
-        await init_db()
+        # Never migrates: a pending migration refuses with exit 75.
+        require_current_schema(process=f"{arguments.domain} {arguments.action}")
         config = load_shadow_runtime_config()
         if arguments.domain == "universe" and arguments.action == "import":
             _print_import(await service.import_universe(arguments.path, runtime_config=config))
@@ -588,6 +644,8 @@ def _market_data_command(arguments: argparse.Namespace) -> int:
         return asyncio.run(_cancel_on_sigterm(command()))
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
+    except SchemaNotReady as exc:
+        return refusal_exit(exc)
     except TWSCompetingSessionError as exc:
         logger.error("%s (%s)", service.COMPETING_SESSION_MESSAGE, exc)
         print(f"error: {service.COMPETING_SESSION_MESSAGE}", file=sys.stderr)
@@ -625,6 +683,16 @@ def _notify_command(arguments: argparse.Namespace) -> int:
         return 1
 
 
+async def _alert_schema_not_ready(status: SchemaStatus) -> None:
+    """Best effort, at most once per day: the refusal stands whatever the alert does."""
+    try:
+        from trading.operations import schema_alert
+
+        await schema_alert.send_schema_alert(status)
+    except Exception:  # noqa: BLE001 - the alert must never turn a refusal into a crash
+        pass
+
+
 def _telegram_command(arguments: argparse.Namespace) -> int:
     """The Telegram assistant; its module is loaded only when a telegram command runs."""
     try:
@@ -636,10 +704,21 @@ def _telegram_command(arguments: argparse.Namespace) -> int:
         return service.print_owner()
 
     async def serve() -> int:
-        # The always-on assistant is often the first process to open the
-        # database after a reboot or a new migration: it migrates like every
-        # other entry point instead of refusing until the 07:55 screener has.
-        await init_db()
+        # The always-on assistant never migrates (reverts 7354b89). The owner's
+        # /stop and manual exits matter more than strictness: it starts while
+        # only migrations newer than its own tables are pending, and refuses
+        # (exit 75, retried) a missing migration it needs or any other schema
+        # problem. It runs at every hour, so either way it tells the phone
+        # right away, at most once per day.
+        try:
+            status = require_current_schema(
+                process="telegram run", requires=TELEGRAM_ASSISTANT_REQUIRES
+            )
+        except SchemaNotReady as exc:
+            await _alert_schema_not_ready(exc.status)
+            return refusal_exit(exc)
+        if not status.current:
+            await _alert_schema_not_ready(status)
         return await service.run_telegram_assistant()
 
     try:
@@ -711,15 +790,33 @@ def _research_command(arguments: argparse.Namespace) -> int:
     if requested_db_path is not None:
         cfg.DB_PATH = str(requested_db_path.expanduser())
     try:
+        # It only reads the universe tables, but every database child waits
+        # for `db migrate` alike; a missed night is filled by the next one.
+        require_current_schema(process=label)
         return asyncio.run(_cancel_on_sigterm(run_backfill_cli(days)))
     except KeyboardInterrupt:
         return EXIT_INTERRUPTED
+    except SchemaNotReady as exc:
+        return refusal_exit(exc)
     except Exception as exc:  # noqa: BLE001 - research text carries no secrets
         logger.exception("%s failed", label)
         print(f"error: {label} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
         cfg.DB_PATH = original_db_path
+
+
+def _database_command(arguments: argparse.Namespace) -> int:
+    """``db migrate`` / ``db status``: the explicit, locked, backed-up schema change."""
+    from trading.operations import db_admin
+
+    database = Path(cfg.DB_PATH)
+    requested_db_path = getattr(arguments, "db_path", None)
+    if requested_db_path is not None:
+        database = requested_db_path.expanduser()
+    if arguments.action == "status":
+        return db_admin.run_status(database)
+    return db_admin.run_migrate(database, allow_during_session=arguments.during_session)
 
 
 def _supervise_command(arguments: argparse.Namespace) -> int:
@@ -750,6 +847,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(arguments, "db_path", None) is not None:
             parser.error("--db-path does not apply to run; its children use the canonical database")
         return _supervise_command(arguments)
+    if arguments.domain == "db":
+        return _database_command(arguments)
     if arguments.domain == "notify":
         return _notify_command(arguments)
     if arguments.domain == "telegram":

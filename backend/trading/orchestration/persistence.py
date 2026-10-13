@@ -316,6 +316,7 @@ class RepositoryBackedShadowRunner:
                         decision_recorder=guarded_recorder,
                         strategy=self._pipeline.strategy,
                         mode=self._pipeline.mode,
+                        setup_recorder=self._pipeline.setup_recorder,
                     )
                     session = ShadowRunSession(
                         run=run,

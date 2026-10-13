@@ -1270,6 +1270,10 @@ def cli_environment(tmp_path, monkeypatch):
         return TWSPaperActor(fast, client_factory=lambda callbacks: SymbolClient(callbacks))
 
     monkeypatch.setattr(service, "default_actor_factory", actor_factory)
+    # Children never migrate: the database is created the way `db migrate` would.
+    from tests.schema_support import migrate_database
+
+    migrate_database(tmp_path / "cli.db")
     return tmp_path
 
 

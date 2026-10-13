@@ -9,9 +9,11 @@ import sqlite3
 
 import pytest
 
+from tests.schema_support import database_at, migrate_database
 from trading.cli import main
 from trading.execution.promotion import engine_code_digest
 from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION
+from trading.storage.migrations import inspect_schema
 
 
 ACCOUNT = "DU1234567"
@@ -26,7 +28,7 @@ def test_promote_needs_confirm_records_the_grant_and_status_shows_it(tmp_path, c
     assert "re-run with --confirm" in capsys.readouterr().err
     assert not database.exists()
 
-    sqlite3.connect(database).close()  # the autotrader database exists before anything is promoted into it
+    migrate_database(database)  # `autotraderctl db migrate` created it at the code's schema
     assert main([*base, "--confirm"]) == 0
     out = capsys.readouterr().out.splitlines()
     [backup] = list((tmp_path / "backups").iterdir())
@@ -57,30 +59,47 @@ def test_promote_backs_up_the_database_first_and_refuses_without_a_backup(tmp_pa
     promote = ["execution", "promote", "--db-path", str(database), "--strategy", "MOMO_HOD_V2", "--account",
                ACCOUNT, "--reason", "review passed", "--confirm"]
 
-    assert main(promote) == 1  # no database: a wrong --db-path never creates a fresh one with authority in it
+    assert main(promote) == 78  # no database: a wrong --db-path never creates a fresh one with authority in it
     assert capsys.readouterr().err.startswith(f"error: no autotrader database at {database}")
     assert not database.exists()
 
-    with sqlite3.connect(database) as connection:
-        connection.execute("CREATE TABLE owner_notes (note TEXT)")
-        connection.execute("INSERT INTO owner_notes VALUES ('kept')")
+    migrate_database(database)
     (tmp_path / "backups").write_text("not a directory")  # the backup cannot be written
     assert main(promote) == 1
     assert capsys.readouterr().err.startswith("error: database backup failed (FileExistsError")
-    with sqlite3.connect(database) as connection:  # nothing was migrated or promoted
-        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [
-            ("owner_notes",)
-        ]
+    with sqlite3.connect(database) as connection:  # nothing was promoted
+        assert connection.execute("SELECT COUNT(*) FROM autotrader_exec_promotions").fetchone() == (0,)
 
     (tmp_path / "backups").unlink()
     assert main(promote) == 0
     [backup] = list((tmp_path / "backups").iterdir())
     assert capsys.readouterr().out.splitlines()[0] == f"database backed up to {backup}"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM autotrader_exec_promotions").fetchone() == (1,)
     with sqlite3.connect(backup) as connection:  # the database exactly as it was before the grant
-        assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [
-            ("owner_notes",)
-        ]
-        assert connection.execute("SELECT note FROM owner_notes").fetchall() == [("kept",)]
+        assert connection.execute("SELECT COUNT(*) FROM autotrader_exec_promotions").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("action", ["promote", "revoke"])
+@pytest.mark.parametrize("version", [0, EXECUTION_LEDGER_MIGRATION - 1], ids=["empty", "before-the-ledger"])
+def test_promote_and_revoke_never_migrate(tmp_path, capsys, action: str, version: int) -> None:
+    database = tmp_path / "live.db"
+    if version:
+        database_at(database, version)  # the owner's database before `db migrate` knows the ledger
+    else:
+        sqlite3.connect(database).close()
+    before = inspect_schema(database)
+    command = ["execution", action, "--db-path", str(database), "--strategy", "MOMO_HOD_V2", "--account",
+               ACCOUNT, "--reason", "drill"]
+
+    assert main([*command, "--confirm"] if action == "promote" else command) == 78
+
+    err = capsys.readouterr().err
+    assert "the database schema is not this code's" in err and "run `autotraderctl db migrate`" in err
+    assert f"once it knows migration {EXECUTION_LEDGER_MIGRATION}" in err
+    after = inspect_schema(database)
+    assert (after.applied, after.pending) == (before.applied, before.pending)  # nothing applied, nothing written
+    assert not (tmp_path / "backups").exists()
 
 
 def test_promote_refuses_shadow_only_strategies_and_live_accounts(tmp_path, capsys) -> None:
@@ -143,7 +162,7 @@ def test_run_needs_confirm_and_refuses_before_tws(tmp_path, capsys, monkeypatch)
 
     sqlite3.connect(database).close()
     assert main([*base, "--confirm"]) == 78  # pending migrations: the runner never migrates
-    assert "are not applied: apply them with a backup first; exit 78" in capsys.readouterr().out
+    assert "the database schema is not this code's" in capsys.readouterr().out
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
 

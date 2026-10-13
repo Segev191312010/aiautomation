@@ -422,11 +422,12 @@ def _module_file(module: str) -> Path | None:
     return None
 
 
-def _imported_modules(path: Path) -> set[str]:
-    """Every module an ``import`` statement anywhere in the file may load (relative ones resolved)."""
+def _imported_modules(path: Path, *, top_level_only: bool = False) -> set[str]:
+    """Every module an ``import`` statement in the file may load (relative ones resolved)."""
     package = path.relative_to(BACKEND).parent.parts
     found: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
+    tree = ast.parse(path.read_text())
+    for node in (tree.body if top_level_only else ast.walk(tree)):
         if isinstance(node, ast.Import):
             found |= {alias.name for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
@@ -436,17 +437,20 @@ def _imported_modules(path: Path) -> set[str]:
     return found
 
 
-def engine_import_graph(entry_points: tuple[str, ...]) -> set[str]:
+def engine_import_graph(entry_points: tuple[str, ...], process_files: tuple[str, ...] = ()) -> set[str]:
     """Backend files a running engine may execute: the entry points, everything they import, and every
-    package ``__init__`` on the way (importing a.b.c runs a/__init__ and a/b/__init__ first)."""
+    package ``__init__`` on the way (importing a.b.c runs a/__init__ and a/b/__init__ first). Process
+    files count with what they import when the process starts (their other commands' lazy imports never
+    run in the engine's process)."""
     seen: set[Path] = set()
-    todo = [BACKEND / relative for relative in entry_points]
+    todo = [BACKEND / relative for relative in (*entry_points, *process_files)]
+    top_level = {BACKEND / relative for relative in process_files}
     while todo:
         path = todo.pop()
         if path in seen:
             continue
         seen.add(path)
-        for module in _imported_modules(path):
+        for module in _imported_modules(path, top_level_only=path in top_level):
             parts = module.split(".")
             packages = [_module_file(".".join(parts[:end])) for end in range(1, len(parts))]
             todo += [item for item in [*packages, _module_file(module)] if item is not None]

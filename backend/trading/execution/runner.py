@@ -20,12 +20,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 import signal
-import sqlite3
 import sys
 import threading
 from typing import Protocol
@@ -47,9 +45,10 @@ from trading.execution.live_executor import (
 )
 from trading.execution.promotion import EngineAuthority, ExecutionAuthorityError, is_paper_account
 from trading.execution.tws_state import TwsMirror
+from trading.operations.schema_gate import MIGRATE_COMMAND
 from trading.operations.settings import ShadowSettingsError, load_shadow_runtime_config
 from trading.storage.execution_ledger import ExecutionLedger
-from trading.storage.migrations import MIGRATIONS
+from trading.storage.migrations import inspect_schema
 
 
 CONNECT_TIMEOUT_S = 30.0  # ibapi 9.81's connect() never returns when TWS accepts TCP but not the handshake
@@ -108,33 +107,16 @@ class IbapiTransport:
 
 
 def pending_migrations(database: Path) -> str | None:
-    """Why the database is not at exactly this code's migrations, read-only; None when it is.
+    """Why the database is not at exactly this code's schema, read-only; None when it is.
 
-    The runner never migrates: an unreviewed schema change must not ride in
-    with an order sender (the main line's explicit migrations, review R-7).
+    The runner never migrates: only ``autotraderctl db migrate``, from the
+    deployed main line, changes the owner's schema (lock, verified backup,
+    after the close).
     """
-    try:
-        with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as connection:
-            exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='autotrader_schema_migrations'"
-            ).fetchone()
-            rows = connection.execute(
-                "SELECT version, name, checksum FROM autotrader_schema_migrations"
-            ).fetchall() if exists else []
-    except sqlite3.Error as exc:
-        return f"the database is unreadable ({type(exc).__name__}: {exc})"
-    applied = {int(version): (str(name), str(checksum)) for version, name, checksum in rows}
-    expected = {migration.version: (migration.name, migration.checksum) for migration in MIGRATIONS}
-    unknown = sorted(set(applied) - set(expected))
-    if unknown:
-        return f"the database has migrations this code does not know: {unknown}"
-    changed = sorted(version for version in applied if applied[version] != expected[version])
-    if changed:
-        return f"applied migrations {changed} differ from this code's (checksum mismatch)"
-    missing = sorted(set(expected) - set(applied))
-    if missing:
-        return f"migrations {missing} are not applied: apply them with a backup first"
-    return None
+    status = inspect_schema(database)
+    if status.current:
+        return None
+    return f"the database schema is not this code's ({status.describe()}); run `{MIGRATE_COMMAND}` first"
 
 
 async def preflight(engine: LiveExecutor) -> str | None:

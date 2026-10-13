@@ -1,5 +1,9 @@
-"""Autotrader V1 database API."""
+"""Autotrader V1 database API.
 
-from db.core import get_db, init_db, transaction
+``init_db`` (the schema migration) is deliberately not exported here: only
+``autotraderctl db migrate`` applies migrations, through ``db.core``.
+"""
 
-__all__ = ["get_db", "init_db", "transaction"]
+from db.core import get_db, transaction
+
+__all__ = ["get_db", "transaction"]

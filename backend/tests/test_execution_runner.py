@@ -198,12 +198,12 @@ def test_the_ibapi_transport_gives_up_on_a_tws_that_never_answers() -> None:
 
 
 async def test_pending_migrations_are_read_only_and_refuse_anything_but_this_codes(tmp_path, monkeypatch) -> None:
-    from trading.storage.migrations import MIGRATIONS
-
     empty = tmp_path / "empty.db"
     sqlite3.connect(empty).close()
-    assert pending_migrations(empty) == (f"migrations {[item.version for item in MIGRATIONS]} are not applied:"
-                                         " apply them with a backup first")
+    assert "schema_migration_pending" not in (pending_migrations(empty) or "")
+    assert (pending_migrations(empty) or "").startswith("the database schema is not this code's (schema v0, this"
+                                                        " code needs v")
+    assert (pending_migrations(empty) or "").endswith("; run `autotraderctl db migrate` first")
     with sqlite3.connect(empty) as connection:
         assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []  # nothing created
 
@@ -211,13 +211,13 @@ async def test_pending_migrations_are_read_only_and_refuse_anything_but_this_cod
     assert pending_migrations(current) is None
     with sqlite3.connect(current) as connection:
         connection.execute("UPDATE autotrader_schema_migrations SET checksum='x' WHERE version=1")
-    assert pending_migrations(current) == "applied migrations [1] differ from this code's (checksum mismatch)"
+    assert "schema_checksum_mismatch" in (pending_migrations(current) or "")
     with sqlite3.connect(current) as connection:
         connection.execute("INSERT INTO autotrader_schema_migrations VALUES (99, 'future', 'x', 'now')")
-    assert pending_migrations(current) == "the database has migrations this code does not know: [99]"
+    assert "schema_newer_than_code" in (pending_migrations(current) or "")
     corrupt = tmp_path / "corrupt.db"
     corrupt.write_bytes(b"not a database " * 100)
-    assert (pending_migrations(corrupt) or "").startswith("the database is unreadable")
+    assert "schema_unreadable" in (pending_migrations(corrupt) or "")
 
 
 def test_the_runner_is_never_scheduled() -> None:

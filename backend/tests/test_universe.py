@@ -791,7 +791,9 @@ def test_a_second_command_exits_with_a_clear_message_and_a_dead_holder_frees_the
         cli, "_interactive_screener_logger", lambda: logging.getLogger("autotrader.shadow.screener")
     )
     monkeypatch.setattr(settings, "load_shadow_runtime_config", screener_runtime_config)
-    database = tmp_path / "cli.db"
+    from tests.schema_support import migrate_database
+
+    database = migrate_database(tmp_path / "cli.db")  # children never migrate
     export = tmp_path / "watchlist.txt"
     export.write_text("NASDAQ:AAPL", encoding="utf-8")
     holder = subprocess.Popen(

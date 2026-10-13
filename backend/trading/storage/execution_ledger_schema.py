@@ -1,9 +1,12 @@
-"""Schema for the reviewed execution engine's ledger (the execution-ledger migration).
+"""Schema of the PAPER execution engine's ledger: one migration, ``EXECUTION_LEDGER_MIGRATION``.
 
-The engine (``trading/execution/live_executor.py``) is built but not wired:
-nothing in the supervisor runs it, and the PAPER bridge stays the only order
-sender until governance replaces it. These tables are therefore empty on the
-owner's database until then.
+The engine that writes these tables (``trading/execution/live_executor.py``)
+is reviewed on its own branch and is not wired: nothing runs it on a
+schedule, and the PAPER bridge stays the only scheduled order sender until
+the owner switches. The migration ships ahead of it, on its own, so the
+owner's database gets these tables (empty until a supervised drill) through
+``autotraderctl db migrate``, with its lock and backup, and no other process
+ever creates them.
 
 Safety properties the triggers enforce, so no code path can bypass them:
 
@@ -24,10 +27,9 @@ Safety properties the triggers enforce, so no code path can bypass them:
 from __future__ import annotations
 
 
-# The ledger migration's number: the ONLY place it is written. It is 13 on this branch; the main
-# line takes 13 for its own tables, so this becomes the next free number when the engine merges
-# (its checksum, which covers the number, is pinned again then). Everything else derives from it.
-EXECUTION_LEDGER_MIGRATION = 13
+# The ledger migration's number: the ONLY place it is written; everything else derives from it.
+# 14, after the main line's migration 13 (manager setups). The checksum covers the number.
+EXECUTION_LEDGER_MIGRATION = 14
 
 EXECUTION_LEDGER_SCHEMA = (
     # ---- PAPER authority: explicit, append-only promotion records ---------------
