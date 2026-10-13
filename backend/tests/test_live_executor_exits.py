@@ -667,9 +667,8 @@ async def test_n3_modifies_encode_exactly_like_the_placement_tws_accepted(tmp_pa
 async def test_a_modification_never_rewrites_an_order_of_another_shape(tmp_path, monkeypatch) -> None:
     h = await build(tmp_path, monkeypatch)
     bracket = await open_bracket(h)
-    reshaped = copy.copy(h.mirror.order_objects[101])
-    reshaped.action, reshaped.orderType = "BUY", "MKT"  # e.g. changed by hand in TWS
-    h.mirror.order_objects[101] = reshaped
+    target = h.tws.orders[(CLIENT_ID, 101)]
+    target.order.action, target.order.orderType = "BUY", "MKT"  # changed by hand in TWS: every snapshot shows it
     h.clock.value = ny(15, 45, 1)
     await h.engine.flatten()
 
@@ -902,7 +901,7 @@ async def test_the_fallback_sell_leaves_the_owners_working_sells_their_shares(tm
     assert h.tws.cancelled == []  # and the protective stop is never cancelled for nothing
     assert bracket.flatten_state == "skipped"
     assert h.critical() == [
-        "HELD: account holds 100 sh with 100 reserved by working sells — no market sell for the 100 sh the engine"
+        "HELD: account holds 100 sh with 100 reserved by working sells — no sell for the 100 sh the engine"
         " expects (its stop stays live); act in TWS if not flat"
     ]
 
@@ -929,7 +928,7 @@ async def test_the_fallback_sell_reads_the_position_afresh_before_selling(tmp_pa
     h.clock.value = ny(15, 45, 1)
     await h.engine.tick()
 
-    # The pre-check still saw 100; the sell itself is capped by the fresh 70 (a stale cap sold 100).
+    # Every flatten decision reads the position afresh: the sell is capped by the fresh 70 (a stale cap sold 100).
     assert [(oid, sent.orderType, sent.totalQuantity) for oid, sent in modifies(h)] == [(103, "MKT", 70)]
     assert h.tws.requests.count("cancelPositions") >= 1
 

@@ -26,8 +26,12 @@ Safety rules (the reviewed bridge's lessons are named in brackets):
 * Paper only: every account TWS manages must start with ``DU`` and include the
   configured one, checked at start and on every reconnect; orders carry the
   account explicitly.
-* Order ids are ``max(nextValidId, ledger max + 1)``; ``reqIds`` is sent at
-  start and on every reconnect.
+* Order ids are above TWS's next valid id, the ledger's highest id and every
+  id TWS reports for this client (open orders, executions, unmanaged orders)
+  [L-c]; ``reqIds`` is sent at start and on every reconnect.
+* It never starts while the PAPER bridge runs (its process, or a bridge
+  heartbeat under 60 s old), after the session's stop time, or for any code
+  other than the promoted build. A slow TWS exits 75, anything unsafe 78.
 * Entries: promoted MOMO_HOD strategies only, inside the strategy window and
   the risk approval's lifetime [L6], once per setup [L6], only in symbols the
   account does not hold [N1] and nobody has a working order in (owner TWS
@@ -51,13 +55,22 @@ Safety rules (the reviewed bridge's lessons are named in brackets):
   [N2, L1, L8].
 * Flatten at the real close minus 15 minutes (half-day aware): the target is
   repriced once to a marketable limit [H2]. Only when that cannot be done or
-  is not confirmed: cancel target and stop, CONFIRM both cancels, then one
-  MARKET sell of the ledger quantity capped by the live position less every
-  other working sell. No second sell ever follows a manual close [H2], and a
-  restart never starts a flatten again [N5].
-* Reconciliation at start, on every reconnect and every two minutes, scoped
-  to the ``at1:`` prefix: a mismatch pauses new entries and raises CRITICAL;
-  ``manual:`` orders and positions the engine did not open are left alone.
+  is not confirmed: cancel target and stop (an Inactive leg too), CONFIRM both
+  are Cancelled or Filled, then one MARKET sell. Both sell at most the ledger
+  quantity capped by a fresh account position less every other working sell
+  and less what other orders sold that the position does not show yet
+  (completed orders of every client, the TWS GUI included). No second sell
+  ever follows a manual close [H2], and a restart never starts a flatten
+  again [N5].
+* An entry still working when its stop dies is cancelled: no share is bought
+  without a stop.
+* Reconciliation at start, on every reconnect, after TWS error 1101 (which
+  also renews the position and account subscriptions) and every two minutes,
+  scoped to the ``at1:`` prefix: a mismatch pauses new entries and raises
+  CRITICAL; ``manual:`` orders and positions the engine did not open are left
+  alone. A short position in a symbol the engine traded today, an entry whose
+  stop died and a running bridge are mismatches too, and the engine never
+  reports FLAT while the account is short such a symbol.
 * Every stdout line is ``HH:MM:SS ET  <KIND> <text>`` (the notifier format).
 """
 from __future__ import annotations
@@ -65,18 +78,26 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time as clock_time, timedelta, timezone
-from decimal import ROUND_CEILING, ROUND_DOWN, Decimal, InvalidOperation
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, Decimal, InvalidOperation
 import json
+import os
+import re
+import subprocess
 import sys
 import threading
 import time
 from typing import Any, Literal, Protocol
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from db.core import get_db
-from trading.execution.promotion import EngineAuthority, ExecutionAuthorityError, is_paper_account
+from trading.execution.promotion import (
+    EngineAuthority,
+    ExecutionAuthorityError,
+    engine_code_digest,
+    is_paper_account,
+)
 from trading.execution.tws_state import (
     DEAD_ORDER_STATUSES,
     LIVE_ORDER_STATUSES,
@@ -107,7 +128,7 @@ from trading.storage.execution_ledger import (
 from trading.storage.runtime_fence import SQLitePaperKillStore
 
 
-ENGINE_VERSION = "c2.1"
+ENGINE_VERSION = "c2.2"
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
 
@@ -121,6 +142,18 @@ EVENT_KINDS = frozenset({
 })
 LEG_NAMES: dict[str, str] = {"P": "entry", "T": "target", "S": "stop", "F": "flatten sell"}
 PROTECTIVE_LEGS: tuple[LegCode, LegCode] = ("T", "S")
+# Only these end an order for good: an Inactive order can come back, so the fallback cancels it too.
+FALLBACK_DEAD_STATUSES = frozenset({"Cancelled", "ApiCancelled", "Filled"})
+# A slow TWS (no accounts or order id in time) is transient: exit 75 so a supervisor retries.
+TRANSIENT_REFUSALS = frozenset({"accounts_unknown", "no_order_id"})
+BRIDGE_HEARTBEAT_WINDOW = timedelta(seconds=60)  # a bridge heartbeat this recent means the bridge runs
+# The bridge script as an argument of any process (pgrep -f, extended regex); test_paper_bridge.py is not it.
+BRIDGE_PROCESS_PATTERN = r"(^|[ /])paper_bridge\.py( |$)"
+UNSHOWN_SELL_ALERT = timedelta(seconds=15)  # another order's sell the position still does not show [L-e]
+# Completion times are TWS's (seconds, maybe another clock): a sell this close to the entry counts as after it.
+FOREIGN_FILL_MARGIN = timedelta(seconds=60)
+EASTERN_ZONE_NAMES = frozenset({"EST", "EDT", "ET"})
+_COMPLETED_TIME = re.compile(r"^(\d{8})[\s-]+(\d{2}):?(\d{2}):?(\d{2})(?:\s+(\S+))?")
 
 DEFAULT_DECISION_TTL_S = 15  # trading/risk/engine.py: a risk approval lives 15 s
 MAX_DECISION_AGE_S = 60  # backstop even when an intent claims a longer expiry
@@ -153,9 +186,21 @@ MANUAL_REF_PREFIX = "manual:"  # owner orders (trading/execution/manual_orders.p
 
 RefusalCode = Literal[
     "not_paper_account", "accounts_unknown", "account_not_managed", "no_order_id", "market_closed",
+    "bridge_running",
 ]
 EventSink = Callable[[str], None]
 _STDOUT_LOCK = threading.RLock()
+
+
+def _loaded_engine_digest() -> str | None:
+    try:
+        return engine_code_digest()
+    except ExecutionAuthorityError:
+        return None
+
+
+# The engine code as this process loaded it: start() refuses when the files changed since (C2-11).
+LOADED_ENGINE_DIGEST = _loaded_engine_digest()
 
 
 class ExecutionRefused(RuntimeError):
@@ -201,6 +246,54 @@ def strategy_family(name: str) -> str:
     if upper.startswith("ORB"):
         return "orb"
     return "other"
+
+
+def parse_completed_time(value: object) -> datetime | None:
+    """TWS's completedTime ('20261013 15:44:02 America/New_York'), or None when it cannot be placed in time.
+
+    Only a named IANA zone or a US Eastern abbreviation is trusted: a time
+    without a zone, or in a zone this machine cannot resolve, is unreadable and
+    the caller assumes the worst.
+    """
+    match = _COMPLETED_TIME.match(value.strip()) if isinstance(value, str) else None
+    if match is None:
+        return None
+    day, hour, minute, second, zone = match.groups()
+    if not zone:
+        return None
+    if zone.upper() in EASTERN_ZONE_NAMES:
+        tz = NY
+    else:
+        try:
+            tz = ZoneInfo(zone)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            return None
+    try:
+        return datetime.strptime(f"{day} {hour}{minute}{second}", "%Y%m%d %H%M%S").replace(tzinfo=tz)
+    except ValueError:
+        return None
+
+
+def running_bridge_processes() -> list[tuple[int, str]]:
+    """Processes running the PAPER bridge script; raises when the process table cannot be read."""
+    result = subprocess.run(["/usr/bin/pgrep", "-fl", BRIDGE_PROCESS_PATTERN], capture_output=True, text=True,
+                            timeout=5, check=False)
+    if result.returncode not in (0, 1):  # 1: nothing matched
+        raise OSError(f"pgrep exited {result.returncode}")
+    found: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) != os.getpid():
+            found.append((int(pid), command))
+    return found
+
+
+async def latest_bridge_heartbeat() -> datetime | None:
+    """When the bridge last wrote its heartbeat into the ledger (migration 12), or None."""
+    from trading.execution.manual_orders import read_bridge_heartbeat
+
+    heartbeat = await read_bridge_heartbeat()
+    return None if heartbeat is None else heartbeat.updated_at
 
 
 def parse_time(value: object) -> datetime | None:
@@ -427,6 +520,8 @@ class PendingModify:
     price: Decimal
     sends: int = 1
     exhausted: bool = False
+    reserved: int = 0  # shares of other sells the first send left alone; every re-send leaves them too
+    restored: bool = False  # sent before a restart: confirmed by its price, never re-sent blindly
 
 
 def plan_exit(snapshot: FillSnapshot, leg: LegCode) -> ExitPlan:
@@ -530,6 +625,21 @@ class BrokerPort(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class SellFacts:
+    """What one flatten may sell, read from one fresh TWS snapshot (review C2-1, C2-4)."""
+
+    quantity: int  # min(held, position - reserved); never negative
+    held: int  # the bracket's own shares per its fills
+    position: Decimal  # the account position TWS reported after the order snapshots
+    working: int  # open quantity of every other working sell in the contract
+    unshown: int  # shares other orders sold since the entry that the position does not show yet
+
+    @property
+    def reserved(self) -> int:
+        return self.working + self.unshown
+
+
+@dataclass(frozen=True, slots=True)
 class Finding:
     """One reconciliation mismatch; while any exists, new entries are paused."""
 
@@ -583,6 +693,9 @@ class LiveExecutor:
             lambda bracket: screener_quote(self.session_date, bracket.symbol, bracket.con_id)
         )
         self.pause: Callable[[float], Awaitable[None]] = asyncio.sleep
+        # The bridge interlock: two order senders on one account could each sell the same shares.
+        self.bridge_processes: Callable[[], list[tuple[int, str]]] = running_bridge_processes
+        self.bridge_heartbeat: Callable[[], Awaitable[datetime | None]] = latest_bridge_heartbeat
         self.quote_timeout = QUOTE_TIMEOUT_S
         self.sync_timeout = SYNC_TIMEOUT_S
         self.loop_seconds = LOOP_SECONDS
@@ -600,6 +713,7 @@ class LiveExecutor:
         self.pending_modifies: dict[int, PendingModify] = {}
         self.error_marks: dict[int, int] = {}
         self.position_gaps: dict[str, datetime] = {}
+        self.unshown_since: dict[str, datetime] = {}  # bracket -> first seen with sales the position lacks
         self.dangling_since: dict[int, datetime] = {}
         self.cancel_requested_at: dict[str, datetime] = {}
         self.unmanaged: dict[int, tuple[str, int]] = {}
@@ -710,6 +824,7 @@ class LiveExecutor:
                 self.pending_modifies[target.order_id] = PendingModify(
                     bracket_id=bracket.id, leg="T", purpose="flatten", kind="LMT",
                     total=target.working_quantity or bracket.entry_filled, price=bracket.flatten_price,
+                    restored=True,
                 )
 
     async def persist(self, bracket: BracketRecord) -> bool:
@@ -752,9 +867,40 @@ class LiveExecutor:
         if self.account not in accounts:
             raise ExecutionRefused("account_not_managed", "the configured paper account is not managed by this TWS")
 
+    def require_reviewed_code(self) -> None:
+        """A grant binds one engine build: this process must run exactly that code (review C2-11)."""
+        on_disk = engine_code_digest()
+        if LOADED_ENGINE_DIGEST != on_disk:
+            raise ExecutionAuthorityError("code_mismatch", "the engine's source files changed after this process"
+                                          " loaded them — restart it from the reviewed code")
+        if self.authority.code_digest != on_disk:
+            raise ExecutionAuthorityError("code_mismatch", f"the authority names engine code"
+                                          f" {self.authority.code_digest[:12]}, this process runs {on_disk[:12]}")
+
+    async def bridge_problem(self) -> str | None:
+        """Why the PAPER bridge may be running, or None; anything unreadable counts as running."""
+        try:
+            processes = self.bridge_processes()
+        except Exception as exc:
+            return f"the process table is unreadable ({type(exc).__name__}: {exc})"
+        if processes:
+            return f"the PAPER bridge is running (pid {processes[0][0]})"
+        try:
+            beat = await self.bridge_heartbeat()
+        except Exception as exc:
+            return f"the bridge heartbeat is unreadable ({type(exc).__name__}: {exc})"
+        if beat is not None and self.now() - beat < BRIDGE_HEARTBEAT_WINDOW:
+            age = max(0, int((self.now() - beat).total_seconds()))
+            return f"the PAPER bridge wrote its heartbeat {age}s ago"
+        return None
+
     async def start(self) -> None:
-        """Authority, paper check, fresh order ids, then a full reconciliation before any entry."""
+        """Authority for this code, no bridge, paper check, fresh order ids, then a full reconciliation."""
         active = await self.authority.require_start()
+        self.require_reviewed_code()
+        bridge = await self.bridge_problem()
+        if bridge is not None:  # two order senders on one account could each sell the same shares
+            raise ExecutionRefused("bridge_running", f"{bridge} — the engine never runs next to the bridge")
         if not await self.wait_for(self.mirror.accounts_event):
             raise ExecutionRefused("accounts_unknown", "TWS reported no managed accounts")
         self.require_paper_accounts()
@@ -795,15 +941,26 @@ class LiveExecutor:
         self.broker.reqAccountSummary(SUMMARY_REQUEST_ID, "All", "NetLiquidation")
 
     async def allocate_order_ids(self, count: int) -> tuple[int, ...]:
-        """``max(nextValidId, ledger max + 1)``: an id is never reused, even after TWS resets its sequence."""
+        """Ids above TWS's next valid id, the ledger's highest and every id TWS reports for this client [L-c].
+
+        TWS can reset its sequence while ids are still in use (an earlier
+        session's GTC leg, an order of this client id the ledger does not know):
+        a placeOrder on such an id would modify that order instead.
+        """
         ledger_next = await self.ledger.max_order_id(self.client_id) + 1
         with self.mirror.lock:
             if self.mirror.next_id is None:
                 raise ExecutionRefused("no_order_id", "TWS has not provided a valid order id")
-            first = max(self.mirror.next_id, ledger_next)
+            reported = self.mirror.next_id
+            in_use = max([0, *self.mirror.open_orders, *self.mirror.order_status, *self.unmanaged,
+                          *(row.order_id for row in self.mirror.execs.values())])
+            first = max(reported, ledger_next, in_use + 1)
             self.mirror.next_id = first + count
             ids = tuple(range(first, first + count))
             self.mirror.own_order_ids.update(ids)
+        if in_use >= max(reported, ledger_next):
+            self.emit("INFO", f"next order id raised from {max(reported, ledger_next)} to {first}: ids up to"
+                      f" {in_use} are in use at TWS")
         return ids
 
     # ---- fills ----------------------------------------------------------------------
@@ -1070,17 +1227,25 @@ class LiveExecutor:
         modified.parentId = parent_id or leg.parent_order_id
         return modified
 
-    def order_shows(self, order_id: int, total: int, price: Decimal, kind: str) -> bool:
-        """True once TWS has echoed this quantity and price for the order through openOrder."""
+    def shows_price(self, order_id: int, price: Decimal, kind: str) -> bool:
+        """True once TWS has echoed this price for the order through openOrder."""
         with self.mirror.lock:
             cached = self.mirror.order_objects.get(order_id)
-        if cached is None or whole(getattr(cached, "totalQuantity", 0)) != total:
+        if cached is None:
             return False
         try:
             shown = Decimal(str(getattr(cached, "lmtPrice" if kind == "LMT" else "auxPrice")))
         except (InvalidOperation, TypeError, ValueError):
             return False
         return shown.is_finite() and abs(shown - price) < TICK / 2
+
+    def order_shows(self, order_id: int, total: int, price: Decimal, kind: str) -> bool:
+        """True once TWS has echoed this quantity and price for the order through openOrder."""
+        with self.mirror.lock:
+            cached = self.mirror.order_objects.get(order_id)
+        if cached is None or whole(getattr(cached, "totalQuantity", 0)) != total:
+            return False
+        return self.shows_price(order_id, price, kind)
 
     def accepted(self, order_id: int, total: int, price: Decimal, kind: str) -> bool:
         """TWS shows these values and reported no error for the order since we last modified it."""
@@ -1116,9 +1281,17 @@ class LiveExecutor:
         return now - self.position_gaps.setdefault(bracket.id, now)
 
     def report_cap(self, bracket: BracketRecord, code: LegCode, order_id: int, purpose: str,
-                   snapshot: FillSnapshot, plan: ExitPlan) -> None:
-        held = share_text(snapshot.position or Decimal("0"))
+                   position: Decimal | None, plan: ExitPlan, reserved: int = 0) -> None:
+        held = share_text(position or Decimal("0"))
         outcome = f"limited to {plan.working} sh" if plan.working > 0 else "not sent"
+        if reserved > 0:  # not a trailing position update: other sells hold these shares now (C2-4)
+            self.alert_once(
+                (bracket.id, code, purpose, "reserved", str(plan.working)),
+                f"{bracket.symbol}: account holds {held} sh, {reserved} of them reserved by other sells, but the"
+                f" bracket expects {plan.capped_from} — {purpose} of {LEG_NAMES[code]} {order_id} {outcome}; act"
+                " in TWS if they do not fill",
+            )
+            return
         message = (f"{bracket.symbol}: account holds {held} sh but the bracket expects {plan.capped_from} —"
                    f" {purpose} of {LEG_NAMES[code]} {order_id} {outcome}")
         key = (bracket.id, code, purpose, "capped", str(plan.working))
@@ -1128,12 +1301,16 @@ class LiveExecutor:
             self.alert_once((*key, "early"), f"{message} — re-checked while the position updates", kind="INFO")
 
     def modify_exit(self, bracket: BracketRecord, code: LegCode, *, price: Decimal, purpose: str,
-                    only_if_changed: bool = False, retry: bool = False) -> ExitResult:
+                    only_if_changed: bool = False, retry: bool = False, reserved: int = 0) -> ExitResult:
         leg = bracket.legs.get(code)
         if leg is None or code not in ("T", "S"):
             return ExitResult("blocked")
         order_id = leg.order_id
         snapshot = self.fill_snapshot(bracket)  # taken after every wait, right before placeOrder [H1]
+        position = snapshot.position
+        if reserved > 0 and position is not None:
+            # Shares other sells may still take are not the engine's to sell (C2-4).
+            snapshot = replace(snapshot, position=position - reserved)
         plan = plan_exit(snapshot, code)
         if plan.problem:
             self.alert_once(
@@ -1143,7 +1320,7 @@ class LiveExecutor:
             return ExitResult("blocked")
         capped = plan.capped_from is not None
         if capped:
-            self.report_cap(bracket, code, order_id, purpose, snapshot, plan)
+            self.report_cap(bracket, code, order_id, purpose, position, plan, reserved)
         if plan.working <= 0:
             return ExitResult("nothing", 0, capped)
         if only_if_changed:
@@ -1168,7 +1345,7 @@ class LiveExecutor:
         )
         self.pending_modifies[order_id] = PendingModify(
             bracket_id=bracket.id, leg=code, purpose=purpose, kind=leg.order_type, total=plan.total, price=price,
-            sends=previous.sends + 1 if same and previous is not None else 1,
+            sends=previous.sends + 1 if same and previous is not None else 1, reserved=reserved,
         )
         self.queue_event("modify_sent", {"order_id": order_id, "purpose": purpose, "total": plan.total,
                                          "price": str(price)}, bracket, leg)
@@ -1179,7 +1356,11 @@ class LiveExecutor:
         pending = self.pending_modifies.get(order_id)
         if pending is None:
             return True
-        if self.accepted(order_id, pending.total, pending.price, pending.kind):
+        confirmed = self.accepted(order_id, pending.total, pending.price, pending.kind)
+        if not confirmed and pending.restored:
+            # Sent before a restart, sized then (possibly less, for other sells): its price is the proof.
+            confirmed = self.shows_price(order_id, pending.price, pending.kind)
+        if confirmed:
             del self.pending_modifies[order_id]
             bracket = self.brackets.get(pending.bracket_id)
             if bracket is not None:
@@ -1198,6 +1379,16 @@ class LiveExecutor:
             if self.modify_settled(order_id) or pending.exhausted:
                 continue
             name = LEG_NAMES[pending.leg]
+            if pending.restored:
+                # Never re-sent blindly: what it may sell was decided before the restart. The
+                # flatten fallback takes over and decides afresh.
+                pending.exhausted = True
+                self.alert_once(
+                    (bracket.id, pending.leg, pending.purpose, "unconfirmed"),
+                    f"{bracket.symbol}: TWS does not show the {pending.purpose} of {name} {order_id} sent before"
+                    f" the restart ({pending.price}) — not re-sent; act in TWS",
+                )
+                continue
             if pending.sends > MODIFY_RETRIES:
                 pending.exhausted = True
                 self.alert_once(
@@ -1209,7 +1400,7 @@ class LiveExecutor:
             self.emit("INFO", f"{bracket.symbol}: {pending.purpose} of {name} {order_id} not confirmed by TWS —"
                       f" sending again ({pending.sends + 1}/{MODIFY_RETRIES + 1})")
             result = self.modify_exit(bracket, pending.leg, price=pending.price, purpose=pending.purpose,
-                                      only_if_changed=True, retry=True)
+                                      only_if_changed=True, retry=True, reserved=pending.reserved)
             if result.outcome in {"nothing", "blocked"}:
                 self.pending_modifies.pop(order_id, None)  # no longer needed; the alerts take over
 
@@ -1308,14 +1499,31 @@ class LiveExecutor:
         """Reprice the bracket's own target once; the OCA link then cancels the stop [H2].
 
         The attempt is recorded before anything is sent and is never started
-        again, by a later checkpoint or after a restart [N5]. Only when the
-        reprice is impossible does the confirmed-cancel fallback take over.
+        again, by a later checkpoint or after a restart [N5]. Like the fallback,
+        the reprice sells no more than a fresh account position less every
+        other working sell and less what other orders sold that the position
+        does not show yet (review C2-1, C2-4). Only when the reprice is
+        impossible does the confirmed-cancel fallback take over.
         """
         if bracket.state != "open" or bracket.remaining <= 0 or bracket.flatten_attempted:
             return False
         bracket.flatten_attempted = True
         self.queue_event("flatten_attempt", {"discount": str(discount)}, bracket)
         await self.persist(bracket)  # an exit is never blocked by the ledger: a failure only alerts
+        facts = await self.sellable(bracket)
+        if bracket.state != "open":
+            bracket.flatten_state = "skipped"  # the fresh snapshot shows the fills that closed it
+            await self.persist(bracket)
+            return False
+        if isinstance(facts, str):
+            bracket.flatten_state = "failed"  # in doubt: alert, never sell
+            self.emit("CRITICAL", f"{bracket.symbol}: flatten not sent — {facts}; act in TWS")
+            await self.persist(bracket)
+            return False
+        if facts.quantity <= 0 and facts.reserved > 0:
+            self.nothing_to_sell(bracket, facts, stop_live=True)
+            await self.persist(bracket)
+            return False
         target = bracket.legs["T"]
         if not self.mirror.live(target.order_id):
             status = self.mirror.status(target.order_id) or "unknown"
@@ -1323,12 +1531,13 @@ class LiveExecutor:
                 bracket.flatten_state = "skipped"
                 self.emit("INFO", f"{bracket.symbol}: target {target.order_id} already filled; awaiting executions")
                 return False
-            return await self.start_fallback(bracket, reason=f"target {target.order_id} is not live ({status})")
+            return await self.start_fallback(bracket, reason=f"target {target.order_id} is not live ({status})",
+                                             facts=facts)
         quote = await self.flatten_quote(bracket, discount)
         if quote is None:
-            return await self.start_fallback(bracket, reason="no quote to reprice the target")
+            return await self.start_fallback(bracket, reason="no quote to reprice the target", facts=facts)
         price, source = quote
-        result = self.modify_exit(bracket, "T", price=price, purpose="flatten")
+        result = self.modify_exit(bracket, "T", price=price, purpose="flatten", reserved=facts.reserved)
         if result.outcome == "sent":
             bracket.flatten_state, bracket.flatten_price = "repricing", price
             self.emit("FLATTEN", f"{bracket.symbol}: target repriced to {price} for {result.working} sh ({source})")
@@ -1340,48 +1549,134 @@ class LiveExecutor:
         await self.persist(bracket)
         return False
 
-    async def sellable(self, bracket: BracketRecord) -> tuple[int, int, Decimal, int] | str:
-        """``(quantity, held, position, reserved)`` a fallback may sell, or why it may sell nothing.
+    async def sellable(self, bracket: BracketRecord) -> SellFacts | str:
+        """What a flatten may sell, from one fresh TWS snapshot, or why it may sell nothing.
 
-        The quantity is the ledger's shares, capped by the live account position
-        less every other working sell in the contract (the owner's TWS orders,
-        ``manual:`` orders): never a second sell next to a manual close [H2].
+        Open orders, this client's executions, every client's completed orders
+        and the positions are requested together; the position is read only
+        once all of them arrived. The quantity is the ledger's shares, capped by
+        that position less every other working sell [H2] and less the shares
+        other orders sold that the position does not show yet: a filled sell is
+        no longer a working order, and until TWS's position update shows it the
+        same shares would be sold twice (review C2-1, the bridge's F2/R2).
         """
+        if not await self.request_snapshots(positions=True):
+            return "TWS did not report a fresh snapshot"
+        await self.sync_fills()
+        self.observe_legs()
+        self.refresh(bracket)
         snapshot = self.fill_snapshot(bracket)
         held = snapshot.parent - max(snapshot.recorded_exits, snapshot.target + snapshot.stop)
         if held < 0:
             return "exit fills exceed entry fills"
-        reserved = await self.other_working_sells(bracket)
-        position = self.account_position(bracket.con_id)  # re-read after the open-orders wait
-        if reserved is None:
-            return "open orders unknown"
-        if position is None:
+        if snapshot.position is None:
             return "account position unknown"
-        return min(held, max(0, int(position) - reserved)), held, position, reserved
+        working = self.other_working_sells(bracket)
+        unshown = self.unshown_sales(bracket, held, snapshot.position)
+        if unshown > 0:
+            self.unshown_since.setdefault(bracket.id, self.now())
+        quantity = min(held, max(0, int(snapshot.position) - working - unshown))
+        return SellFacts(quantity=quantity, held=held, position=snapshot.position, working=working, unshown=unshown)
 
-    def nothing_to_sell(self, bracket: BracketRecord, held: int, position: Decimal, reserved: int,
-                        *, stop_live: bool) -> None:
+    def other_working_sells(self, bracket: BracketRecord) -> int:
+        """Shares every other working SELL in the contract may still sell (owner, manual:, other apps)."""
+        with self.mirror.lock:
+            orders = list(self.mirror.account_orders.values())
+        own = {leg.order_ref for leg in bracket.legs.values()}
+        reserved = sum(
+            (item.open_quantity for item in orders
+             if item.con_id == bracket.con_id and item.action == "SELL" and item.working
+             and item.account in {"", self.account} and item.order_ref not in own),
+            Decimal("0"),
+        )
+        return int(reserved.to_integral_value(rounding=ROUND_CEILING))
+
+    def foreign_fills(self, bracket: BracketRecord) -> tuple[int, int]:
+        """``(sold, bought)``: shares other orders executed in the bracket's contract since its entry.
+
+        Every order that is not one of this bracket's legs counts: the owner's
+        TWS orders, ``manual:`` orders, other apps. Completed orders carry their
+        filled quantity and completion time; partly filled working orders their
+        remaining size. A sell counts when it may have executed after the entry
+        (an unreadable time or an unreported fill counts in full), a buy only
+        when it surely did: either error leaves fewer shares to sell, never more.
+        The entry itself needed a flat account [N1], so earlier orders are not
+        the engine's concern.
+        """
+        own = {leg.order_ref for leg in bracket.legs.values()}
+        sold, bought = Decimal("0"), Decimal("0")
+        with self.mirror.lock:
+            completed = list(self.mirror.completed.values())
+            working = list(self.mirror.account_orders.values())
+        counted: set[int] = set()
+        for row in completed:
+            if row.con_id != bracket.con_id or row.order_ref in own or row.account not in {"", self.account}:
+                continue
+            if row.perm_id:
+                counted.add(row.perm_id)
+            when = parse_completed_time(row.completed_time)
+            if row.action == "SELL" and (when is None or when >= bracket.created_at - FOREIGN_FILL_MARGIN):
+                sold += row.total if row.filled is None else row.filled
+            elif (row.action == "BUY" and row.filled is not None and when is not None
+                  and when >= bracket.created_at + FOREIGN_FILL_MARGIN):
+                bought += row.filled
+        for item in working:
+            if (item.con_id != bracket.con_id or item.order_ref in own or item.account not in {"", self.account}
+                    or item.remaining is None or (item.perm_id and item.perm_id in counted)):
+                continue
+            executed = max(Decimal("0"), item.total - item.remaining)
+            if item.action == "SELL":
+                sold += executed
+            elif item.action == "BUY" and item.perm_id:
+                bought += executed
+        return (int(sold.to_integral_value(rounding=ROUND_CEILING)),
+                int(bought.to_integral_value(rounding=ROUND_FLOOR)))
+
+    def unshown_sales(self, bracket: BracketRecord, held: int, position: Decimal) -> int:
+        """Shares other orders sold since the entry that the account position does not show yet.
+
+        The entry needed a flat account [N1], so the true position is the
+        bracket's own shares plus what other orders bought less what they sold;
+        a position above that has not caught up with their sells.
+        """
+        sold, bought = self.foreign_fills(bracket)
+        if sold <= 0:
+            return 0
+        expected = held + bought - sold
+        return min(sold, max(0, int(position) - expected))
+
+    def nothing_to_sell(self, bracket: BracketRecord, facts: SellFacts, *, stop_live: bool) -> None:
         bracket.flatten_state = "skipped"
-        if held > 0:
-            protection = "its stop stays live" if stop_live else "its stop is cancelled"
-            self.emit("CRITICAL", f"{bracket.symbol}: account holds {share_text(position)} sh with {reserved}"
-                      f" reserved by working sells — no market sell for the {held} sh the engine expects"
-                      f" ({protection}); act in TWS if not flat")
+        if facts.held <= 0:
+            return
+        protection = "its stop stays live" if stop_live else "its stop is cancelled"
+        reasons = []
+        if facts.working:
+            reasons.append(f"{facts.working} reserved by working sells")
+        if facts.unshown:
+            reasons.append(f"{facts.unshown} sold by other orders that the position does not show yet")
+        self.emit("CRITICAL", f"{bracket.symbol}: account holds {share_text(facts.position)} sh with"
+                  f" {' and '.join(reasons) or 'nothing reserved'} — no sell for the {facts.held} sh the engine"
+                  f" expects ({protection}); act in TWS if not flat")
 
-    async def start_fallback(self, bracket: BracketRecord, *, reason: str) -> bool:
+    async def start_fallback(self, bracket: BracketRecord, *, reason: str, facts: SellFacts | None = None) -> bool:
         """Cancel target and stop; a market sell follows only once both cancels are confirmed."""
         if bracket.flatten_state not in ("none", "repricing"):
             return False
         # Never cancel the protective stop for a sell that could not be sent anyway.
-        facts = await self.sellable(bracket)
-        if isinstance(facts, str):
-            bracket.flatten_state = "failed"
-            self.emit("CRITICAL", f"{bracket.symbol}: flatten fallback not started ({reason}) — {facts}; act in TWS")
+        checked = facts if facts is not None else await self.sellable(bracket)
+        if bracket.state != "open":
+            bracket.flatten_state = "skipped"  # the fresh snapshot shows the fills that closed it
             await self.persist(bracket)
             return False
-        quantity, held, position, reserved = facts
-        if quantity <= 0:
-            self.nothing_to_sell(bracket, held, position, reserved, stop_live=True)
+        if isinstance(checked, str):
+            bracket.flatten_state = "failed"
+            self.emit("CRITICAL", f"{bracket.symbol}: flatten fallback not started ({reason}) — {checked};"
+                      " act in TWS")
+            await self.persist(bracket)
+            return False
+        if checked.quantity <= 0:
+            self.nothing_to_sell(bracket, checked, stop_live=True)
             await self.persist(bracket)
             return False
         previous = bracket.flatten_state
@@ -1397,47 +1692,66 @@ class LiveExecutor:
         self.cancel_requested_at[bracket.id] = self.now()
         self.emit("FLATTEN", f"{bracket.symbol}: {reason} — fallback: cancelling target and stop, then one market"
                   " sell once both cancels are confirmed")
-        for code in PROTECTIVE_LEGS:
-            if self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES:
-                self.cancel_leg(bracket, code, "flatten fallback")
+        self.cancel_protective_legs(bracket, "flatten fallback")
         return True
 
-    def leg_dead(self, bracket: BracketRecord, code: LegCode) -> bool:
+    def cancel_protective_legs(self, bracket: BracketRecord, why: str) -> None:
+        """Cancel every exit leg not yet Cancelled or Filled: an Inactive one can come back (review C2-5)."""
+        for code in PROTECTIVE_LEGS:
+            if not self.leg_dead(bracket, code):
+                self.cancel_leg(bracket, code, why)
+
+    def leg_status(self, bracket: BracketRecord, code: LegCode) -> str | None:
+        """IBKR's status of a leg: its order status, else the completed order carrying its orderRef."""
         leg = bracket.legs.get(code)
         if leg is None:
-            return True
+            return None
         status = self.mirror.status(leg.order_id)
         if status is None:
             with self.mirror.lock:
                 status = next((row.status for row in self.mirror.completed.values()
                                if row.order_ref == leg.order_ref), None)
-        return status in DEAD_ORDER_STATUSES
+        return status
+
+    def leg_dead(self, bracket: BracketRecord, code: LegCode) -> bool:
+        """Only Cancelled, ApiCancelled or Filled ends a leg for the fallback (review C2-5)."""
+        if bracket.legs.get(code) is None:
+            return True
+        return self.leg_status(bracket, code) in FALLBACK_DEAD_STATUSES
 
     async def advance_fallbacks(self) -> None:
         for bracket in list(self.brackets.values()):
-            if bracket.flatten_state == "repricing":
-                await self.follow_reprice(bracket)
-                continue
-            if bracket.flatten_state != "cancelling":
-                continue
-            if bracket.state != "open":
-                bracket.flatten_state = "skipped"  # fills that raced the cancels closed it
-                continue
-            if bracket.id not in self.cancel_requested_at:
-                # First look in this run: a restart may have come before the cancels reached TWS.
-                self.cancel_requested_at[bracket.id] = self.now()
-                for code in PROTECTIVE_LEGS:
-                    if self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES:
-                        self.cancel_leg(bracket, code, "flatten fallback, after a restart")
-            if not all(self.leg_dead(bracket, code) for code in PROTECTIVE_LEGS):
-                started = self.cancel_requested_at.setdefault(bracket.id, self.now())
-                if self.now() - started >= FLATTEN_CANCEL_TIMEOUT:
-                    bracket.flatten_state = "failed"
-                    seconds = int(FLATTEN_CANCEL_TIMEOUT.total_seconds())
-                    self.emit("CRITICAL", f"{bracket.symbol}: TWS did not confirm cancelling the target and stop"
-                              f" within {seconds}s — no market sell sent; act in TWS")
-                continue
-            await self.send_fallback_sell(bracket)
+            try:
+                await self.advance_fallback(bracket)
+            except (ExecutionRefused, ExecutionAuthorityError):
+                raise
+            except Exception as exc:  # one bracket's failure never stops another's fallback [M1]
+                self.alert_once((bracket.id, "fallback", "step", type(exc).__name__),
+                                f"{bracket.symbol}: flatten fallback step failed ({type(exc).__name__}: {exc}) —"
+                                " retried every tick; act in TWS if it persists")
+
+    async def advance_fallback(self, bracket: BracketRecord) -> None:
+        if bracket.flatten_state == "repricing":
+            await self.follow_reprice(bracket)
+            return
+        if bracket.flatten_state != "cancelling":
+            return
+        if bracket.state != "open":
+            bracket.flatten_state = "skipped"  # fills that raced the cancels closed it
+            return
+        if bracket.id not in self.cancel_requested_at:
+            # First look in this run: a restart may have come before the cancels reached TWS.
+            self.cancel_requested_at[bracket.id] = self.now()
+            self.cancel_protective_legs(bracket, "flatten fallback, after a restart")
+        if not all(self.leg_dead(bracket, code) for code in PROTECTIVE_LEGS):
+            started = self.cancel_requested_at.setdefault(bracket.id, self.now())
+            if self.now() - started >= FLATTEN_CANCEL_TIMEOUT:
+                bracket.flatten_state = "failed"
+                seconds = int(FLATTEN_CANCEL_TIMEOUT.total_seconds())
+                self.emit("CRITICAL", f"{bracket.symbol}: TWS did not confirm cancelling the target and stop"
+                          f" within {seconds}s — no market sell sent; act in TWS")
+            return
+        await self.send_fallback_sell(bracket)
 
     async def follow_reprice(self, bracket: BracketRecord) -> None:
         """A sent reprice ends confirmed, or falls back when TWS never confirmed it."""
@@ -1462,47 +1776,30 @@ class LiveExecutor:
         # A reprice dropped on the way (capped to nothing, or blocked with its own alert) is never retried.
         bracket.flatten_state = "repriced" if repriced or status == "Filled" or bracket.state != "open" else "failed"
 
-    async def other_working_sells(self, bracket: BracketRecord) -> int | None:
-        """Shares every other working SELL in the contract may still sell (owner, manual:, other apps)."""
-        if not await self.refresh_open_orders():
-            return None
-        with self.mirror.lock:
-            orders = list(self.mirror.account_orders.values())
-        own = {leg.order_ref for leg in bracket.legs.values()}
-        reserved = sum(
-            (item.open_quantity for item in orders
-             if item.con_id == bracket.con_id and item.action == "SELL" and item.working
-             and item.account in {"", self.account} and item.order_ref not in own),
-            Decimal("0"),
-        )
-        return int(reserved.to_integral_value(rounding=ROUND_CEILING))
-
     async def send_fallback_sell(self, bracket: BracketRecord) -> None:
-        """One market sell of the ledger quantity, capped by the live position less other working sells."""
+        """One market sell of the ledger quantity, capped by a fresh position less every other sell."""
         # The most dangerous order the engine sends decides on a fresh snapshot of everything:
         # executions and completed orders (a fill that raced the cancels) and positions from scratch.
-        if not await self.request_snapshots(positions=True):
-            bracket.flatten_state = "failed"
-            self.emit("CRITICAL", f"{bracket.symbol}: flatten fallback stopped — TWS did not report a fresh"
-                      " snapshot; no market sell sent; act in TWS")
-            return
-        await self.sync_fills()
-        self.observe_legs()
-        self.refresh(bracket)
+        facts = await self.sellable(bracket)
         if bracket.state != "open":
             bracket.flatten_state = "skipped"  # the cancels raced fills that closed it
             return
-        facts = await self.sellable(bracket)  # one more look: the owner may have acted meanwhile
         if isinstance(facts, str):
             bracket.flatten_state = "failed"
             self.emit("CRITICAL", f"{bracket.symbol}: flatten fallback stopped — {facts}; no market sell sent;"
                       " act in TWS")
             return
-        quantity, held, position, reserved = facts
-        if quantity <= 0:
-            self.nothing_to_sell(bracket, held, position, reserved, stop_live=False)
+        if facts.quantity <= 0:
+            self.nothing_to_sell(bracket, facts, stop_live=False)
             return
-        order_id = (await self.allocate_order_ids(1))[0]
+        quantity, held, position = facts.quantity, facts.held, facts.position
+        try:
+            order_id = (await self.allocate_order_ids(1))[0]
+        except Exception as exc:  # no order id from TWS, or an unreadable ledger [M1]
+            self.alert_once((bracket.id, "fallback", "order-id"), f"{bracket.symbol}: no order id for the fallback"
+                            f" market sell ({type(exc).__name__}: {exc}) — target and stop are cancelled; retried"
+                            " every tick; act in TWS")
+            return  # still "cancelling": the next tick takes a fresh snapshot and tries again
         leg = LegRecord(
             id=f"{bracket.id}:F", bracket_id=bracket.id, leg="F", client_id=self.client_id, order_id=order_id,
             order_ref=order_ref(bracket.id, "F"), action="SELL", order_type="MKT", tif="DAY", quantity=quantity,
@@ -1510,13 +1807,13 @@ class LiveExecutor:
         )
         try:
             await self.ledger.add_flatten_leg(bracket, leg, payload={
-                "held": held, "position": str(position), "reserved": reserved, "quantity": quantity,
+                "held": held, "position": str(position), "reserved": facts.reserved, "quantity": quantity,
             })
         except Exception as exc:
-            bracket.flatten_state = "failed"
-            self.emit("CRITICAL", f"{bracket.symbol}: fallback market sell not recorded ({type(exc).__name__}:"
-                      f" {exc}) — not sent; act in TWS")
-            return
+            self.alert_once((bracket.id, "fallback", "unrecorded-sell"), f"{bracket.symbol}: fallback market sell"
+                            f" not recorded ({type(exc).__name__}: {exc}) — not sent; retried every tick; target"
+                            " and stop are cancelled, act in TWS")
+            return  # still "cancelling": nothing was sent, so a retry can never sell twice
         self.saved[bracket.id] = ()  # flatten state changed in the ledger: save the rest normally
         self.index(bracket)
         if self.stop_event.is_set() or not self.broker.isConnected():
@@ -1558,21 +1855,90 @@ class LiveExecutor:
             return f"{bracket.symbol}: still open after flatten ({bracket.net_held} sh) — act in TWS"
         return f"{bracket.symbol}: unreconciled bracket, {bracket.net_held} sh per the ledger — act in TWS"
 
+    def short_positions(self, *, unexplained: bool = False) -> list[tuple[int, str, Decimal]]:
+        """``(conId, symbol, shares)`` of every short position in a symbol the engine traded today.
+
+        ``unexplained`` leaves out contracts a not-flat bracket already reports
+        as oversold, so the same short is not announced twice.
+        """
+        explained = {bracket.con_id for bracket in self.positions_not_flat() if bracket.net_held < 0}
+        traded: dict[int, str] = {}
+        for bracket in self.brackets.values():
+            if bracket.entry_filled > 0 or bracket.state in ("open", "needs_attention", "unknown"):
+                traded.setdefault(bracket.con_id, bracket.symbol)
+        shorts: list[tuple[int, str, Decimal]] = []
+        for con_id, symbol in traded.items():
+            held = self.account_position(con_id)
+            if held is not None and held < 0 and not (unexplained and con_id in explained):
+                shorts.append((con_id, symbol, held))
+        return shorts
+
+    @staticmethod
+    def short_message(symbol: str, held: Decimal) -> str:
+        return f"{symbol}: account is short {share_text(-held)} sh in a symbol the engine traded today — act in TWS"
+
     def alert_not_flat(self) -> bool:
-        positions = self.positions_not_flat()
-        for bracket in positions:
-            self.emit("CRITICAL", self.not_flat_message(bracket))
-        if positions:
+        """CRITICAL for every bracket not flat and every short in a symbol traded today (never FLAT then)."""
+        messages = [self.short_message(symbol, held) for _, symbol, held in self.short_positions(unexplained=True)]
+        messages += [self.not_flat_message(bracket) for bracket in self.positions_not_flat()]
+        for message in messages:
+            self.emit("CRITICAL", message)
+        if messages:
             self.alert_raised = True
-        return bool(positions)
+        return bool(messages)
 
     def verify_flat(self) -> None:
         """Alert only: a second automatic sell could race the owner's manual close [H2]."""
         if not self.alert_not_flat():
             self.emit("FLAT", "no open engine positions")
 
+    def stop_died_under_entry(self, bracket: BracketRecord) -> str | None:
+        """The stop's status when it died (rejected, cancelled, Inactive) while the entry still works."""
+        if bracket.state not in ("working", "open") or bracket.parent_cancel_requested:
+            return None
+        status = self.mirror.status(bracket.order_id("S"))
+        if status in PARENT_CANCELLED_STATUSES and self.mirror.live(bracket.order_id("P")):
+            return status
+        return None
+
+    def contain_unprotected_entry(self, bracket: BracketRecord) -> None:
+        """Shares bought after the stop died would have no stop at all: cancel the entry (review C2-6).
+
+        The same containment as for a bracket cut off mid-send (resolve_inflight).
+        """
+        status = self.stop_died_under_entry(bracket)
+        if status is None:
+            return
+        if self.cancel_leg(bracket, "P", "its stop is not live"):
+            bracket.parent_cancel_requested = True
+            self.emit("CRITICAL", f"entry {bracket.symbol}: stop {bracket.order_id('S')} is {status} while the entry"
+                      f" works — entry cancelled (filled {bracket.entry_filled}/{bracket.quantity}); act in TWS")
+
+    def check_unshown_sales(self, bracket: BracketRecord) -> None:
+        """Shares other orders sold that the position still does not show stay reserved; CRITICAL after 15 s."""
+        unshown, position = 0, None
+        if bracket.state == "open":
+            snapshot = self.fill_snapshot(bracket)
+            held = snapshot.parent - max(snapshot.recorded_exits, snapshot.target + snapshot.stop)
+            position = snapshot.position
+            if position is not None and held > 0:
+                unshown = self.unshown_sales(bracket, held, position)
+        if unshown <= 0 or position is None:
+            self.unshown_since.pop(bracket.id, None)
+            return
+        now = self.now()
+        since = self.unshown_since.setdefault(bracket.id, now)
+        if now - since >= UNSHOWN_SELL_ALERT:  # the bridge's L-e: the shares stay reserved, never released by time
+            self.alert_once(
+                (bracket.id, "unshown", str(unshown)),
+                f"{bracket.symbol}: the account position ({share_text(position)} sh) still does not show {unshown} sh"
+                f" other orders sold {int((now - since).total_seconds())}s ago — those shares stay reserved and the"
+                " engine never sells them; check TWS",
+            )
+
     def check_protection(self, bracket: BracketRecord) -> None:
-        """Every tick: an open position without a live stop is CRITICAL once [M2]."""
+        """Every tick: an entry whose stop died is cancelled; an open position without a live stop is CRITICAL [M2]."""
+        self.contain_unprotected_entry(bracket)
         if bracket.state != "open" or bracket.net_held <= 0 or self.mirror.live(bracket.order_id("S")):
             return
         if bracket.flatten_state in ("cancelling", "selling"):
@@ -1634,7 +2000,7 @@ class LiveExecutor:
             event.clear()
         self.broker.reqAllOpenOrders()
         self.broker.reqExecutions(EXEC_REQUEST_ID, execution_filter(self.client_id))
-        self.broker.reqCompletedOrders(True)
+        self.broker.reqCompletedOrders(False)  # every client's, the TWS GUI's included (review C2-1)
         if positions:
             # Re-subscribe from scratch: a contract TWS no longer reports must not keep a stale count.
             with mirror.lock:
@@ -1809,6 +2175,14 @@ class LiveExecutor:
                 findings.append(Finding("position_mismatch", key,
                                         f"{symbol}: account holds {share_text(held)} sh, the execution ledger expects"
                                         f" {shares} — check TWS"))
+        for con_id, symbol, held in self.short_positions():
+            findings.append(Finding("short_position", f"short:{con_id}", self.short_message(symbol, held)))
+        for bracket in self.brackets.values():
+            status = self.stop_died_under_entry(bracket)
+            if status is not None:
+                findings.append(Finding("stop_dead", f"stop-dead:{bracket.id}",
+                                        f"{bracket.symbol}: stop {bracket.order_id('S')} is {status} while the entry"
+                                        " works — check TWS"))
         for bracket in self.brackets.values():
             if bracket.state != "needs_attention" or bracket.attention_cleared_at is not None:
                 continue
@@ -1844,10 +2218,10 @@ class LiveExecutor:
             self.emit("INFO", "reconciliation clean — new entries resumed")
             self.queue_event("entries_resumed", {})
 
-    async def reconcile(self, *, startup: bool = False) -> list[Finding]:
+    async def reconcile(self, *, startup: bool = False, positions: bool | None = None) -> list[Finding]:
         """Compare the ledger with IBKR, scoped to the engine's at1: orders."""
         self.last_reconcile = self.now()
-        if not await self.request_snapshots(positions=startup):
+        if not await self.request_snapshots(positions=startup if positions is None else positions):
             findings = [Finding("snapshot_unavailable", "snapshot",
                                 "TWS did not report open orders, executions, completed orders and positions in time")]
             self.apply_findings(findings)
@@ -1860,6 +2234,10 @@ class LiveExecutor:
         for bracket in list(self.brackets.values()):
             self.refresh(bracket)
         findings += await self.compare_with_ibkr(startup=startup)
+        bridge = await self.bridge_problem()
+        if bridge is not None:
+            findings.append(Finding("bridge_running", "bridge", f"{bridge} — the bridge and the engine must never"
+                                    " send orders together; stop one of them"))
         self.apply_findings(findings)
         self.queue_event("reconciled", {"startup": startup, "findings": [item.code for item in findings]})
         await self.save()
@@ -2115,7 +2493,19 @@ class LiveExecutor:
         if failures:
             self.emit("INFO", f"{source} step recovered after {failures} failed attempts")
 
+    async def renew_subscriptions(self) -> None:
+        """TWS 1101 (connectivity restored, data lost): positions and the account summary are requested again."""
+        self.mirror.data_lost.clear()
+        self.emit("INFO", "TWS lost its data subscriptions (1101): positions and net liquidation requested again;"
+                  " reconciling")
+        self.broker.cancelAccountSummary(SUMMARY_REQUEST_ID)
+        self.request_net_liquidation()
+        await self.reconcile(positions=True)  # re-subscribes positions from scratch (review C2-10)
+
     async def tick(self) -> None:
+        # Every exit is capped by the positions: lost subscriptions are renewed before anything else.
+        if self.mirror.data_lost.is_set():
+            await self.run_step("reconciliation", self.renew_subscriptions)
         # Management first; reconciliation and intake last, so nothing they raise can delay a
         # cancel, a resize or the flatten.
         await self.run_step("fill", self.sync_fills)
@@ -2131,6 +2521,7 @@ class LiveExecutor:
         for bracket in list(self.brackets.values()):
             self.check_protection(bracket)
             self.check_account_position(bracket)
+            self.check_unshown_sales(bracket)
             self.check_dangling_exits(bracket)
         await self.run_step("ledger", self.save)
         if self.reconcile_due():
@@ -2159,7 +2550,10 @@ class LiveExecutor:
         for bracket in list(self.brackets.values()):
             self.refresh(bracket)
         if not self.flattened:  # started too late for the regular pass: the first and only attempt
-            await self.flatten(LATE_FLATTEN_DISCOUNT)
+            if self.past(self.times.closes_at):  # never a late flatten after the close (review C2-7)
+                self.emit("INFO", f"past the {self.times.closes_at:%H:%M} ET close — no late flatten is sent")
+            else:
+                await self.flatten(LATE_FLATTEN_DISCOUNT)
             self.flattened = True
         await self.run_step("ledger", self.save)
         while self.positions_not_flat():
@@ -2177,7 +2571,9 @@ class LiveExecutor:
             await self.advance_fallbacks()
             await self.run_step("ledger", self.save)
         else:
-            if self.alert_raised:
+            if self.short_positions(unexplained=True):
+                self.alert_not_flat()  # a short in a traded symbol is never reported FLAT
+            elif self.alert_raised:
                 self.emit("FLAT", "no open engine positions")
         realized = sum((bracket.realized_pnl for bracket in self.brackets.values()
                         if bracket.session_date == self.session_date), Decimal("0"))
@@ -2185,9 +2581,31 @@ class LiveExecutor:
         await self.run_step("ledger", self.save)
         return EXIT_OK
 
-    async def run(self) -> int:
-        """The session loop. Refusals return EXIT_REFUSED; a lost connection returns EXIT_RESTART."""
+    async def report_after_close(self) -> int:
+        """Started after the stop time: nothing is sent, not even a late flatten (review C2-7).
+
+        Like the bridge's main(): the ledger is only read and every bracket it
+        still shows open is reported.
+        """
+        self.emit("INFO", f"started after {self.times.stop:%H:%M} ET for {self.session_date} — nothing to manage")
         try:
+            await self.load()
+        except Exception as exc:
+            self.emit("CRITICAL", f"execution ledger unreadable ({type(exc).__name__}: {exc}) — check TWS")
+            return EXIT_OK
+        for bracket in self.positions_not_flat():
+            if bracket.net_held < 0:
+                self.emit("CRITICAL", self.not_flat_message(bracket))
+            else:
+                self.emit("CRITICAL", f"{bracket.symbol}: still open per the execution ledger ({bracket.net_held} sh)"
+                          " — act in TWS")
+        return EXIT_OK
+
+    async def run(self) -> int:
+        """The session loop: a slow TWS or a lost connection returns EXIT_RESTART, refusals EXIT_REFUSED."""
+        try:
+            if self.past(self.times.stop):  # first, as the bridge's main(): no TWS state matters any more
+                return await self.report_after_close()
             code = await self.interrupted()
             if code is not None:
                 return code
@@ -2200,7 +2618,13 @@ class LiveExecutor:
                     return await self.finish()
                 await self.tick()
                 await self.pause(self.loop_seconds)
-        except (ExecutionRefused, ExecutionAuthorityError) as exc:
+        except ExecutionRefused as exc:
+            if exc.code in TRANSIENT_REFUSALS:  # slow, not unsafe: a supervisor may retry (review C2-3)
+                self.emit("CRITICAL", f"TWS not ready: {exc} — exit {EXIT_RESTART} for a supervised restart")
+                return EXIT_RESTART
+            self.emit("CRITICAL", f"refusing: {exc}")
+            return EXIT_REFUSED
+        except ExecutionAuthorityError as exc:
             self.emit("CRITICAL", f"refusing: {exc}")
             return EXIT_REFUSED
 
@@ -2219,6 +2643,7 @@ __all__ = [
     "Finding",
     "FillSnapshot",
     "LiveExecutor",
+    "SellFacts",
     "SessionTimes",
     "accepted_decisions",
     "format_event_line",
