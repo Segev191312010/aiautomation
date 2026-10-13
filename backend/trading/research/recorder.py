@@ -8,21 +8,25 @@ backs off and retries, and a competing login or lost connection stops the run
 cleanly: every day already written stays written, and the next run skips it.
 Only sessions that have closed are stored, so a stored day is never partial.
 
-The nightly run (``research record``, 16:20-17:30 ET) then:
+The nightly run (``research record``, 16:20-17:30 ET):
 
-1. records the RTH bars of every qualified contract of the session that
-   closed: the watchlist first, then the day universe by scan rank, then any
-   other qualified scan name, capped at ``RECORDER_MAX_CONTRACTS`` so the
-   whole night fits the window (``nightly_budget_seconds``);
-2. records extended-hours bars (04:00 ET through the close) of that
-   session's gap candidates (watchlist and scanner gappers, at most
-   ``MAX_GAP_CANDIDATES``) for GAP_GO's replay; IBKR's all-hours request
-   covers only the current day, so a missed night is not refilled;
-3. qualifies the next session's watchlist, so the 08:00 screener sweep does
-   not wait ~8 minutes for it (the first sweep re-checks the prior closes
-   for overnight splits).
+1. first records extended-hours bars (04:00 ET through the close) of the
+   closed session's gap candidates (watchlist and scanner gappers, at most
+   ``MAX_GAP_CANDIDATES``) for GAP_GO's replay: IBKR's all-hours request
+   covers only the current day, so this is the one step a later night can
+   never refill;
+2. records the RTH bars of every qualified contract of that session: the
+   watchlist first, then the day universe by scan rank, then any other
+   qualified scan name, capped at ``RECORDER_MAX_CONTRACTS`` and stopped at
+   ``regular_hours_deadline`` (5 minutes before the window's end) with a
+   "STOPPED early" line and its counts; the next night's lookback takes the
+   rest;
+3. only while ``EVENING_QUALIFICATION_ENABLED`` (off: review R6), qualifies
+   the next session's watchlist; otherwise the screener does it at 08:00
+   exactly as deployed.
 
-A manual ``research backfill`` runs the same steps; each is idempotent.
+A manual ``research backfill`` runs the same steps (without a deadline
+outside the window); each is idempotent.
 """
 from __future__ import annotations
 
@@ -30,7 +34,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from functools import partial
 import logging
@@ -47,6 +51,7 @@ from trading.market.ibkr_boundary import (
     DailyBarBatch,
     IBKRTradeBar,
     MarketDataQualityError,
+    is_competing_session_report,
     liquidity_profile,
 )
 from trading.market.tws_actor import (
@@ -57,9 +62,9 @@ from trading.market.tws_actor import (
     TWSPaperActor,
     TWSRequestError,
     _PendingBars,
-    is_competing_session_report,
 )
 from trading.market.universe import (
+    EVENING_QUALIFICATION_ENABLED,
     DailyHistorySource,
     QualificationReport,
     RequestPacer,
@@ -100,13 +105,19 @@ STOP_DISCONNECTED = "disconnected"
 STOP_PACING = "pacing"
 STOP_REPEATED_FAILURES = "repeated_failures"
 STOP_STORE_UNWRITABLE = "store_unwritable"
+# A planned stop: the regular-hours pass reached its deadline before the
+# window's end. The missing days are taken by the next night's lookback.
+STOP_DEADLINE = "deadline"
 # Stops after which no further TWS step of the night is attempted.
 CONNECTION_STOPS = frozenset({STOP_COMPETING_SESSION, STOP_DISCONNECTED})
 
 # --- the nightly budget -------------------------------------------------------------
 # The recorder's supervised window, 16:20-17:30 ET (supervisor.RECORDER_WINDOW;
 # a test pins the two).
+RECORDER_WINDOW = (dt_time(16, 20), dt_time(17, 30))
 RECORDER_WINDOW_SECONDS = 70 * 60
+# The regular-hours pass starts no contract later than this before the
+# window's end, so the supervisor's SIGTERM never cuts a night short.
 RECORDER_MARGIN_SECONDS = 5 * 60
 # Contracts recorded per night, at most: the watchlist (~400 qualified of
 # ~500), the day universe (<= 150) and any other qualified scan name, in that
@@ -119,7 +130,8 @@ WATCHLIST_PLANNING_SIZE = 520
 QUALIFY_PACE_SECONDS = 1.0
 # Worst-typical wall time per item: the pacing plus a slow reply.
 RECORD_SECONDS_PER_CONTRACT = 2 * DEFAULT_PACE_SECONDS + 1.0
-EXTENDED_SECONDS_PER_CONTRACT = DEFAULT_PACE_SECONDS + 0.5
+# All-hours bars plus, since this step runs first, the daily context request.
+EXTENDED_SECONDS_PER_CONTRACT = 2 * DEFAULT_PACE_SECONDS + 1.0
 QUALIFY_SECONDS_PER_CONTRACT = QUALIFY_PACE_SECONDS + 0.2
 # Gap candidates: GAP_GO's own minimum gap, read from the sweeps of the first
 # hour after the open (the official open makes gap_pct final by then).
@@ -128,12 +140,36 @@ GAP_CANDIDATE_WINDOW = timedelta(minutes=60)
 
 
 def nightly_budget_seconds(contracts: int, gap_candidates: int, watchlist: int) -> float:
-    """Worst-typical seconds for one night: RTH recording, extended bars, qualification."""
+    """Worst-typical seconds for one night: extended bars, RTH recording, qualification.
+
+    ``watchlist`` is 0 while evening qualification is off (the default).
+    """
     return (
-        contracts * RECORD_SECONDS_PER_CONTRACT
-        + gap_candidates * EXTENDED_SECONDS_PER_CONTRACT
+        gap_candidates * EXTENDED_SECONDS_PER_CONTRACT
+        + contracts * RECORD_SECONDS_PER_CONTRACT
         + watchlist * QUALIFY_SECONDS_PER_CONTRACT
     )
+
+
+def regular_hours_deadline(started: datetime) -> datetime | None:
+    """When the regular-hours pass starts its last contract, or None.
+
+    Inside the supervised window the pass stops ``RECORDER_MARGIN_SECONDS``
+    before the window's end, less the evening qualification's budget when
+    that step is on. A run started outside the window (an owner's manual
+    backfill) has no deadline.
+    """
+    if started.tzinfo is None or started.utcoffset() is None:
+        raise ValueError("started must be timezone-aware")
+    local = started.astimezone(MARKET_TIMEZONE)
+    opens, closes = RECORDER_WINDOW
+    if not opens <= local.time() < closes:
+        return None
+    end = datetime.combine(local.date(), closes, tzinfo=MARKET_TIMEZONE)
+    reserve = timedelta(seconds=RECORDER_MARGIN_SECONDS)
+    if EVENING_QUALIFICATION_ENABLED:
+        reserve += timedelta(seconds=WATCHLIST_PLANNING_SIZE * QUALIFY_SECONDS_PER_CONTRACT)
+    return (end - reserve).astimezone(timezone.utc)
 
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -203,6 +239,8 @@ class HistorySource(Protocol):
 
 class ExtendedHistorySource(Protocol):
     async def extended_trade_bars(self, con_id: int) -> BarBatch: ...
+
+    async def daily_trade_bars(self, con_id: int) -> DailyBarBatch: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,13 +462,15 @@ async def backfill(
     max_attempts: int = MAX_REQUEST_ATTEMPTS,
     pacing_backoff_seconds: float = PACING_BACKOFF_SECONDS,
     max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
+    deadline: datetime | None = None,
 ) -> BackfillReport:
     """Store the newest ``days`` closed sessions for each contract; resumable.
 
     Sessions already stored are skipped (a fully stored contract sends no
     request), request starts are at least ``pace_seconds`` apart, and the run
     stops early, with everything written so far kept, on a competing login,
-    a lost connection, persistent pacing, or repeated contract failures.
+    a lost connection, persistent pacing, or repeated contract failures. With
+    ``deadline`` no contract starts at or after it (``STOP_DEADLINE``).
     """
     if not 1 <= days <= MAX_BACKFILL_DAYS:
         raise ValueError(f"days must be between 1 and {MAX_BACKFILL_DAYS}")
@@ -452,6 +492,18 @@ async def backfill(
         if not missing:
             already_stored += 1
             continue
+        if deadline is not None and clock() >= deadline:
+            stopped = STOP_DEADLINE
+            remaining = len(instruments) - index
+            logger.warning(
+                "backfill STOPPED early at its %s ET deadline: %d days written for %d contracts,"
+                " %d contracts not attempted (the next night's lookback takes them)",
+                deadline.astimezone(MARKET_TIMEZONE).strftime("%H:%M"),
+                days_written,
+                symbols_written,
+                remaining,
+            )
+            break
         requested += 1
         now = clock()
         duration = f"{request_days(sessions, missing, now)} D"
@@ -786,8 +838,10 @@ async def record_extended(
 
     IBKR's all-hours request (``extended_trade_bars``, "1 D") returns only
     the current day, so the step runs on the evening of the session itself
-    and is skipped (named) otherwise. The prior close and average dollar
-    volume are copied from the same session's regular-hours day when stored.
+    (first of the night: it can never be refilled later) and is skipped
+    (named) otherwise. The prior close and average dollar volume come from
+    the same session's regular-hours day when stored, else from one daily
+    request, exactly as the regular-hours recording computes them.
     """
     store = store or BarsStore()
     now = clock()
@@ -816,14 +870,26 @@ async def record_extended(
                 failures.append((instrument.symbol, "no extended-hours bars"))
                 continue
             regular = store.get_day(session_date, instrument.con_id)
+            if regular is not None:
+                prior_close, average = regular.prior_close, regular.avg_dollar_volume
+            else:
+                daily = await _fetch(
+                    partial(actor.daily_trade_bars, instrument.con_id),
+                    pacer=pacer,
+                    max_attempts=max_attempts,
+                    backoff_seconds=pacing_backoff_seconds,
+                )
+                if any(bar.con_id != instrument.con_id for bar in daily.bars):
+                    raise _InstrumentFailure("daily history returned another contract")
+                prior_close, average = daily_context(daily, session_date)
             store.write_day(
                 StoredDay(
                     session_date=session_date,
                     con_id=instrument.con_id,
                     symbol=instrument.symbol,
                     bars=stored_bars(bars, con_id=instrument.con_id),
-                    prior_close=None if regular is None else regular.prior_close,
-                    avg_dollar_volume=None if regular is None else regular.avg_dollar_volume,
+                    prior_close=prior_close,
+                    avg_dollar_volume=average,
                     primary_exchange=instrument.primary_exchange
                     or (None if regular is None else regular.primary_exchange),
                     fetched_at=clock(),
@@ -935,9 +1001,11 @@ def format_qualification_report(report: QualificationReport) -> str:
 async def run_backfill_cli(days: int, *, clock: Clock = _utc_now) -> int:
     """``autotraderctl research backfill --days N`` / ``record``: read-only TWS, client id 28.
 
-    After the RTH bars come the gap candidates' extended-hours bars and the
-    next session's watchlist qualification (module docstring); none of them
-    runs after a competing login or a lost connection.
+    The gap candidates' extended-hours bars come first (they can never be
+    refilled), then the regular-hours pass up to ``regular_hours_deadline``,
+    then, only while ``EVENING_QUALIFICATION_ENABLED``, the next session's
+    watchlist qualification. Nothing runs after a competing login or a lost
+    connection. A pass stopped at its deadline is a planned stop (exit 0).
     """
     from config import cfg
     from trading.operations.settings import ShadowSettingsError, load_shadow_runtime_config
@@ -963,15 +1031,29 @@ async def run_backfill_cli(days: int, *, clock: Clock = _utc_now) -> int:
             request_timeout_seconds=HISTORY_REQUEST_TIMEOUT_SECONDS,
         )
     )
-    minutes = nightly_budget_seconds(len(instruments), len(gappers), WATCHLIST_PLANNING_SIZE) / 60
+    qualify_tonight = EVENING_QUALIFICATION_ENABLED
+    deadline = regular_hours_deadline(started)
+    minutes = (
+        nightly_budget_seconds(
+            len(instruments), len(gappers), WATCHLIST_PLANNING_SIZE if qualify_tonight else 0
+        )
+        / 60
+    )
     print(
-        f"research backfill: {len(instruments)} contracts qualified"
-        f" {universe_date.isoformat()}, {days} sessions each; {len(gappers)} gap candidates"
-        f" of {closed.isoformat()}; then the next session's qualification;"
-        f" at most ~{minutes:.0f} min (stored sessions are skipped)",
+        f"research backfill: {len(gappers)} gap candidates of {closed.isoformat()} first, then"
+        f" {len(instruments)} contracts qualified {universe_date.isoformat()}, {days} sessions"
+        " each"
+        + (
+            f" until {deadline.astimezone(MARKET_TIMEZONE).strftime('%H:%M')} ET"
+            if deadline is not None
+            else ""
+        )
+        + ("; then the next session's qualification" if qualify_tonight else "")
+        + f"; at most ~{minutes:.0f} min (stored sessions are skipped)",
         flush=True,
     )
     extended: ExtendedReport | None = None
+    report: BackfillReport | None = None
     qualification: QualificationReport | None = None
     try:
         await actor.connect()
@@ -980,22 +1062,23 @@ async def run_backfill_cli(days: int, *, clock: Clock = _utc_now) -> int:
         ):
             print("error: refusing a TWS login with a non-paper account", file=sys.stderr)
             return 1
-        report = await backfill(
+        extended = await record_extended(
             actor,
-            con_ids_with_symbols=instruments,
-            days=days,
+            session_date=closed,
+            instruments=gappers,
             pace_seconds=DEFAULT_PACE_SECONDS,
             clock=clock,
         )
-        if report.stopped not in CONNECTION_STOPS:
-            extended = await record_extended(
+        if extended.stopped not in CONNECTION_STOPS:
+            report = await backfill(
                 actor,
-                session_date=closed,
-                instruments=gappers,
+                con_ids_with_symbols=instruments,
+                days=days,
                 pace_seconds=DEFAULT_PACE_SECONDS,
                 clock=clock,
+                deadline=deadline,
             )
-        if extended is not None and extended.stopped not in CONNECTION_STOPS:
+        if qualify_tonight and report is not None and report.stopped not in CONNECTION_STOPS:
             try:
                 qualification = await qualify_next_session(
                     actor, now=clock(), pace_seconds=QUALIFY_PACE_SECONDS, clock=clock
@@ -1007,15 +1090,18 @@ async def run_backfill_cli(days: int, *, clock: Clock = _utc_now) -> int:
         return 1
     finally:
         await actor.disconnect()
-    print(format_backfill_report(report, universe_date=universe_date))
-    if extended is not None:
-        print(format_extended_report(extended))
+    if extended is None:  # pragma: no cover - every path above sets it or returns
+        return 1
+    print(format_extended_report(extended))
+    if report is not None:
+        print(format_backfill_report(report, universe_date=universe_date))
     if qualification is not None:
         print(format_qualification_report(qualification))
-    else:
+    elif qualify_tonight:
         print("Next session not qualified tonight: the screener qualifies it at 08:00.")
-    nightly_done = extended is not None and extended.stopped is None and qualification is not None
-    return 0 if report.completed and nightly_done else 1
+    recorded = report is not None and (report.completed or report.stopped == STOP_DEADLINE)
+    qualified = qualification is not None or not qualify_tonight
+    return 0 if extended.stopped is None and recorded and qualified else 1
 
 
 __all__ = [
@@ -1025,8 +1111,10 @@ __all__ = [
     "MAX_BACKFILL_DAYS",
     "MAX_GAP_CANDIDATES",
     "RECORDER_MAX_CONTRACTS",
+    "RECORDER_WINDOW",
     "RECORDER_WINDOW_SECONDS",
     "RESEARCH_CLIENT_ID",
+    "STOP_DEADLINE",
     "BackfillReport",
     "ExtendedHistorySource",
     "ExtendedReport",
@@ -1049,6 +1137,7 @@ __all__ = [
     "qualify_next_session",
     "record_extended",
     "record_today",
+    "regular_hours_deadline",
     "request_days",
     "run_backfill_cli",
     "split_sessions",

@@ -35,13 +35,13 @@ from trading.market.ibkr_boundary import (
     DailyBarBatch,
     IBKRContractDetails,
     MarketDataQualityError,
+    is_competing_session_report,
     liquidity_profile,
 )
 from trading.market.tws_actor import (
     TWSCompetingSessionError,
     TWSConnectionError,
     TWSRequestError,
-    is_competing_session_report,
 )
 
 logger = logging.getLogger("autotrader.shadow.screener")
@@ -73,6 +73,12 @@ MIN_AVG_DOLLAR_VOLUME = Decimal("20000000")
 ERROR_REASON_PREFIX = "error: "
 PACING_BACKOFF_SECONDS = 15.0
 # The daily ATR stored beside each qualification (metadata for the manager).
+# Qualifying the next session's watchlist the evening before (after the
+# recorder) is OFF: it would read the closed session's daily bar before IBKR's
+# overnight volume revisions, which changes the real MOMO's inputs and their
+# timing (review R6). The code stays for a reviewed change to switch on; then
+# the 08:00 qualification, untouched, behaves exactly as deployed (694cc1a).
+EVENING_QUALIFICATION_ENABLED = False
 DAILY_ATR_PERIOD = 14
 DAILY_ATR_QUANTUM = Decimal("0.0001")
 
@@ -1162,6 +1168,7 @@ async def qualify_universe(
 
 __all__ = [
     "DAILY_ATR_PERIOD",
+    "EVENING_QUALIFICATION_ENABLED",
     "ERROR_REASON_PREFIX",
     "EXCHANGE_HINTS",
     "MAX_PRICE",

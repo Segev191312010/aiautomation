@@ -14,6 +14,7 @@ from decimal import Decimal
 from hashlib import sha256
 import importlib.util
 import json
+import logging
 from pathlib import Path
 import random
 import sqlite3
@@ -1226,7 +1227,10 @@ async def test_the_first_sweep_requalifies_an_evening_row_whose_prior_close_chan
 
 
 @pytest.mark.asyncio
-async def test_the_loop_rechecks_once_per_session(database, monkeypatch) -> None:
+@pytest.mark.parametrize("evening_qualification", [False, True])
+async def test_the_loop_rechecks_once_per_session_only_after_evening_qualification(
+    database, monkeypatch, evening_qualification
+) -> None:
     calls: list[date] = []
 
     async def recheck(actor: Any, sweep: Any, *, session_date: date, **kwargs: Any) -> Any:
@@ -1234,6 +1238,7 @@ async def test_the_loop_rechecks_once_per_session(database, monkeypatch) -> None
         return screener_module.PriorCloseRecheck(checked=0)
 
     monkeypatch.setattr(service, "recheck_session_prior_closes", recheck)
+    monkeypatch.setattr(service, "EVENING_QUALIFICATION_ENABLED", evening_qualification)
     clock = FakeClock(at(10, 0))
     actor = LoopActor(clock, answers={})
 
@@ -1242,7 +1247,191 @@ async def test_the_loop_rechecks_once_per_session(database, monkeypatch) -> None
         max_sweeps=3, include_scans=True, retention=False,
     )
 
-    assert calls == [DAY]
+    # Off (the default, R6): no evening rows exist, so nothing is re-checked, as deployed.
+    assert calls == ([DAY] if evening_qualification else [])
+
+
+class SlowSweepActor(LoopActor):
+    """Every snapshot batch takes 56 s: a sweep with no idle time left."""
+
+    async def market_snapshots(self, con_ids: Any, *, timeout_seconds: float = 3.0) -> Any:
+        assert self.clock is not None
+        self.clock.now += timedelta(seconds=46)
+        return await super().market_snapshots(con_ids, timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_without_idle_time_says_the_day_universe_was_skipped(database, caplog) -> None:
+    """M-5: visible in the log, never fixed by stretching the sweep."""
+    await replace_universe_source("watchlist", [universe_row("AAA", 1)])
+    await upsert_daily(qualified_row("AAA", 1))
+    clock = FakeClock(at(10, 0))
+    actor = SlowSweepActor(
+        clock,
+        answers={},
+        scans={"HOT_BY_VOLUME": [scan_row(101, "NEW", 1)]},
+        histories={101: history_batch(101)},
+        details={101: stock_details(101, "NEW")},
+    )
+    caplog.set_level("INFO", logger="autotrader.shadow.screener")
+
+    await service._screener_loop(
+        actor, interval_seconds=60, clock=clock, sleep=clock.sleep, monotonic=clock.monotonic,
+        max_sweeps=2, include_scans=True, retention=False,
+    )
+
+    skipped = [record for record in caplog.records if "day universe skipped" in record.getMessage()]
+    assert [record.getMessage() for record in skipped] == [
+        "day universe skipped: no idle time (sweep 56.0s)"
+    ] * 2
+    assert {record.levelname for record in skipped} == {"INFO"}
+    # No admission ran; the hot-35's own scan addition is unaffected.
+    assert actor.detail_calls == [] and await load_day_universe(DAY) == ()
+    snapshot = await latest_snapshot(DAY)
+    assert snapshot is not None and [row.con_id for row in snapshot.rows if row.source == "ibkr_scan"] == [101]
+
+
+# --- R6: with evening qualification off, 08:00 qualifies exactly as deployed ----------------------
+
+QUALIFY_WATCHLIST = [(f"Q{index:02d}", 400 + index) for index in range(1, 13)]
+QUALIFY_ETF = 409  # its recorded IBKR stock type rejects it without a request
+# sha256 of the 08:00 qualification's history requests and stored outcomes
+# (qualify_digest, daily_atr aside) that the DEPLOYED universe.py (694cc1a)
+# produces on this fixture, computed by running that file itself.
+QUALIFY_DIGEST = "360512349554aade82a2436c97a30c9703f2efb721c9d17d64cb6a43ac9027d6"
+
+
+def qualify_histories() -> dict[int, DailyBarBatch | Exception]:
+    histories: dict[int, DailyBarBatch | Exception] = {}
+    for index, (_symbol, con_id) in enumerate(QUALIFY_WATCHLIST, start=1):
+        close = Decimal("400") if index == 3 else Decimal(20 + 7 * index)
+        bars = tuple(
+            IBKRDailyBar(
+                con_id=con_id,
+                session_date=DAY - timedelta(days=offset),
+                close=close + Decimal(offset % 3),
+                volume=Decimal(300_000 + 10_000 * index + offset),
+                high=close + Decimal("1.5"),
+                low=close - Decimal("1.25"),
+            )
+            for offset in range(30, 0, -1)
+        )
+        histories[con_id] = DailyBarBatch(bars=bars[-5:] if index == 5 else bars)
+    histories[400 + 7] = TWSRequestError("TWS daily-history request timed out")
+    return histories
+
+
+async def seed_qualify_universe() -> None:
+    from trading.market.universe import stock_type_cache
+
+    await replace_universe_source(
+        "watchlist", [universe_row(symbol, con_id) for symbol, con_id in QUALIFY_WATCHLIST]
+    )
+    stock_type_cache().record(
+        {con_id: ("ETF" if con_id == QUALIFY_ETF else "COMMON") for _symbol, con_id in QUALIFY_WATCHLIST}
+    )
+
+
+def qualify_document(requests: list[int], rows: Any) -> dict[str, Any]:
+    """What MOMO's inputs depend on: requests, their order, and every stored outcome."""
+    return {
+        "requests": list(requests),
+        "rows": [
+            [row.con_id, row.symbol, _text(row.prior_close), _text(row.avg_daily_volume_shares),
+             _text(row.avg_dollar_volume), row.qualified, row.reason, row.observed_at.isoformat()]
+            for row in sorted(rows, key=lambda item: item.con_id)
+        ],
+    }
+
+
+def _text(value: Decimal | None) -> str | None:
+    return None if value is None else format(value, "f")
+
+
+def qualify_digest(requests: list[int], rows: Any) -> str:
+    document = json.dumps(qualify_document(requests, rows), sort_keys=True, separators=(",", ":"))
+    return sha256(document.encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_golden_08_00_qualification_matches_the_deployed_code_with_evening_qualification_off(
+    database, monkeypatch
+) -> None:
+    """R6: no evening rows exist, so 08:00 requests and stores what the deployed code does."""
+    monkeypatch.setattr(service, "DAILY_HISTORY_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(service, "CONTRACT_DETAILS_MIN_INTERVAL_SECONDS", 0.0)
+    assert service.EVENING_QUALIFICATION_ENABLED is False
+    await seed_qualify_universe()
+    assert await load_daily(DAY) == ()  # nothing qualified the evening before
+    clock = FakeClock(at(8, 0))
+    actor = LoopActor(clock, answers={}, histories=qualify_histories())
+
+    await service._screener_loop(
+        actor, interval_seconds=60, clock=clock, sleep=clock.sleep, monotonic=clock.monotonic,
+        max_sweeps=1, include_scans=True, retention=False,
+    )
+
+    rows = await load_daily(DAY)
+    # Every resolved name but the ETF, in the universe's order, once.
+    assert actor.history_calls == [con_id for _symbol, con_id in QUALIFY_WATCHLIST if con_id != QUALIFY_ETF]
+    by_id = {row.con_id: row for row in rows}
+    assert (by_id[403].reason, by_id[405].reason, by_id[409].reason) == (
+        "price_out_of_range", "insufficient_daily_history", "stock_type_ETF",
+    )
+    assert by_id[407].transient
+    assert qualify_digest(actor.history_calls, rows) == QUALIFY_DIGEST
+    # daily_atr is the one column the deployed code left NULL: metadata MOMO never reads.
+    assert by_id[401].daily_atr is not None
+
+
+# --- R5: a login elsewhere is said at once, in a line the notifier matches ------------------------
+
+
+def test_the_competing_login_line_is_logged_once_a_minute_and_matches_the_notifier(caplog) -> None:
+    from trading.operations.notify_service import ibkr_session_problem
+
+    now = [0.0]
+    listener = service.competing_login_listener(lambda: now[0])
+    report = (
+        "TWS error 162: Historical Market Data Service error message:"
+        "Trading TWS session is connected from a different IP address"
+    )
+    caplog.set_level("ERROR", logger="autotrader.shadow.screener")
+
+    listener(report)
+    now[0] = 59.0
+    listener(report)
+    now[0] = 60.0
+    listener(report)
+
+    records = [record for record in caplog.records if record.name == "autotrader.shadow.screener"]
+    assert [record.levelname for record in records] == ["ERROR", "ERROR"]
+    message = records[0].getMessage()
+    assert message == f"IBKR login active elsewhere (phone/web) — log out there ({report})"
+    # The exact lines of screener.log (the child's console) and shadow.log.
+    console = logging.Formatter("%(asctime)s %(levelname)s %(message)s").format(records[0])
+    shadow = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s").format(records[0])
+    for line in (console, shadow):
+        assert ibkr_session_problem(line) == "competing_login"
+
+
+@pytest.mark.asyncio
+async def test_the_screener_says_a_login_elsewhere_the_moment_tws_reports_it(caplog) -> None:
+    from tests.test_tws_actor import FakeTWSClient, config as actor_config
+    from trading.market.tws_actor import TWSPaperActor
+
+    actor = TWSPaperActor(actor_config(), client_factory=lambda callbacks: FakeTWSClient(callbacks))
+    service._listen_for_competing_logins(actor, lambda: 0.0)
+    await actor.connect()
+    caplog.set_level("ERROR", logger="autotrader.shadow.screener")
+
+    # A global notice fails no request, yet the screener says it at once.
+    actor._on_error(-1, 10197, "No market data during competing live session")
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "IBKR login active elsewhere (phone/web) — log out there"
+        " (TWS error 10197: No market data during competing live session)"
+    ]
 
 
 @pytest.mark.asyncio

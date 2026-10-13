@@ -61,6 +61,7 @@ from trading.market.tws_actor import (
     TWSPaperActor,
 )
 from trading.market.universe import (
+    EVENING_QUALIFICATION_ENABLED,
     MAX_WATCHLIST_BYTES,
     ImportReport,
     QualificationReport,
@@ -185,6 +186,35 @@ def screener_actor_config(config: ShadowRuntimeConfig) -> TWSActorConfig:
 
 def default_actor_factory(config: TWSActorConfig) -> ScreenerActor:
     return TWSPaperActor(config)
+
+
+def competing_login_listener(
+    monotonic: Callable[[], float] = monotonic_time.monotonic,
+) -> Callable[[str], None]:
+    """Log the competing-login ERROR the moment TWS reports it, at most once a minute.
+
+    The screener only learns of a login elsewhere through its own requests;
+    some of those failures are absorbed (a quote-only pass, a global notice),
+    so the actor's listener says it at once instead of when a sweep fails.
+    The line contains "login active elsewhere" and IBKR's own text, which the
+    notifier's competing-login pattern matches.
+    """
+    last: list[float] = []
+
+    def listener(report: str) -> None:
+        now = monotonic()
+        if last and now - last[0] < COMPETING_SESSION_RETRY_SECONDS:
+            return
+        last[:] = [now]
+        logger.error("%s (%s)", COMPETING_SESSION_MESSAGE, report)
+
+    return listener
+
+
+def _listen_for_competing_logins(actor: ScreenerActor, monotonic: Callable[[], float]) -> None:
+    attach = getattr(actor, "set_competing_session_listener", None)
+    if callable(attach):
+        attach(competing_login_listener(monotonic))
 
 
 def _build_actor(actor_factory: ActorFactory | None, config: TWSActorConfig) -> ScreenerActor:
@@ -390,6 +420,7 @@ async def run_screener_once(
     config = screener_actor_config(runtime_config)
     with tws_client_lock(config.client_id, "screener run --once"):
         actor = _build_actor(actor_factory, config)
+        _listen_for_competing_logins(actor, monotonic_time.monotonic)
         await connect_actor(actor)
         try:
             qualification = await _qualify(actor, session_date, clock=clock, pacer=pacer)
@@ -481,6 +512,7 @@ async def _screener_loop(
     include_scans: bool,
     retention: bool,
 ) -> int:
+    _listen_for_competing_logins(actor, monotonic)
     history_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
     # Admission paces its own history requests: the hot-35's scan additions
     # keep their pacer, and so their request timing, exactly as before.
@@ -537,13 +569,16 @@ async def _screener_loop(
                     actor,
                     session_date=session_date,
                     clock=clock,
+                    monotonic=monotonic,
                     scan_merge=scan_merge,
                     context_etfs=context_etfs,
                     day_universe=include_scans,
                     day_universe_deadline=next_sweep_deadline,
                 )
                 sweeps += 1
-                if session_date not in rechecked_dates:
+                if EVENING_QUALIFICATION_ENABLED and session_date not in rechecked_dates:
+                    # Only evening-qualified rows can miss an overnight split;
+                    # with evening qualification off there are none (as deployed).
                     await recheck_session_prior_closes(
                         actor,
                         sweep,
@@ -552,7 +587,13 @@ async def _screener_loop(
                         clock=clock,
                     )
                     rechecked_dates.add(session_date)
-                if include_scans:
+                if include_scans and monotonic() >= next_sweep_deadline:
+                    # Visible, never fixed by stretching the sweep (Principle 1).
+                    logger.info(
+                        "day universe skipped: no idle time (sweep %.1fs)",
+                        sweep.payload.sweep_seconds,
+                    )
+                elif include_scans:
                     # The idle rest of the interval; never past the next sweep.
                     await admit_day_universe(
                         actor,
@@ -601,6 +642,7 @@ async def _screener_loop(
 __all__ = [
     "CLIENT_LOCK_TEMPLATE",
     "COMPETING_SESSION_MESSAGE",
+    "competing_login_listener",
     "SCREENER_CLIENT_ID_OFFSET",
     "ClientIdInUseError",
     "ScreenerActor",
