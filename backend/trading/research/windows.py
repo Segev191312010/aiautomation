@@ -33,9 +33,11 @@ from trading.contracts import CompletedBar, RuleSetup
 from trading.research.bars_store import NEW_YORK, BarsStore, BarsStoreError, StoredDay, previous_session
 from trading.research.costs import DEFAULT_COST_MODEL, CostModel
 from trading.research.replay import (
+    EXTENDED_BAR_STRATEGIES,
     POLL_DELAY,
     UNREPLAYABLE,
     _candidate,
+    no_extended_bars,
     flatten_at,
     r_multiple,
     simulate_bracket,
@@ -293,6 +295,10 @@ def sweep_family(
     key = FAMILY_REGISTRY_KEYS[family]
     if key in UNREPLAYABLE:
         return FamilyResearch(family=family, status="skipped", note=UNREPLAYABLE[key].note)
+    # The sweep replays regular-hours days only; GAP_GO's gap and trigger need
+    # pre-market bars, so it is never swept on regular-hours bars alone.
+    if key in EXTENDED_BAR_STRATEGIES:
+        return FamilyResearch(family=family, status="skipped", note=no_extended_bars(key).note)
     candidates = tuple(windows or SWEEP_WINDOWS[family])
     core_window = V1_WINDOWS[family]
     wide = windowed_strategy(family, widest_window(candidates))

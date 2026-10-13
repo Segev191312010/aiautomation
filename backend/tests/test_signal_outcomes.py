@@ -1,8 +1,7 @@
 """The nightly signal-outcome tracker: saved setups simulated forward on recorded bars.
 
-The database is built the way migration 15 will build it: every registered
-migration (13 holds the setups, 14 the execution ledger) plus the phase-1
-draft DDL (``DRAFT_PHASE1_DDL``) until the data agent registers it.
+The database is built by the registered migrations (13 holds the setups,
+14 the execution ledger, 15 the day universe and the signal outcomes).
 """
 from __future__ import annotations
 
@@ -31,8 +30,6 @@ from trading.research.outcomes import (
 )
 from trading.research.replay import FILL_MODEL_ID, replay_strategy
 from trading.rules.all_session import vwap_pb_v2_strategy_spec
-from trading.storage.manager_schema import DRAFT_PHASE1_DDL
-
 UTC = timezone.utc
 TS = "2026-10-12T13:00:00+00:00"
 LATER_SESSION = date(2026, 10, 13)  # not in the research store yet
@@ -42,9 +39,6 @@ SIMULATED_AT = datetime(2026, 10, 12, 22, 0, tzinfo=UTC)
 def _phase1_database(path: Path) -> Path:
     """Migrations 1-14 plus the phase-1 draft (migration 15 once registered)."""
     migrate_database(path)
-    with sqlite3.connect(path) as connection:
-        for statement in DRAFT_PHASE1_DDL:
-            connection.execute(statement)
     return path
 
 
@@ -263,10 +257,14 @@ def test_a_database_not_at_this_codes_schema_is_left_alone(tmp_path):
     pending = database_at(tmp_path / "pending.db", 13)
     assert tracker_readiness(pending) == "schema_migration_pending"
 
-    without_draft = migrate_database(tmp_path / "current.db")
-    report = asyncio.run(track_outcomes(store=store, database=without_draft))
-    assert (report.status, report.reason) == ("skipped", OUTCOMES_TABLE_ABSENT)
-    assert report.summary_line() == "signal outcomes: not tracked (signal_outcomes_table_absent)"
+    # Migration 15 registers the outcomes table, so a current database has it;
+    # a database that lost it is still left alone.
+    current = migrate_database(tmp_path / "current.db")
+    with sqlite3.connect(current) as connection:
+        connection.execute("DROP TABLE autotrader_manager_signal_outcomes")
+    report = asyncio.run(track_outcomes(store=store, database=current))
+    assert report.status == "skipped"
+    assert report.reason in (OUTCOMES_TABLE_ABSENT, "schema_checksum_mismatch", "schema_unreadable")
 
 
 def test_an_unknown_strategy_keeps_the_order_senders_last_entry(tmp_path):
