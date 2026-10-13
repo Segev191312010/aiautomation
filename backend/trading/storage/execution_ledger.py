@@ -1,4 +1,4 @@
-"""Persistence for the reviewed execution engine (migration 13 tables).
+"""Persistence for the reviewed execution engine (the execution-ledger migration's tables).
 
 The repository records what the engine decided and what IBKR reported; it
 never talks to IBKR. Every write that must precede broker I/O commits before
@@ -415,7 +415,7 @@ def risk_book_from(
 
 
 class ExecutionLedger:
-    """Async repository over the migration-13 tables (``db.core`` connection)."""
+    """Async repository over the execution-ledger tables (``db.core`` connection)."""
 
     def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
         self._clock = clock or (lambda: datetime.now(UTC))

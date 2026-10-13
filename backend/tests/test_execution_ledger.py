@@ -1,4 +1,7 @@
-"""Migration 13 (execution engine ledger): pinned identity, clean application, and its invariants.
+"""The execution-ledger migration: pinned identity, clean application, and its invariants.
+
+Its number lives only in ``EXECUTION_LEDGER_MIGRATION`` (13 on this branch, renumbered when the
+engine merges after the main line's own migration 13); every check here derives from it.
 
 The triggers are the last line of defence: whatever the engine code does, the
 ledger refuses to resend a decision, rewrite a placed order, decrease a fill,
@@ -32,12 +35,14 @@ from trading.storage.execution_ledger import (
     order_ref,
     parse_order_ref,
 )
-from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_SCHEMA
+from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION, EXECUTION_LEDGER_SCHEMA
 
 
-# Pinned: once migration 13 is applied to the owner's database, any edit to its schema or apply
-# function would make every later start fail closed with "checksum mismatch".
-MIGRATION_13_CHECKSUM = "48ec49e6a9b866bef124f6d004d6b72df2410d59912a0c3a64b0c418a59c4d02"
+# Pinned: once the ledger migration is applied to the owner's database, any edit to its schema or
+# apply function would make every later start fail closed with "checksum mismatch". The checksum
+# covers the migration's number too: renumbering it pins a new one.
+LEDGER_MIGRATION_CHECKSUM = "48ec49e6a9b866bef124f6d004d6b72df2410d59912a0c3a64b0c418a59c4d02"
+BEFORE_LEDGER = list(range(1, EXECUTION_LEDGER_MIGRATION))  # the versions an older database has
 ACCOUNT = "DU1234567"
 SESSION = date(2026, 10, 13)
 NOW = datetime(2026, 10, 13, 14, 0, tzinfo=timezone.utc)
@@ -47,18 +52,30 @@ NEW_TABLES = {
 }
 
 
-def _migration_13() -> migrations.Migration:
-    return next(item for item in migrations.MIGRATIONS if item.version == 13)
+def _ledger_migration() -> migrations.Migration:
+    return next(item for item in migrations.MIGRATIONS if item.name == "execution-engine-ledger")
 
 
-def test_migration_13_identity_and_checksum_are_pinned() -> None:
-    migration = _migration_13()
+def _all_versions() -> list[int]:
+    return [item.version for item in migrations.MIGRATIONS]
+
+
+def test_the_ledger_migration_identity_and_checksum_are_pinned() -> None:
+    migration = _ledger_migration()
     assert (migration.version, migration.name, migration.signature) == (
-        13, "execution-engine-ledger", "v1-execution-engine-ledger-20261013"
+        EXECUTION_LEDGER_MIGRATION, "execution-engine-ledger", "v1-execution-engine-ledger-20261013"
     )
     assert migration.schema_payload == EXECUTION_LEDGER_SCHEMA
-    assert migration.checksum == MIGRATION_13_CHECKSUM
-    assert [item.version for item in migrations.MIGRATIONS] == list(range(1, 14))
+    assert migration.checksum == LEDGER_MIGRATION_CHECKSUM
+    assert _all_versions() == list(range(1, len(migrations.MIGRATIONS) + 1))
+
+
+def test_the_ledger_migration_number_is_written_in_one_place_only() -> None:
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[1]
+    source = (backend / "trading" / "storage" / "migrations.py").read_text()
+    assert "EXECUTION_LEDGER_MIGRATION, \"execution-engine-ledger\"" in source
 
 
 async def _objects(path: Path) -> dict[str, set[str]]:
@@ -77,12 +94,12 @@ async def _versions(path: Path) -> list[int]:
             return [int(row[0]) for row in await cursor.fetchall()]
 
 
-async def test_a_fresh_database_gets_migration_13_once(tmp_path, monkeypatch) -> None:
+async def test_a_fresh_database_gets_the_ledger_migration_once(tmp_path, monkeypatch) -> None:
     path = tmp_path / "fresh.db"
     monkeypatch.setattr(cfg, "DB_PATH", str(path))
     await init_db()
     await init_db()
-    assert await _versions(path) == list(range(1, 14))
+    assert await _versions(path) == _all_versions()
     objects = await _objects(path)
     assert NEW_TABLES <= objects["table"]
     assert {name for name in objects["trigger"] if name.startswith("autotrader_exec_")} >= {
@@ -92,10 +109,10 @@ async def test_a_fresh_database_gets_migration_13_once(tmp_path, monkeypatch) ->
     }
 
 
-async def test_migration_13_applies_on_top_of_a_version_12_database(tmp_path, monkeypatch) -> None:
-    path = tmp_path / "v12.db"
+async def test_the_ledger_migration_applies_on_top_of_the_previous_version(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "previous.db"
     full = migrations.MIGRATIONS
-    monkeypatch.setattr(migrations, "MIGRATIONS", full[:12])
+    monkeypatch.setattr(migrations, "MIGRATIONS", full[:EXECUTION_LEDGER_MIGRATION - 1])
     async with aiosqlite.connect(path) as db:
         await migrations.apply_migrations(db)
         await db.execute(
@@ -105,11 +122,11 @@ async def test_migration_13_applies_on_top_of_a_version_12_database(tmp_path, mo
         await db.commit()
     assert "autotrader_exec_outbox" not in (await _objects(path))["table"]
     monkeypatch.setattr(migrations, "MIGRATIONS", full)
-    backup = tmp_path / "before-migration-13.db"
+    backup = tmp_path / "before-the-ledger-migration.db"
     async with aiosqlite.connect(path) as db:
         await migrations.apply_migrations(db, backup_path=backup)
-    assert await _versions(path) == list(range(1, 14))
-    assert await _versions(backup) == list(range(1, 13))
+    assert await _versions(path) == _all_versions()
+    assert await _versions(backup) == BEFORE_LEDGER
     assert NEW_TABLES <= (await _objects(path))["table"]
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT COUNT(*) FROM autotrader_universe").fetchone() == (1,)
@@ -121,7 +138,9 @@ LIVE_DB = Path.home() / ".local" / "share" / "autotrader-v1" / "autotrader.db"
 
 
 @pytest.mark.skipif(not LIVE_DB.is_file(), reason="no live autotrader database on this machine")
-async def test_migration_13_applies_cleanly_to_a_read_only_copy_of_the_live_database(tmp_path, monkeypatch) -> None:
+async def test_the_ledger_migration_applies_cleanly_to_a_read_only_copy_of_the_live_database(
+    tmp_path, monkeypatch
+) -> None:
     from tests.test_manual_orders_migration import _row_counts, _snapshot_live_database
 
     copy = tmp_path / "live-copy.db"
@@ -130,7 +149,7 @@ async def test_migration_13_applies_cleanly_to_a_read_only_copy_of_the_live_data
     monkeypatch.setattr(cfg, "DB_PATH", str(copy))
     await init_db()
     after = await _row_counts(copy)
-    assert await _versions(copy) == list(range(1, 14))
+    assert await _versions(copy) == _all_versions()
     assert {table: after[table] for table in NEW_TABLES} == {table: 0 for table in NEW_TABLES}
     untouched = {table: count for table, count in before.items()
                  if table not in ("users", "autotrader_schema_migrations")}

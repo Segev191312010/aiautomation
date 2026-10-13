@@ -1,4 +1,4 @@
-"""Schema for the reviewed execution engine's ledger (migration 13).
+"""Schema for the reviewed execution engine's ledger (the execution-ledger migration).
 
 The engine (``trading/execution/live_executor.py``) is built but not wired:
 nothing in the supervisor runs it, and the PAPER bridge stays the only order
@@ -23,6 +23,11 @@ Safety properties the triggers enforce, so no code path can bypass them:
 """
 from __future__ import annotations
 
+
+# The ledger migration's number: the ONLY place it is written. It is 13 on this branch; the main
+# line takes 13 for its own tables, so this becomes the next free number when the engine merges
+# (its checksum, which covers the number, is pinned again then). Everything else derives from it.
+EXECUTION_LEDGER_MIGRATION = 13
 
 EXECUTION_LEDGER_SCHEMA = (
     # ---- PAPER authority: explicit, append-only promotion records ---------------
@@ -391,4 +396,4 @@ EXECUTION_LEDGER_SCHEMA = (
 )
 
 
-__all__ = ["EXECUTION_LEDGER_SCHEMA"]
+__all__ = ["EXECUTION_LEDGER_MIGRATION", "EXECUTION_LEDGER_SCHEMA"]

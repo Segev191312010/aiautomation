@@ -1,8 +1,9 @@
 """Code-owned PAPER authority for the reviewed execution engine.
 
 PAPER order authority for the engine comes from exactly one place: an
-explicit, append-only promotion record (``autotrader_exec_promotions``,
-migration 13) written by ``autotraderctl execution promote``. Nothing else can
+explicit, append-only promotion record (``autotrader_exec_promotions``, in
+the execution-ledger migration) written by ``autotraderctl execution
+promote``. Nothing else can
 grant it:
 
 * only strategies whose catalogue name starts with a code-owned prefix

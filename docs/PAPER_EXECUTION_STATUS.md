@@ -92,11 +92,12 @@ to start while the bridge runs (a `paper_bridge.py` process, or a bridge
 heartbeat under 60 s old) or after the session's stop time. What it adds over
 the bridge:
 
-- a SQLite ledger (migration 13) instead of a JSON state file: an outbox keyed
-  by decision id written before any order, brackets, legs tagged
-  `at1:<bracket>:P|T|S`, fills keyed by execId with commission reports, and
-  append-only order events; a bracket still being sent at a restart becomes
-  `sent` when IBKR reports its legs and `unknown` (never resent) otherwise;
+- a SQLite ledger (its own migration; see "Migration numbering") instead of a
+  JSON state file: an outbox keyed by decision id written before any order,
+  brackets, legs tagged `at1:<bracket>:P|T|S`, fills keyed by execId with
+  commission reports, and append-only order events; a bracket still being
+  sent at a restart becomes `sent` when IBKR reports its legs and `unknown`
+  (never resent) otherwise;
 - order ids above TWS's next valid id, the ledger's highest id and every id
   TWS reports for this client, and a paper-only check with `reqIds` on every
   reconnect;
@@ -184,6 +185,20 @@ signatures, not captured from a live TWS.
     "Migration numbering" below), not on this branch.
   - Status: R-1 to R-6 are being fixed on this branch, each with a
     regression test named after it.
+
+### Migration numbering
+
+The engine's ledger is migration 13 on this branch and has never been
+applied to the owner's database (it is at 12). The main line is moving to
+explicit migrations: children refuse to start while a migration is pending,
+and `autotraderctl db migrate` takes a lock and a unique backup, which also
+closes R-7. The main line takes migration 13 for its own manager tables, so
+the ledger migration is renumbered to the next free number when the engine
+merges, not before. Its number is written in one place only,
+`EXECUTION_LEDGER_MIGRATION` in `trading/storage/execution_ledger_schema.py`;
+the migration list, the tests and the CLI derive from it. Its pinned
+checksum covers the number, so it is pinned again at the renumbering. Until
+then, on this branch, any `init_db` still applies pending migrations (R-7).
 
 ## Still to do
 

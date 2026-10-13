@@ -27,7 +27,7 @@ from trading.storage.schema import (
 )
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
 from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
-from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_SCHEMA
+from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION, EXECUTION_LEDGER_SCHEMA
 
 
 MigrationApply = Callable[[aiosqlite.Connection], Awaitable[None]]
@@ -382,7 +382,7 @@ MIGRATIONS = (
         _manual_orders_ledger, MANUAL_ORDERS_SCHEMA,
     ),
     Migration(
-        13, "execution-engine-ledger", "v1-execution-engine-ledger-20261013",
+        EXECUTION_LEDGER_MIGRATION, "execution-engine-ledger", "v1-execution-engine-ledger-20261013",
         _live_execution_ledger, EXECUTION_LEDGER_SCHEMA,
     ),
 )

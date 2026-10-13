@@ -7,6 +7,7 @@ import pytest
 
 from trading.cli import main
 from trading.execution.promotion import engine_code_digest
+from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION
 
 
 ACCOUNT = "DU1234567"
@@ -97,10 +98,10 @@ def test_status_is_read_only(tmp_path, capsys) -> None:
     assert not missing.exists()
 
     old = tmp_path / "old.db"
-    sqlite3.connect(old).close()  # a database without migration 13
+    sqlite3.connect(old).close()  # a database without the execution-ledger migration
     assert main(["execution", "status", "--db-path", str(old)]) == 0
     assert capsys.readouterr().out.strip() == (
-        "execution ledger not installed (migration 13 not applied): no PAPER promotion"
+        f"execution ledger not installed (migration {EXECUTION_LEDGER_MIGRATION} not applied): no PAPER promotion"
     )
     with sqlite3.connect(old) as connection:
         assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []

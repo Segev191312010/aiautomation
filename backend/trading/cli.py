@@ -335,6 +335,7 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
         require_grantable,
         revoke_promotion,
     )
+    from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION
 
     if arguments.action == "promote" and not arguments.confirm:
         print("error: promote writes PAPER authority for the execution engine; re-run with --confirm",
@@ -347,14 +348,15 @@ async def _execution_command(arguments: argparse.Namespace) -> int:
     try:
         digest = engine_code_digest()
         if arguments.action == "status":
-            # Read-only: never creates a database, and one without migration 13 has no promotions.
+            # Read-only: never creates a database, and one without the ledger migration has no promotions.
             if cfg.DB_PATH != ":memory:" and not Path(cfg.DB_PATH).expanduser().is_file():
                 print("no autotrader database: no PAPER promotion")
                 return 0
             try:
                 records = await promotion_history(account=arguments.account)
             except aiosqlite.OperationalError:
-                print("execution ledger not installed (migration 13 not applied): no PAPER promotion")
+                print(f"execution ledger not installed (migration {EXECUTION_LEDGER_MIGRATION} not applied):"
+                      " no PAPER promotion")
                 return 0
             print(f"execution engine code: {digest}")
             print("execution engine: built, not wired (the PAPER bridge is the only order sender)")
