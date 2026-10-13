@@ -81,35 +81,82 @@ Order sources:
   loop by up to 20 s, a few-second startup window, and two untested guards
   (startup replay exclusion, the SLD path).
 
-## The execution engine (C2): built, not wired, review pending
+## The execution engine (C2): built, not wired, review NOT-READY, fixes awaiting re-review
 
 `backend/trading/execution/live_executor.py` is built and tested against a fake
 TWS only. Nothing runs it and it cannot send an order today: no supervisor
 child, LaunchAgent or CLI command starts it, and `start()` refuses without an
-explicit promotion record for its exact code (`autotraderctl execution promote
---confirm`, MOMO_HOD strategies and DU accounts only). What it adds over the
-bridge:
+explicit promotion record for the exact code it runs (`autotraderctl execution
+promote --confirm`, MOMO_HOD strategies and DU accounts only). It also refuses
+to start while the bridge runs (a `paper_bridge.py` process, or a bridge
+heartbeat under 60 s old) or after the session's stop time. What it adds over
+the bridge:
 
 - a SQLite ledger (migration 13) instead of a JSON state file: an outbox keyed
   by decision id written before any order, brackets, legs tagged
   `at1:<bracket>:P|T|S`, fills keyed by execId with commission reports, and
   append-only order events; a bracket still being sent at a restart becomes
   `sent` when IBKR reports its legs and `unknown` (never resent) otherwise;
-- order ids `max(nextValidId, ledger max + 1)` and a paper-only check with
-  `reqIds` on every reconnect;
-- reconciliation at start, on reconnect and every two minutes, scoped to
-  `at1:`: a mismatch pauses new entries (CRITICAL), exits never pause;
+- order ids above TWS's next valid id, the ledger's highest id and every id
+  TWS reports for this client, and a paper-only check with `reqIds` on every
+  reconnect;
+- reconciliation at start, on reconnect, after TWS error 1101 (which also
+  renews the position and account subscriptions) and every two minutes,
+  scoped to `at1:`: a mismatch pauses new entries (CRITICAL), exits never
+  pause. A short position in a symbol the engine traded today, an entry whose
+  stop died and a running bridge are mismatches too, and the engine never
+  reports FLAT while such a short exists;
 - a shared risk book across strategies: 0.5% per new trade, 1.5% open risk,
   2% realized loss plus open plus new risk, three positions, 25% notional;
-- a flatten fallback when the target cannot be repriced or the reprice is not
-  confirmed: cancel target and stop, confirm both, then one market sell of the
-  ledger quantity capped by the position less every other working sell (never
-  a second sell next to the owner's manual close).
+- the 15:45 target reprice and its fallback (when the target cannot be
+  repriced or the reprice is not confirmed: cancel target and stop, an
+  Inactive one too, confirm both Cancelled or Filled, then one market sell)
+  sell at most the ledger quantity capped by a fresh account position less
+  every other working sell and less what other orders, the TWS GUI's
+  included, sold that the position does not show yet (never a second sell
+  next to the owner's manual close);
+- `autotraderctl execution promote` backs the database up first
+  (`<database dir>/backups/<name>.before-execution-promote-<UTC time>.db`,
+  printed) and refuses when there is no database or the backup fails.
 
 The bridge's review lessons (H1, H2, M1-M4, L1-L8, N1-N7, D3) are ported with a
 regression test each. The recorded TWS callback sequences in
 `backend/tests/fakes/tws_recordings.py` were written from the ibapi 9.81
 signatures, not captured from a live TWS.
+
+### Engine review history
+
+- 2026-10-13: first independent execution-safety review (at 4c755f6) —
+  NOT-READY.
+  - C2-1 (HIGH): the fallback market sell ignored another client's sell (the
+    TWS GUI) that had filled but was not in the position yet, sold the same
+    shares again and then reported FLAT while the account was short.
+  - C2-2 (MEDIUM): new order ids skipped only the ledger's, not this client's
+    live orders, executions and unmanaged orders.
+  - C2-3 (MEDIUM): a slow TWS (no accounts or order id in time) exited 78, so a
+    supervisor would never retry.
+  - C2-4 (MEDIUM): the target reprice was capped by the position only, not by
+    other working sells.
+  - C2-5 to C2-11 (LOW): the fallback sold next to an Inactive leg it never
+    cancelled; a working entry whose stop died was neither flagged nor
+    cancelled; a start after the stop time still flattened, at any hour; the
+    cancel and execution orderRef guards were untested; a missing order id
+    after the fallback's cancels was uncaught; TWS error 1101 was ignored; the
+    code digest left out the kill switch, manual-order and calendar modules,
+    and the engine never checked that its authority named the code it runs.
+  - Also requested: a test for a commission report before its execution, a
+    test that kills the surviving "saved fill rewritten every tick" mutant, a
+    database backup before promote and a hard interlock with the bridge.
+- Fixed on `feat/c2-execution-engine`: every finding and request, each with
+  a regression test named after it in
+  `backend/tests/test_live_executor_review.py` (CLI backup tests in
+  `test_autotraderctl_execution.py`). Every reviewer probe fails on the fixed
+  code, and removing any fix in a scratch copy fails its test. Filled sells of
+  other clients come from `reqCompletedOrders(apiOnly=False)` with their
+  filled quantity and completion time; one without a readable time zone
+  counts as after the entry (its shares stay reserved), and a CRITICAL
+  follows when the position still does not show such a sell after 15 s (the
+  bridge's L-e). A re-review is pending.
 
 ## Still to do
 
@@ -117,12 +164,15 @@ signatures, not captured from a live TWS.
   09:35 one-share test) and the first 15:45 flatten modify against a real TWS.
 - Execution engine: an independent execution-safety re-review of
   `trading/execution/live_executor.py`, `tws_state.py`, `promotion.py`,
-  `trading/storage/execution_ledger*.py` and `trading/risk/book.py` after the
-  fixes for its first review.
+  `trading/storage/execution_ledger*.py`, `trading/risk/book.py` and the
+  promote command in `trading/cli.py` after the fixes for its first review
+  (above).
 - Execution engine: a supervised drill on the paper account that captures the
   recorded callback sequences from a real TWS (bracket fill, partial fill,
-  modify echo, rejected modify, restart mid-send) and checks how TWS reports
-  untransmitted legs after a client crash. The bridge must not run during the
+  modify echo, rejected modify, restart mid-send), checks how TWS reports
+  untransmitted legs after a client crash, and confirms how
+  `reqCompletedOrders(apiOnly=False)` reports a TWS GUI sell (filled quantity,
+  `completedTime` format and time zone). The bridge must not run during the
   drill.
 - Execution engine: a runner (connection, reconnect loop, supervisor child) and
   a decision on how owner manual orders are sent once the bridge is retired;
