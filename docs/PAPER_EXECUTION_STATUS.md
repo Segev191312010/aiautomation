@@ -84,13 +84,21 @@ Order sources:
 ## The execution engine (C2): built, not wired; re-review READY-FOR-DRILL
 
 `backend/trading/execution/live_executor.py` is built and tested against a fake
-TWS only. Nothing runs it and it cannot send an order today: no supervisor
-child, LaunchAgent or CLI command starts it, and `start()` refuses without an
-explicit promotion record for the exact code it runs (`autotraderctl execution
-promote --confirm`, MOMO_HOD strategies and DU accounts only). It also refuses
-to start while the bridge runs (a `paper_bridge.py` process, or a bridge
-heartbeat under 60 s old) or after the session's stop time. What it adds over
-the bridge:
+TWS only. Nothing schedules it: no supervisor child, LaunchAgent or schedule
+starts it. Only `autotraderctl execution run --confirm [--date D]`
+(`trading/execution/runner.py`) starts it, by hand, for the supervised drill.
+Before it contacts TWS, the runner refuses (exit 78) without an explicit
+promotion record for the exact code it runs (`autotraderctl execution promote
+--confirm`, MOMO_HOD strategies and DU accounts only), while the bridge runs (a
+`paper_bridge.py` process in any launch form, or a heartbeat under 60 s old in
+the bridge's own database), with pending or unknown migrations (it never
+migrates), without the shadow configuration's paper account, or on a day
+without a session. `start()` repeats every check once connected. Started
+after the session's stop time, the engine only reports what its ledger holds
+and finishes a fallback sell whose cancels were already sent, before the
+close. It connects with the bridge's order client id; a lost TWS exits 75 and
+is never reconnected in-process (a restart reconciles from the ledger). What
+it adds over the bridge:
 
 - a SQLite ledger (its own migration; see "Migration numbering") instead of a
   JSON state file: an outbox keyed by decision id written before any order,
@@ -114,8 +122,12 @@ the bridge:
   Inactive one too, confirm both Cancelled or Filled, then one market sell)
   sell at most the ledger quantity capped by a fresh account position less
   every other working sell and less what other orders, the TWS GUI's
-  included, sold that the position does not show yet (never a second sell
-  next to the owner's manual close);
+  included, sold since the entry that the position does not show yet (never
+  a second sell next to the owner's manual close). Without a fresh snapshot
+  nothing is sold and the decision is taken again every tick: the start
+  until 10 minutes before the close, the fallback's market sell until the
+  close; shares left without stop, target or working sell are flagged
+  UNPROTECTED at once;
 - `autotraderctl execution promote` backs the database up first
   (`<database dir>/backups/<name>.before-execution-promote-<UTC time>.db`,
   printed) and refuses when there is no database or the backup fails.
@@ -173,9 +185,10 @@ signatures, not captured from a live TWS.
     order's unshown sale: no flatten sell, a false CRITICAL.
   - R-4 (LOW): a restart after the stop time neither finished nor flagged a
     fallback that had already cancelled target and stop.
-  - R-5 (LOW): the bridge interlock missed `python -m scripts_local.paper_bridge`,
-    read the heartbeat from the engine's own database rather than the
-    bridge's, and was tested only with a mocked pgrep.
+  - R-5 (LOW): the bridge interlock missed
+    `python -m scripts_local.paper_bridge`, read the heartbeat from the
+    engine's own database rather than the bridge's, and was tested only with
+    a mocked pgrep.
   - R-6 (LOW): the code digest left out the package `__init__` modules the
     engine imports for their side effects and `db/core.py`; its completeness
     test followed explicit imports only.
@@ -183,8 +196,35 @@ signatures, not captured from a live TWS.
     assistant and supervisor children would apply the ledger migration
     without one. Covered by the explicit-migration work on the main line (see
     "Migration numbering" below), not on this branch.
-  - Status: R-1 to R-6 are being fixed on this branch, each with a
-    regression test named after it.
+- Fixed on `feat/c2-execution-engine`, each with a regression test named
+  after it in `backend/tests/test_live_executor_rereview.py`; removing any
+  fix in a scratch copy fails its test:
+  - R-1: no flatten ends on a missing snapshot. Nothing is sent and the same
+    decision is retried every tick on a fresh snapshot: the start (and a
+    fallback's start) until 10 minutes before the close, the market sell
+    after both cancels until the close, then a CRITICAL; a recorded attempt
+    is still never restarted after a restart [N5]. Shares without stop,
+    target or a working market sell are flagged UNPROTECTED at once.
+  - R-2: a completed sell counts its whole size when it is Filled or reports
+    a filledQuantity of 0. A sell cancelled unfilled after the entry
+    therefore also keeps its shares reserved (no flatten sell for them, a
+    CRITICAL) until the drill shows how TWS reports the field.
+  - R-3: the engine's own legs never count as another order's sale. Each
+    bracket keeps, with its ledger claim, the orders TWS reported completed
+    before its entry (the entry gate reads completed orders too), so an
+    earlier sale never counts whatever its completedTime says; only brackets
+    without that record use the completion time.
+  - R-4: a restart after the stop time flags a fallback that cancelled
+    target and stop as UNPROTECTED and, before the close and after the full
+    start checks, finishes its one market sell.
+  - R-5: the interlock matches the supervisor's launch line, a hand start and
+    the module form; it reads the heartbeat, read-only, from the bridge's
+    own database; a darwin test runs the real pgrep.
+  - R-6: the digest binds the whole import graph of the engine and its
+    runner (package `__init__` modules, `db/core.py` and what they import:
+    37 files); its test walks that graph.
+  - R-7: left to the main line's explicit migrations (below); the runner
+    never migrates.
 
 ### Migration numbering
 
@@ -204,21 +244,19 @@ then, on this branch, any `init_db` still applies pending migrations (R-7).
 
 - Supervised first live runs: the first owner order through the bridge (the
   09:35 one-share test) and the first 15:45 flatten modify against a real TWS.
-- Execution engine: an independent execution-safety re-review of
-  `trading/execution/live_executor.py`, `tws_state.py`, `promotion.py`,
-  `trading/storage/execution_ledger*.py`, `trading/risk/book.py` and the
-  promote command in `trading/cli.py` after the fixes for its first review
-  (above).
-- Execution engine: a supervised drill on the paper account that captures the
-  recorded callback sequences from a real TWS (bracket fill, partial fill,
-  modify echo, rejected modify, restart mid-send), checks how TWS reports
-  untransmitted legs after a client crash, and confirms how
-  `reqCompletedOrders(apiOnly=False)` reports a TWS GUI sell (filled quantity,
-  `completedTime` format and time zone). The bridge must not run during the
-  drill.
-- Execution engine: a runner (connection, reconnect loop, supervisor child) and
-  a decision on how owner manual orders are sent once the bridge is retired;
-  both need their own review.
+- Execution engine: a re-review of the R-1 to R-6 fixes and of the runner
+  (`trading/execution/runner.py` and `execution run` in `trading/cli.py`).
+- Execution engine: the supervised drill on the paper account (the
+  reviewer's checklist), started with `execution run --confirm` on a day the
+  bridge does not run (a supervisor drill mode is still to be built). It
+  captures the recorded callback sequences from a real TWS (bracket fill,
+  partial fill, modify echo, rejected modify, restart mid-send), checks how
+  TWS reports untransmitted legs after a client crash, and records exactly
+  how `reqCompletedOrders(apiOnly=False)` reports TWS GUI sells: the raw
+  filledQuantity of a filled, a partly filled then cancelled and an unfilled
+  cancelled sell, and the `completedTime` format and time zone.
+- Execution engine: a decision on how owner manual orders are sent once the
+  bridge is retired; it needs its own review.
 - Replace the bridge with the execution engine (ledger, reconciliation every 2
   minutes, shared risk book) only after the review, the drill and a clean paper
   week; the old `trading/execution/` transport stack is deleted at the same

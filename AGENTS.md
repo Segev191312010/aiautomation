@@ -14,24 +14,27 @@
   review before it runs unattended.
 
 ## Execution Engine (C2): built, not wired
-- `backend/trading/execution/live_executor.py` is the execution engine (not yet
-  independently reviewed) meant to replace the bridge. It is NOT wired: no
-  supervisor child, LaunchAgent or CLI command runs it, and it must not be
-  wired until it has passed an
+- `backend/trading/execution/live_executor.py` is the execution engine meant to
+  replace the bridge (re-review 2026-10-13: READY-FOR-DRILL, a supervised
+  PAPER drill only). It is NOT wired: no supervisor child, LaunchAgent or
+  schedule runs it, and it must not be wired until it has passed an
   independent execution-safety review and a supervised drill on the paper
-  account, and the owner explicitly decides to switch the order sender. Only
-  one sender may ever run: the bridge stays the only one until the switch, and
-  the bridge is retired after the engine's first clean paper week.
+  account, and the owner explicitly decides to switch the order sender.
+  `autotraderctl execution run --confirm` starts it by hand for that drill
+  only, and refuses while the bridge runs. Only one sender may ever run: the
+  bridge stays the only scheduled one until the switch, and the bridge is
+  retired after the engine's first clean paper week.
 - Its PAPER authority comes only from an append-only promotion record in the
-  ledger (`autotrader_exec_promotions`, migration 13), written by
-  `autotraderctl execution promote --confirm` for a `MOMO_HOD` strategy and a DU
-  account. A grant binds the SHA-256 of the engine's source files
-  (`trading/execution/promotion.py`), so any change to them needs a new grant
-  after its review. `LiveExecutor.start()` refuses to run without one.
-  Configuration can only switch entries off; no setting or environment variable
-  can grant authority. `revoke` is always allowed.
-- Engine invariants live in code and in migration-13 triggers: the outbox is
-  written before any order, a crash never resends, orderRefs are
+  ledger (`autotrader_exec_promotions`, the execution-ledger migration),
+  written by `autotraderctl execution promote --confirm` for a `MOMO_HOD`
+  strategy and a DU account. A grant binds the SHA-256 of the engine's source
+  files, its whole import graph (`trading/execution/promotion.py`), so any
+  change to them needs a new grant after its review. `LiveExecutor.start()`
+  refuses to run without one. Configuration can only switch entries off; no
+  setting or environment variable can grant authority. `revoke` is always
+  allowed.
+- Engine invariants live in code and in the execution-ledger triggers: the
+  outbox is written before any order, a crash never resends, orderRefs are
   `at1:<bracket>:<leg>`, fills are keyed by execId, the shared risk book
   (`trading/risk/book.py`) is re-checked inside the staging transaction, and a
   reconciliation mismatch pauses entries but never exits. Do not weaken a
