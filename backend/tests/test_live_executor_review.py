@@ -157,8 +157,9 @@ async def test_c2_1_without_a_fresh_snapshot_nothing_is_sold(tmp_path, monkeypat
     await h.engine.tick()
 
     assert sells(h) == [] and h.tws.cancelled == []  # in doubt: alert, never sell
-    assert bracket.flatten_state == "failed"
-    assert "HELD: flatten not sent — TWS did not report a fresh snapshot; act in TWS" in h.critical()
+    assert bracket.flatten_state == "none"  # it waits for a fresh snapshot (re-review R-1)
+    assert ("HELD: flatten waits for a fresh TWS snapshot — nothing sent; tried again every tick until 15:50 ET"
+            in h.critical())
 
 
 @pytest.mark.parametrize(("text", "expected"), [
@@ -427,7 +428,7 @@ async def test_c2_7_a_start_after_the_stop_time_sends_nothing_and_reports_the_le
 
     assert sells(h) == [] and len(h.tws.requests) == requests  # the probe repriced the target at 17:30
     assert restarted.events() == [
-        ("INFO", "started after 15:55 ET for 2026-10-13 — nothing to manage"),
+        ("INFO", "started after 15:55 ET for 2026-10-13 — nothing new is managed"),
         ("CRITICAL", "HELD: still open per the execution ledger (100 sh) — act in TWS"),
     ]
 
@@ -511,7 +512,7 @@ async def test_c2_9_a_fallback_sell_without_an_order_id_is_critical_once_and_ret
     assert sells(h) == [] and h.tws.cancelled == [102]  # the stop is gone: the engine must keep trying
     assert bracket.flatten_state == "cancelling"
     critical = h.critical()
-    assert len([text for text in critical if "no order id for the fallback market sell" in text]) == 1
+    assert len([text for text in critical if "fallback market sell not sent yet (no order id" in text]) == 1
 
     h.engine.ledger.max_order_id = ledger_max  # type: ignore[method-assign]
     h.tws.reqIds(-1)

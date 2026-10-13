@@ -58,10 +58,15 @@ Safety rules (the reviewed bridge's lessons are named in brackets):
   is not confirmed: cancel target and stop (an Inactive leg too), CONFIRM both
   are Cancelled or Filled, then one MARKET sell. Both sell at most the ledger
   quantity capped by a fresh account position less every other working sell
-  and less what other orders sold that the position does not show yet
-  (completed orders of every client, the TWS GUI included). No second sell
-  ever follows a manual close [H2], and a restart never starts a flatten
-  again [N5].
+  and less what other orders sold since the entry that the position does not
+  show yet (completed orders of every client, the TWS GUI included; a Filled
+  sell counts in full). No second sell ever follows a manual close [H2], and
+  a restart never starts a flatten again [N5]. Without a fresh snapshot
+  nothing is sold and the decision is taken again every tick: the flatten's
+  start until 10 minutes before the close, the fallback's market sell until
+  the close. Shares left without stop, target or working sell are flagged
+  UNPROTECTED at once; a restart after the stop time finishes only a
+  fallback whose cancels were already sent, before the close.
 * An entry still working when its stop dies is cancelled: no share is bought
   without a stop.
 * Reconciliation at start, on every reconnect, after TWS error 1101 (which
@@ -152,6 +157,7 @@ BRIDGE_PROCESS_PATTERN = r"(^|[ /])paper_bridge\.py( |$)"
 UNSHOWN_SELL_ALERT = timedelta(seconds=15)  # another order's sell the position still does not show [L-e]
 # Completion times are TWS's (seconds, maybe another clock): a sell this close to the entry counts as after it.
 FOREIGN_FILL_MARGIN = timedelta(seconds=60)
+SNAPSHOT_MISSING = "TWS did not report a fresh snapshot"
 EASTERN_ZONE_NAMES = frozenset({"EST", "EDT", "ET"})
 _COMPLETED_TIME = re.compile(r"^(\d{8})[\s-]+(\d{2}):?(\d{2}):?(\d{2})(?:\s+(\S+))?")
 
@@ -272,6 +278,18 @@ def parse_completed_time(value: object) -> datetime | None:
         return datetime.strptime(f"{day} {hour}{minute}{second}", "%Y%m%d %H%M%S").replace(tzinfo=tz)
     except ValueError:
         return None
+
+
+def completed_sell_shares(status: str, total: Decimal, filled: Decimal | None) -> Decimal:
+    """Shares a completed SELL may have sold (review R-2).
+
+    Filled means the whole order executed, whatever filledQuantity says; a
+    filledQuantity of 0 is unknown, never nothing sold (ibapi 9.81 decodes an
+    empty field as 0.0): both count the order's whole size.
+    """
+    if status == "Filled" or not filled or filled <= 0:
+        return max(total, filled or Decimal("0"))
+    return filled
 
 
 def running_bridge_processes() -> list[tuple[int, str]]:
@@ -714,6 +732,10 @@ class LiveExecutor:
         self.error_marks: dict[int, int] = {}
         self.position_gaps: dict[str, datetime] = {}
         self.unshown_since: dict[str, datetime] = {}  # bracket -> first seen with sales the position lacks
+        # Flattens whose first sell decision had no fresh snapshot: tried again every tick (R-1).
+        self.flatten_waiting: dict[str, Decimal] = {}  # bracket -> discount
+        # Perm ids of the orders in a bracket's contract TWS reported completed before its entry (R-3).
+        self.entry_baselines: dict[str, frozenset[int]] = {}
         self.dangling_since: dict[int, datetime] = {}
         self.cancel_requested_at: dict[str, datetime] = {}
         self.unmanaged: dict[int, tuple[str, int]] = {}
@@ -811,6 +833,12 @@ class LiveExecutor:
             self.index(bracket)
             self.saved[bracket.id] = self.signature(bracket)
         self.processed = set(await self.ledger.processed_decision_ids(self.account, self.session_date))
+        for event in await self.ledger.events(book=self.book):
+            perms = event.payload.get("completed_before_entry") if event.kind == "claimed" else None
+            if event.bracket_id in self.brackets and isinstance(perms, list):
+                self.entry_baselines[event.bracket_id] = frozenset(
+                    perm for perm in perms if isinstance(perm, int) and not isinstance(perm, bool) and perm > 0
+                )
         legs = [leg.id for bracket in self.brackets.values() for leg in bracket.legs.values()]
         for fill in await self.ledger.load_fills(legs):
             current = self.fills.get(fill.exec_base)
@@ -1510,11 +1538,29 @@ class LiveExecutor:
         bracket.flatten_attempted = True
         self.queue_event("flatten_attempt", {"discount": str(discount)}, bracket)
         await self.persist(bracket)  # an exit is never blocked by the ledger: a failure only alerts
+        return await self.continue_flatten(bracket, discount)
+
+    async def continue_flatten(self, bracket: BracketRecord, discount: Decimal) -> bool:
+        """The flatten's sell decision, on a fresh snapshot.
+
+        Without one nothing is sent and the decision waits: it is taken again
+        every tick until 10 minutes before the close, each time on a fresh
+        snapshot (review R-1). The wait lives in this process only: after a
+        restart the recorded attempt is never started again [N5].
+        """
         facts = await self.sellable(bracket)
         if bracket.state != "open":
+            self.flatten_waiting.pop(bracket.id, None)
             bracket.flatten_state = "skipped"  # the fresh snapshot shows the fills that closed it
             await self.persist(bracket)
             return False
+        if facts == SNAPSHOT_MISSING and not self.past(self.times.verify):
+            self.flatten_waiting[bracket.id] = discount
+            self.alert_once((bracket.id, "flatten", "snapshot-wait"), f"{bracket.symbol}: flatten waits for a fresh"
+                            " TWS snapshot — nothing sent; tried again every tick until"
+                            f" {self.times.verify:%H:%M} ET")
+            return False
+        self.flatten_waiting.pop(bracket.id, None)
         if isinstance(facts, str):
             bracket.flatten_state = "failed"  # in doubt: alert, never sell
             self.emit("CRITICAL", f"{bracket.symbol}: flatten not sent — {facts}; act in TWS")
@@ -1561,7 +1607,7 @@ class LiveExecutor:
         same shares would be sold twice (review C2-1, the bridge's F2/R2).
         """
         if not await self.request_snapshots(positions=True):
-            return "TWS did not report a fresh snapshot"
+            return SNAPSHOT_MISSING
         await self.sync_fills()
         self.observe_legs()
         self.refresh(bracket)
@@ -1594,35 +1640,48 @@ class LiveExecutor:
     def foreign_fills(self, bracket: BracketRecord) -> tuple[int, int]:
         """``(sold, bought)``: shares other orders executed in the bracket's contract since its entry.
 
-        Every order that is not one of this bracket's legs counts: the owner's
-        TWS orders, ``manual:`` orders, other apps. Completed orders carry their
-        filled quantity and completion time; partly filled working orders their
-        remaining size. A sell counts when it may have executed after the entry
-        (an unreadable time or an unreported fill counts in full), a buy only
-        when it surely did: either error leaves fewer shares to sell, never more.
-        The entry itself needed a flat account [N1], so earlier orders are not
-        the engine's concern.
+        Other orders: the owner's TWS orders, ``manual:`` orders, other apps. The
+        engine's own legs, of any of today's brackets, are accounted by their
+        executions instead (review R-3). The entry itself needed a flat account
+        [N1], so only orders completed after it count: the bracket's baseline
+        holds every order TWS reported completed before it; without one (an
+        older ledger row) the completion time decides, a sell counting when it
+        may have completed after the entry (an unreadable time counts), a buy
+        only when it surely did.
+
+        A Filled sell counts its whole size whatever filledQuantity says, and a
+        filled quantity of 0 counts as unknown, never as nothing sold: ibapi
+        9.81 decodes an empty field as 0.0 (review R-2). Every doubt leaves
+        fewer shares to sell, never more.
         """
-        own = {leg.order_ref for leg in bracket.legs.values()}
+        baseline = self.entry_baselines.get(bracket.id)
         sold, bought = Decimal("0"), Decimal("0")
         with self.mirror.lock:
             completed = list(self.mirror.completed.values())
             working = list(self.mirror.account_orders.values())
         counted: set[int] = set()
         for row in completed:
-            if row.con_id != bracket.con_id or row.order_ref in own or row.account not in {"", self.account}:
+            if (row.con_id != bracket.con_id or row.order_ref in self.leg_by_ref
+                    or row.account not in {"", self.account}):
                 continue
             if row.perm_id:
                 counted.add(row.perm_id)
-            when = parse_completed_time(row.completed_time)
-            if row.action == "SELL" and (when is None or when >= bracket.created_at - FOREIGN_FILL_MARGIN):
-                sold += row.total if row.filled is None else row.filled
-            elif (row.action == "BUY" and row.filled is not None and when is not None
-                  and when >= bracket.created_at + FOREIGN_FILL_MARGIN):
+            if baseline is not None and row.perm_id:
+                if row.perm_id in baseline:
+                    continue  # completed before the entry: the flat position at the entry included it
+                sold_after = bought_after = True
+            else:
+                when = parse_completed_time(row.completed_time)
+                sold_after = when is None or when >= bracket.created_at - FOREIGN_FILL_MARGIN
+                bought_after = when is not None and when >= bracket.created_at + FOREIGN_FILL_MARGIN
+            if row.action == "SELL" and sold_after:
+                sold += completed_sell_shares(row.status, row.total, row.filled)
+            elif row.action == "BUY" and bought_after and row.filled:  # an unknown fill never adds shares
                 bought += row.filled
         for item in working:
-            if (item.con_id != bracket.con_id or item.order_ref in own or item.account not in {"", self.account}
-                    or item.remaining is None or (item.perm_id and item.perm_id in counted)):
+            if (item.con_id != bracket.con_id or item.order_ref in self.leg_by_ref
+                    or item.account not in {"", self.account} or item.remaining is None
+                    or (item.perm_id and item.perm_id in counted)):
                 continue
             executed = max(Decimal("0"), item.total - item.remaining)
             if item.action == "SELL":
@@ -1668,6 +1727,12 @@ class LiveExecutor:
         if bracket.state != "open":
             bracket.flatten_state = "skipped"  # the fresh snapshot shows the fills that closed it
             await self.persist(bracket)
+            return False
+        if checked == SNAPSHOT_MISSING and not self.past(self.times.verify):
+            # Nothing cancelled yet: asked again next tick, on a fresh snapshot (review R-1).
+            self.alert_once((bracket.id, "fallback-start", "snapshot-wait"), f"{bracket.symbol}: flatten fallback"
+                            f" waits for a fresh TWS snapshot ({reason}) — target and stop stay live; tried again"
+                            f" every tick until {self.times.verify:%H:%M} ET")
             return False
         if isinstance(checked, str):
             bracket.flatten_state = "failed"
@@ -1784,6 +1849,9 @@ class LiveExecutor:
         if bracket.state != "open":
             bracket.flatten_state = "skipped"  # the cancels raced fills that closed it
             return
+        if facts == SNAPSHOT_MISSING:
+            self.retry_fallback_sell(bracket, facts)
+            return
         if isinstance(facts, str):
             bracket.flatten_state = "failed"
             self.emit("CRITICAL", f"{bracket.symbol}: flatten fallback stopped — {facts}; no market sell sent;"
@@ -1796,9 +1864,7 @@ class LiveExecutor:
         try:
             order_id = (await self.allocate_order_ids(1))[0]
         except Exception as exc:  # no order id from TWS, or an unreadable ledger [M1]
-            self.alert_once((bracket.id, "fallback", "order-id"), f"{bracket.symbol}: no order id for the fallback"
-                            f" market sell ({type(exc).__name__}: {exc}) — target and stop are cancelled; retried"
-                            " every tick; act in TWS")
+            self.retry_fallback_sell(bracket, f"no order id ({type(exc).__name__}: {exc})")
             return  # still "cancelling": the next tick takes a fresh snapshot and tries again
         leg = LegRecord(
             id=f"{bracket.id}:F", bracket_id=bracket.id, leg="F", client_id=self.client_id, order_id=order_id,
@@ -1810,10 +1876,9 @@ class LiveExecutor:
                 "held": held, "position": str(position), "reserved": facts.reserved, "quantity": quantity,
             })
         except Exception as exc:
-            self.alert_once((bracket.id, "fallback", "unrecorded-sell"), f"{bracket.symbol}: fallback market sell"
-                            f" not recorded ({type(exc).__name__}: {exc}) — not sent; retried every tick; target"
-                            " and stop are cancelled, act in TWS")
-            return  # still "cancelling": nothing was sent, so a retry can never sell twice
+            # Still "cancelling": nothing was sent, so a retry can never sell twice.
+            self.retry_fallback_sell(bracket, f"not recorded in the execution ledger ({type(exc).__name__}: {exc})")
+            return
         self.saved[bracket.id] = ()  # flatten state changed in the ledger: save the rest normally
         self.index(bracket)
         if self.stop_event.is_set() or not self.broker.isConnected():
@@ -1828,6 +1893,40 @@ class LiveExecutor:
             leg.state = "sent"
         self.emit("FLATTEN", f"{bracket.symbol}: fallback market sell of {quantity} sh (order {order_id}; ledger"
                   f" {held} sh, account {share_text(position)} sh)")
+
+    def retry_fallback_sell(self, bracket: BracketRecord, why: str) -> None:
+        """Target and stop are cancelled but the market sell could not go out: again next tick, until the close.
+
+        Every try takes a fresh snapshot and nothing is sent twice (review R-1);
+        at the close the fallback fails, CRITICAL.
+        """
+        close = self.times.closes_at
+        if self.past(close):
+            bracket.flatten_state = "failed"
+            self.emit("CRITICAL", f"{bracket.symbol}: fallback market sell not sent by the {close:%H:%M} ET close"
+                      f" ({why}) — {bracket.net_held} sh without target or stop; act in TWS")
+            return
+        self.alert_once((bracket.id, "fallback-sell", why.split(" (")[0]), f"{bracket.symbol}: fallback market"
+                        f" sell not sent yet ({why}) — target and stop are cancelled; tried again every tick until"
+                        f" {close:%H:%M} ET; act in TWS if it persists")
+
+    async def retry_flattens(self) -> None:
+        """Flattens still waiting for a fresh snapshot, each on a fresh one; at close - 10 min they fail."""
+        for bracket_id, discount in list(self.flatten_waiting.items()):
+            bracket = self.brackets[bracket_id]
+            if self.past(self.times.verify):  # no try after the deadline, even one TWS would answer
+                del self.flatten_waiting[bracket_id]
+                bracket.flatten_state = "failed"
+                self.emit("CRITICAL", f"{bracket.symbol}: flatten not sent — no fresh TWS snapshot by"
+                          f" {self.times.verify:%H:%M} ET; act in TWS")
+                await self.persist(bracket)
+                continue
+            try:
+                await self.continue_flatten(bracket, discount)
+            except Exception as exc:  # one bracket's failure never stops the others' flatten
+                self.flatten_waiting.pop(bracket_id, None)
+                self.emit("CRITICAL", f"{bracket.symbol}: flatten failed ({type(exc).__name__}: {exc}) — not"
+                          " retried; act in TWS")
 
     async def flatten(self, discount: Decimal = FLATTEN_DISCOUNT) -> None:
         """One attempt per bracket, ever: flatten_attempted is persisted across restarts [N5]."""
@@ -1942,10 +2041,27 @@ class LiveExecutor:
         if bracket.state != "open" or bracket.net_held <= 0 or self.mirror.live(bracket.order_id("S")):
             return
         if bracket.flatten_state in ("cancelling", "selling"):
-            return  # the fallback cancelled it on purpose; its own alerts cover the gap
+            self.check_fallback_protection(bracket)  # the fallback cancelled the stop on purpose
+            return
         if self.mirror.status(bracket.order_id("T")) == "Filled":
             return  # the target's fill (and the OCA cancel of the stop) is still being reported
         self.report_dead_leg(bracket, "S")
+
+    def check_fallback_protection(self, bracket: BracketRecord) -> None:
+        """Shares with no stop, no target and no market sell working are UNPROTECTED: CRITICAL at once (R-1)."""
+        if any(self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES for code in PROTECTIVE_LEGS):
+            return  # a cancel not confirmed yet (PendingCancel): that leg may still fill
+        sell = bracket.legs.get("F")
+        if sell is not None:
+            status = self.mirror.status(sell.order_id)
+            if status is None or status in WORKING_ORDER_STATUSES or status == "Filled":
+                return  # the market sell is on its way, working or filled
+        self.flag_unprotected(bracket, "the flatten fallback cancelled target and stop and no market sell is"
+                              " working")
+
+    def flag_unprotected(self, bracket: BracketRecord, why: str) -> None:
+        self.alert_once((bracket.id, "unprotected"), f"{bracket.symbol}: {bracket.net_held} sh UNPROTECTED — {why};"
+                        " act in TWS")
 
     def report_dangling(self, bracket: BracketRecord, order_id: int) -> None:
         """A live exit on a finished bracket could sell shares the engine no longer holds [N2]."""
@@ -1984,13 +2100,20 @@ class LiveExecutor:
             )
 
     # ---- reconciliation ------------------------------------------------------------------
-    async def refresh_open_orders(self) -> bool:
-        """A fresh snapshot of every client's working orders (the owner's TWS orders included)."""
-        with self.mirror.lock:
-            self.mirror.account_orders.clear()
-        self.mirror.open_orders_done.clear()
+    async def refresh_orders(self) -> bool:
+        """A fresh snapshot of every client's working and completed orders (the owner's TWS orders included)."""
+        mirror = self.mirror
+        with mirror.lock:
+            mirror.account_orders.clear()
+        mirror.open_orders_done.clear()
+        mirror.completed_done.clear()
         self.broker.reqAllOpenOrders()
-        return await self.wait_for(self.mirror.open_orders_done)
+        self.broker.reqCompletedOrders(False)
+        deadline = time.monotonic() + self.sync_timeout
+        for event in (mirror.open_orders_done, mirror.completed_done):
+            if not await self.wait_for(event, max(0.0, deadline - time.monotonic())):
+                return False
+        return True
 
     async def request_snapshots(self, *, positions: bool) -> bool:
         mirror = self.mirror
@@ -2276,8 +2399,8 @@ class LiveExecutor:
 
         if normalize_symbol(symbol) in manual:
             return "symbol_manual_order", "symbol has a working manual order"
-        if not await self.refresh_open_orders():
-            return "open_orders_unavailable", "TWS did not report its open orders"
+        if not await self.refresh_orders():  # the completed ones become the bracket's baseline (R-3)
+            return "open_orders_unavailable", "TWS did not report its open and completed orders"
         with self.mirror.lock:
             busy = any(item.con_id == con_id and item.working and item.account in {"", self.account}
                        for item in self.mirror.account_orders.values())
@@ -2422,12 +2545,16 @@ class LiveExecutor:
             return
         ids = await self.allocate_order_ids(3)
         bracket = self.new_bracket(row, intent, ids)
+        with self.mirror.lock:  # the entry gate just read every completed order afresh (R-3)
+            baseline = frozenset(item.perm_id for item in self.mirror.completed.values()
+                                 if item.con_id == row.con_id and item.perm_id > 0)
         try:
             # Persisted (and the risk book re-checked atomically) before anything is sent.
             await self.ledger.stage_bracket(
                 bracket, net_liquidation=net_liq,
                 unmanaged_symbols=frozenset(symbol for symbol, _ in self.unmanaged_live()),
-                payload={"strategy": row.strategy_name, "symbol": row.symbol},
+                payload={"strategy": row.strategy_name, "symbol": row.symbol,
+                         "completed_before_entry": sorted(baseline)},
             )
         except RiskBookRefusal as exc:
             await self.skip(row, str(exc.check.code), exc.check.detail)
@@ -2437,6 +2564,7 @@ class LiveExecutor:
             return
         self.processed.add(row.decision_id)
         self.index(bracket)
+        self.entry_baselines[bracket.id] = baseline
         self.saved[bracket.id] = self.signature(bracket)
         contract = stock(bracket.con_id, bracket.primary_exchange)
         try:
@@ -2469,6 +2597,8 @@ class LiveExecutor:
             self.emit("INFO", f"{self.times.flatten:%H:%M} ET: flattening all engine positions")
             await self.flatten()
             self.flattened = True
+        elif self.flatten_waiting:
+            await self.retry_flattens()
         if self.flattened and "alert" not in self.alerts_done and self.past(self.times.flatten_alert):
             self.alerts_done.add("alert")
             self.alert_not_flat()
@@ -2560,7 +2690,10 @@ class LiveExecutor:
             code = await self.interrupted()
             if code is not None:
                 return code
-            if self.past(self.times.final_alert):
+            # A fallback sell still to send is tried until the close (review R-1); nothing else waits.
+            if self.past(self.times.final_alert) and not (self.fallback_sell_due() and not self.past(
+                    self.times.closes_at)):
+                self.fail_fallbacks_at_the_close()
                 self.alert_not_flat()
                 break
             await self.pause(self.loop_seconds)
@@ -2568,7 +2701,11 @@ class LiveExecutor:
             self.observe_legs()
             for bracket in list(self.brackets.values()):
                 self.refresh(bracket)
+            if self.flatten_waiting:
+                await self.retry_flattens()
             await self.advance_fallbacks()
+            for bracket in list(self.brackets.values()):
+                self.check_protection(bracket)
             await self.run_step("ledger", self.save)
         else:
             if self.short_positions(unexplained=True):
@@ -2581,24 +2718,71 @@ class LiveExecutor:
         await self.run_step("ledger", self.save)
         return EXIT_OK
 
-    async def report_after_close(self) -> int:
-        """Started after the stop time: nothing is sent, not even a late flatten (review C2-7).
+    def fallback_sell_due(self) -> bool:
+        """A flatten fallback has cancelled (or is cancelling) target and stop and not sent its market sell."""
+        return any(bracket.state == "open" and bracket.flatten_state == "cancelling"
+                   for bracket in self.brackets.values())
 
-        Like the bridge's main(): the ledger is only read and every bracket it
-        still shows open is reported.
+    def fail_fallbacks_at_the_close(self) -> None:
+        """Past the close a fallback sell still to send has failed: CRITICAL once each (review R-1)."""
+        if not self.past(self.times.closes_at):
+            return
+        for bracket in self.brackets.values():
+            if bracket.state == "open" and bracket.flatten_state == "cancelling":
+                self.retry_fallback_sell(bracket, "the close came first")
+
+    async def report_after_close(self) -> int:
+        """Started after the stop time: nothing new is sent, not even a late flatten (review C2-7).
+
+        Like the bridge's main(): the ledger is read and every bracket it still
+        shows open is reported. Only a flatten fallback that was cancelling
+        target and stop when the engine stopped is finished, before the close,
+        after the full start checks; its shares are flagged unprotected at once
+        (review R-4).
         """
-        self.emit("INFO", f"started after {self.times.stop:%H:%M} ET for {self.session_date} — nothing to manage")
+        self.emit("INFO", f"started after {self.times.stop:%H:%M} ET for {self.session_date} — nothing new is"
+                  " managed")
         try:
             await self.load()
         except Exception as exc:
             self.emit("CRITICAL", f"execution ledger unreadable ({type(exc).__name__}: {exc}) — check TWS")
             return EXIT_OK
+        unfinished = [bracket for bracket in self.positions_not_flat()
+                      if bracket.state == "open" and bracket.flatten_state == "cancelling"]
         for bracket in self.positions_not_flat():
-            if bracket.net_held < 0:
+            if bracket in unfinished:
+                self.flag_unprotected(bracket, "the flatten fallback was cancelling target and stop when the engine"
+                                      " stopped and its market sell was never sent")
+            elif bracket.net_held < 0:
                 self.emit("CRITICAL", self.not_flat_message(bracket))
             else:
                 self.emit("CRITICAL", f"{bracket.symbol}: still open per the execution ledger ({bracket.net_held} sh)"
                           " — act in TWS")
+        if not unfinished or self.past(self.times.closes_at):
+            return EXIT_OK
+        await self.start()  # authority, code, no bridge, paper accounts, order ids, reconciliation
+        while self.fallback_sell_due() and not self.past(self.times.closes_at):
+            code = await self.interrupted()
+            if code is not None:
+                return code
+            await self.run_step("fill", self.sync_fills)
+            self.observe_legs()
+            for bracket in list(self.brackets.values()):
+                self.refresh(bracket)
+            for bracket in unfinished:  # nothing else is managed after the stop time
+                if bracket.flatten_state == "cancelling":
+                    try:
+                        await self.advance_fallback(bracket)
+                    except (ExecutionRefused, ExecutionAuthorityError):
+                        raise
+                    except Exception as exc:
+                        self.alert_once((bracket.id, "fallback", "step", type(exc).__name__),
+                                        f"{bracket.symbol}: flatten fallback step failed ({type(exc).__name__}: {exc})"
+                                        " — retried every tick; act in TWS if it persists")
+            await self.run_step("ledger", self.save)
+            await self.pause(self.loop_seconds)
+        self.fail_fallbacks_at_the_close()
+        await self.run_step("ledger", self.save)
         return EXIT_OK
 
     async def run(self) -> int:
