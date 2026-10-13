@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timezone
 import importlib
 import json
 import logging
-from collections.abc import Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 import signal
 import sys
@@ -29,12 +29,23 @@ _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
 # them); kept literal so parsing never imports the TWS and Claude stack.
 _STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap")
 _UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers")
+# Three weeks of five-minute bars: enough sessions for a first replay sample.
+DEFAULT_BACKFILL_DAYS = 21
+# The nightly recording reaches back a week: stored sessions cost no request,
+# and a night the recorder missed (TWS down, Mac asleep) is filled in by the
+# next one instead of staying a hole in the replay sample.
+RECORD_LOOKBACK_DAYS = 5
 EXIT_INTERRUPTED = 130
 # An orderly SIGTERM stop is a clean exit, as in paper_bridge.py: the
 # supervisor's window-end stop must not read as a failure on the owner's phone.
 EXIT_STOPPED = 0
 NOTIFY_SERVICE_MODULE = "trading.operations.notify_service"
 TELEGRAM_BOT_MODULE = "trading.operations.telegram_bot"
+
+
+class _Terminated(BaseException):
+    """SIGTERM inside synchronous work; a BaseException so no ``except Exception``
+    swallows it on the way out, while every ``finally`` still runs."""
 
 
 def _clock_time(value: str) -> time:
@@ -156,6 +167,48 @@ def _parser() -> argparse.ArgumentParser:
         help="answer the pinned owner's messages (foreground; the supervisor keeps it running)",
     )
     telegram_actions.add_parser("whoami", help="show the pinned owner chat id (no secrets)")
+
+    research = domains.add_parser(
+        "research", help="strategy research: real five-minute bars and rule-only replay (no orders)"
+    )
+    research_actions = research.add_subparsers(dest="action", required=True)
+    research_backfill = research_actions.add_parser(
+        "backfill",
+        help="store the newest closed sessions for the qualified universe (read-only TWS client 28)",
+    )
+    research_backfill.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_BACKFILL_DAYS,
+        help=f"sessions per contract, 1-60 (default {DEFAULT_BACKFILL_DAYS}); stored ones are skipped",
+    )
+    research_actions.add_parser(
+        "record",
+        help=(
+            "store the newest closed sessions (the nightly recording: backfill --days"
+            f" {RECORD_LOOKBACK_DAYS}, so a missed night is filled in)"
+        ),
+    )
+    research_replay = research_actions.add_parser(
+        "replay", help="replay every stored session through the strategies' rules; write reports"
+    )
+    research_replay.add_argument(
+        "--strategy",
+        dest="strategies",
+        nargs="+",
+        choices=_STRATEGY_CHOICES,
+        default=None,
+        metavar="NAME",
+        help=(
+            f"strategies to replay, from {' '.join(_STRATEGY_CHOICES)} (default all; gap is"
+            " reported as not replayable: it needs pre-market bars)"
+        ),
+    )
+    research_replay.add_argument(
+        "--notify",
+        action="store_true",
+        help="send the summary to Telegram now (otherwise once a week, after the week's last close)",
+    )
 
     supervise = domains.add_parser(
         "run",
@@ -450,6 +503,77 @@ def _telegram_command(arguments: argparse.Namespace) -> int:
         return 1
 
 
+def _interactive_research_logger() -> logging.Logger:
+    """Shadow log plus console: a supervised run's progress lands in its child log."""
+    from trading.operations.logging import configure_shadow_logging
+
+    logger = configure_shadow_logging()
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(console)
+    return logging.getLogger("autotrader.shadow.research")
+
+
+def _run_sync_until_sigterm(work: Callable[[], int]) -> int:
+    """Run synchronous ``work``; SIGTERM unwinds it (its finally blocks and atomic
+    writes clean up) and is an orderly stop, as ``_cancel_on_sigterm`` is for
+    async work. SIGINT keeps Python's own KeyboardInterrupt."""
+
+    def terminate(_signum: int, _frame: object) -> None:
+        raise _Terminated
+
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        return work()
+    except _Terminated:
+        print("stopped by SIGTERM", file=sys.stderr, flush=True)
+        return EXIT_STOPPED
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _research_command(arguments: argparse.Namespace) -> int:
+    """Research bars and replay. ``backfill`` and ``record`` read TWS PAPER market
+    data on client 28 (they refuse a non-paper login); ``replay`` reads only the
+    research store. Nothing here can place an order."""
+    logger = _interactive_research_logger()
+    label = f"research {arguments.action}"
+    if arguments.action == "replay":
+        from trading.research.replay import run_replay_cli
+
+        mode = "now" if arguments.notify else "weekly"
+        try:
+            return _run_sync_until_sigterm(
+                lambda: run_replay_cli(arguments.strategies or [], notify=mode)
+            )
+        except KeyboardInterrupt:
+            return EXIT_INTERRUPTED
+        except Exception as exc:  # noqa: BLE001 - research text carries no secrets
+            logger.exception("%s failed", label)
+            print(f"error: {label} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+
+    from trading.research.recorder import run_backfill_cli
+
+    # The recorder has no date of its own: it always stores the newest closed
+    # sessions, and the nightly lookback refills any night that was missed.
+    days = RECORD_LOOKBACK_DAYS if arguments.action == "record" else arguments.days
+    original_db_path = cfg.DB_PATH
+    requested_db_path = getattr(arguments, "db_path", None)
+    if requested_db_path is not None:
+        cfg.DB_PATH = str(requested_db_path.expanduser())
+    try:
+        return asyncio.run(_cancel_on_sigterm(run_backfill_cli(days)))
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except Exception as exc:  # noqa: BLE001 - research text carries no secrets
+        logger.exception("%s failed", label)
+        print(f"error: {label} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        cfg.DB_PATH = original_db_path
+
+
 def _supervise_command(arguments: argparse.Namespace) -> int:
     """``autotraderctl run``: the foreground supervisor, or its simulated timeline."""
     from trading.operations import supervisor
@@ -484,6 +608,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(arguments, "db_path", None) is not None:
             parser.error("--db-path does not apply to telegram; the assistant uses the canonical database")
         return _telegram_command(arguments)
+    if arguments.domain == "research":
+        if arguments.action == "replay" and getattr(arguments, "db_path", None) is not None:
+            parser.error("--db-path does not apply to research replay; it reads the research store")
+        return _research_command(arguments)
     if arguments.domain in {"universe", "screener"}:
         return _market_data_command(arguments)
     if arguments.domain == "shadow" and arguments.action == "run":

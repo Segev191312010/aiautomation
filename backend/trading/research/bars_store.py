@@ -58,7 +58,11 @@ class ResearchPaths:
 
     @classmethod
     def default(cls) -> "ResearchPaths":
-        return cls(root=UserPaths.current().data_directory / "research")
+        return cls.for_user(UserPaths.current())
+
+    @classmethod
+    def for_user(cls, paths: UserPaths) -> "ResearchPaths":
+        return cls(root=paths.data_directory / "research")
 
     @property
     def bars_directory(self) -> Path:

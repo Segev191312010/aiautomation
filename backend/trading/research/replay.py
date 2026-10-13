@@ -12,6 +12,10 @@ This is a rule-only baseline. Claude's review, the position cap, the daily
 loss stop and sizing are not simulated, quotes are synthetic (spread and
 chase always pass), and every stored contract is evaluated, not only the
 live hot list. Fills and exits are conservative (see ``simulate_bracket``).
+
+GAP_GO is registered live but never replayed: its gap, pre-market volume
+and trigger come from pre-market bars, and the store holds regular-hours
+bars only. Its report says so (``needs_extended_bars``) instead of faking it.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 import json
 import logging
 import sys
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from trading.contracts import Candidate, CompletedBar, QuoteSnapshot, RuleSetup
 from trading.operations.paths import atomic_private_write
@@ -41,6 +45,7 @@ from trading.research.stats import (
     stats_payload,
     summarize,
 )
+from trading.rules.gap_go import GAP_GO_RULES_VERSION
 from trading.rules.momo import MOMO_RULES_VERSION, MomoStrategy
 from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
 from trading.rules.strategy import (
@@ -49,7 +54,11 @@ from trading.rules.strategy import (
     entry_window_utc,
     is_data_rejection,
 )
+from trading.rules.vwap_pb import VWAP_PB_RULES_VERSION, VwapPbStrategy
 from trading.scheduler.sessions import market_session
+
+if TYPE_CHECKING:
+    from trading.research.report_notify import NotifyMode
 
 logger = logging.getLogger("autotrader.shadow.research")
 
@@ -70,8 +79,19 @@ _R_QUANTUM = Decimal("0.0001")
 STRATEGY_FACTORIES: dict[str, Callable[[], StrategyEvaluator]] = {
     "orb": ORBStrategy,
     "momo": MomoStrategy,
+    "vwap": VwapPbStrategy,
 }
-RULES_VERSIONS = {"orb": "ORB_V1", "momo": MOMO_RULES_VERSION}
+RULES_VERSIONS = {
+    "orb": "ORB_V1",
+    "momo": MOMO_RULES_VERSION,
+    "vwap": VWAP_PB_RULES_VERSION,
+    "gap": GAP_GO_RULES_VERSION,
+}
+# Every strategy the live pipeline registers (shadow_service.STRATEGIES; a
+# test pins the two), in report order. Kept literal so a replay never loads
+# the TWS and Claude stack that module imports.
+REGISTERED_STRATEGIES = ("orb", "momo", "vwap", "gap")
+NEEDS_EXTENDED_BARS = "needs_extended_bars"
 
 ExitReason = Literal["stop", "target", "time", "data_end"]
 
@@ -88,6 +108,46 @@ REPLAY_NOTES = (
     " open; still open at 15:45 ET exits at that bar's close (time); data_end = bars ended"
     " before 15:45 and the trade is marked at the last close.",
 )
+
+
+class UnreplayableStrategyError(ValueError):
+    """A registered strategy whose inputs the research store cannot supply."""
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedStrategy:
+    """A registered strategy the replay declines to simulate, with a named reason."""
+
+    strategy: str
+    reason: str
+    note: str
+
+    def to_payload(self, *, generated_at: datetime) -> dict[str, Any]:
+        return {
+            "schema": REPLAY_SCHEMA,
+            "version": REPLAY_VERSION,
+            "generated_at": generated_at.astimezone(UTC).isoformat(),
+            "status": "skipped",
+            "strategy": self.strategy,
+            "rules_version": RULES_VERSIONS.get(self.strategy, "custom"),
+            "reason": self.reason,
+            "note": self.note,
+        }
+
+
+# Registered strategies the store cannot replay honestly. GAP_GO's gap,
+# pre-market volume and trigger need pre-market bars; replaying it on
+# regular-hours bars would only ever say "no pre-market data".
+UNREPLAYABLE: dict[str, SkippedStrategy] = {
+    "gap": SkippedStrategy(
+        strategy="gap",
+        reason=NEEDS_EXTENDED_BARS,
+        note=(
+            "needs extended bars: GAP_GO's gap, pre-market volume and trigger come from"
+            " pre-market bars, and the research store holds regular-hours bars only"
+        ),
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +432,8 @@ def replay_strategy(
 ) -> ReplayResult:
     """Replay one strategy over every stored session that has its prior session."""
     name = strategy_name.strip().lower()
+    if name in UNREPLAYABLE:
+        raise UnreplayableStrategyError(f"{name} is not replayed: {UNREPLAYABLE[name].note}")
     if strategy is None:
         if name not in STRATEGY_FACTORIES:
             raise ValueError(f"unknown strategy {strategy_name!r}")
@@ -533,6 +595,7 @@ def result_payload(result: ReplayResult, *, generated_at: datetime) -> dict[str,
         "schema": REPLAY_SCHEMA,
         "version": REPLAY_VERSION,
         "generated_at": generated_at.astimezone(UTC).isoformat(),
+        "status": "replayed",
         "metadata": dict(result.metadata),
         "coverage": {
             "sessions": len(result.sessions),
@@ -547,14 +610,17 @@ def result_payload(result: ReplayResult, *, generated_at: datetime) -> dict[str,
     }
 
 
-def text_report(results: Sequence[ReplayResult]) -> str:
+def _strategy_label(name: str) -> str:
+    return f"{name.upper()} ({RULES_VERSIONS.get(name, '?')})"
+
+
+def text_report(
+    results: Sequence[ReplayResult], *, skipped: Sequence[SkippedStrategy] = ()
+) -> str:
     sessions = sorted({day for result in results for day in result.sessions})
     span = f"{sessions[0].isoformat()}..{sessions[-1].isoformat()}" if sessions else "no sessions"
     symbols = max((result.symbols for result in results), default=0)
-    labels = {
-        result.strategy: f"{result.strategy.upper()} ({RULES_VERSIONS.get(result.strategy, '?')})"
-        for result in results
-    }
+    labels = {result.strategy: _strategy_label(result.strategy) for result in results}
     extra = {
         result.strategy: (
             "  signals skipped (symbol-days): "
@@ -565,7 +631,7 @@ def text_report(results: Sequence[ReplayResult]) -> str:
         for result in results
         if result.skip_reasons
     }
-    return format_text_report(
+    report = format_text_report(
         [result_stats(result) for result in results],
         title=f"Research replay {span}: {len(sessions)} sessions, {symbols} symbols",
         notes=(
@@ -576,6 +642,10 @@ def text_report(results: Sequence[ReplayResult]) -> str:
         labels=labels,
         extra=extra,
     )
+    sections = [report]
+    for item in skipped:
+        sections.append(f"{_strategy_label(item.strategy)}\n  not replayed: {item.note}")
+    return "\n\n".join(sections)
 
 
 def write_reports(
@@ -583,64 +653,111 @@ def write_reports(
     *,
     paths: ResearchPaths,
     generated_at: datetime,
+    skipped: Sequence[SkippedStrategy] = (),
 ) -> tuple[str, ...]:
-    """Private JSON per strategy plus one plain-text summary, under the newest session."""
+    """Private JSON per strategy plus one plain-text summary, under the newest session.
+
+    A skipped strategy gets a ``"status": "skipped"`` JSON with its named
+    reason, so its absence from the statistics is explicit, never silent.
+    """
     sessions = sorted({day for result in results for day in result.sessions})
     as_of = sessions[-1].isoformat() if sessions else generated_at.date().isoformat()
     directory = paths.ensure_private(paths.reports_directory / as_of)
     written: list[str] = []
-    for result in results:
-        target = directory / f"replay-{result.strategy}.json"
-        payload = json.dumps(
-            result_payload(result, generated_at=generated_at), indent=2, sort_keys=False
-        )
-        atomic_private_write(target, payload.encode("utf-8"))
+    payloads = [
+        (result.strategy, result_payload(result, generated_at=generated_at))
+        for result in results
+    ]
+    payloads += [
+        (item.strategy, item.to_payload(generated_at=generated_at)) for item in skipped
+    ]
+    for strategy, payload in payloads:
+        target = directory / f"replay-{strategy}.json"
+        encoded = json.dumps(payload, indent=2, sort_keys=False)
+        atomic_private_write(target, encoded.encode("utf-8"))
         written.append(str(target))
     summary = directory / "summary.txt"
-    atomic_private_write(summary, (text_report(results) + "\n").encode("utf-8"))
+    atomic_private_write(
+        summary, (text_report(results, skipped=skipped) + "\n").encode("utf-8")
+    )
     written.append(str(summary))
     return tuple(written)
 
 
-def run_replay_cli(strategies: list[str]) -> int:
-    """``autotraderctl research replay [orb] [momo]``: rule-only replay of stored days."""
+def run_replay_cli(strategies: Sequence[str], *, notify: NotifyMode = "never") -> int:
+    """``autotraderctl research replay [--strategy ...] [--notify]``: rule-only replay.
+
+    Without strategies every registered one is reported; GAP_GO as not
+    replayable. ``notify`` hands the summary to ``report_notify`` after a
+    successful replay ("weekly": only on the week's last session; "now": on
+    demand). Telegram never changes a successful replay's exit code unless the
+    owner asked for the message ("now") and it was not delivered.
+    """
     names = [name.strip().lower() for name in strategies if name.strip()] or list(
-        STRATEGY_FACTORIES
+        REGISTERED_STRATEGIES
     )
-    unknown = sorted(set(names) - set(STRATEGY_FACTORIES))
+    known = (*STRATEGY_FACTORIES, *UNREPLAYABLE)
+    unknown = sorted(set(names) - set(known))
     if unknown:
         print(
-            f"error: unknown strategy {', '.join(unknown)};"
-            f" choose from {', '.join(STRATEGY_FACTORIES)}",
+            f"error: unknown strategy {', '.join(unknown)}; choose from {', '.join(known)}",
             file=sys.stderr,
         )
         return 2
     store = BarsStore()
-    if not store.list_sessions():
+    stored = store.list_sessions()
+    if not stored:
         print("error: no stored research bars; run the research backfill first", file=sys.stderr)
         return 1
-    results = [replay_strategy(name, store) for name in dict.fromkeys(names)]
+    ordered = list(dict.fromkeys(names))
+    skipped = [UNREPLAYABLE[name] for name in ordered if name in UNREPLAYABLE]
+    results = [replay_strategy(name, store) for name in ordered if name not in UNREPLAYABLE]
     written = write_reports(
-        results, paths=store.paths, generated_at=datetime.now(UTC)
+        results, paths=store.paths, generated_at=datetime.now(UTC), skipped=skipped
     )
-    print(text_report(results))
+    report = text_report(results, skipped=skipped)
+    print(report)
     print("")
     print("reports:")
     for path in written:
         print(f"  {path}")
+    if notify == "never":
+        return 0
+    from trading.research import report_notify
+
+    outcome = report_notify.notify_summary(report, mode=notify, newest_session=stored[-1])
+    if outcome == report_notify.SENT:
+        print("telegram: summary sent")
+    elif notify == "now":
+        print(
+            f"telegram: summary NOT sent: {report_notify.OUTCOME_TEXT[outcome]}", file=sys.stderr
+        )
+        return 1
+    elif outcome == report_notify.FAILED:
+        # The replay itself succeeded: a restart would only redo it.
+        print(
+            f"telegram: weekly summary not sent: {report_notify.OUTCOME_TEXT[outcome]}",
+            file=sys.stderr,
+        )
     return 0
 
 
 __all__ = [
     "ENTRY_TTL",
     "FLATTEN_TIME",
+    "NEEDS_EXTENDED_BARS",
     "POLL_DELAY",
+    "REGISTERED_STRATEGIES",
     "REPLAY_NOTES",
+    "RULES_VERSIONS",
     "STRATEGY_FACTORIES",
+    "UNREPLAYABLE",
     "BracketOutcome",
     "ReplayResult",
     "SimulatedTrade",
+    "SkippedStrategy",
     "UnfilledSetup",
+    "UnreplayableStrategyError",
     "flatten_at",
     "r_multiple",
     "replay_strategy",

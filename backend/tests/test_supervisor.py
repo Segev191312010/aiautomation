@@ -42,8 +42,9 @@ from trading.scheduler.sessions import market_session
 
 @pytest.fixture(autouse=True)
 def _two_strategy_schedule(request, monkeypatch):
-    """Timeline tests below were written for the ORB+MOMO day; the shadow
-    strategies added later (gap, vwap) are covered by their own test."""
+    """Timeline tests below were written for the ORB+MOMO trading day; the
+    shadow strategies added later (gap, vwap) and the after-close research
+    children (recorder, replay) are covered by their own full_schedule tests."""
     if request.node.get_closest_marker("full_schedule"):
         return
     monkeypatch.setattr(
@@ -52,6 +53,7 @@ def _two_strategy_schedule(request, monkeypatch):
     monkeypatch.setattr(
         supervisor_module, "STRATEGY_UNIVERSES", {"orb": "scanner", "momo": "watchlist"}
     )
+    monkeypatch.setattr(supervisor_module, "RESEARCH_CHILDREN", {})
 
 ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
@@ -257,6 +259,32 @@ def test_half_day_strategy_windows_follow_their_own_cutoffs():
 
     assert window(plans["momo"]) == ("09:55", "12:01", "12:00")
     assert window(plans["orb"]) == ("09:40", "12:01", "12:00")
+
+
+def test_half_day_bridge_window_follows_the_early_close():
+    plans = {plan.name: plan for plan in plans_for(market_session(date(2026, 11, 27)))}
+
+    # paper_bridge.py stops at 12:55 on a 13:00 close; its 12:58 alert fits.
+    assert window(plans["bridge"]) == ("09:25", "13:00", "12:55")
+
+
+async def test_half_day_bridge_stop_at_its_own_close_is_not_restarted():
+    half_day = date(2026, 11, 27)
+    world = FakeWorld(
+        et(half_day, 9, 20), {"bridge": [Script(exit_after=timedelta(hours=3, minutes=30))]}
+    )
+
+    def bridge_only(session):
+        return [plan for plan in plans_for(session) if plan.name == "bridge"]
+
+    assert await world.supervisor_for(planner=bridge_only).run(session_date=half_day) == 0
+
+    # A fixed 15:55 finish read the 12:55 clean exit as a crash and restarted
+    # the bridge every 15 s (repeating its "still open" alert) until 16:00.
+    assert world.child_lines() == [
+        "2026-11-27T14:25:00+00:00 CHILD_START bridge pid=100",
+        "2026-11-27T17:55:00+00:00 CHILD_EXIT bridge code=0 restart_in=none",
+    ]
 
 
 def test_strategy_without_an_entry_window_is_not_planned():
@@ -1101,14 +1129,186 @@ def test_single_instance_names_the_holder(tmp_path):
 
 
 @pytest.mark.full_schedule
-def test_default_plan_runs_the_shadow_strategies_in_their_own_windows():
+def test_default_plan_runs_the_shadow_strategies_and_the_learning_loop_in_their_own_windows():
     from trading.operations.supervisor import plan_session
 
     plans = {plan.name: plan for plan in plan_session(market_session(date(2026, 10, 13)))}
-    assert {"gap", "vwap", "orb", "momo"} <= set(plans)
+    assert list(plans) == [
+        "screener", "notifier", "bridge", "orb", "momo", "gap", "vwap", "recorder", "replay",
+    ]
     ny = ZoneInfo("America/New_York")
     assert plans["gap"].starts_at.astimezone(ny).time() == time(9, 28)
     assert plans["gap"].finishes_at.astimezone(ny).time() == time(10, 30)
     assert plans["vwap"].starts_at.astimezone(ny).time() == time(10, 25)
     assert plans["vwap"].finishes_at.astimezone(ny).time() == time(14, 30)
     assert "gappers" in plans["gap"].argv and "watchlist" in plans["vwap"].argv
+    # After the close: record the session that just closed, then replay the store.
+    control = str(BACKEND_DIR / "autotraderctl.py")
+    assert plans["recorder"].argv == (str(VENV_PYTHON), control, "research", "record")
+    assert plans["replay"].argv == (str(VENV_PYTHON), control, "research", "replay")
+    # The planned finish is the start: any clean exit is the end of the day.
+    assert window(plans["recorder"]) == ("16:20", "17:30", "16:20")
+    assert window(plans["replay"]) == ("17:35", "18:30", "17:35")
+    for name in ("recorder", "replay"):
+        assert plans[name].base_backoff == timedelta(seconds=15)
+        assert plans[name].final_codes == frozenset()
+    # The replay reads what the recorder stored, so their windows never overlap.
+    assert plans["recorder"].ends_at < plans["replay"].starts_at
+
+
+# --- the learning loop after the close (recorder, replay) ----------------------------
+
+RESEARCH = ("recorder", "replay")
+
+
+def research_plans(session) -> list[ChildPlan]:
+    return [plan for plan in plans_for(session) if plan.name in RESEARCH]
+
+
+@pytest.mark.full_schedule
+def test_half_days_keep_the_learning_loop_windows():
+    plans = {plan.name: plan for plan in plans_for(market_session(date(2026, 11, 27)))}
+
+    assert window(plans["recorder"]) == ("16:20", "17:30", "16:20")
+    assert window(plans["replay"]) == ("17:35", "18:30", "17:35")
+
+
+@pytest.mark.full_schedule
+async def test_research_children_run_once_and_a_clean_exit_is_final():
+    world = FakeWorld(
+        et(TUESDAY, 16, 0),
+        {
+            "recorder": [Script(exit_after=timedelta(minutes=30))],
+            "replay": [Script(exit_after=timedelta(minutes=4))],
+        },
+    )
+
+    assert await world.supervisor_for(planner=research_plans).run(session_date=TUESDAY) == 0
+
+    assert world.child_lines() == [
+        "2026-10-13T20:20:00+00:00 CHILD_START recorder pid=100",
+        "2026-10-13T20:50:00+00:00 CHILD_EXIT recorder code=0 restart_in=none",
+        "2026-10-13T21:35:00+00:00 CHILD_START replay pid=101",
+        "2026-10-13T21:39:00+00:00 CHILD_EXIT replay code=0 restart_in=none",
+    ]
+    assert all(child.signals == [] for child in world.children)
+    # The day ends when the replay is done, not at its 18:30 window end.
+    assert world.lines[-2].endswith("SESSION_END date=2026-10-13")
+    assert world.lines[-2].startswith("2026-10-13T21:39:00")
+
+
+@pytest.mark.full_schedule
+async def test_a_failed_recording_is_retried_with_the_service_backoff_inside_its_window():
+    # IB Gateway logged off: every attempt fails after 10 s until 17:30.
+    gateway_down = Script(exit_after=timedelta(seconds=10), code=1)
+    world = FakeWorld(et(TUESDAY, 16, 0), {"recorder": [gateway_down] * 40})
+
+    await world.supervisor_for(planner=research_plans).run(session_date=TUESDAY)
+
+    restarts = restart_values(world, "recorder")
+    assert restarts[:6] == ["15", "30", "60", "120", "240", "300"]
+    assert set(restarts[6:-1]) == {"300"}
+    # 17:25:35 + 300 s would land after the 17:30 window end: not restarted.
+    assert restarts[-1] == "none"
+    launches = world.launch_times("recorder")
+    assert len(launches) == 17
+    assert launches[-1] == et(TUESDAY, 17, 25, 25) and max(launches) < et(TUESDAY, 17, 30)
+    # The replay still runs in its own window.
+    assert world.launch_times("replay") == [et(TUESDAY, 17, 35)]
+
+
+@pytest.mark.full_schedule
+async def test_a_recording_still_running_at_17_30_is_stopped_and_the_replay_still_runs():
+    world = FakeWorld(et(TUESDAY, 16, 0), {"replay": [Script(exit_after=timedelta(minutes=3))]})
+
+    await world.supervisor_for(planner=research_plans).run(session_date=TUESDAY)
+
+    (recorder,) = world.instances("recorder")
+    assert recorder.signals == [(et(TUESDAY, 17, 30), signal.SIGTERM)]
+    assert world.child_lines("recorder")[-1] == (
+        "2026-10-13T21:30:00+00:00 CHILD_EXIT recorder code=143 restart_in=none"
+    )
+    assert world.launch_times("replay") == [et(TUESDAY, 17, 35)]
+
+
+@pytest.mark.full_schedule
+async def test_daily_mode_runs_the_learning_loop_once_per_session():
+    # The replay usually finishes long before 18:30. The day must not be
+    # re-entered then, which would relaunch the replay until its window closed.
+    world = FakeWorld(
+        et(TUESDAY, 16, 0),
+        {
+            "recorder": [Script(exit_after=timedelta(minutes=25))] * 2,
+            "replay": [Script(exit_after=timedelta(minutes=4))] * 2,
+        },
+    )
+    world.stop_at = et(date(2026, 10, 15), 7, 0)
+
+    await world.supervisor_for(planner=research_plans).run()
+
+    assert world.launches == [
+        (et(TUESDAY, 16, 20), "recorder"),
+        (et(TUESDAY, 17, 35), "replay"),
+        (et(WEDNESDAY, 16, 20), "recorder"),
+        (et(WEDNESDAY, 17, 35), "replay"),
+    ]
+    events = [line.split(" ", 1)[1] for line in world.lines if "SESSION_" in line]
+    assert events == [
+        "SESSION_WAIT date=2026-10-13 until=2026-10-13T20:20:00+00:00",
+        "SESSION_START date=2026-10-13",
+        "SESSION_END date=2026-10-13",
+        "SESSION_WAIT date=2026-10-14 until=2026-10-14T20:20:00+00:00",
+        "SESSION_START date=2026-10-14",
+        "SESSION_END date=2026-10-14",
+        "SESSION_WAIT date=2026-10-15 until=2026-10-15T20:20:00+00:00",
+    ]
+
+
+async def test_daily_mode_never_reenters_a_session_whose_children_all_finished():
+    # The notifier exits 0 after its 16:05 report, ten minutes before its window
+    # end; nothing may relaunch it for the rest of the day.
+    world = FakeWorld(
+        et(TUESDAY, 15, 0),
+        {"notifier": [Script(exit_after=et(TUESDAY, 16, 5, 30) - et(TUESDAY, 15, 0))]},
+    )
+    world.stop_at = et(WEDNESDAY, 7, 0)
+
+    await world.supervisor_for().run()
+
+    assert world.launch_times("notifier") == [et(TUESDAY, 15, 0)]
+
+
+@pytest.mark.full_schedule
+async def test_a_supervisor_started_after_the_close_runs_only_the_learning_loop():
+    world = FakeWorld(et(TUESDAY, 17, 0))
+
+    await world.supervisor_for().run(session_date=TUESDAY)
+
+    assert world.launches == [(et(TUESDAY, 17, 0), "recorder"), (et(TUESDAY, 17, 35), "replay")]
+
+
+@pytest.mark.full_schedule
+async def test_a_requested_session_after_the_replay_window_launches_nothing():
+    world = FakeWorld(et(TUESDAY, 18, 30))
+
+    assert await world.supervisor_for().run(session_date=TUESDAY) == 0
+
+    assert world.launches == []
+    assert any(line.endswith("SESSION_OVER date=2026-10-13") for line in world.lines)
+
+
+@pytest.mark.full_schedule
+def test_dry_run_shows_the_learning_loop():
+    report = dry_run_report(session_date=TUESDAY, unsupervised=list)
+
+    assert "recorder  16:20-17:30  from 16:20" in report
+    assert "replay    17:35-18:30  from 17:35" in report
+    assert "backend/autotraderctl.py research record" in report
+    assert "backend/autotraderctl.py research replay" in report
+    for expected in (
+        "16:20:00  CHILD_START recorder",
+        "17:30:00  SIGNAL recorder SIGTERM reason=window_end",
+        "17:35:00  CHILD_START replay",
+        "18:30:00  SESSION_END date=2026-10-13",
+    ):
+        assert expected in report

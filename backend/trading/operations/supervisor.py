@@ -1,18 +1,33 @@
 """One foreground process that runs every trading day's children by itself.
 
-``autotraderctl run`` supervises, for each XNYS session, five child processes
+``autotraderctl run`` supervises, for each XNYS session, these child processes
 inside America/New_York windows:
 
     screener  07:55-16:00  autotraderctl.py screener run --interval 60
     notifier  07:55-16:15  autotraderctl.py notify run --date D
-    bridge    09:25-16:00  scripts_local/paper_bridge.py --date D
+    bridge    09:25-close  scripts_local/paper_bridge.py --date D   (16:00; 13:00 on a half day)
     orb       09:40-12:01  autotraderctl.py shadow run --strategy orb --universe scanner --date D
     momo      09:55-15:01  autotraderctl.py shadow run --strategy momo --universe watchlist --date D
+    gap       09:28-10:31  autotraderctl.py shadow run --strategy gap --universe gappers --date D
+    vwap      10:25-14:31  autotraderctl.py shadow run --strategy vwap --universe watchlist --date D
+    recorder  16:20-17:30  autotraderctl.py research record
+    replay    17:35-18:30  autotraderctl.py research replay
 
 A strategy window ends one minute after that strategy's own entry cutoff, so a
 half day's earlier MOMO cutoff moves its window in. Between sessions, and on
 closed days, the process sleeps until the next session's 07:55 ET; it never
 exits because a day ended (launchd's KeepAlive would only restart it).
+
+The learning loop runs after the close: the recorder stores the session that
+just closed in the research bar store (read-only TWS data client 28; it takes
+no date because it always records the newest closed sessions, reaching back a
+week so a missed night is filled in at no extra request), then the replay
+walks every stored session through each strategy's rules, writes the reports
+and, on the week's last session, sends their summary to Telegram. Both run
+once: any clean exit is final, a failure is retried inside the window. Their
+exits come after the notifier's 16:15 end, so they reach the phone only through
+the weekly summary (which flags a session the recorder missed) and the
+assistant's /status.
 
 Always-on children run outside any session, for the supervisor's whole life:
 
@@ -24,7 +39,8 @@ closed days, and stop only when the supervisor itself stops.
 Restart policy. A child that exits before its window end is restarted after a
 backoff: 95 s for strategies (longer than their 90 s shadow-run lease), 15 s
 for the others, doubling to 5 minutes and starting over after a healthy run.
-A clean exit (code 0) at or after a child's planned finish is its end of day,
+A clean exit (code 0) at or after a child's planned finish is its end of day
+(the research children's planned finish is their start, so any clean exit),
 and a refusal the child declares final (the bridge's 78) is never restarted;
 nothing is (re)started at or after a window end. An always-on child is
 restarted after any exit, whatever its code, with the same 15 s to 5 minute
@@ -83,10 +99,13 @@ SCREENER_WINDOW = (time(7, 55), time(16, 0))
 NOTIFIER_WINDOW = (time(7, 55), time(16, 15))
 # The notifier's 16:05 daily report; a clean exit after it is final.
 NOTIFIER_FINISH = time(16, 5)
-# paper_bridge.py exits 0 by itself at 15:55 when flat, or just after its
-# 15:58 "still open" alert; the window must not cut that alert off.
-BRIDGE_WINDOW = (time(9, 25), time(16, 0))
-BRIDGE_FINISH = time(15, 55)
+# paper_bridge.py exits 0 by itself five minutes before the close when flat,
+# or just after its "still open" alert two minutes before it; the window must
+# not cut that alert off. Both follow the session's own close: a half day's
+# 13:00 close moves them to 12:55 and 13:00, where a fixed 15:55 finish would
+# restart the bridge (and repeat its alert) every 15 s until 16:00.
+BRIDGE_START = time(9, 25)
+BRIDGE_FINISH_BEFORE_CLOSE = timedelta(minutes=5)
 # EX_CONFIG: a refusal a restart cannot fix (non-paper account, future date,
 # unusable config or state). Logged with restart_in=none so the phone alerts.
 BRIDGE_REFUSED_CODE = 78
@@ -99,6 +118,15 @@ STRATEGY_STARTS = {
 STRATEGY_UNIVERSES = {"orb": "scanner", "momo": "watchlist", "gap": "gappers", "vwap": "watchlist"}
 STRATEGY_WINDOW_TAIL = timedelta(minutes=1)
 TELEGRAM_CHILD = "telegram"
+# The learning loop, after the close: name -> ((start, end) ET, autotraderctl
+# arguments). The recording (two paced requests per qualified contract, ~30
+# minutes for ~400) must finish before the replay reads the store.
+RECORDER_WINDOW = (time(16, 20), time(17, 30))
+REPLAY_WINDOW = (time(17, 35), time(18, 30))
+RESEARCH_CHILDREN: dict[str, tuple[tuple[time, time], tuple[str, ...]]] = {
+    "recorder": (RECORDER_WINDOW, ("research", "record")),
+    "replay": (REPLAY_WINDOW, ("research", "replay")),
+}
 
 # A restarted strategy must find its predecessor's shadow-run lease expired.
 STRATEGY_BACKOFF = DEFAULT_LEASE_TTL + timedelta(seconds=5)
@@ -249,9 +277,9 @@ def plan_session(
         ChildPlan(
             name="bridge",
             argv=(interpreter, bridge, "--date", iso),
-            starts_at=at(BRIDGE_WINDOW[0]),
-            ends_at=at(BRIDGE_WINDOW[1]),
-            finishes_at=at(BRIDGE_FINISH),
+            starts_at=at(BRIDGE_START),
+            ends_at=session.closes_at.astimezone(UTC),
+            finishes_at=(session.closes_at - BRIDGE_FINISH_BEFORE_CLOSE).astimezone(UTC),
             base_backoff=SERVICE_BACKOFF,
             final_codes=frozenset({BRIDGE_REFUSED_CODE}),
         ),
@@ -279,6 +307,19 @@ def plan_session(
                 ends_at=cutoff + STRATEGY_WINDOW_TAIL,
                 finishes_at=cutoff,
                 base_backoff=STRATEGY_BACKOFF,
+            )
+        )
+    for name, ((start, end), command) in RESEARCH_CHILDREN.items():
+        plans.append(
+            ChildPlan(
+                name=name,
+                argv=(interpreter, control, *command),
+                starts_at=at(start),
+                ends_at=at(end),
+                # Run once: a clean exit is done for the day whenever it comes;
+                # a failure is retried with the service backoff inside the window.
+                finishes_at=at(start),
+                base_backoff=SERVICE_BACKOFF,
             )
         )
     return tuple(plans)
@@ -402,8 +443,9 @@ class Supervisor:
             for child in self._always:
                 child.next_start = started
             await self._tend_always(started)
+            completed: date | None = None
             while not self.stopping:
-                scheduled = self._next_session(session_date)
+                scheduled = self._next_session(session_date, after=completed)
                 if scheduled is None:
                     assert session_date is not None
                     self._event(f"SESSION_OVER date={session_date.isoformat()}")
@@ -419,6 +461,7 @@ class Supervisor:
                 self._event(f"SESSION_START date={day}")
                 await self.run_session(plans)
                 self._event(f"SESSION_END date={day}")
+                completed = session.session_date
                 if session_date is not None:
                     break
             await self._retire_always()
@@ -441,11 +484,18 @@ class Supervisor:
             await self._abandon(children)
 
     def _next_session(
-        self, requested: date | None
+        self, requested: date | None, *, after: date | None = None
     ) -> tuple[MarketSession, tuple[ChildPlan, ...]] | None:
         now = self._clock()
         if requested is None:
-            return upcoming_session(now, self._planner)
+            session, plans = upcoming_session(now, self._planner)
+            if after is not None and session.session_date <= after:
+                # Every child finished before the last window end (the replay
+                # usually does): re-entering the day would relaunch each child
+                # whose window is still open, so the next session follows.
+                session = next_market_session(after)
+                plans = tuple(self._planner(session))
+            return session, plans
         session = market_session(requested)
         if session is None:
             raise ValueError(f"{requested.isoformat()} is not an XNYS trading session")
@@ -1060,6 +1110,9 @@ __all__ = [
     "ChildProcess",
     "Launcher",
     "MAX_BACKOFF",
+    "RECORDER_WINDOW",
+    "REPLAY_WINDOW",
+    "RESEARCH_CHILDREN",
     "SERVICE_BACKOFF",
     "STRATEGY_BACKOFF",
     "Supervisor",

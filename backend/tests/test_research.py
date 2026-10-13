@@ -1,13 +1,15 @@
 """Research loop: bar store, read-only IBKR backfill, deterministic replay, R stats.
 
 The replay tests run the real IBKR PAPER bars of 2026-10-09 and 2026-10-12
-(tests/fixtures/momo, captured read-only from TWS) through ORB_V1 and
-MOMO_HOD_V2. The 2026-10-12 capture ends with the 15:15-15:20 ET bar, so a
-trade still open then is marked at that close (``data_end``), never at an
-invented 15:45 price.
+(tests/fixtures/momo, captured read-only from TWS) through ORB_V1,
+MOMO_HOD_V2 and VWAP_PB_V1. The 2026-10-12 capture ends with the 15:15-15:20
+ET bar, so a trade still open then is marked at that close (``data_end``),
+never at an invented 15:45 price. GAP_GO needs pre-market bars the store
+does not hold, so it is reported as not replayable rather than replayed.
 """
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -59,6 +61,11 @@ from trading.research.recorder import (
 )
 from trading.research.replay import (
     ENTRY_TTL,
+    REGISTERED_STRATEGIES,
+    RULES_VERSIONS,
+    STRATEGY_FACTORIES,
+    UNREPLAYABLE,
+    UnreplayableStrategyError,
     flatten_at,
     replay_strategy,
     result_payload,
@@ -68,9 +75,20 @@ from trading.research.replay import (
     write_reports,
 )
 from trading.research.stats import format_strategy, stats_payload, summarize
-from trading.rules.momo import EXTENDED_ABOVE_VWAP, MOMO_STRATEGY_KIND, MomoStrategy
-from trading.rules.orb import QUOTE_REQUIRED
+from trading.rules.momo import (
+    EXTENDED_ABOVE_VWAP,
+    MOMO_STRATEGY_KIND,
+    MomoStrategy,
+    xnys_session_close,
+)
+from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
 from trading.rules.strategy import ORBStrategy
+from trading.rules.vwap_pb import (
+    VWAP_PB_STRATEGY_KIND,
+    VwapPbConfig,
+    VwapPbStrategy,
+    evaluate_vwap_pb,
+)
 from trading.scheduler.sessions import market_session
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -454,7 +472,16 @@ class _Spy:
         return result
 
 
-@pytest.mark.parametrize("inner", [ORBStrategy(), MomoStrategy()], ids=["orb", "momo"])
+@pytest.mark.parametrize(
+    "inner",
+    [
+        ORBStrategy(),
+        MomoStrategy(),
+        # A wide pullback band so FIGS's 13:25 reclaim asks for a quote.
+        VwapPbStrategy(VwapPbConfig(pullback_ceiling_atr=Decimal("3"))),
+    ],
+    ids=["orb", "momo", "vwap"],
+)
 def test_replay_feeds_only_completed_bars_and_synthetic_quotes(tmp_path, inner):
     spy = _Spy(inner)
     replay_strategy(inner.strategy_kind, _capture_store(tmp_path), strategy=spy)
@@ -508,7 +535,123 @@ def test_replay_skips_days_without_liquidity_and_is_deterministic(tmp_path):
     stamp = datetime(2026, 10, 12, 22, 0, tzinfo=UTC)
     assert result_payload(first, generated_at=stamp) == result_payload(second, generated_at=stamp)
     with pytest.raises(ValueError, match="unknown strategy"):
-        replay_strategy("vwap", store)
+        replay_strategy("bogus", store)
+
+
+@dataclass
+class _VwapWhy:
+    """VWAP_PB_V1 exactly as ``VwapPbStrategy`` evaluates it, keeping the first
+    rule each poll's latest bar failed (the pipeline only sees NO_SIGNAL_YET)."""
+
+    strategy: VwapPbStrategy = field(default_factory=VwapPbStrategy)
+    unmet: dict[str, Counter[str]] = field(default_factory=dict)
+
+    @property
+    def strategy_kind(self) -> str:
+        return self.strategy.strategy_kind
+
+    def entry_window(self, session_date: date) -> tuple[datetime, datetime]:
+        return self.strategy.entry_window(session_date)
+
+    def evaluate(self, **kwargs: Any) -> Any:
+        result = evaluate_vwap_pb(
+            **kwargs,
+            config=self.strategy.config,
+            session_close=xnys_session_close(kwargs["session_date"]),
+        )
+        symbol = kwargs["candidate"].symbol
+        self.unmet.setdefault(symbol, Counter())[result.unmet or result.rejection_reason] += 1
+        return result.as_strategy_result()
+
+
+def test_replay_vwap_pb_on_real_bars_finds_no_reclaim_and_says_why(tmp_path):
+    store = _capture_store(tmp_path)
+    why = _VwapWhy()
+
+    result = replay_strategy("vwap", store, strategy=why)
+
+    assert result.strategy_kind == VWAP_PB_STRATEGY_KIND
+    assert result.outcomes == {
+        f"no_setup:{NO_SIGNAL_YET}": 2,
+        "skipped:prior_session_missing": 2,
+    }
+    assert result.trades == () and result.unfilled == () and result.skip_reasons == {}
+    # Each symbol was polled at every bar end 10:30-14:25 ET (48 polls) and
+    # never priced. BF B only became a trend day late; FIGS ran +8-12% all day
+    # but never pulled back to VWAP and reclaimed it on volume.
+    assert why.unmet == {
+        "BF B": {
+            "day_change_too_low": 17,
+            "too_few_bars_above_vwap": 16,
+            "close_not_above_previous_high": 10,
+            "signal_volume_too_low": 5,
+        },
+        "FIGS": {
+            "close_not_above_previous_high": 34,
+            "signal_volume_too_low": 12,
+            "pullback_missed_vwap": 2,
+        },
+    }
+    # The registered factory replays the same rules to the same result.
+    default = replay_strategy("vwap", store)
+    assert default.outcomes == result.outcomes
+    assert default.metadata["rules_version"] == "VWAP_PB_V1"
+
+
+def test_replay_simulates_a_vwap_pb_setup_like_any_other(tmp_path):
+    # A pullback band of 3 ATR above VWAP (live: 0.25) lets FIGS's 13:25
+    # reclaim through, so a VWAP_PB setup takes the bracket path on real bars.
+    loose = VwapPbStrategy(VwapPbConfig(pullback_ceiling_atr=Decimal("3")))
+
+    result = replay_strategy("vwap", _capture_store(tmp_path), strategy=loose)
+
+    assert result.outcomes == {
+        f"no_setup:{NO_SIGNAL_YET}": 1,
+        "skipped:prior_session_missing": 2,
+        "trade:data_end": 1,
+    }
+    (trade,) = result.trades
+    # Stop 0.1 ATR under the pullback low, 2R target on the rounded stop; the
+    # capture ends at 15:20 with neither exit touched.
+    assert trade.to_payload() == {
+        "date": "2026-10-12",
+        "symbol": "FIGS",
+        "con_id": 493581450,
+        "strategy": VWAP_PB_STRATEGY_KIND,
+        "signal_at_et": "13:25",
+        "entry": "17.59",
+        "stop": "17.33",
+        "target": "18.11",
+        "filled_bar_et": "13:25",
+        "exit_at_et": "15:20",
+        "exit": "17.71",
+        "exit_reason": "data_end",
+        "r_multiple": "0.4615",
+        "bars_held": 23,
+    }
+
+
+def test_gap_go_is_reported_as_not_replayable_never_faked(tmp_path):
+    store = _capture_store(tmp_path)
+
+    with pytest.raises(UnreplayableStrategyError, match="needs extended bars"):
+        replay_strategy("gap", store)
+    # The registered name alone decides: no evaluator can stand in for it.
+    with pytest.raises(UnreplayableStrategyError):
+        replay_strategy("gap", store, strategy=ORBStrategy())
+    assert UNREPLAYABLE["gap"].reason == "needs_extended_bars"
+
+
+def test_replay_covers_every_registered_live_strategy():
+    from trading.operations import shadow_service
+
+    assert REGISTERED_STRATEGIES == tuple(shadow_service.STRATEGIES)
+    assert set(STRATEGY_FACTORIES) | set(UNREPLAYABLE) == set(shadow_service.STRATEGIES)
+    assert not set(STRATEGY_FACTORIES) & set(UNREPLAYABLE)
+    assert set(RULES_VERSIONS) == set(shadow_service.STRATEGIES)
+    for name, factory in STRATEGY_FACTORIES.items():
+        # The replay runs the live evaluator class itself, never a copy.
+        assert factory is shadow_service.STRATEGIES[name][0]
 
 
 # --- bracket simulation ------------------------------------------------------------
@@ -815,6 +958,92 @@ def test_run_replay_cli_writes_reports_under_the_research_root(tmp_path, monkeyp
     assert "MOMO (MOMO_HOD_V2)" in output and "ORB (ORB_V1)" in output
     assert str(root / "reports" / "2026-10-12" / "summary.txt") in output
     assert (root / "reports" / "2026-10-12" / "replay-orb.json").is_file()
+
+
+def _research_root(tmp_path: Path, monkeypatch) -> Path:
+    root = tmp_path / "research"
+    monkeypatch.setattr(
+        bars_store.ResearchPaths, "default", classmethod(lambda cls: cls(root=root))
+    )
+    return root
+
+
+def test_run_replay_cli_reports_every_registered_strategy_and_skips_gap_explicitly(
+    tmp_path, monkeypatch, capsys
+):
+    root = _research_root(tmp_path, monkeypatch)
+    _capture_store(tmp_path)
+
+    assert run_replay_cli([]) == 0
+
+    directory = root / "reports" / "2026-10-12"
+    assert sorted(path.name for path in directory.iterdir()) == [
+        "replay-gap.json",
+        "replay-momo.json",
+        "replay-orb.json",
+        "replay-vwap.json",
+        "summary.txt",
+    ]
+    gap = json.loads((directory / "replay-gap.json").read_text())
+    assert (gap["status"], gap["reason"], gap["rules_version"]) == (
+        "skipped",
+        "needs_extended_bars",
+        "GAP_GO_V1",
+    )
+    assert "stats" not in gap and "trades" not in gap  # no invented numbers
+    vwap = json.loads((directory / "replay-vwap.json").read_text())
+    assert (vwap["status"], vwap["metadata"]["rules_version"]) == ("replayed", "VWAP_PB_V1")
+    assert vwap["coverage"] == {"sessions": 1, "symbols": 2, "symbol_days": 2}
+    summary = (directory / "summary.txt").read_text()
+    sections = [block.splitlines()[0] for block in summary.split("\n\n")[1:]]
+    assert sections == [
+        "ORB (ORB_V1)",
+        "MOMO (MOMO_HOD_V2)",
+        "VWAP (VWAP_PB_V1)",
+        "GAP (GAP_GO_V1)",
+    ]
+    assert "VWAP (VWAP_PB_V1)\n  0 trades from 2 symbol-days\n  no filled trades" in summary
+    assert "GAP (GAP_GO_V1)\n  not replayed: needs extended bars: GAP_GO's gap" in summary
+    assert summary.rstrip("\n") in capsys.readouterr().out
+
+
+def test_run_replay_cli_hands_the_summary_to_telegram_only_when_asked(
+    tmp_path, monkeypatch, capsys
+):
+    from trading.research import report_notify
+
+    _research_root(tmp_path, monkeypatch)
+    _capture_store(tmp_path)
+    calls: list[dict[str, Any]] = []
+    outcome = {"value": report_notify.SENT}
+
+    def fake_notify(summary: str, **kwargs: Any) -> str:
+        calls.append({"summary": summary, **kwargs})
+        return outcome["value"]
+
+    monkeypatch.setattr(report_notify, "notify_summary", fake_notify)
+
+    assert run_replay_cli(["orb"]) == 0  # the default never touches Telegram
+    assert calls == []
+    printed = capsys.readouterr().out
+
+    assert run_replay_cli(["orb"], notify="weekly") == 0
+    (call,) = calls
+    assert call["mode"] == "weekly"
+    assert call["newest_session"] == SESSION  # the newest stored session
+    assert call["summary"] in printed and call["summary"].startswith("Research replay")
+    assert "telegram: summary sent" in capsys.readouterr().out
+
+    # A weekly summary that fails never fails the replay (a restart would
+    # only redo it); an on-demand one that is not delivered does.
+    outcome["value"] = report_notify.FAILED
+    assert run_replay_cli(["orb"], notify="weekly") == 0
+    assert "weekly summary not sent" in capsys.readouterr().err
+    outcome["value"] = report_notify.NOT_CONFIGURED
+    assert run_replay_cli(["orb"], notify="weekly") == 0
+    assert capsys.readouterr().err == ""  # not set up: silent
+    assert run_replay_cli(["orb"], notify="now") == 1
+    assert "summary NOT sent: Telegram is not set up" in capsys.readouterr().err
 
 
 # --- recorder --------------------------------------------------------------------

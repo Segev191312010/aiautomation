@@ -2,8 +2,10 @@
 
 ``recorder`` fills the private bar store from TWS PAPER (read-only data
 client), ``replay`` walks stored sessions through a strategy without
-lookahead and simulates each first setup as a conservative bracket, and
-``stats`` summarizes the outcomes in R. Nothing here can place an order.
+lookahead and simulates each first setup as a conservative bracket,
+``stats`` summarizes the outcomes in R, and ``report_notify`` sends the
+weekly summary to the owner's Telegram. The supervisor runs the recording
+and the replay after every session close. Nothing here can place an order.
 """
 from __future__ import annotations
 
