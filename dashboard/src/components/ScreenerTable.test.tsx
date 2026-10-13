@@ -25,6 +25,7 @@ describe('ScreenerTable', () => {
     const nvda = screen.getAllByRole('row')[1]
     expect(within(nvda).getAllByRole('cell').map((cell) => cell.textContent)).toEqual([
       'NVDA#1',
+      'Watchlist',
       '123.45',
       '+2.88%',
       '+0.83%',
@@ -36,7 +37,31 @@ describe('ScreenerTable', () => {
     expect(nvda.className).toContain('hot')
     expect(nvda.className).toContain('selected')
     expect(screen.getAllByRole('row')[3].className).not.toContain('hot')
-    expect(screen.getByText(/503 watchlist · 410 qualified · 400 quoted · 10 errors · sweep 12.3 s/)).toBeTruthy()
+    // universe_size counts the stored universe plus scan additions: never "watchlist".
+    expect(screen.getByText(/503 in universe · 410 qualified · 400 quoted · 10 errors · sweep 12.3 s/)).toBeTruthy()
+    expect(screen.queryByText(/503 watchlist/)).toBeNull()
+  })
+
+  it('shows each row as a watchlist name or a scan addition, and the split of a full sweep', () => {
+    renderTable({ ...SCREENER_FIXTURE, quoted: 3, qualified: 3, errors: 0 })
+
+    const sources = screen
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => within(row).getAllByRole('cell')[1])
+    expect(sources.map((cell) => cell.textContent)).toEqual(['Watchlist', 'Scan', 'Watchlist'])
+    expect(sources[1].className).toContain('source-scan')
+    expect(screen.getByRole('columnheader', { name: 'Source' }).className).toContain('optional')
+    expect(screen.getByText(/3 quoted \(2 watchlist, 1 scan\)/)).toBeTruthy()
+  })
+
+  it('never claims a source split for compacted sweeps or rows without a source', () => {
+    const rows = SCREENER_FIXTURE.rows.map((row) => ({ ...row, source: undefined }))
+    renderTable({ ...SCREENER_FIXTURE, rows, quoted: 3, compacted: { rows_kept: 3, rows_dropped: 0 } })
+
+    expect(screen.queryByText(/watchlist, /)).toBeNull()
+    const first = within(screen.getAllByRole('row')[1]).getAllByRole('cell')[1]
+    expect(first.textContent).toBe('—')
   })
 
   it('sorts by change and RVOL, toggling direction on a second click', () => {

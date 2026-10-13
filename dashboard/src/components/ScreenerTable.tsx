@@ -27,6 +27,7 @@ type Column = { key: SortKey | null; label: string; title: string; optional?: bo
 
 const COLUMNS: readonly Column[] = [
   { key: null, label: 'Symbol', title: 'Symbol (hot rank)' },
+  { key: null, label: 'Source', title: "Owner's watchlist or IBKR scan addition", optional: true },
   { key: null, label: 'Last', title: 'Last trade price' },
   { key: 'change_pct', label: 'Chg %', title: 'Change from prior close' },
   { key: 'gap_pct', label: 'Gap %', title: 'Open versus prior close', optional: true },
@@ -38,6 +39,24 @@ const COLUMNS: readonly Column[] = [
 
 function rowKey(row: ScreenerRow, index: number): string {
   return `${row.symbol}:${row.con_id ?? index}`
+}
+
+const SOURCES: Readonly<Record<string, { label: string; className: string }>> = {
+  watchlist: { label: 'Watchlist', className: 'source source-watchlist' },
+  ibkr_scan: { label: 'Scan', className: 'source source-scan' },
+}
+
+function sourceOf(row: ScreenerRow): { label: string; className: string } {
+  return (row.source && SOURCES[row.source]) || { label: '—', className: 'source' }
+}
+
+/** Quoted rows by source; only a full sweep's rows add up to its quoted count. */
+function sourceCounts(snapshot: ScreenerSnapshot): { watchlist: number; scan: number } | null {
+  if (snapshot.compacted || snapshot.rows.length !== snapshot.quoted) {
+    return null
+  }
+  const watchlist = snapshot.rows.filter((row) => row.source === 'watchlist').length
+  return { watchlist, scan: snapshot.rows.length - watchlist }
 }
 
 function selectionOf(row: ScreenerRow): SelectedSymbol {
@@ -77,6 +96,7 @@ function ScreenerTableView({ snapshot, error, selectedSymbol, onSelect }: Screen
 
   const total = rows?.length ?? 0
   const hotCount = rows?.filter((row) => row.hot === true).length ?? 0
+  const counts = snapshot ? sourceCounts(snapshot) : null
 
   return (
     <>
@@ -86,8 +106,9 @@ function ScreenerTableView({ snapshot, error, selectedSymbol, onSelect }: Screen
           <p className="panel-sub">
             {snapshot && !snapshot.empty ? (
               <>
-                {snapshot.universe_size ?? '—'} watchlist · {snapshot.qualified ?? '—'} qualified ·{' '}
+                {snapshot.universe_size ?? '—'} in universe · {snapshot.qualified ?? '—'} qualified ·{' '}
                 {snapshot.quoted ?? '—'} quoted
+                {counts ? ` (${counts.watchlist} watchlist, ${counts.scan} scan)` : ''}
                 {snapshot.errors ? ` · ${snapshot.errors} errors` : ''}
                 {typeof snapshot.sweep_seconds === 'number' ? ` · sweep ${snapshot.sweep_seconds.toFixed(1)} s` : ''}
                 {' · '}as of {formatNyTime(snapshot.observed_at)} ET
@@ -138,7 +159,12 @@ function ScreenerTableView({ snapshot, error, selectedSymbol, onSelect }: Screen
                 const key = column.key
                 if (key === null) {
                   return (
-                    <th key={column.label} scope="col" title={column.title}>
+                    <th
+                      key={column.label}
+                      scope="col"
+                      title={column.title}
+                      className={column.optional ? 'optional' : undefined}
+                    >
                       {column.label}
                     </th>
                   )
@@ -180,6 +206,7 @@ function ScreenerTableView({ snapshot, error, selectedSymbol, onSelect }: Screen
                       </span>
                     ) : null}
                   </td>
+                  <td className={`optional ${sourceOf(row).className}`}>{sourceOf(row).label}</td>
                   <td className="num">{formatPrice(row.last)}</td>
                   <td className={`num ${directionClass(row.change_pct)}`}>{formatPercent(row.change_pct)}</td>
                   <td className={`num optional ${directionClass(row.gap_pct)}`}>{formatPercent(row.gap_pct)}</td>
