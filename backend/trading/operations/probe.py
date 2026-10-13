@@ -25,6 +25,7 @@ from trading.market.tws_actor import (
     TWSPaperActor,
     documented_line_allocation,
 )
+from trading.operations.scanner_probe import PROBE_CLIENT_ID, child_client_ids
 
 
 def _mask(account: str) -> str:
@@ -47,18 +48,28 @@ async def probe_tws(
     actor_factory: Callable[[TWSActorConfig], TWSPaperActor] = _default_actor,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {"orders": "none — this probe is read-only"}
+    # Never a child's client id: a second login with it would knock that
+    # child's data connection over mid-session.
+    if PROBE_CLIENT_ID in child_client_ids(config.data_client_id, config.order_client_id):
+        report["connection"] = {
+            "ok": False,
+            "client_id": PROBE_CLIENT_ID,
+            "error": f"probe client id {PROBE_CLIENT_ID} collides with a configured child client id",
+        }
+        return report
     actor = actor_factory(
-        TWSActorConfig(account=config.paper_account_id, client_id=config.data_client_id)
+        TWSActorConfig(account=config.paper_account_id, client_id=PROBE_CLIENT_ID)
     )
     market = PaperIBKRMarketData(actor=actor, host=PAPER_TWS_HOST)
     try:
         await actor.connect()
     except Exception as exc:  # noqa: BLE001 - reported to the operator
-        report["connection"] = {"ok": False, "error": _error(exc)}
+        report["connection"] = {"ok": False, "client_id": PROBE_CLIENT_ID, "error": _error(exc)}
         return report
     try:
         report["connection"] = {
             "ok": True,
+            "client_id": PROBE_CLIENT_ID,
             "managed_accounts": sorted(_mask(account) for account in actor.managed_accounts),
             "all_paper_prefixed": all(
                 account.startswith("DU") for account in actor.managed_accounts
