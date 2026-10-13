@@ -41,6 +41,7 @@ from trading.operations.schema_alert import (
 from trading.storage.migrations import (
     MIGRATIONS,
     SCHEMA_CHECKSUM_MISMATCH,
+    SCHEMA_UNREADABLE,
     SchemaProblem,
     SchemaStatus,
 )
@@ -105,6 +106,14 @@ def test_the_alert_names_the_command_the_versions_and_what_still_works():
     )
     assert "does not match this code" in schema_alert_text(mismatch)
     assert "restore the pre-migration backup" in schema_alert_text(mismatch)
+    unreadable = replace(
+        CURRENT, problems=(SchemaProblem(SCHEMA_UNREADABLE, "database unreadable: DatabaseError"),)
+    )
+    assert schema_alert_text(unreadable).startswith("⛔ The database cannot be read")
+    for status in (PENDING, mismatch, unreadable):
+        assert "refuse to start (exit 75)" in schema_alert_text(status)
+    for status in (mismatch, unreadable):
+        assert "Nothing was migrated" in schema_alert_text(status)
 
 
 def test_one_claim_per_day_and_a_failed_send_gives_it_back(tmp_path):

@@ -526,7 +526,9 @@ def inspect_schema(database: str | Path) -> SchemaStatus:
                 if ledger is not None
                 else []
             )
-    except sqlite3.Error as exc:
+        applied, problems = _history_problems(rows)
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        # A refusal with a reason, never a crash: the child still exits 75.
         return SchemaStatus(
             database=str(path),
             exists=True,
@@ -536,7 +538,6 @@ def inspect_schema(database: str | Path) -> SchemaStatus:
                 SchemaProblem(SCHEMA_UNREADABLE, f"database unreadable: {type(exc).__name__}: {exc}"),
             ),
         )
-    applied, problems = _history_problems(rows)
     return SchemaStatus(
         database=str(path),
         exists=True,

@@ -42,7 +42,7 @@ from trading.operations.paths import (
 )
 from trading.operations.schema_gate import MIGRATE_COMMAND
 from trading.scheduler.sessions import MARKET_TIMEZONE
-from trading.storage.migrations import SchemaStatus
+from trading.storage.migrations import SCHEMA_UNREADABLE, SchemaStatus
 
 logger = logging.getLogger("autotrader.shadow.schema")
 
@@ -52,17 +52,25 @@ SESSION_OVERRIDE_FLAG = "--during-session-i-know"
 
 def schema_alert_text(status: SchemaStatus) -> str:
     """Plain text (no Markdown) for the phone."""
+    refusing = (
+        "the screener, the strategies, the recorder and the Telegram assistant refuse to start"
+        " (exit 75) and retry every few minutes"
+    )
+    if status.token == SCHEMA_UNREADABLE:
+        return (
+            f"⛔ The database cannot be read ({status.describe()}). Until it can, {refusing}."
+            " Nothing was migrated; details: autotraderctl db status"
+        )
     if status.problems:
         return (
-            f"⛔ Database schema does not match this code ({status.describe()}). Every trading"
-            " child refuses to start (exit 75) and nothing was migrated. Deploy the matching code"
-            " or restore the pre-migration backup; details: autotraderctl db status"
+            f"⛔ Database schema does not match this code ({status.describe()}). Until it does,"
+            f" {refusing}. Nothing was migrated: deploy the matching code or restore the"
+            " pre-migration backup; details: autotraderctl db status"
         )
     return (
         f"⛔ Database needs migration — run `{MIGRATE_COMMAND}` after the close."
-        f" {status.describe()}. Until then the screener, strategies and this Telegram assistant"
-        " refuse to start (exit 75) and retry every few minutes; the bridge still manages open"
-        f" positions and `autotraderctl paper stop` still works. Inside the session: `{MIGRATE_COMMAND}"
+        f" {status.describe()}. Until then {refusing}; the bridge still manages open positions"
+        f" and `autotraderctl paper stop` still works. Inside the session: `{MIGRATE_COMMAND}"
         f" {SESSION_OVERRIDE_FLAG}`."
     )
 
