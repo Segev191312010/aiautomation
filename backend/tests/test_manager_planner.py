@@ -330,7 +330,7 @@ def test_the_candidates_are_ordered_capped_at_80_and_merged_by_contract():
     payload = rows[0].payload()
     assert set(payload) == {
         "con_id", "symbol", "sources", "hot_rank", "last", "change_pct", "gap_pct", "rvol",
-        "pct_from_high", "dollar_volume",
+        "pct_from_high", "dollar_volume", "daily_atr", "industry", "category",
     }
 
 
@@ -369,6 +369,79 @@ async def test_the_context_pack_reads_only_the_database_and_carries_no_headlines
     }
     assert "news" not in pack.encoded() and "headlines" not in pack.encoded()
     assert pack.digest() == pack.digest() and len(pack.digest()) == 64
+
+
+def _day_universe_quote(con_id: int, symbol: str, rank: int, score: str) -> dict:
+    return {
+        "rank": rank, "symbol": symbol, "con_id": con_id, "primary_exchange": "NASDAQ",
+        "last": "41.20", "bid": None, "ask": None, "prior_close": "38.00", "open": "39.10",
+        "day_high": "41.50", "day_low": "38.90", "change_pct": "8.42", "gap_pct": "2.89",
+        "volume_shares": "3000000", "rvol": "4.1", "dollar_volume": "123600000",
+        "pct_from_high": "0.72", "score": score,
+    }
+
+
+@pytest.mark.anyio
+async def test_the_day_universe_joins_c_with_its_quotes_atr_and_industry(db):
+    """Phase 1's members and the newest sweep's day_universe section (never its rows)."""
+    from trading.manager.context import build_context
+
+    observed = et(9, 45)
+    with sqlite3.connect(db) as connection:
+        for con_id, symbol, rank in ((555001, "SCANA", 1), (555002, "SCANB", 2)):
+            connection.execute(
+                """INSERT INTO autotrader_manager_day_universe
+                   (session_date, con_id, symbol, primary_exchange, first_seen, last_seen,
+                    sources_json, best_rank, qualified, reason)
+                   VALUES (?, ?, ?, 'NASDAQ', ?, ?, '["TOP_PERC_GAIN"]', ?, 1, NULL)""",
+                (SESSION.isoformat(), con_id, symbol, observed.isoformat(), observed.isoformat(), rank),
+            )
+            connection.execute(
+                """INSERT INTO autotrader_universe_daily
+                   (session_date, con_id, symbol, prior_close, avg_daily_volume_shares,
+                    avg_dollar_volume, daily_atr, qualified, reason, observed_at)
+                   VALUES (?, ?, ?, '38.00', '900000', '34200000', '1.87', 1, NULL, ?)""",
+                (SESSION.isoformat(), con_id, symbol, observed.isoformat()),
+            )
+        connection.execute(
+            """INSERT INTO autotrader_manager_contract_info
+               (con_id, symbol, primary_exchange, stock_type, industry, category, source, updated_at)
+               VALUES (555001, 'SCANA', 'NASDAQ', 'COMMON', 'Technology', 'Semiconductors',
+                       'day_universe', ?)""",
+            (observed.isoformat(),),
+        )
+        section = {"size": 2, "quoted": 1, "errors": 1, "complete": True, "seconds": 3.5,
+                   "rows": [_day_universe_quote(555001, "SCANA", 1, "88.5")]}
+        hot = [sweep_row(con_id, symbol, hot_rank=rank) for rank, (con_id, symbol) in enumerate(HOT, 1)]
+        payload = {"schema": "screener.v1", "session_date": SESSION.isoformat(),
+                   "observed_at": observed.isoformat(), "rows": hot, "day_universe": section}
+        connection.execute(
+            "INSERT INTO autotrader_screener_snapshots VALUES ('sweep-du', ?, ?, ?)",
+            (SESSION.isoformat(), observed.isoformat(), json.dumps(payload)),
+        )
+
+    pack = await build_context(
+        market_session(SESSION), now=et(9, 46), slot="09:46", running=RUNNING,
+        bridge_reader=lambda _day: ((), None), replay_reader=lambda: {"available": False},
+        market_reader=lambda _day, *, now: _none(),
+    )
+
+    rows = {row.con_id: row.payload() for row in pack.candidates}
+    assert {555001, 555002} <= pack.offered
+    assert rows[555001]["sources"] == ["day_universe"]
+    assert (rows[555001]["change_pct"], rows[555001]["rvol"]) == ("8.42", "4.1")
+    assert (rows[555001]["daily_atr"], rows[555001]["industry"], rows[555001]["category"]) == (
+        "1.87", "Technology", "Semiconductors",
+    )
+    # Unquoted this sweep: offered, without numbers.
+    assert rows[555002]["last"] is None and rows[555002]["daily_atr"] == "1.87"
+    # The hot list ranks first; the day universe never joins it.
+    assert [row.con_id for row in pack.candidates] == [4931, 76792991, 265598, 555001, 555002]
+    assert all(row.hot_rank is None for row in pack.candidates if row.con_id in {555001, 555002})
+
+
+async def _none():
+    return None
 
 
 def test_the_bridge_slot_count_is_the_pinned_bridges():
