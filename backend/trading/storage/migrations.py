@@ -37,7 +37,7 @@ from trading.storage.schema import (
 )
 from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION, EXECUTION_LEDGER_SCHEMA
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
-from trading.storage.manager_schema import MANAGER_SETUPS_SCHEMA
+from trading.storage.manager_schema import DRAFT_PHASE1_DDL, MANAGER_SETUPS_SCHEMA
 from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
 
 
@@ -289,6 +289,10 @@ async def _live_execution_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, EXECUTION_LEDGER_SCHEMA)
 
 
+async def _manager_day_universe_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, DRAFT_PHASE1_DDL)
+
+
 async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
     columns = await _table_columns(db, "autotrader_bracket_groups")
     additions = (
@@ -410,6 +414,14 @@ MIGRATIONS = (
     Migration(
         EXECUTION_LEDGER_MIGRATION, "execution-engine-ledger", "v1-execution-engine-ledger-20261013",
         _live_execution_ledger, EXECUTION_LEDGER_SCHEMA,
+    ),
+    # STAND-IN for the phase-1 agent's registration of the same draft
+    # (DRAFT_PHASE1_DDL, unchanged): phase 2's migration 16 needs a gap-free
+    # history on this branch. At merge, keep phase 1's own migration 15 and
+    # drop this entry and its pin.
+    Migration(
+        15, "manager-day-universe", "v1-manager-day-universe-20261013",
+        _manager_day_universe_ledger, DRAFT_PHASE1_DDL,
     ),
 )
 
