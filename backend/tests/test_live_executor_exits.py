@@ -918,6 +918,22 @@ async def test_the_fallback_sell_is_capped_by_the_live_position(tmp_path, monkey
     assert [(oid, sent.orderType, sent.totalQuantity) for oid, sent in modifies(h)] == [(103, "MKT", 70)]
 
 
+async def test_the_fallback_sell_reads_the_position_afresh_before_selling(tmp_path, monkeypatch) -> None:
+    h = await build(tmp_path, monkeypatch)
+    await open_bracket(h)
+    h.tws._cancel(h.tws.orders[(CLIENT_ID, 101)])
+    h.tws.position_subscribed = False  # the owner's sale of 30 never reached the subscription
+    h.tws.move_position(HELD, -30)
+    h.tws.position_subscribed = True
+    assert h.engine.account_position(HELD) == 100  # stale
+    h.clock.value = ny(15, 45, 1)
+    await h.engine.tick()
+
+    # The pre-check still saw 100; the sell itself is capped by the fresh 70 (a stale cap sold 100).
+    assert [(oid, sent.orderType, sent.totalQuantity) for oid, sent in modifies(h)] == [(103, "MKT", 70)]
+    assert h.tws.requests.count("cancelPositions") >= 1
+
+
 async def test_an_unconfirmed_reprice_is_resent_at_the_same_price_then_falls_back(tmp_path, monkeypatch) -> None:
     h = await build(tmp_path, monkeypatch)
     bracket = await open_bracket(h)

@@ -446,6 +446,23 @@ async def test_paper_kill_switch_blocks_every_new_entry_and_fails_closed(tmp_pat
     assert skips(h) == ["AAPL: kill switch active", "TSLA: kill switch unreadable (OperationalError) — fail closed"]
 
 
+async def test_the_kill_switch_never_blocks_an_exit(tmp_path, monkeypatch) -> None:
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    h = await build(tmp_path, monkeypatch)
+    await h.decide("AAPL", con_id=AAPL)
+    await h.engine.tick()
+    h.tws.fill(100, 100, "50.00")
+    await h.decide("WORK", con_id=7400)
+    await h.engine.tick()
+    await SQLitePaperKillStore().stop(reason="owner stop")
+    h.clock.value = ny(15, 45, 1)
+    await h.engine.tick()
+
+    assert 103 in h.tws.cancelled  # the WORK entry is still cancelled at its cutoff
+    assert [(order_id, order.totalQuantity) for order_id, order in h.tws.placed[6:]] == [(101, 100)]  # flatten
+
+
 async def test_a_price_already_at_the_stop_is_not_entered(tmp_path, monkeypatch) -> None:
     h = await build(tmp_path, monkeypatch)
     await h.decide("AAPL", con_id=AAPL, quote={"bid": 49.50, "ask": 49.52})

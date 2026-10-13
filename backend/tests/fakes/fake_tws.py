@@ -180,6 +180,10 @@ class FakeTws:
                                   float(shares), 50.0)
         self.wrapper.positionEnd()
 
+    def cancelPositions(self) -> None:
+        self.requests.append("cancelPositions")
+        self.position_subscribed = False
+
     def reqAllOpenOrders(self) -> None:
         self.requests.append("reqAllOpenOrders")
         if not self.answer_snapshots:

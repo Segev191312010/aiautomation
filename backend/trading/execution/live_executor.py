@@ -120,6 +120,7 @@ EVENT_KINDS = frozenset({
     "FLATTEN", "FLAT", "RESIZE", "CRITICAL", "INFO",
 })
 LEG_NAMES: dict[str, str] = {"P": "entry", "T": "target", "S": "stop", "F": "flatten sell"}
+PROTECTIVE_LEGS: tuple[LegCode, LegCode] = ("T", "S")
 
 DEFAULT_DECISION_TTL_S = 15  # trading/risk/engine.py: a risk approval lives 15 s
 MAX_DECISION_AGE_S = 60  # backstop even when an intent claims a longer expiry
@@ -519,6 +520,7 @@ class BrokerPort(Protocol):
     def reqCompletedOrders(self, apiOnly: bool) -> None: ...
     def reqExecutions(self, reqId: int, execFilter: Any) -> None: ...
     def reqPositions(self) -> None: ...
+    def cancelPositions(self) -> None: ...
     def reqAccountSummary(self, reqId: int, groupName: str, tags: str) -> None: ...
     def cancelAccountSummary(self, reqId: int) -> None: ...
     def reqMktData(self, reqId: int, contract: Any, genericTickList: str, snapshot: bool,
@@ -1161,7 +1163,9 @@ class LiveExecutor:
             self.error_marks[order_id] = self.mirror.order_errors.get(order_id, 0)
         self.broker.placeOrder(order_id, stock(bracket.con_id, bracket.primary_exchange), modified)
         previous = self.pending_modifies.get(order_id)
-        same = previous is not None and (previous.purpose, previous.total, previous.price) == (purpose, plan.total, price)
+        same = previous is not None and (
+            (previous.purpose, previous.total, previous.price) == (purpose, plan.total, price)
+        )
         self.pending_modifies[order_id] = PendingModify(
             bracket_id=bracket.id, leg=code, purpose=purpose, kind=leg.order_type, total=plan.total, price=price,
             sends=previous.sends + 1 if same and previous is not None else 1,
@@ -1249,15 +1253,15 @@ class LiveExecutor:
             return
         sent = False
         settled = True
-        for code in ("T", "S"):
-            order_id = bracket.order_id(code)  # type: ignore[arg-type]
-            price = self.leg_price(bracket, code)  # type: ignore[arg-type]
+        for code in PROTECTIVE_LEGS:
+            order_id = bracket.order_id(code)
+            price = self.leg_price(bracket, code)
             if not self.mirror.live(order_id):
-                settled = self.report_dead_leg(bracket, code) and settled  # type: ignore[arg-type]
+                settled = self.report_dead_leg(bracket, code) and settled
                 continue
             if price is None or order_id is None:
                 continue
-            result = self.modify_exit(bracket, code, price=price, purpose="resize", only_if_changed=True)  # type: ignore[arg-type]
+            result = self.modify_exit(bracket, code, price=price, purpose="resize", only_if_changed=True)
             sent = sent or result.outcome == "sent"
             settled = (settled and result.outcome not in {"blocked", "pending"} and not result.capped
                        and self.modify_settled(order_id))
@@ -1393,9 +1397,9 @@ class LiveExecutor:
         self.cancel_requested_at[bracket.id] = self.now()
         self.emit("FLATTEN", f"{bracket.symbol}: {reason} — fallback: cancelling target and stop, then one market"
                   " sell once both cancels are confirmed")
-        for code in ("T", "S"):
-            if self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES:  # type: ignore[arg-type]
-                self.cancel_leg(bracket, code, "flatten fallback")  # type: ignore[arg-type]
+        for code in PROTECTIVE_LEGS:
+            if self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES:
+                self.cancel_leg(bracket, code, "flatten fallback")
         return True
 
     def leg_dead(self, bracket: BracketRecord, code: LegCode) -> bool:
@@ -1422,15 +1426,16 @@ class LiveExecutor:
             if bracket.id not in self.cancel_requested_at:
                 # First look in this run: a restart may have come before the cancels reached TWS.
                 self.cancel_requested_at[bracket.id] = self.now()
-                for code in ("T", "S"):
-                    if self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES:  # type: ignore[arg-type]
-                        self.cancel_leg(bracket, code, "flatten fallback, after a restart")  # type: ignore[arg-type]
-            if not all(self.leg_dead(bracket, code) for code in ("T", "S")):
+                for code in PROTECTIVE_LEGS:
+                    if self.mirror.status(bracket.order_id(code)) in WORKING_ORDER_STATUSES:
+                        self.cancel_leg(bracket, code, "flatten fallback, after a restart")
+            if not all(self.leg_dead(bracket, code) for code in PROTECTIVE_LEGS):
                 started = self.cancel_requested_at.setdefault(bracket.id, self.now())
                 if self.now() - started >= FLATTEN_CANCEL_TIMEOUT:
                     bracket.flatten_state = "failed"
+                    seconds = int(FLATTEN_CANCEL_TIMEOUT.total_seconds())
                     self.emit("CRITICAL", f"{bracket.symbol}: TWS did not confirm cancelling the target and stop"
-                              f" within {int(FLATTEN_CANCEL_TIMEOUT.total_seconds())}s — no market sell sent; act in TWS")
+                              f" within {seconds}s — no market sell sent; act in TWS")
                 continue
             await self.send_fallback_sell(bracket)
 
@@ -1452,7 +1457,8 @@ class LiveExecutor:
         with self.mirror.lock:
             echo = self.mirror.order_objects.get(target.order_id)
         shown = decimal_or_none(getattr(echo, "lmtPrice", None)) if echo is not None else None
-        repriced = shown is not None and bracket.flatten_price is not None and abs(shown - bracket.flatten_price) < TICK / 2
+        repriced = (shown is not None and bracket.flatten_price is not None
+                    and abs(shown - bracket.flatten_price) < TICK / 2)
         # A reprice dropped on the way (capped to nothing, or blocked with its own alert) is never retried.
         bracket.flatten_state = "repriced" if repriced or status == "Filled" or bracket.state != "open" else "failed"
 
@@ -1473,7 +1479,15 @@ class LiveExecutor:
 
     async def send_fallback_sell(self, bracket: BracketRecord) -> None:
         """One market sell of the ledger quantity, capped by the live position less other working sells."""
+        # The most dangerous order the engine sends decides on a fresh snapshot of everything:
+        # executions and completed orders (a fill that raced the cancels) and positions from scratch.
+        if not await self.request_snapshots(positions=True):
+            bracket.flatten_state = "failed"
+            self.emit("CRITICAL", f"{bracket.symbol}: flatten fallback stopped — TWS did not report a fresh"
+                      " snapshot; no market sell sent; act in TWS")
+            return
         await self.sync_fills()
+        self.observe_legs()
         self.refresh(bracket)
         if bracket.state != "open":
             bracket.flatten_state = "skipped"  # the cancels raced fills that closed it
@@ -1576,8 +1590,8 @@ class LiveExecutor:
         )
 
     def check_dangling_exits(self, bracket: BracketRecord) -> None:
-        for code in ("T", "S"):
-            order_id = bracket.order_id(code)  # type: ignore[arg-type]
+        for code in PROTECTIVE_LEGS:
+            order_id = bracket.order_id(code)
             if order_id is None:
                 continue
             if bracket.state not in {"closed", "cancelled"} or not self.mirror.live(order_id):
@@ -1622,11 +1636,19 @@ class LiveExecutor:
         self.broker.reqExecutions(EXEC_REQUEST_ID, execution_filter(self.client_id))
         self.broker.reqCompletedOrders(True)
         if positions:
-            mirror.positions_done.clear()
+            # Re-subscribe from scratch: a contract TWS no longer reports must not keep a stale count.
+            with mirror.lock:
+                mirror.positions_done.clear()
+                for key in [key for key in mirror.positions if key[0] == self.account]:
+                    del mirror.positions[key]
+            self.broker.cancelPositions()
             self.broker.reqPositions()  # stays subscribed: every exit is capped by it
-        waits = (mirror.open_orders_done, mirror.exec_done, mirror.completed_done, mirror.positions_done)
-        results = [await self.wait_for(event) for event in waits]
-        return all(results)
+        # One deadline for the whole snapshot: a silent TWS stalls a tick once, not once per request.
+        deadline = time.monotonic() + self.sync_timeout
+        for event in (mirror.open_orders_done, mirror.exec_done, mirror.completed_done, mirror.positions_done):
+            if not await self.wait_for(event, max(0.0, deadline - time.monotonic())):
+                return False
+        return True
 
     def refs_known_at_ibkr(self) -> set[str]:
         with self.mirror.lock:
@@ -1727,8 +1749,8 @@ class LiveExecutor:
                 code = "stale_order" if item.order_ref in known_elsewhere else "unknown_order"
                 self.unmanaged.setdefault(item.order_id, (item.symbol or "?", item.con_id))
                 findings.append(Finding(code, f"{code}:{item.order_ref}",
-                                        f"{item.symbol or '?'}: order {item.order_id} tagged {item.order_ref} is working"
-                                        " at IBKR but is not a managed engine order — check TWS"))
+                                        f"{item.symbol or '?'}: order {item.order_id} tagged {item.order_ref} is"
+                                        " working at IBKR but is not a managed engine order — check TWS"))
                 continue
             if item.client_id != self.client_id or item.order_id != leg.order_id or (
                 item.account and item.account != self.account
@@ -1815,7 +1837,8 @@ class LiveExecutor:
         self.findings = {finding.key: finding for finding in findings}
         if self.findings and not was_paused:
             codes = sorted({finding.code for finding in findings})
-            self.emit("CRITICAL", f"reconciliation mismatch ({', '.join(codes)}) — new entries paused; exits continue")
+            self.emit("CRITICAL", f"reconciliation mismatch ({', '.join(codes)}) — new entries paused;"
+                      " exits continue")
             self.queue_event("entries_paused", {"codes": codes})
         elif not self.findings and was_paused:
             self.emit("INFO", "reconciliation clean — new entries resumed")
@@ -1987,12 +2010,12 @@ class LiveExecutor:
         now = self.now()
         parent_id, target_id, stop_id = ids
 
-        def leg(code: LegCode, order_id: int, action: str, order_type: str, tif: str, price: Decimal,
-                parent: int | None, transmit: bool) -> LegRecord:
+        def leg(code: LegCode, order_id: int, action: Literal["BUY", "SELL"], order_type: Literal["LMT", "STP"],
+                tif: Literal["DAY", "GTC"], price: Decimal, parent: int | None, transmit: bool) -> LegRecord:
             return LegRecord(
                 id=f"{bracket_id}:{code}", bracket_id=bracket_id, leg=code, client_id=self.client_id,
-                order_id=order_id, order_ref=order_ref(bracket_id, code), action=action,  # type: ignore[arg-type]
-                order_type=order_type, tif=tif, quantity=intent.quantity, price=price,  # type: ignore[arg-type]
+                order_id=order_id, order_ref=order_ref(bracket_id, code), action=action,
+                order_type=order_type, tif=tif, quantity=intent.quantity, price=price,
                 parent_order_id=parent, transmit=transmit, state="staged", created_at=now,
             )
 

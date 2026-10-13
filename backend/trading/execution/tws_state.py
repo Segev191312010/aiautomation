@@ -292,7 +292,8 @@ class TwsMirror:
                 return  # the original of an execution that was already corrected
             self.execs[base] = row
         if current is not None and version > current.version:
-            self.alert("INFO", f"execution {exec_id} corrects order {row.order_id}: {current.shares} -> {row.shares} sh")
+            self.alert("INFO", f"execution {exec_id} corrects order {row.order_id}:"
+                       f" {current.shares} -> {row.shares} sh")
 
     def execDetailsEnd(self, reqId: int) -> None:
         self.exec_done.set()

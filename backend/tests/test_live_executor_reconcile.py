@@ -171,6 +171,19 @@ async def test_a_snapshot_tws_does_not_answer_pauses_entries_but_not_exits(tmp_p
     assert not h.engine.findings
 
 
+async def test_a_silent_tws_stalls_a_reconciliation_once_not_once_per_request(tmp_path, monkeypatch) -> None:
+    import time
+
+    h = await build(tmp_path, monkeypatch)
+    h.tws.answer_snapshots = False
+    h.engine.sync_timeout = 0.3
+    started = time.monotonic()
+    findings = await h.engine.reconcile()
+
+    assert [finding.code for finding in findings] == ["snapshot_unavailable"]
+    assert time.monotonic() - started < 0.9  # four requests, one deadline (the old waits took 1.2 s)
+
+
 async def test_a_stale_engine_order_of_an_earlier_session_is_a_mismatch(tmp_path, monkeypatch) -> None:
     h = await build(tmp_path, monkeypatch, clock=Clock(ny(10, 0, 5, day=date(2026, 10, 12))),
                     session_date=date(2026, 10, 12))
