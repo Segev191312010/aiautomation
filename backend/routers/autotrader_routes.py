@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,6 +12,11 @@ from trading.authority import EngineAuthority
 from trading.contracts import EngineMode, StrategySpec, StrategyState
 from trading.contracts import Run
 from trading.data.repositories import CandidateRepository, RunRepository
+from trading.sendable_identities import (
+    API_RESERVED_NAME_PREFIXES,
+    RESERVED_STRATEGY_NAME,
+    is_api_reserved_name,
+)
 from trading.storage.repository import (
     create_strategy,
     get_strategy,
@@ -19,6 +26,8 @@ from trading.storage.repository import (
     publish_strategy_version,
     transition_strategy,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/engine/v1",
@@ -61,6 +70,23 @@ _CURRENT_RELEASE_TRANSITIONS = {
 }
 
 
+def _refuse_reserved_name(spec: StrategySpec) -> None:
+    """MOMO_HOD names reach the PAPER bridge and AP_ names are autopilot-managed:
+    both are made only by reviewed code, never through this API."""
+    if not is_api_reserved_name(spec.name):
+        return
+    log.warning("%s: API refused strategy name %r", RESERVED_STRATEGY_NAME, spec.name)
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": RESERVED_STRATEGY_NAME,
+            "message": "strategy names starting with "
+            + " or ".join(API_RESERVED_NAME_PREFIXES)
+            + " are created by reviewed code only",
+        },
+    )
+
+
 @router.get("/status")
 async def get_engine_status():
     authority = EngineAuthority()
@@ -80,6 +106,7 @@ async def get_strategies(user=Depends(get_current_user)):
 
 @router.post("/strategies", status_code=201)
 async def create_draft_strategy(spec: StrategySpec, user=Depends(get_current_user)):
+    _refuse_reserved_name(spec)
     record = await create_strategy(spec=spec, owner_id=user.id, actor=user.id)
     return record.model_dump(mode="json")
 
@@ -106,6 +133,7 @@ async def publish_version(
     request: PublishStrategyVersionRequest,
     user=Depends(get_current_user),
 ):
+    _refuse_reserved_name(request.spec)
     try:
         record = await publish_strategy_version(
             strategy_id=strategy_id,

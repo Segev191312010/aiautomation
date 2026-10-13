@@ -447,6 +447,13 @@ async def test_only_momo_sessions_get_market_context_and_the_risk_off_gate(
     provide = captured["transport"]["context_provider"]
     gate = captured["runner"]["entry_gate"]
     prints = captured["run"]["policy_fingerprints"]
+    # The runner polls in the strategy's own slot, and the market enforces
+    # exactly the freshness limit that slot was planned against.
+    schedule = captured["runner"]["poll_schedule"]
+    universe = "watchlist" if strategy_name == "momo" else "scanner"
+    assert schedule == shadow_service.poll_schedule(strategy_name, universe)
+    assert schedule.offset == shadow_service.STRATEGY_POLL_OFFSETS[strategy_name]
+    assert captured["market"]["bar_max_age"] == schedule.bar_max_age
     if strategy_name == "momo":
         assert captured["runner"]["entry_gate_name"] == "momo"
         assert await provide() == risk_off.to_payload()
@@ -516,6 +523,7 @@ async def _gated_day(tmp_path, monkeypatch, make_gate) -> GatedDay:
             lease_renew_interval=timedelta(hours=1),
         ),
         clock=now,
+        poll_schedule=shadow_service.poll_schedule("orb", "scanner"),
         sleep=sleep,
         entry_gate=make_gate(now),
         entry_gate_name="momo",
@@ -550,7 +558,7 @@ async def test_risk_off_pauses_assessments_then_resumes_logging_each_change_once
 
     day = await _gated_day(tmp_path, monkeypatch, make_gate)
 
-    # Polls 09:50:05 through 10:25:05 were paused: no data, account or review.
+    # Polls 09:50:30 through 10:25:30 were paused: no data, account or review.
     assert (day.report.polls, day.report.paused_polls) == (26, 8)
     assert day.market.requested_at and min(day.market.requested_at) >= resume_at
     assert min(day.account_reads) >= resume_at

@@ -130,3 +130,79 @@ async def test_autotrader_routes_are_draft_and_shadow_only(tmp_path, monkeypatch
         assert listed.status_code == 200
         assert listed.json()[0]["version"] == 2
         assert listed.json()[0]["state"] == "draft"
+
+
+# The PAPER bridge sends for stored MOMO_HOD names; AP_ names are
+# autopilot-managed. Code alone makes both, so the API refuses every variant,
+# the one sendable identity included.
+RESERVED_NAMES = (
+    "MOMO_HOD_V2",
+    "MOMO_HOD_V1",
+    " momo_hod_v3",
+    "AP_MOMO_HOD_V1",
+    "ap_scanner",
+)
+
+
+@pytest.mark.anyio
+async def test_api_never_creates_or_publishes_a_reserved_strategy_name(tmp_path, monkeypatch):
+    from config import cfg
+    from db.core import init_db
+    from main import app
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "reserved_names.db"))
+    monkeypatch.setattr(cfg, "JWT_BOOTSTRAP_SECRET_FILE", "")
+    monkeypatch.setenv("BOOTSTRAP_ALLOW_REMOTE", "1")
+    await init_db()
+    transport = ASGITransport(app=app)
+    headers = {"X-Bootstrap-Secret": cfg.JWT_BOOTSTRAP_SECRET}
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        auth = await client.post("/api/auth/token", headers=headers)
+        assert auth.status_code == 200
+        bearer = {"Authorization": f"Bearer {auth.json()['access_token']}"}
+
+        for name in RESERVED_NAMES:
+            refused = await client.post(
+                "/api/engine/v1/strategies",
+                headers=bearer,
+                json={**_strategy_payload(), "name": name},
+            )
+            assert refused.status_code == 422, name
+            assert refused.json()["detail"]["code"] == "reserved_strategy_name"
+            assert "MOMO_HOD or AP_" in refused.json()["detail"]["message"]
+        listed = await client.get("/api/engine/v1/strategies", headers=bearer)
+        assert listed.status_code == 200 and listed.json() == []
+
+        created = await client.post(
+            "/api/engine/v1/strategies", headers=bearer, json=_strategy_payload()
+        )
+        assert created.status_code == 201
+        strategy_id = created.json()["strategy_id"]
+        for name in RESERVED_NAMES:
+            refused = await client.post(
+                f"/api/engine/v1/strategies/{strategy_id}/versions",
+                headers=bearer,
+                json={
+                    "base_version": 1,
+                    "spec": {**_strategy_payload(), "name": name},
+                    "reason": "Rename into a reserved family",
+                },
+            )
+            assert refused.status_code == 422, name
+            assert refused.json()["detail"]["code"] == "reserved_strategy_name"
+        versions = await client.get(
+            f"/api/engine/v1/strategies/{strategy_id}/versions", headers=bearer
+        )
+        assert [item["version"] for item in versions.json()] == [1]
+
+        # Names that merely contain the text are ordinary drafts.
+        ordinary = await client.post(
+            f"/api/engine/v1/strategies/{strategy_id}/versions",
+            headers=bearer,
+            json={
+                "base_version": 1,
+                "spec": {**_strategy_payload(), "name": "Draft MOMO_HOD copy"},
+                "reason": "Ordinary rename",
+            },
+        )
+        assert ordinary.status_code == 201 and ordinary.json()["version"] == 2

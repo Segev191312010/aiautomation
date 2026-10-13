@@ -37,26 +37,56 @@ from trading.contracts import (
 )
 from trading.market.ibkr_boundary import (
     DEFAULT_SCANNER_REQUEST,
+    MARKET_DATA_FAULTS,
     LiquidityProfile,
+    MarketDataQualityError,
     ScannerSnapshot,
 )
 from trading.orchestration.persistence import RepositoryBackedShadowRunner, ShadowRunSession
 from trading.orchestration.pipeline import CandidateInput
 from trading.risk.portfolio import portfolio_from_account
 from trading.rules.orb import qualify_candidate
-from trading.scheduler.sessions import MarketSession
+from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
+from trading.sendable_identities import (
+    SENDABLE_IDENTITIES,
+    SENDABLE_SPEC_MISMATCH,
+    SendableIdentityError,
+)
 
 logger = logging.getLogger("autotrader.shadow.session")
 
 ORB_STRATEGY_NAME = "ORB_V1"
 MOMO_STRATEGY_NAME = "MOMO_HOD_V2"
 BAR_INTERVAL = timedelta(minutes=5)
-# Poll a few seconds after each bar closes so IBKR has finalized that bar.
-POLL_DELAY_AFTER_BAR_CLOSE = timedelta(seconds=5)
+# The least time a poll gets, from its slot to its freshness limit, to fetch
+# every pending candidate: what the original 30 s limit left a poll made 5 s
+# after the close.
+MIN_PASS_BUDGET = timedelta(seconds=25)
 SCANNER_ATTEMPTS = 3
 SCANNER_RETRY_DELAY = timedelta(seconds=20)
 # How often a dynamic run asks its candidate refresh for newly hot symbols.
 DEFAULT_REFRESH_INTERVAL = timedelta(minutes=15)
+
+# Why a poll could not use a candidate's data. Each literal tags its warning
+# line and keys the session summary's ``data_error_reasons``.
+ACCOUNT_UNAVAILABLE = "account_unavailable"
+LIQUIDITY_UNAVAILABLE = "liquidity_unavailable"
+QUOTE_UNAVAILABLE = "quote_unavailable"
+# A bar request that failed outside the market-data boundary (e.g. a timeout).
+BARS_ERROR = "bars_error"
+# A bar batch the boundary refused, by its fault: bars_stale, bars_pacing, ...
+BARS_FAULT_REASONS = {fault: f"bars_{fault}" for fault in MARKET_DATA_FAULTS}
+DATA_ERROR_REASONS = frozenset(
+    {
+        ACCOUNT_UNAVAILABLE,
+        LIQUIDITY_UNAVAILABLE,
+        QUOTE_UNAVAILABLE,
+        BARS_ERROR,
+        *BARS_FAULT_REASONS.values(),
+    }
+)
+# Log tag for a poll slot reached too late to find fresh bars.
+LATE_POLLS_SKIPPED = "late_polls_skipped"
 
 
 class SessionMarketData(Protocol):
@@ -102,7 +132,18 @@ class SessionReport:
     outcomes: Counter[str] = field(default_factory=Counter)
     polls: int = 0
     paused_polls: int = 0
+    late_polls_skipped: int = 0
     data_errors: int = 0
+    data_error_reasons: Counter[str] = field(default_factory=Counter)
+
+    def record_data_error(self, reason: str) -> None:
+        """Count one failed request under its reason; the reasons sum to ``data_errors``."""
+        if reason not in DATA_ERROR_REASONS:
+            # Still counted, so the breakdown never hides an error; the new
+            # failure path needs its own token in DATA_ERROR_REASONS.
+            logger.critical("unregistered data-error reason %r", reason, stack_info=True)
+        self.data_errors += 1
+        self.data_error_reasons[reason] += 1
 
     def summary(self) -> dict[str, object]:
         return {
@@ -113,8 +154,38 @@ class SessionReport:
             "outcomes": dict(self.outcomes),
             "polls": self.polls,
             "paused_polls": self.paused_polls,
+            "late_polls_skipped": self.late_polls_skipped,
             "data_errors": self.data_errors,
+            "data_error_reasons": dict(sorted(self.data_error_reasons.items())),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class PollSchedule:
+    """When one strategy child polls inside every five-minute bar.
+
+    ``offset`` is the poll's delay after each bar close, and ``bar_max_age``
+    the freshness limit its bars are validated against, so the run has
+    ``bar_max_age - offset`` to fetch every pending candidate (its pass budget).
+    """
+
+    offset: timedelta
+    bar_max_age: timedelta
+
+    def __post_init__(self) -> None:
+        if self.offset <= timedelta(0):
+            raise ValueError("a poll must follow the bar close it evaluates")
+        if self.bar_max_age >= BAR_INTERVAL:
+            # Under one interval, a bar that passes is always the latest completed one.
+            raise ValueError("the bar freshness limit must stay under one bar interval")
+        if self.bar_max_age - self.offset < MIN_PASS_BUDGET:
+            # Otherwise most, or all, of every pass would be refused as stale.
+            raise ValueError("the poll offset leaves too little time under the freshness limit")
+
+    @property
+    def late_poll_limit(self) -> timedelta:
+        """How late a slot may still be polled: while half its pass budget remains."""
+        return (self.bar_max_age - self.offset) / 2
 
 
 def orb_strategy_spec() -> StrategySpec:
@@ -164,7 +235,12 @@ def momo_strategy_spec() -> StrategySpec:
 
 
 async def ensure_strategy(*, owner_id: str, spec: StrategySpec) -> StrategyRecord:
-    """Return the owner's strategy named ``spec.name``, creating it in SHADOW."""
+    """Return the owner's strategy named ``spec.name``, creating it in SHADOW.
+
+    A sendable identity is reused only while its stored content hash is the
+    hash of the spec this code builds: the PAPER bridge sends by stored name
+    alone, so a record whose content differs must never collect decisions.
+    """
     from trading.storage.repository import (
         create_strategy,
         list_strategies,
@@ -178,7 +254,27 @@ async def ensure_strategy(*, owner_id: str, spec: StrategySpec) -> StrategyRecor
         and record.state in {StrategyState.SHADOW, StrategyState.PAPER}
     ]
     if existing:
-        return max(existing, key=lambda record: record.version)
+        reused = max(existing, key=lambda record: record.version)
+        # content_hash is the stored column; StrategyRecord has already
+        # checked it equals the fingerprint of the stored spec_json.
+        if spec.name in SENDABLE_IDENTITIES and reused.content_hash != spec.fingerprint():
+            logger.critical(
+                "%s: %s record %s v%d stores spec %s but this code builds %s; "
+                "refusing to reuse it",
+                SENDABLE_SPEC_MISMATCH,
+                spec.name,
+                reused.strategy_id,
+                reused.version,
+                reused.content_hash,
+                spec.fingerprint(),
+                stack_info=True,
+            )
+            raise SendableIdentityError(
+                SENDABLE_SPEC_MISMATCH,
+                f"{spec.name} record {reused.strategy_id} v{reused.version} does not "
+                "hold the spec this code builds",
+            )
+        return reused
     record = await create_strategy(spec=spec, owner_id=owner_id, actor=owner_id)
     for target in (StrategyState.BACKTESTING, StrategyState.SHADOW):
         record = await transition_strategy(
@@ -207,6 +303,7 @@ class ShadowSessionRunner:
         read_account: AccountReader,
         runner: RepositoryBackedShadowRunner,
         clock: Callable[[], datetime],
+        poll_schedule: PollSchedule,
         sleep: Sleeper = asyncio.sleep,
         reconnect: Reconnector | None = None,
         holder_id: str | None = None,
@@ -215,11 +312,16 @@ class ShadowSessionRunner:
         bars_fetcher: BarsFetcher | None = None,
         contract_loader: ContractLoader | None = None,
     ) -> None:
-        """``entry_gate`` may pause assessments poll by poll; ``entry_gate_name``
+        """``poll_schedule`` places every poll inside its bar (a required
+        choice: children sharing symbols must not poll together).
+        ``entry_gate`` may pause assessments poll by poll; ``entry_gate_name``
         labels its log lines (``<name> paused: <reason>``). ``contract_loader``
         runs before every quote request, so candidates that joined without a
         loaded contract (a refresh, or a resumed run) still quote on their tick
         grid."""
+        if not isinstance(poll_schedule, PollSchedule):
+            raise TypeError("poll_schedule must be a PollSchedule")
+        self._poll_schedule = poll_schedule
         self._market = market
         self._read_account = read_account
         self._runner = runner
@@ -306,7 +408,7 @@ class ShadowSessionRunner:
             latest: dict[str, CandidateInput] = {}
             cutoff = shadow.cutoff
             refreshed_at = self._now()
-            poll_at = self._first_poll(session, window_start)
+            poll_at = self._first_poll(session, report, window_start)
             # A dynamic run polls on with nothing pending: a refresh may still add.
             while poll_at < cutoff and (dynamic or shadow.pending()):
                 await self._sleep_until(poll_at)
@@ -332,7 +434,7 @@ class ShadowSessionRunner:
                         # Paused candidates stay pending; the cutoff sweep below
                         # still makes every one of them terminal.
                         report.paused_polls += 1
-                poll_at = poll_at + BAR_INTERVAL
+                poll_at = self._due_poll(poll_at + BAR_INTERVAL, report)
             # Only the sweep completes a dynamic run, even with nothing pending.
             if dynamic or shadow.pending():
                 await self._sleep_until(cutoff)
@@ -401,7 +503,7 @@ class ShadowSessionRunner:
     ) -> None:
         portfolio = await self._portfolio(shadow)
         if portfolio is None:
-            report.data_errors += 1
+            report.record_data_error(ACCOUNT_UNAVAILABLE)
             return
         for candidate in shadow.pending():
             profile = liquidity.get(candidate.con_id)
@@ -411,8 +513,13 @@ class ShadowSessionRunner:
                         con_id=candidate.con_id, session_date=session_date
                     )
                 except Exception as exc:  # noqa: BLE001 - candidate stays pending
-                    report.data_errors += 1
-                    logger.warning("liquidity unavailable for %s: %s", candidate.symbol, exc)
+                    report.record_data_error(LIQUIDITY_UNAVAILABLE)
+                    logger.warning(
+                        "liquidity unavailable for %s [%s]: %s",
+                        candidate.symbol,
+                        LIQUIDITY_UNAVAILABLE,
+                        exc,
+                    )
                     await self._recover_connection()
                     continue
                 liquidity[candidate.con_id] = profile
@@ -442,8 +549,9 @@ class ShadowSessionRunner:
                         con_id=candidate.con_id, now=self._now()
                     )
             except Exception as exc:  # noqa: BLE001 - pending until the next poll
-                report.data_errors += 1
-                logger.warning("bars unavailable for %s: %s", candidate.symbol, exc)
+                reason = bars_error_reason(exc)
+                report.record_data_error(reason)
+                logger.warning("bars unavailable for %s [%s]: %s", candidate.symbol, reason, exc)
                 await self._recover_connection()
                 bars = ()
             item = CandidateInput(
@@ -462,8 +570,10 @@ class ShadowSessionRunner:
                     await self._contract_loader(candidate.con_id)
                 quote = await self._market.quote(con_id=candidate.con_id)
             except Exception as exc:  # noqa: BLE001 - breakout stays pending
-                report.data_errors += 1
-                logger.warning("quote unavailable for %s: %s", candidate.symbol, exc)
+                report.record_data_error(QUOTE_UNAVAILABLE)
+                logger.warning(
+                    "quote unavailable for %s [%s]: %s", candidate.symbol, QUOTE_UNAVAILABLE, exc
+                )
                 await self._recover_connection()
                 continue
             quoted = CandidateInput(
@@ -552,7 +662,7 @@ class ShadowSessionRunner:
         try:
             account = await self._read_account()
         except Exception as exc:  # noqa: BLE001 - no sizing without broker truth
-            logger.warning("account snapshot unavailable: %s", exc)
+            logger.warning("account snapshot unavailable [%s]: %s", ACCOUNT_UNAVAILABLE, exc)
             await self._recover_connection()
             return None
         accepted = tuple(
@@ -581,17 +691,47 @@ class ShadowSessionRunner:
         except Exception as exc:  # noqa: BLE001 - retried on the next request
             logger.warning("TWS reconnect failed: %s", type(exc).__name__)
 
-    def _first_poll(self, session: MarketSession, window_start: datetime | None = None) -> datetime:
-        """First bar close at or after the window opens, and not in the past.
+    def _first_poll(
+        self,
+        session: MarketSession,
+        report: SessionReport,
+        window_start: datetime | None = None,
+    ) -> datetime:
+        """This child's slot after the window's first bar close, or the slot due now.
 
         A strategy with its own window (GAP_GO opens at 09:35) polls from that
         window; scan-driven ORB keeps the session's first signal bar (09:50).
         """
         first = window_start if window_start is not None else session.first_signal_at
+        return self._due_poll(first + self._poll_schedule.offset, report)
+
+    def _due_poll(self, slot: datetime, report: SessionReport) -> datetime:
+        """``slot`` if it is still ahead or only a little late; else the next slot.
+
+        Bars are refused once older than ``bar_max_age``, and a slot reached
+        late (a restart mid-bar, a slow pass) starts its pass with bars that
+        much older. It still runs while half its pass budget remains; later,
+        most of its requests would be refused as stale (2026-10-12: MOMO began
+        a pass 78 s after its slot and 28 of its 35 bar requests were refused),
+        so the run waits for the next bar's slot instead.
+        """
         now = self._now()
-        while first + POLL_DELAY_AFTER_BAR_CLOSE < now - BAR_INTERVAL:
-            first += BAR_INTERVAL
-        return first + POLL_DELAY_AFTER_BAR_CLOSE
+        if slot >= now:
+            return slot
+        # Slots before the current bar's belong to history, not to this pass.
+        slot += BAR_INTERVAL * ((now - slot) // BAR_INTERVAL)
+        late = now - slot
+        if late <= self._poll_schedule.late_poll_limit:
+            return slot
+        report.late_polls_skipped += 1
+        logger.warning(
+            "skipping the %s ET poll [%s]: %d s late, past the %d s a late poll may start",
+            slot.astimezone(MARKET_TIMEZONE).strftime("%H:%M:%S"),
+            LATE_POLLS_SKIPPED,
+            late.total_seconds(),
+            self._poll_schedule.late_poll_limit.total_seconds(),
+        )
+        return slot + BAR_INTERVAL
 
     def _now(self) -> datetime:
         return self._clock().astimezone(timezone.utc)
@@ -609,16 +749,33 @@ def _decision_symbol(shadow: ShadowRunSession, decision: Decision) -> str:
     raise LookupError("decision does not belong to a session candidate")
 
 
+def bars_error_reason(exc: BaseException) -> str:
+    """The data-error reason for a failed bar request."""
+    if isinstance(exc, MarketDataQualityError):
+        return BARS_FAULT_REASONS[exc.fault]
+    return BARS_ERROR
+
+
 __all__ = [
+    "ACCOUNT_UNAVAILABLE",
+    "BARS_ERROR",
+    "BARS_FAULT_REASONS",
+    "DATA_ERROR_REASONS",
     "DEFAULT_REFRESH_INTERVAL",
+    "LATE_POLLS_SKIPPED",
+    "LIQUIDITY_UNAVAILABLE",
+    "MIN_PASS_BUDGET",
     "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
+    "QUOTE_UNAVAILABLE",
     "CandidateRefresh",
     "ContractLoader",
     "EntryGate",
+    "PollSchedule",
     "SessionAborted",
     "SessionReport",
     "ShadowSessionRunner",
+    "bars_error_reason",
     "ensure_orb_strategy",
     "ensure_strategy",
     "momo_strategy_spec",
