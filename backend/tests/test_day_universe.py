@@ -542,8 +542,50 @@ async def test_golden_the_hot_35_and_the_regime_ignore_day_universe_and_held_row
     assert {row.con_id for row in section.rows} & ranking_ids == {601, 602, 603, 604, 605, 606, 607}
     calls = [con_id for batch in source.batches for con_id in batch]
     assert len(calls) == len(set(calls))
-    # The extras come after the whole ranking group, in their own batch.
-    assert source.batches[-1] == [600 + index for index in range(8, 41)] + [700]
+    # After the whole ranking group: the held symbol, then the day universe.
+    assert source.batches[-2:] == [[700], [600 + index for index in range(8, 41)]]
+
+
+class PersistWatch(FakeMarket):
+    """Records what the database held when each quote-only batch was requested."""
+
+    def __init__(self, *args: Any, watched: set[int], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.watched = watched
+        self.seen: list[ScreenerPayload | None] = []
+
+    async def market_snapshots(self, con_ids: Any, *, timeout_seconds: float = 3.0) -> Any:
+        if set(con_ids) & self.watched:
+            self.seen.append(await latest_snapshot(DAY))
+        return await super().market_snapshots(con_ids, timeout_seconds=timeout_seconds)
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_is_persisted_before_the_day_universe_is_quoted(database) -> None:
+    """MOMO's readers see each sweep exactly when its ranking group is done."""
+    await seed_golden_universe()
+    insert_day_names(database, GOLDEN_DAY)
+    template = golden_source()
+    source = PersistWatch(
+        template.answers, template.scans, template.histories, watched={608}
+    )
+
+    result = await golden_sweep(source, day_universe=True, held=False)
+
+    (stored,) = source.seen
+    assert stored is not None and stored.day_universe is None
+    assert stored.rows == result.payload.rows and stored.market == result.payload.market
+    # The list was attached to that same snapshot, leaving the rest byte-identical.
+    with closing(sqlite3.connect(database)) as db:
+        (text,) = db.execute(
+            "SELECT payload_json FROM autotrader_screener_snapshots WHERE id = ?", (result.snapshot_id,)
+        ).fetchone()
+    assert text.startswith(stored.to_json()[:-1] + ',"day_universe":')
+    assert ScreenerPayload.model_validate_json(text) == result.payload
+    with pytest.raises(screener_module.ScreenerError):
+        await screener_module.attach_day_universe(result.snapshot_id, result.payload, result.payload.day_universe)
+    with pytest.raises(screener_module.ScreenerError, match="not this sweep"):
+        await screener_module.attach_day_universe(result.snapshot_id, stored, result.payload.day_universe)
 
 
 @pytest.mark.asyncio

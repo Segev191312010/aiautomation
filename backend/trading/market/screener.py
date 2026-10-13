@@ -8,15 +8,16 @@ payload also carries the sweep's ``market_context.v1`` document.
 
 The hot-35 ranking group is the qualified watchlist plus at most 15 scan
 additions, exactly as before the day manager. Two kinds of names are quoted
-after that group, in their own pass, and never ranked with it:
+after that group, in their own passes, and never ranked with it:
 
-* the day universe (``trading.market.day_universe``), ranked in its own list
-  under ``day_universe``; the manager and the simulations read it, the real
-  MOMO never does;
 * symbols the order bridge may hold (the session's accepted decisions of a
   sendable strategy name) that left the ranking group: they trail ``rows``
   unranked (score 0, never hot) so the bridge's flatten fallback always finds
-  a fresh ``rows[].{symbol,con_id,bid,last}`` quote.
+  a fresh ``rows[].{symbol,con_id,bid,last}`` quote;
+* the day universe (``trading.market.day_universe``), quoted after the sweep
+  is persisted and ranked in its own list, attached to that sweep under
+  ``day_universe``; the manager and the simulations read it, the real MOMO
+  never does.
 """
 from __future__ import annotations
 
@@ -545,7 +546,10 @@ def with_market_context(payload: ScreenerPayload, context: MarketContext) -> Scr
 
 
 async def persist_snapshot(payload: ScreenerPayload) -> str:
-    """Append one sweep; snapshots are never updated in place."""
+    """Append one sweep; its rows, market and counts are never updated in place.
+
+    The only later write is the sweep's own ``attach_day_universe``.
+    """
     snapshot_id = uuid4().hex
     async with transaction() as db:
         await db.execute(
@@ -554,6 +558,35 @@ async def persist_snapshot(payload: ScreenerPayload) -> str:
             (snapshot_id, payload.session_date, payload.observed_at, payload.to_json()),
         )
     return snapshot_id
+
+
+async def attach_day_universe(
+    snapshot_id: str, payload: ScreenerPayload, section: DayUniverseSection
+) -> ScreenerPayload:
+    """Add the sweep's own day-universe list to its persisted snapshot, once.
+
+    Everything already stored stays byte-for-byte as it was (the rows the
+    hot list and the order bridge read included); the key is only appended,
+    and a snapshot that already carries one is refused.
+    """
+    if payload.day_universe is not None:
+        raise ScreenerError("the sweep's day universe is already attached")
+    document = payload.model_dump(mode="json", by_alias=True)
+    document["day_universe"] = section
+    updated = ScreenerPayload.model_validate(document)
+    before = payload.to_json()
+    after = updated.to_json()
+    if not after.startswith(before[:-1] + ","):
+        raise ScreenerError("attaching the day universe would change the stored sweep")
+    async with transaction() as db:
+        cursor = await db.execute(
+            """UPDATE autotrader_screener_snapshots SET payload_json = ?
+               WHERE id = ? AND payload_json = ? AND json_type(payload_json, '$.day_universe') IS NULL""",
+            (after, snapshot_id, before),
+        )
+        if cursor.rowcount != 1:
+            raise ScreenerError(f"snapshot {snapshot_id} is not this sweep's unattached snapshot")
+    return updated
 
 
 async def latest_snapshot(session_date: date) -> ScreenerPayload | None:
@@ -646,14 +679,24 @@ async def latest_hotlist(session_date: date) -> tuple[HotListRow, ...]:
 async def latest_day_universe(
     session_date: date,
 ) -> tuple[datetime, DayUniverseSection] | None:
-    """The newest sweep's day-universe list with that sweep's start, or None.
+    """The newest attached day-universe list with its sweep's start, or None.
 
-    For the day manager and the simulations only; callers own freshness.
+    For the day manager and the simulations only; callers own freshness. The
+    newest sweep may not carry its list yet (it is attached after the sweep
+    is persisted), so this reads the newest sweep that does.
     """
-    payload = await latest_snapshot(session_date)
-    if payload is None or payload.day_universe is None:
+    async with get_db() as db:
+        async with db.execute(
+            """SELECT observed_at, json_extract(payload_json, '$.day_universe')
+               FROM autotrader_screener_snapshots
+               WHERE session_date = ? AND json_type(payload_json, '$.day_universe') = 'object'
+               ORDER BY observed_at DESC, id DESC LIMIT 1""",
+            (session_date.isoformat(),),
+        ) as cursor:
+            raw = await cursor.fetchone()
+    if raw is None:
         return None
-    return datetime.fromisoformat(payload.observed_at), payload.day_universe
+    return datetime.fromisoformat(str(raw[0])), DayUniverseSection.model_validate_json(str(raw[1]))
 
 
 async def load_screener_universe(
@@ -1253,12 +1296,14 @@ async def run_sweep(
     persisting: a partial sweep would rank a different universe than the
     one that qualified.
 
-    Afterwards, in a second pass that can neither change nor abort the
-    ranking group, it quotes the day universe (``day_universe``: its own
-    list under ``day_universe``) and, with ``held``, the symbols the order
-    bridge may hold that left the ranking group (trailing, unranked rows).
-    A competing login or lost connection in that pass still persists the
-    ranking group, then raises.
+    With ``held`` it then quotes, in their own small batch, the symbols the
+    order bridge may hold that left the ranking group (trailing, unranked
+    rows), and persists the sweep: at the same point as before the day
+    universe existed, so the hot list's readers never wait for more. With
+    ``day_universe`` it afterwards quotes the day universe in its own pass
+    and attaches its own list to the persisted sweep (``attach_day_universe``).
+    Neither pass can change or abort the ranking group; a competing login
+    or lost connection in them raises after the sweep is persisted.
     """
     universe_size, instruments = await load_screener_universe(session_date)
     context_instruments: tuple[ContextInstrument, ...] = ()
@@ -1318,40 +1363,16 @@ async def run_sweep(
             consecutive = 0
             observations.append(observation)
     ranked = rank_observations(observations)
-    # --- quote-only names: never ranked with the group above ---
+    # --- held symbols that left the ranking group: quoted, never ranked ---
     ranking_ids = {item.con_id for item in instruments}
-    members = await day_universe_instruments(session_date, context_ids) if day_universe else ()
     held_names = (
         without_context_etfs(await held_instruments(session_date), context_ids) if held else ()
     )
-    extras: dict[int, ScreenerInstrument] = {}
-    for item in (*members, *held_names):
-        if item.con_id not in ranking_ids:
-            extras.setdefault(item.con_id, item)
-    extra_pass = await _quote_extras(
-        source, tuple(extras.values()), session=session, monotonic=monotonic
-    )
-    observed = {item.instrument.con_id: item for item in observations}
-    observed.update(extra_pass.observed)
     held_only = [item for item in held_names if item.con_id not in ranking_ids]
+    held_pass = await _quote_extras(source, held_only, session=session, monotonic=monotonic)
     trailing = _valid_rows(
-        unranked([observed[item.con_id] for item in held_only if item.con_id in observed])
+        unranked([held_pass.observed[item.con_id] for item in held_only if item.con_id in held_pass.observed])
     )
-    section: DayUniverseSection | None = None
-    if day_universe:
-        quoted_members = [observed[item.con_id] for item in members if item.con_id in observed]
-        try:
-            section = DayUniverseSection(
-                size=len(members),
-                quoted=len(quoted_members),
-                errors=len(members) - len(quoted_members),
-                complete=extra_pass.complete,
-                seconds=extra_pass.seconds,
-                rows=tuple(day_universe_row(item) for item in rank_day_universe(quoted_members)),
-            )
-        except (ValueError, ScreenerError) as exc:
-            # The ranking group is persisted whatever its quote-only companions do.
-            logger.error("day universe left out of this sweep: %s", exc)
     payload = build_payload(
         session_date=session_date,
         observed_at=observed_at,
@@ -1361,7 +1382,6 @@ async def run_sweep(
         errors=len(errors) + len(held_only) - len(trailing),
         ranked=ranked,
         trailing=trailing,
-        day_universe=section,
     )
     context: MarketContext | None = None
     if etf_snapshots is not None:
@@ -1372,6 +1392,8 @@ async def run_sweep(
             watchlist_rows=[row.model_dump() for row in payload.rows],
         )
         payload = with_market_context(payload, context)
+    # Persisted exactly when the ranking group is done, as before the day
+    # universe: the hot list's readers never wait for its quote-only pass.
     snapshot_id = await persist_snapshot(payload)
     logger.info(
         "sweep %s: qualified=%d quoted=%d errors=%d hot=%d seconds=%.1f",
@@ -1382,23 +1404,27 @@ async def run_sweep(
         sum(1 for row in payload.rows if row.hot),
         payload.sweep_seconds,
     )
-    if section is not None or trailing:
-        logger.info(
-            "sweep %s: day universe quoted=%d/%d%s held-only=%d extra seconds=%.1f",
-            session_date.isoformat(),
-            0 if section is None else section.quoted,
-            0 if section is None else section.size,
-            "" if extra_pass.complete else " (incomplete)",
-            len(trailing),
-            extra_pass.seconds,
-        )
     if context is not None:
         logger.info("market %s", context.summary)
     if errors:
         logger.warning("sweep snapshot errors (first 5): %s", "; ".join(errors[:5]))
-    if extra_pass.interrupted is not None:
+    if held_pass.interrupted is not None:
         # The ranking group is persisted; the connection problem still surfaces.
-        raise extra_pass.interrupted
+        raise held_pass.interrupted
+    # --- the day universe: its own pass and list, attached to this sweep once ---
+    if day_universe:
+        payload = await _sweep_day_universe(
+            source,
+            snapshot_id=snapshot_id,
+            payload=payload,
+            context_ids=context_ids,
+            observed={
+                **{item.instrument.con_id: item for item in observations},
+                **held_pass.observed,
+            },
+            session=session,
+            monotonic=monotonic,
+        )
     return SweepResult(
         snapshot_id=snapshot_id,
         payload=payload,
@@ -1406,6 +1432,55 @@ async def run_sweep(
         market_context=context,
         scans=scans,
     )
+
+
+async def _sweep_day_universe(
+    source: SnapshotSource,
+    *,
+    snapshot_id: str,
+    payload: ScreenerPayload,
+    context_ids: Set[int],
+    observed: Mapping[int, Observation],
+    session: MarketSession | None,
+    monotonic: Callable[[], float],
+) -> ScreenerPayload:
+    """Quote the day universe after the sweep is persisted and attach its own list.
+
+    Names the sweep already quoted reuse that snapshot; the rest get their
+    own pass. A competing login or lost connection still attaches what was
+    quoted (``complete`` false), then raises.
+    """
+    session_date = date.fromisoformat(payload.session_date)
+    members = await day_universe_instruments(session_date, context_ids)
+    pending = [item for item in members if item.con_id not in observed]
+    member_pass = await _quote_extras(source, pending, session=session, monotonic=monotonic)
+    quotes = {**observed, **member_pass.observed}
+    quoted = [quotes[item.con_id] for item in members if item.con_id in quotes]
+    try:
+        section = DayUniverseSection(
+            size=len(members),
+            quoted=len(quoted),
+            errors=len(members) - len(quoted),
+            complete=member_pass.complete,
+            seconds=member_pass.seconds,
+            rows=tuple(day_universe_row(item) for item in rank_day_universe(quoted)),
+        )
+        payload = await attach_day_universe(snapshot_id, payload, section)
+    except (ValueError, ScreenerError) as exc:
+        # The ranking group is already persisted; only this list is lost.
+        logger.error("day universe left out of sweep %s: %s", snapshot_id, exc)
+    else:
+        logger.info(
+            "sweep %s: day universe quoted=%d/%d%s seconds=%.1f",
+            payload.session_date,
+            section.quoted,
+            section.size,
+            "" if section.complete else " (incomplete)",
+            section.seconds,
+        )
+    if member_pass.interrupted is not None:
+        raise member_pass.interrupted
+    return payload
 
 
 __all__ = [
