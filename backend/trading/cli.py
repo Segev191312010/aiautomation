@@ -1,4 +1,10 @@
-"""Local, stop-only operator controls for the Autotrader V1 runtime."""
+"""Local operator controls for the Autotrader V1 runtime.
+
+PAPER controls are stop-only. The one exception is ``execution promote``: the
+owner's explicit, recorded grant that the reviewed execution engine requires
+before it may start (trading/execution/promotion.py). The engine itself is not
+wired: no command here runs it or sends an order.
+"""
 from __future__ import annotations
 
 import argparse
@@ -212,6 +218,33 @@ def _parser() -> argparse.ArgumentParser:
         help="send the summary to Telegram now (otherwise once a week, after the week's last close)",
     )
 
+    execution = domains.add_parser(
+        "execution",
+        help="PAPER authority records of the reviewed execution engine (not wired; sends no orders)",
+    )
+    execution.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    execution_actions = execution.add_subparsers(dest="action", required=True)
+    promote = execution_actions.add_parser(
+        "promote", help="record the owner's explicit PAPER grant for one MOMO_HOD strategy and this engine code"
+    )
+    promote.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    promote.add_argument("--strategy", required=True, help="catalogue name, e.g. MOMO_HOD_V2")
+    promote.add_argument("--account", required=True, help="the DU paper account")
+    promote.add_argument("--reason", required=True, help="why (kept in the append-only record)")
+    promote.add_argument("--confirm", action="store_true", help="required: without it nothing is written")
+    revoke = execution_actions.add_parser(
+        "revoke", help="end every PAPER grant of a strategy on an account (always allowed)"
+    )
+    revoke.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    revoke.add_argument("--strategy", required=True)
+    revoke.add_argument("--account", required=True)
+    revoke.add_argument("--reason", required=True)
+    execution_status = execution_actions.add_parser(
+        "status", help="read-only: the engine's code digest and the strategies it may trade"
+    )
+    execution_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    execution_status.add_argument("--account", default=None)
+
     supervise = domains.add_parser(
         "run",
         help="supervise each trading day's screener, bridge, strategies and notifier (foreground)",
@@ -275,6 +308,71 @@ async def _execute(arguments: argparse.Namespace) -> int:
         return 0
     except (OSError, ValueError, RuntimeError, aiosqlite.Error):
         print("error: PAPER control command could not be completed", file=sys.stderr)
+        return 1
+    finally:
+        cfg.DB_PATH = original_db_path
+
+
+async def _execution_command(arguments: argparse.Namespace) -> int:
+    """Authority records only: nothing here connects to TWS or sends an order."""
+    from trading.execution.promotion import (
+        ExecutionAuthorityError,
+        active_strategies,
+        engine_code_digest,
+        grant_promotion,
+        promotion_history,
+        revoke_promotion,
+    )
+
+    if arguments.action == "promote" and not arguments.confirm:
+        print("error: promote writes PAPER authority for the execution engine; re-run with --confirm",
+              file=sys.stderr)
+        return 2
+    original_db_path = cfg.DB_PATH
+    requested_db_path = getattr(arguments, "db_path", None)
+    if requested_db_path is not None:
+        cfg.DB_PATH = str(requested_db_path.expanduser())
+    try:
+        digest = engine_code_digest()
+        if arguments.action == "status":
+            # Read-only: never creates a database, and one without migration 13 has no promotions.
+            if cfg.DB_PATH != ":memory:" and not Path(cfg.DB_PATH).expanduser().is_file():
+                print("no autotrader database: no PAPER promotion")
+                return 0
+            try:
+                records = await promotion_history(account=arguments.account)
+            except aiosqlite.OperationalError:
+                print("execution ledger not installed (migration 13 not applied): no PAPER promotion")
+                return 0
+            print(f"execution engine code: {digest}")
+            print("execution engine: built, not wired (the PAPER bridge is the only order sender)")
+            accounts = [arguments.account] if arguments.account else sorted({item.account for item in records})
+            for account in accounts:
+                active = active_strategies(records, account=account, code_digest=digest)
+                print(f"{account}: {', '.join(sorted(active)) or 'no active promotion for this code'}")
+            if not accounts:
+                print("no promotion records")
+            return 0
+        await init_db()
+        if arguments.action == "promote":
+            record = await grant_promotion(
+                strategy_name=arguments.strategy, account=arguments.account, actor="owner via autotraderctl",
+                reason=arguments.reason, code_digest=digest,
+            )
+            print(f"PAPER promotion recorded: {record.strategy_name} on {record.account} for engine code"
+                  f" {digest[:12]} (the engine is not wired; nothing runs it)")
+            return 0
+        record = await revoke_promotion(
+            strategy_name=arguments.strategy, account=arguments.account, actor="owner via autotraderctl",
+            reason=arguments.reason,
+        )
+        print(f"PAPER promotion revoked: {record.strategy_name} on {record.account}")
+        return 0
+    except ExecutionAuthorityError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, RuntimeError, aiosqlite.Error):
+        print("error: execution command could not be completed", file=sys.stderr)
         return 1
     finally:
         cfg.DB_PATH = original_db_path
@@ -616,6 +714,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _research_command(arguments)
     if arguments.domain in {"universe", "screener"}:
         return _market_data_command(arguments)
+    if arguments.domain == "execution":
+        return asyncio.run(_execution_command(arguments))
     if arguments.domain == "shadow" and arguments.action == "run":
         return _shadow_run(arguments)
     if arguments.domain == "shadow" and arguments.action == "agent":
