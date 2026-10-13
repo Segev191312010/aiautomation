@@ -198,6 +198,10 @@ STRATEGY_CLIENT_OFFSET = {
 # single-symbol limit. Anything under one bar interval still guarantees the
 # newest bar is the latest completed one.
 WATCHLIST_BAR_MAX_AGE = timedelta(seconds=240)
+# Managed MOMO polls last (+165 s), after VWAP_PB_V2's whole pass; its bars may
+# be up to 280 s old, still under one bar interval (the newest bar is always the
+# latest completed one), which leaves a 115 s pass for the hot list.
+MANAGED_BAR_MAX_AGE = timedelta(seconds=280)
 # IBKR refuses a historical-data request identical to one made within the last
 # 15 s by any client of the same TWS (a pacing violation), and children that
 # share symbols send identical bar requests. Their polls stay this far apart.
@@ -217,9 +221,11 @@ STRATEGY_POLL_OFFSETS = {
     "orb-v2": timedelta(seconds=75),
     "gap-v2": timedelta(seconds=90),
     "vwap-v2": timedelta(seconds=105),
-    # Managed MOMO reads MOMO's own hot list, after every other child; its
-    # 120 s pass budget covers a full hot-35 pass (~90 s live).
-    "momo-ap": timedelta(seconds=120),
+    # Managed MOMO reads MOMO's own hot list, after every other child and
+    # after VWAP_PB_V2's own pass (+105 s, up to 45 names): an identical
+    # request within 15 s of another child's is refused by IBKR. Its 280 s
+    # freshness limit leaves a 115 s pass (MANAGED_BAR_MAX_AGE).
+    "momo-ap": timedelta(seconds=165),
 }
 
 
@@ -380,6 +386,8 @@ def bar_freshness_limit(strategy_name: str, universe: str) -> timedelta:
     _require_strategy(strategy_name, universe)
     if universe == "scanner":
         return STRATEGY_POLL_OFFSETS[strategy_name] + MIN_PASS_BUDGET
+    if strategy_name in MANAGED_STRATEGIES:
+        return MANAGED_BAR_MAX_AGE
     return WATCHLIST_BAR_MAX_AGE
 
 
@@ -617,9 +625,41 @@ async def run_shadow_session(
             usage.calls,
             usage.cost_usd,
         )
-        return report
     finally:
         await actor.disconnect()
+    await idle_until_cutoff(
+        strategy_name, window_cutoff, dynamic=dynamic, clock=clock, sleep=sleep
+    )
+    return report
+
+
+async def idle_until_cutoff(
+    strategy_name: str,
+    cutoff: datetime,
+    *,
+    dynamic: bool,
+    clock: Clock,
+    sleep: Sleeper,
+) -> None:
+    """A run that finished before its cutoff stays alive until then (TWS closed).
+
+    A non-dynamic run returns as soon as every candidate is terminal (or when
+    it had none), and the supervisor restarts any clean exit before the
+    child's planned finish: an all-session simulation with nothing left to
+    assess would restart all day. Exiting at the cutoff is its planned finish.
+    A dynamic run only returns at its cutoff sweep, so it never waits here.
+    """
+    if dynamic:
+        return
+    now = clock()
+    if now >= cutoff:
+        return
+    logger.info(
+        "%s: every candidate is decided; idle until the %s ET cutoff (TWS closed)",
+        strategy_name,
+        cutoff.astimezone(MARKET_TIMEZONE).strftime("%H:%M"),
+    )
+    await _sleep_until(cutoff, clock=clock, sleep=sleep)
 
 
 async def _managed_session(
@@ -750,9 +790,11 @@ __all__ = [
     "STRATEGY_FAMILIES",
     "STRATEGY_POLL_OFFSETS",
     "UNIVERSES",
+    "MANAGED_BAR_MAX_AGE",
     "WATCHLIST_BAR_MAX_AGE",
     "bar_freshness_limit",
     "fresh_run_label",
+    "idle_until_cutoff",
     "market_context_provider",
     "poll_offset_problems",
     "poll_schedule",

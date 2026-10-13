@@ -673,7 +673,7 @@ async def test_a_fallback_is_logged_once_per_outage(tmp_path, monkeypatch, caplo
     clock = {"now": _et(SESSION, 10, 0)}
     controller = await ManagedStrategy.open(session_date=SESSION, family="momo", clock=lambda: clock["now"])
 
-    with caplog.at_level(logging.INFO, logger="autotrader.manager.managed"):
+    with caplog.at_level(logging.INFO, logger="autotrader.shadow.manager.managed"):
         for minutes in range(0, 180, 5):  # 10:00 .. 12:55
             clock["now"] = _et(SESSION, 10, 0) + timedelta(minutes=minutes)
             await controller.refresh()
@@ -726,10 +726,12 @@ def test_the_plans_running_strategies_are_the_scheduled_families_with_a_window_t
     assert running_strategies(date(2026, 11, 27)) == ("orb-v2", "momo", "gap-v2", "vwap-v2")
 
 
-def test_managed_momo_polls_last_clear_of_every_child_including_the_v2_simulations():
-    """The V2 simulations take +75/+90/+105 s (the V1 entries keep +30/+45/+60):
-    managed MOMO's +120 s stays 15 s from each, inside its 240 s freshness limit."""
+def test_managed_momo_polls_after_vwap_v2s_whole_pass_and_inside_its_freshness_limit():
+    """Review R3: +120 s sat 15 s behind VWAP_PB_V2's +105 s start, inside its pass of
+    up to 45 hot-list names, so identical requests collided (IBKR refuses one within 15 s)."""
     from trading.operations.shadow_service import (
+        MANAGED_BAR_MAX_AGE,
+        MIN_PASS_BUDGET,
         MIN_POLL_SEPARATION,
         STRATEGY_POLL_OFFSETS,
         poll_offset_problems,
@@ -737,12 +739,56 @@ def test_managed_momo_polls_last_clear_of_every_child_including_the_v2_simulatio
     )
 
     managed = STRATEGY_POLL_OFFSETS["momo-ap"]
-    assert managed >= timedelta(seconds=120)
-    planned = {**STRATEGY_POLL_OFFSETS, **{name: timedelta(seconds=seconds) for name, seconds in (
-        ("orb-v2", 75), ("vwap-v2", 90), ("gap-v2", 105))}}
-    for name, offset in planned.items():
+    assert managed >= timedelta(seconds=165)
+    # VWAP_PB_V2's 45-name pass at ~1.3 s a request ends near +165 s.
+    assert managed - STRATEGY_POLL_OFFSETS["vwap-v2"] >= timedelta(seconds=60)
+    for name, offset in STRATEGY_POLL_OFFSETS.items():
         if name != "momo-ap":
-            assert abs(managed - offset) >= MIN_POLL_SEPARATION, name
+            assert managed - offset >= MIN_POLL_SEPARATION, name
     assert poll_offset_problems(STRATEGY_POLL_OFFSETS) == []
     schedule = poll_schedule("momo-ap", "watchlist")
-    assert schedule.offset == managed and schedule.late_poll_limit == timedelta(seconds=60)
+    assert schedule.offset == managed and schedule.bar_max_age == MANAGED_BAR_MAX_AGE
+    assert schedule.bar_max_age < timedelta(minutes=5)
+    assert schedule.bar_max_age - managed >= MIN_PASS_BUDGET * 4  # a 115 s pass
+    assert schedule.late_poll_limit == timedelta(seconds=57.5)
+
+
+def _model_requests(order, offset: float, seconds_per_request: float, keep=None) -> dict:
+    """When one child's pass asks for each name (the reviewer's collision model)."""
+    at, times = offset, {}
+    for name in order:
+        if keep is not None and name not in keep:
+            continue
+        times[name] = at
+        at += seconds_per_request
+    return times
+
+
+def _victims(early: dict, late: dict) -> int:
+    """Requests in ``late`` that come under 15 s after the same request in ``early``."""
+    return sum(1 for name, at in late.items() if name in early and 0 < at - early[name] < 15)
+
+
+@pytest.mark.parametrize("seconds_per_request", [0.65, 1.0, 1.3])
+def test_no_identical_request_collides_between_momo_vwap_v2_and_managed_momo(seconds_per_request):
+    """The reviewer's model (q2/collide.py) as a test: MOMO's hot list (48 names) is
+    read by MOMO (+15), VWAP_PB_V2 (+105, 45 of them) and managed MOMO (all, or a
+    20-name focus); at +165 nothing collides at live request rates."""
+    import random
+
+    from trading.operations.shadow_service import STRATEGY_POLL_OFFSETS as OFFSETS
+
+    rng = random.Random(1)
+    momo_list = [f"S{index}" for index in range(48)]
+    vwap_list = momo_list[:45]
+    focus = set(rng.sample(momo_list, 20))
+    momo = _model_requests(momo_list, OFFSETS["momo"].total_seconds(), seconds_per_request)
+    vwap = _model_requests(vwap_list, OFFSETS["vwap-v2"].total_seconds(), seconds_per_request)
+    for keep in (None, focus):
+        managed = _model_requests(momo_list, OFFSETS["momo-ap"].total_seconds(), seconds_per_request, keep)
+        assert _victims(vwap, managed) == _victims(managed, vwap) == 0
+        assert _victims(managed, momo) == _victims(vwap, momo) == 0
+    # The old +120 s slot collided with VWAP_PB_V2 once a focus let managed MOMO
+    # skip names and catch up with VWAP_PB_V2's pass.
+    old = _model_requests(momo_list, 120, seconds_per_request, focus)
+    assert _victims(vwap, old) > 0

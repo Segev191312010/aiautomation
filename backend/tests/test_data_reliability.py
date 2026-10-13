@@ -120,7 +120,7 @@ def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart
         "orb-v2": timedelta(seconds=75),
         "gap-v2": timedelta(seconds=90),
         "vwap-v2": timedelta(seconds=105),
-        "momo-ap": timedelta(seconds=120),
+        "momo-ap": timedelta(seconds=165),
     }
     assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES)
     # The supervisor schedules registry strategies only (the V2 simulations
@@ -173,7 +173,7 @@ def test_each_child_keeps_a_pass_budget_under_its_freshness_limit():
         "momo": WATCHLIST_BAR_MAX_AGE,
         "vwap-v2": WATCHLIST_BAR_MAX_AGE,
         "gap-v2": WATCHLIST_BAR_MAX_AGE,
-        "momo-ap": WATCHLIST_BAR_MAX_AGE,
+        "momo-ap": shadow_service.MANAGED_BAR_MAX_AGE,
         # A scanner run keeps its old 25 s after its slot (30 s at +5 s before).
         "orb-v2": timedelta(seconds=100),
     }
@@ -183,7 +183,7 @@ def test_each_child_keeps_a_pass_budget_under_its_freshness_limit():
         "orb-v2": timedelta(seconds=12.5),
         "gap-v2": timedelta(seconds=75),
         "vwap-v2": timedelta(seconds=67.5),
-        "momo-ap": timedelta(seconds=60),
+        "momo-ap": timedelta(seconds=57.5),
     }
     for schedule in schedules.values():
         assert schedule.bar_max_age < BAR_INTERVAL
