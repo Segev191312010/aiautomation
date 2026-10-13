@@ -88,6 +88,56 @@ async def test_stale_or_missing_snapshot_is_refused(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_refresh_returns_only_newly_hot_rows_under_the_same_filters(tmp_path, monkeypatch):
+    from config import cfg
+    from db.core import get_db, init_db
+    from trading.data import CandidateRepository, RunRepository, ScannerRunRepository
+    from trading.orchestration.session_runner import ensure_orb_strategy
+    from trading.orchestration.watchlist_source import hotlist_refresh
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "r.db"))
+    await init_db()
+    await _seed(NOW - timedelta(minutes=10))
+    strategy = await ensure_orb_strategy(owner_id="demo")
+    run = _run().model_copy(
+        update={"strategy_id": strategy.strategy_id, "strategy_version": strategy.version}
+    )
+    # The run started on the first sweep: AMD and NVDA.
+    scanner_run, opening, _ = await hotlist_candidates(run, now=NOW - timedelta(minutes=9))
+    await RunRepository().save(run)
+    await ScannerRunRepository().save(scanner_run)
+    for candidate in opening:
+        await CandidateRepository().save(candidate)
+    # A later sweep: KO turns hot at the top; BRK B is hot but still unqualified.
+    later = {
+        "rows": [
+            _row("KO", 3, hot=True, rank=1),
+            _row("AMD", 2, hot=True, rank=2),
+            _row("NVDA", 1, hot=True, rank=3),
+            _row("BRK B", 4, hot=True, rank=4),
+        ]
+    }
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO autotrader_screener_snapshots VALUES (?,?,?,?)",
+            ("snap-2", "2026-10-12", (NOW - timedelta(minutes=1)).isoformat(), json.dumps(later)),
+        )
+        await db.commit()
+
+    added, liquidity = await hotlist_refresh(run, NOW)
+
+    # Only the new symbol, in the run's own scanner run under its stable id;
+    # the rank is provisional (the session assigns the next free one).
+    assert [(c.symbol, c.id, c.scanner_run_id, c.rank) for c in added] == [
+        ("KO", f"{run.id}:3", scanner_run.id, 1)
+    ]
+    assert liquidity[3].reference_price == Decimal("100.00")
+    assert set(liquidity) == {3}
+    with pytest.raises(HotListUnavailable, match="old"):
+        await hotlist_refresh(run, NOW + timedelta(minutes=10))
+
+
+@pytest.mark.anyio
 async def test_gappers_use_gap_or_premarket_change_and_skip_scan_rows(tmp_path, monkeypatch):
     from config import cfg
     from db.core import get_db, init_db

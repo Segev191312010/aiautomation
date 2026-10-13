@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, time, timezone
+from decimal import Decimal
 import logging
 import os
 import signal
+from types import SimpleNamespace
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -15,7 +17,8 @@ from trading.contracts import RiskPolicy, ShadowRuntimeConfig
 from trading.intelligence import prompts
 from trading.operations import shadow_service
 from trading.orchestration import ShadowPersistenceConflictError
-from trading.orchestration.session_runner import SessionAborted
+from trading.orchestration.session_runner import SessionAborted, SessionReport
+from trading.orchestration.watchlist_source import hotlist_refresh
 from trading.scheduler.sessions import market_session, next_market_session
 
 ET = ZoneInfo("America/New_York")
@@ -150,6 +153,100 @@ def test_policy_fingerprints_bind_prompt_model_and_config():
     assert set(momo) == set(prints) | {"momo_hod", "market_regime_rule"}
 
 
+# --- dynamic hot list -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("strategy_name", "universe", "dynamic"),
+    [
+        ("momo", "watchlist", True),
+        ("vwap", "watchlist", True),
+        ("gap", "gappers", False),
+        ("orb", "scanner", False),
+    ],
+)
+async def test_only_watchlist_sessions_add_symbols_that_heat_up_later(
+    monkeypatch, strategy_name, universe, dynamic
+):
+    captured: dict[str, dict[str, object]] = {}
+    loaded: list[int] = []
+
+    class FakeActor:
+        connected = True
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            pass
+
+        async def preflight(self, *, required_data_lines: int) -> SimpleNamespace:
+            return SimpleNamespace(ready=True, reasons=())
+
+        async def account_snapshot(self) -> None:
+            raise AssertionError("the fake runner never reads the account")
+
+    class FakeMarket:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def load_contract(self, con_id: int) -> None:
+            loaded.append(con_id)
+
+    class FakeRunner:
+        def __init__(self, **kwargs: object) -> None:
+            captured["runner"] = kwargs
+
+        async def run(self, **kwargs: object) -> SessionReport:
+            captured["run"] = kwargs
+            return SessionReport(run_id=str(kwargs["run_id"]), session_date=TUESDAY)
+
+    async def strategy(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(strategy_id="f" * 32)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    usage = SimpleNamespace(usage=SimpleNamespace(calls=0, cost_usd=Decimal("0")))
+    monkeypatch.setattr(shadow_service, "ensure_strategy", strategy)
+    monkeypatch.setattr(shadow_service, "read_anthropic_api_key", lambda: "sk-test")
+    monkeypatch.setattr(shadow_service, "build_anthropic_client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "AnthropicMessagesTransport", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "StructuredAIReviewProvider", lambda **_kwargs: usage)
+    monkeypatch.setattr(shadow_service, "TWSPaperActor", FakeActor)
+    monkeypatch.setattr(shadow_service, "PaperIBKRMarketData", FakeMarket)
+    monkeypatch.setattr(shadow_service, "ShadowPipeline", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "RepositoryBackedShadowRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "ShadowSessionRunner", FakeRunner)
+    monkeypatch.setattr(shadow_service, "source_sha", lambda: "abc1234")
+
+    await shadow_service.run_shadow_session(
+        config=runtime_config(),
+        owner_id="demo",
+        session=market_session(TUESDAY),
+        clock=lambda: et(TUESDAY, 9, 0),
+        sleep=no_sleep,
+        strategy_name=strategy_name,
+        universe=universe,
+    )
+
+    refresh = captured["run"]["candidate_refresh"]
+    loader = captured["runner"]["contract_loader"]
+    assert (universe in shadow_service.DYNAMIC_UNIVERSES) is dynamic
+    if not dynamic:
+        assert refresh is None and loader is None
+        return
+    assert refresh is hotlist_refresh
+    assert captured["run"]["candidate_source"] is not None
+    # Added and resumed candidates load their contract through the session's market.
+    assert callable(loader)
+    await loader(4242)
+    assert loaded == [4242]
+
+
 # --- resume fallback -----------------------------------------------------------------
 
 
@@ -179,7 +276,8 @@ async def _day(monkeypatch, fake: RecordingSession, *, universe: str, run_label:
 
 
 async def test_watchlist_run_that_cannot_resume_starts_one_fresh_labelled_run(monkeypatch):
-    fake = RecordingSession(ShadowPersistenceConflictError("stored scanner run differs from request"))
+    # A dynamic watchlist run resumes a newer hot list; changed code cannot resume.
+    fake = RecordingSession(ShadowPersistenceConflictError("stored run differs from immutable request"))
 
     assert await _day(monkeypatch, fake, universe="watchlist") == "report"
 

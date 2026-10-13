@@ -48,7 +48,11 @@ from trading.orchestration.session_runner import (
     SessionReport,
     ShadowSessionRunner,
 )
-from trading.orchestration.watchlist_source import gap_candidates, hotlist_candidates
+from trading.orchestration.watchlist_source import (
+    gap_candidates,
+    hotlist_candidates,
+    hotlist_refresh,
+)
 from trading.policies import ExecutionPolicy, OpeningRangeBreakoutPolicy
 from trading.rules.gap_go import (
     GAP_REVIEW_PROMPT_ID,
@@ -130,6 +134,9 @@ STRATEGIES = {
     "gap": (GapGoStrategy, gap_go_strategy_spec, GAP_REVIEW_PROMPT_ID),
 }
 UNIVERSES = ("scanner", "watchlist", "gappers")
+# Universes whose runs add symbols that heat up after the window opens. The
+# hot list moves all day; gappers are an opening set and ORB keeps its scan.
+DYNAMIC_UNIVERSES = frozenset({"watchlist"})
 # TWS accepts one connection per client ID. Strategy sessions run concurrently,
 # so each gets its own data client: data_client_id + offset (the screener uses
 # data_client_id + 2 and the order bridge uses order_client_id).
@@ -291,7 +298,8 @@ async def run_shadow_session(
     ``run_label`` starts a separate run for the same day (e.g. after a changed
     scanner request); without it a restart resumes the day's existing run.
     ``universe="watchlist"`` takes candidates from the live screener's hot list
-    when the strategy's entry window opens instead of the 09:45 IBKR scan.
+    when the strategy's entry window opens instead of the 09:45 IBKR scan, and
+    adds symbols that join the hot list later in the window.
     """
     _require_strategy(strategy_name, universe)
     evaluator_factory, spec_factory, strategy_prompt = STRATEGIES[strategy_name]
@@ -359,6 +367,11 @@ async def run_shadow_session(
             await market.load_contract(candidate.con_id)
         return scanner_run, candidates, liquidity
 
+    async def load_contract(con_id: int) -> object:
+        # Refreshed and resumed candidates never pass through watchlist_source;
+        # the market facade caches, so loaded contracts cost nothing here.
+        return await market.load_contract(con_id)
+
     async def gap_bars(candidate, now):
         # RTH history (2 D) for ATR plus today's all-hours bars for the gap.
         regular = await market.completed_bars(con_id=candidate.con_id, now=now)
@@ -372,6 +385,7 @@ async def run_shadow_session(
         await actor.connect()
         logger.info("reconnected to TWS")
 
+    dynamic = universe in DYNAMIC_UNIVERSES
     connect_at = session.scanner_at if universe == "scanner" else window_start
     await _sleep_until(connect_at - CONNECT_LEAD, clock=clock, sleep=sleep)
     await actor.connect()
@@ -399,6 +413,7 @@ async def run_shadow_session(
             ),
             entry_gate_name=strategy_name,
             bars_fetcher=gap_bars if strategy_name == "gap" else None,
+            contract_loader=load_contract if dynamic else None,
         )
         report = await runner.run(
             session=session,
@@ -411,6 +426,7 @@ async def run_shadow_session(
             run_id=run_id,
             candidate_source=watchlist_source if universe != "scanner" else None,
             window_start=window_start if universe != "scanner" else None,
+            candidate_refresh=hotlist_refresh if dynamic else None,
         )
         usage = provider.usage
         logger.info(
@@ -436,11 +452,14 @@ async def run_shadow_day(
     clock: Clock = _utc_now,
     sleep: Sleeper = asyncio.sleep,
 ) -> SessionReport:
-    """Resume the day's run; a watchlist run that cannot resume starts one fresh run.
+    """Resume the day's run; a run that cannot resume starts one fresh run.
 
-    A restarted watchlist session reads a newer hot-list snapshot than the one
-    its stored run recorded, so resuming conflicts by construction. The stored
-    run is never rewritten: exactly one retry runs under ``r<HHMM>`` (ET).
+    A restarted watchlist session resumes its dynamic run with every stored
+    candidate plus the current hot list. Scanner and gappers sessions
+    re-select on restart (a new scan or snapshot), which conflicts with the
+    stored run by construction, as does any run whose code or policy changed.
+    The stored run is never rewritten: exactly one retry runs under
+    ``r<HHMM>`` (ET).
     """
     try:
         return await run_shadow_session(
@@ -455,9 +474,9 @@ async def run_shadow_day(
         )
     except ShadowPersistenceConflictError as exc:
         label = fresh_run_label(clock())
-        # Both universes re-select candidates on restart (a new scan or a new
-        # hot-list snapshot), which can never match the stored run; a fresh
-        # labelled run avoids a restart loop until the strategy's cutoff.
+        # A run that cannot resume never will (its selection, code or policy
+        # differs from the stored run); a fresh labelled run avoids a restart
+        # loop until the strategy's cutoff.
         if label == run_label:
             raise
         logger.warning(
@@ -486,6 +505,7 @@ async def _sleep_until(moment: datetime, *, clock: Clock, sleep: Sleeper) -> Non
 
 
 __all__ = [
+    "DYNAMIC_UNIVERSES",
     "IBKR_API_VOLUME_MULTIPLIER",
     "MARKET_AWARE_STRATEGIES",
     "MARKET_CONTEXT_MAX_AGE",

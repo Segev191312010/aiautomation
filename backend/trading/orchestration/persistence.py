@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from typing import Any
 
 import aiosqlite
@@ -43,6 +44,12 @@ from trading.scheduler import (
     release_lease,
 )
 from trading.storage.repository import record_decision
+
+logger = logging.getLogger("autotrader.shadow.persistence")
+
+# autotrader_candidates.rank CHECK(rank BETWEEN 1 AND 50), mirrored by
+# Candidate.rank: one scanner run holds at most this many candidates.
+MAX_CANDIDATE_RANK = 50
 
 
 class ShadowLeaseUnavailableError(RuntimeError):
@@ -229,12 +236,20 @@ class RepositoryBackedShadowRunner:
         holder_id: str,
         now: datetime | None = None,
         lease_name: str | None = None,
+        dynamic: bool = False,
     ) -> AsyncIterator["ShadowRunSession"]:
         """Hold the run lease for a whole session of repeated assessments.
 
-        The scanner universe is materialized once; every later poll assesses
-        only these candidates. A failure while the lease is held marks the run
-        failed so a restart resumes from the recorded decisions.
+        By default the scanner universe is materialized once; every later poll
+        assesses only these candidates, and the run completes as soon as each
+        one is terminal. A ``dynamic`` session keeps its scanner run open until
+        the entry cutoff instead: ``add_candidates`` admits symbols that heat
+        up during the day, a reopen resumes every stored candidate (the scanner
+        parameters stay those of the first selection and are never compared
+        again), and only the cutoff sweep completes the run.
+
+        A failure while the lease is held marks the run failed so a restart
+        resumes from the recorded decisions.
         """
         observed_at = _utc(now or self._clock())
         candidate_tuple = tuple(candidates)
@@ -272,20 +287,21 @@ class RepositoryBackedShadowRunner:
                     renew_interval=self._lease_renew_interval,
                     clock=self._clock,
                 ) as heartbeat:
-                    await self._materialize(
+                    session_candidates = await self._materialize(
                         run=run,
                         scanner_run=scanner_run,
                         candidates=candidate_tuple,
                         observed_at=observed_at,
+                        dynamic=dynamic,
                     )
                     stored_decisions = await self._existing_decisions(
                         run=run,
-                        candidate_ids=frozenset(item.id for item in candidate_tuple),
+                        candidate_ids=frozenset(item.id for item in session_candidates),
                     )
                     already_completed = await self._set_running(
                         run=run,
                         stored_status=stored_decisions,
-                        candidate_count=len(candidate_tuple),
+                        candidate_count=len(session_candidates),
                     )
                     active_heartbeat = heartbeat
 
@@ -301,18 +317,26 @@ class RepositoryBackedShadowRunner:
                         strategy=self._pipeline.strategy,
                         mode=self._pipeline.mode,
                     )
-                    yield ShadowRunSession(
+                    session = ShadowRunSession(
                         run=run,
                         strategy=strategy,
                         policy=policy,
-                        candidates=candidate_tuple,
+                        scanner_run_id=scanner_run.id,
+                        candidates=session_candidates,
                         pipeline=pipeline,
                         decisions=stored_decisions,
                         completed=already_completed,
                         cutoff=entry_cutoff_utc(run.session_date, pipeline.strategy),
                         heartbeat=heartbeat,
                         clock=self._clock,
+                        candidate_repository=self._candidates,
+                        dynamic=dynamic,
                     )
+                    if dynamic:
+                        # The stored candidates are the session's base; this
+                        # selection only adds the conIds it does not hold yet.
+                        await session.add_candidates(candidate_tuple, now=observed_at)
+                    yield session
             except BaseException:
                 try:
                     from trading.scheduler import require_lease
@@ -350,7 +374,9 @@ class RepositoryBackedShadowRunner:
         scanner_run: ScannerRun,
         candidates: tuple[Candidate, ...],
         observed_at: datetime,
-    ) -> None:
+        dynamic: bool,
+    ) -> tuple[Candidate, ...]:
+        """Persist the run and its scanner run; return the session's starting candidates."""
         stored_run = await self._runs.get(run_id=run.id, owner_id=run.owner_id)
         if stored_run is None:
             initial = run.model_copy(
@@ -375,13 +401,20 @@ class RepositoryBackedShadowRunner:
                 raise ShadowPersistenceConflictError(
                     "scanner run was concurrently created"
                 ) from exc
+        elif dynamic:
+            # Every selection of a dynamic run reads a newer snapshot; the
+            # first one's parameters stay the record, so a restart resumes.
+            if stored_scanner.run_id != scanner_run.run_id:
+                raise ShadowPersistenceConflictError("stored scanner run belongs to another run")
         elif not _same_scanner(scanner_run, stored_scanner):
             raise ShadowPersistenceConflictError("stored scanner run differs from request")
 
-        stored_candidates = {
-            candidate.id: candidate
-            for candidate in await self._candidates.list_for_scanner(scanner_run.id)
-        }
+        stored_rows = await self._candidates.list_for_scanner(scanner_run.id)
+        if dynamic:
+            # The session admits the requested candidates itself (next free
+            # rank, idempotent by conId), so a restart keeps every stored one.
+            return tuple(stored_rows)
+        stored_candidates = {candidate.id: candidate for candidate in stored_rows}
         for candidate in candidates:
             stored = stored_candidates.get(candidate.id)
             if stored is None:
@@ -395,6 +428,7 @@ class RepositoryBackedShadowRunner:
                 raise ShadowPersistenceConflictError(
                     f"stored candidate differs from request: {candidate.id}"
                 )
+        return candidates
 
     async def _existing_decisions(
         self,
@@ -489,6 +523,7 @@ class ShadowRunSession:
         run: Run,
         strategy: StrategyRecord,
         policy: RiskPolicy,
+        scanner_run_id: str,
         candidates: tuple[Candidate, ...],
         pipeline: ShadowPipeline,
         decisions: dict[str, Decision],
@@ -496,11 +531,14 @@ class ShadowRunSession:
         cutoff: datetime,
         heartbeat: LeaseHeartbeat,
         clock: Callable[[], datetime],
+        candidate_repository: CandidateRepository,
+        dynamic: bool = False,
     ) -> None:
         self.run = run
         self.cutoff = cutoff
         self._strategy = strategy
         self._policy = policy
+        self._scanner_run_id = scanner_run_id
         self._candidates = {candidate.id: candidate for candidate in candidates}
         self._admitted_symbols = frozenset(
             candidate.symbol
@@ -512,9 +550,17 @@ class ShadowRunSession:
         self._completed = completed
         self._heartbeat = heartbeat
         self._clock = clock
+        self._candidate_repository = candidate_repository
+        self._dynamic = dynamic
+        self._rank_cap_logged = False
+
+    @property
+    def dynamic(self) -> bool:
+        return self._dynamic
 
     @property
     def complete(self) -> bool:
+        """Every current candidate is terminal (a dynamic run may still grow)."""
         return len(self._decisions) == len(self._candidates)
 
     @property
@@ -530,6 +576,81 @@ class ShadowRunSession:
             candidate
             for candidate_id, candidate in self._candidates.items()
             if candidate_id not in self._decisions
+        )
+
+    async def add_candidates(
+        self,
+        candidates: Sequence[Candidate],
+        *,
+        now: datetime | None = None,
+    ) -> tuple[Candidate, ...]:
+        """Admit candidates into this dynamic run's scanner run; return those added.
+
+        Each new conId takes the scanner run's next free rank; a conId the run
+        already holds is a no-op, so repeating a selection is idempotent. Once
+        the rank cap is full, the entry cutoff has passed, or the run has
+        completed, nothing more is admitted: no decision could follow.
+        """
+        if not self._dynamic:
+            raise ValueError("only a dynamic session admits candidates after it opens")
+        batch = tuple(candidates)
+        batch_ids: set[str] = set()
+        for candidate in batch:
+            if candidate.scanner_run_id != self._scanner_run_id:
+                raise ValueError("candidate does not belong to scanner run")
+            if candidate.id in batch_ids:
+                raise ValueError("a shadow run cannot assess one candidate more than once")
+            batch_ids.add(candidate.id)
+        held = {candidate.con_id for candidate in self._candidates.values()}
+        fresh = [candidate for candidate in batch if candidate.con_id not in held]
+        if not fresh:
+            return ()
+        observed = _utc(now or self._clock())
+        if self._completed or observed >= self.cutoff:
+            logger.info(
+                "run %s is closed to new candidates; %d not admitted", self.run.id, len(fresh)
+            )
+            return ()
+        await self._heartbeat.require(now=observed)
+        added: list[Candidate] = []
+        for candidate in fresh:
+            if candidate.con_id in held:
+                continue
+            if candidate.id in self._candidates:
+                raise ShadowPersistenceConflictError(
+                    f"candidate id already names another contract: {candidate.id}"
+                )
+            rank = self._next_free_rank()
+            if rank is None:
+                if not self._rank_cap_logged:
+                    self._rank_cap_logged = True
+                    logger.warning(
+                        "run %s holds %d candidates (the cap); newly hot symbols are "
+                        "no longer added",
+                        self.run.id,
+                        MAX_CANDIDATE_RANK,
+                    )
+                break
+            ranked = Candidate.model_validate({**candidate.model_dump(), "rank": rank})
+            try:
+                await self._candidate_repository.save(ranked)
+            except DuplicateRecordError as exc:
+                # The lease makes this session the run's only writer, so a
+                # collision means another writer exists: never guess, fail.
+                raise ShadowPersistenceConflictError(
+                    f"candidate was concurrently created: {ranked.id}"
+                ) from exc
+            self._candidates[ranked.id] = ranked
+            held.add(ranked.con_id)
+            if ranked.admission_status == "admitted":
+                self._admitted_symbols = self._admitted_symbols | {ranked.symbol}
+            added.append(ranked)
+        return tuple(added)
+
+    def _next_free_rank(self) -> int | None:
+        used = {candidate.rank for candidate in self._candidates.values()}
+        return next(
+            (rank for rank in range(1, MAX_CANDIDATE_RANK + 1) if rank not in used), None
         )
 
     async def assess(
@@ -569,7 +690,7 @@ class ShadowRunSession:
         portfolio: PortfolioSnapshot,
         now: datetime | None = None,
     ) -> dict[str, Decision]:
-        """Cutoff sweep: every remaining candidate must become terminal."""
+        """Cutoff sweep: every remaining candidate becomes terminal, then the run completes."""
         observed = _utc(now or self._clock())
         if observed < self.cutoff:
             raise ValueError("finalize requires the entry cutoff to have passed")
@@ -589,10 +710,13 @@ class ShadowRunSession:
             raise ShadowPersistenceConflictError(
                 "shadow pipeline did not produce one terminal decision per candidate"
             )
+        await self._complete_if_done(sweep=True)
         return self.decisions
 
-    async def _complete_if_done(self) -> None:
-        if self._completed or not self.complete:
+    async def _complete_if_done(self, *, sweep: bool = False) -> None:
+        # A dynamic run can still admit candidates until its cutoff, so a
+        # momentarily empty pending set is not the end; only the sweep is.
+        if self._completed or not self.complete or (self._dynamic and not sweep):
             return
         await _mark_run_status(
             run_id=self.run.id,
@@ -605,6 +729,7 @@ class ShadowRunSession:
 
 
 __all__ = [
+    "MAX_CANDIDATE_RANK",
     "RepositoryBackedShadowRunner",
     "ShadowRunSession",
     "ShadowLeaseUnavailableError",

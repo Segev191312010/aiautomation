@@ -55,6 +55,8 @@ BAR_INTERVAL = timedelta(minutes=5)
 POLL_DELAY_AFTER_BAR_CLOSE = timedelta(seconds=5)
 SCANNER_ATTEMPTS = 3
 SCANNER_RETRY_DELAY = timedelta(seconds=20)
+# How often a dynamic run asks its candidate refresh for newly hot symbols.
+DEFAULT_REFRESH_INTERVAL = timedelta(minutes=15)
 
 
 class SessionMarketData(Protocol):
@@ -73,6 +75,13 @@ BarsFetcher = Callable[[Candidate, datetime], Awaitable[tuple[CompletedBar, ...]
 CandidateSource = Callable[
     [Run], Awaitable[tuple[ScannerRun, tuple[Candidate, ...], dict[int, LiquidityProfile]]]
 ]
+# ``(run, now) -> (candidates, liquidity)``: symbols that became eligible since
+# the run's start, in the run's own scanner run (see ``hotlist_refresh``).
+CandidateRefresh = Callable[
+    [Run, datetime], Awaitable[tuple[tuple[Candidate, ...], dict[int, LiquidityProfile]]]
+]
+# Qualifies one conId (cached by the market facade) so its quotes have a tick grid.
+ContractLoader = Callable[[int], Awaitable[object]]
 Sleeper = Callable[[float], Awaitable[None]]
 Reconnector = Callable[[], Awaitable[None]]
 # ``(allowed, reason)``: asked once per poll; ``(False, reason)`` skips that
@@ -89,6 +98,7 @@ class SessionReport:
     run_id: str
     session_date: date
     candidates: int = 0
+    added_candidates: int = 0
     outcomes: Counter[str] = field(default_factory=Counter)
     polls: int = 0
     paused_polls: int = 0
@@ -99,6 +109,7 @@ class SessionReport:
             "run_id": self.run_id,
             "session_date": self.session_date.isoformat(),
             "candidates": self.candidates,
+            "added_candidates": self.added_candidates,
             "outcomes": dict(self.outcomes),
             "polls": self.polls,
             "paused_polls": self.paused_polls,
@@ -202,9 +213,13 @@ class ShadowSessionRunner:
         entry_gate: EntryGate | None = None,
         entry_gate_name: str = "entries",
         bars_fetcher: BarsFetcher | None = None,
+        contract_loader: ContractLoader | None = None,
     ) -> None:
         """``entry_gate`` may pause assessments poll by poll; ``entry_gate_name``
-        labels its log lines (``<name> paused: <reason>``)."""
+        labels its log lines (``<name> paused: <reason>``). ``contract_loader``
+        runs before every quote request, so candidates that joined without a
+        loaded contract (a refresh, or a resumed run) still quote on their tick
+        grid."""
         self._market = market
         self._read_account = read_account
         self._runner = runner
@@ -215,6 +230,7 @@ class ShadowSessionRunner:
         self._entry_gate = entry_gate
         self._entry_gate_name = entry_gate_name
         self._bars_fetcher = bars_fetcher
+        self._contract_loader = contract_loader
         self._entries_paused = False
         self._gate_failing = False
 
@@ -229,13 +245,27 @@ class ShadowSessionRunner:
         run_id: str | None = None,
         candidate_source: CandidateSource | None = None,
         window_start: datetime | None = None,
+        candidate_refresh: CandidateRefresh | None = None,
+        refresh_interval: timedelta = DEFAULT_REFRESH_INTERVAL,
     ) -> SessionReport:
         """Run one strategy session.
 
         Without ``candidate_source`` candidates come from the 09:45 IBKR scan;
         with it (e.g. the screener hot list) they are taken when the strategy's
         window opens, and liquidity is seeded from the source.
+
+        ``candidate_refresh`` makes the run dynamic: once ``refresh_interval``
+        has passed, the next poll first adds the symbols that became eligible
+        since and assesses them with the rest. The run keeps polling, even
+        with nothing pending, and stays open until the cutoff sweep; a
+        restart resumes every candidate added before.
         """
+        if candidate_refresh is not None:
+            if candidate_source is None:
+                raise ValueError("candidate_refresh extends a candidate_source run")
+            if refresh_interval <= timedelta(0):
+                raise ValueError("refresh_interval must be positive")
+        dynamic = candidate_refresh is not None
         session_date = session.session_date
         run = Run(
             id=run_id or f"shadow-{strategy.strategy_id[:8]}-{session_date.isoformat()}",
@@ -256,7 +286,6 @@ class ShadowSessionRunner:
             if window_start is not None:
                 await self._sleep_until(window_start - BAR_INTERVAL)
             scanner_run, candidates, liquidity = await candidate_source(run)
-        report.candidates = len(candidates)
         logger.info("%s admitted %d candidates", scanner_run.parameters.get("source", "scanner"),
                     len(candidates))
 
@@ -268,27 +297,44 @@ class ShadowSessionRunner:
             policy=policy,
             holder_id=self._holder_id,
             now=self._now(),
+            dynamic=dynamic,
         ) as shadow:
+            if dynamic:
+                # Includes every candidate a restarted run had already added.
+                logger.info("run %s holds %d candidates", run.id, len(shadow.candidates))
+            report.candidates = len(shadow.candidates)
             latest: dict[str, CandidateInput] = {}
             cutoff = shadow.cutoff
+            refreshed_at = self._now()
             poll_at = self._first_poll(session, window_start)
-            while poll_at < cutoff and shadow.pending():
+            # A dynamic run polls on with nothing pending: a refresh may still add.
+            while poll_at < cutoff and (dynamic or shadow.pending()):
                 await self._sleep_until(poll_at)
-                report.polls += 1
-                if await self._entries_allowed():
-                    await self._poll(
+                if candidate_refresh is not None and self._now() - refreshed_at >= refresh_interval:
+                    refreshed_at = self._now()
+                    await self._refresh(
                         shadow=shadow,
-                        session_date=session_date,
-                        latest=latest,
+                        refresh=candidate_refresh,
                         liquidity=liquidity,
                         report=report,
                     )
-                else:
-                    # Paused candidates stay pending; the cutoff sweep below
-                    # still makes every one of them terminal.
-                    report.paused_polls += 1
+                if shadow.pending():
+                    report.polls += 1
+                    if await self._entries_allowed():
+                        await self._poll(
+                            shadow=shadow,
+                            session_date=session_date,
+                            latest=latest,
+                            liquidity=liquidity,
+                            report=report,
+                        )
+                    else:
+                        # Paused candidates stay pending; the cutoff sweep below
+                        # still makes every one of them terminal.
+                        report.paused_polls += 1
                 poll_at = poll_at + BAR_INTERVAL
-            if shadow.pending():
+            # Only the sweep completes a dynamic run, even with nothing pending.
+            if dynamic or shadow.pending():
                 await self._sleep_until(cutoff)
                 portfolio = await self._portfolio(shadow) or self._fallback_portfolio()
                 await shadow.finalize(list(latest.values()), portfolio=portfolio, now=self._now())
@@ -412,6 +458,8 @@ class ShadowSessionRunner:
             if not assessment.needs_quote:
                 continue
             try:
+                if self._contract_loader is not None:
+                    await self._contract_loader(candidate.con_id)
                 quote = await self._market.quote(con_id=candidate.con_id)
             except Exception as exc:  # noqa: BLE001 - breakout stays pending
                 report.data_errors += 1
@@ -430,6 +478,41 @@ class ShadowSessionRunner:
                 logger.info(
                     "%s decided: %s", candidate.symbol, outcome.decision.outcome.value
                 )
+
+    async def _refresh(
+        self,
+        *,
+        shadow: ShadowRunSession,
+        refresh: CandidateRefresh,
+        liquidity: dict[int, LiquidityProfile],
+        report: SessionReport,
+    ) -> None:
+        """Add newly eligible symbols; a failed refresh keeps the current set."""
+        try:
+            candidates, profiles = await refresh(shadow.run, self._now())
+        except Exception as exc:  # noqa: BLE001 - retried at the next interval
+            logger.warning("candidate refresh failed: %s", exc)
+            return
+        try:
+            added = await shadow.add_candidates(candidates, now=self._now())
+        except ValueError as exc:
+            # Malformed refresh output admits nothing. Lease loss and storage
+            # conflicts propagate: like a failed assessment they end the session.
+            logger.error("candidate refresh rejected: %s", exc)
+            return
+        if not added:
+            return
+        for candidate in added:
+            profile = profiles.get(candidate.con_id)
+            if profile is not None:
+                liquidity[candidate.con_id] = profile
+        report.added_candidates += len(added)
+        report.candidates = len(shadow.candidates)
+        logger.info(
+            "refresh added %d candidates: %s",
+            len(added),
+            ", ".join(candidate.symbol for candidate in added),
+        )
 
     async def _entries_allowed(self) -> bool:
         """Ask the entry gate; each pause, resume or gate failure is logged once.
@@ -527,8 +610,11 @@ def _decision_symbol(shadow: ShadowRunSession, decision: Decision) -> str:
 
 
 __all__ = [
+    "DEFAULT_REFRESH_INTERVAL",
     "MOMO_STRATEGY_NAME",
     "ORB_STRATEGY_NAME",
+    "CandidateRefresh",
+    "ContractLoader",
     "EntryGate",
     "SessionAborted",
     "SessionReport",
