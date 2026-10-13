@@ -140,7 +140,11 @@ def log_files() -> dict[str, str]:
     a renamed or added child is followed without an edit here)."""
     from trading.operations import supervisor
 
-    children = (*supervisor.STRATEGY_STARTS, *supervisor.MANAGED_STRATEGY_STARTS)
+    children = (
+        *supervisor.STRATEGY_STARTS,
+        *supervisor.MANAGED_STRATEGY_STARTS,
+        supervisor.MANAGER_CHILD,
+    )
     return {**_SERVICE_LOG_FILES, **{name: f"{name}.log" for name in children}}
 
 
@@ -148,6 +152,25 @@ LOG_FILES = log_files()
 # Shadow decisions (managed and simulated) reach the phone in one digest per
 # half hour; only real MOMO's are sent one by one.
 DIGEST_INTERVAL_MINUTES = 30
+# A child that keeps exiting (a restart loop) reaches the phone once per half
+# hour, not once per restart; the supervisor log keeps every line.
+CHILD_EXIT_ALERT_INTERVAL = timedelta(minutes=30)
+# The AI day manager's tripwires, as its children log them (CRITICAL lines in
+# manager.log / momo-ap.log): each reaches the phone at most once per half hour.
+MANAGER_TRIPWIRES = (
+    "manager_widening_attempt",
+    "manager_widening_detected",
+    "candidate_filter_failed",
+    "managed_size_failed",
+    "managed_record_failed",
+    "plan_store_failed",
+    "spend_settle_failed",
+    "ai_request_not_sent",
+)
+TRIPWIRE_ALERT_INTERVAL = timedelta(minutes=30)
+# A plan lookup that fails in the managed child never shows in the plans table
+# (the notifier's own outage alert reads that), so it is forwarded from the log.
+_FALLBACK_PLAN_ERROR = re.compile(r"manager_fallback_neutral: plan_error\b")
 DIGEST_LINES_PER_STRATEGY = 8
 MANAGER_POLL_SECONDS = 30.0
 PLAN_SUMMARY_SLOTS = ("09:20", "09:46")
@@ -671,6 +694,22 @@ def supervisor_event_text(line: str) -> str | None:
             return None
         return f"⚙️ {name} exited (code {code}), not restarting"
     return f"⚙️ {name} exited (code {code}), restarting in {_seconds_text(restart)} s"
+
+
+def supervisor_child_name(line: str) -> str | None:
+    """The child a ``CHILD_EXIT`` or ``LAUNCH_REFUSED`` line is about."""
+    match = _CHILD_EXIT.search(line) or _LAUNCH_REFUSED.search(line)
+    return None if match is None else match.group("name")
+
+
+def manager_tripwire(line: str) -> tuple[str, str] | None:
+    """``(token, phone text)`` for a day-manager tripwire line, else None."""
+    token = next((name for name in MANAGER_TRIPWIRES if name in line), None)
+    if token is None and _FALLBACK_PLAN_ERROR.search(line):
+        token = "manager_fallback_neutral"
+    if token is None:
+        return None
+    return token, f"🚨 AI day manager tripwire: {token}\n{_clip(line.strip(), 300)}"
 
 
 def child_exit_code(line: str) -> int | None:
@@ -1404,9 +1443,17 @@ class _NotifierSession:
             if self._schema_refusal(line):
                 return
             text = supervisor_event_text(line)
-            if text:
+            if not text:
+                return
+            name = supervisor_child_name(line) or "unknown"
+            if self._alert_allowed(f"child_exit:{name}", CHILD_EXIT_ALERT_INTERVAL):
                 self._send(text)
             return
+        tripwire = manager_tripwire(line)
+        if tripwire is not None:
+            token, text = tripwire
+            if self._alert_allowed(f"tripwire:{token}", TRIPWIRE_ALERT_INTERVAL):
+                self._send(text)
         if source == "bridge":
             self._handle_bridge_line(line)
             # The bridge already reports its own disconnects as CRITICAL.
@@ -1887,6 +1934,8 @@ __all__ = [
     "bridge_event_text",
     "bridge_state_files",
     "child_exit_code",
+    "manager_tripwire",
+    "supervisor_child_name",
     "collect_daily_report",
     "format_daily_report",
     "format_decision",

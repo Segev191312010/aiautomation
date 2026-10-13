@@ -87,11 +87,13 @@ def test_the_notifier_follows_every_supervised_strategy_childs_log(monkeypatch):
     assert notify_service.log_files() == {
         "bridge": "bridge.log", "supervisor": "supervisor.log", "screener": "screener.log",
         "orb-v2": "orb-v2.log", "momo": "momo.log", "gap-v2": "gap-v2.log",
-        "vwap-v2": "vwap-v2.log", "momo-ap": "momo-ap.log",
+        "vwap-v2": "vwap-v2.log", "momo-ap": "momo-ap.log", "manager": "manager.log",
     }
     # A renamed child is followed as is, from the supervisor's own table.
     monkeypatch.setattr(supervisor, "STRATEGY_STARTS", {"momo": time(9, 55), "orb-v3": time(9, 40)})
-    assert set(notify_service.log_files()) == {"bridge", "supervisor", "screener", "momo", "orb-v3", "momo-ap"}
+    assert set(notify_service.log_files()) == {
+        "bridge", "supervisor", "screener", "momo", "orb-v3", "momo-ap", "manager",
+    }
 
 
 @pytest.mark.anyio
@@ -274,3 +276,53 @@ async def test_while_migration_16_is_pending_the_manager_parts_are_skipped(tmp_p
     await session._poll_manager()
 
     assert notifier.texts == []
+
+
+def test_a_restarting_child_reaches_the_phone_once_per_half_hour(tmp_path):
+    """Review R1: a child that exits 0 every few minutes all day was one phone line per exit."""
+    clock = FakeTime(_et(9, 28))
+    session, notifier = _session(tmp_path, clock)
+
+    async def day() -> None:
+        for minute in range(0, 6 * 60, 5):  # 09:28 .. 15:23, a restart every five minutes
+            clock.now = _et(9, 28) + timedelta(minutes=minute)
+            stamp = clock.now.isoformat(timespec="seconds")
+            session._handle_line("supervisor", f"{stamp} CHILD_EXIT gap-v2 code=1 restart_in=95")
+            session._handle_line("supervisor", f"{stamp} CHILD_EXIT orb-v2 code=1 restart_in=95")
+
+    asyncio.run(day())
+
+    per_child = {name: [text for text in notifier.texts if text.startswith(f"⚙️ {name} ")] for name in ("gap-v2", "orb-v2")}
+    assert len(per_child["gap-v2"]) == len(per_child["orb-v2"]) == 12  # 72 exits each, 6 hours
+    assert per_child["gap-v2"][0] == "⚙️ gap-v2 exited (code 1), restarting in 95 s"
+
+
+def test_manager_tripwires_reach_the_phone_rate_limited(tmp_path):
+    clock = FakeTime(_et(11, 0))
+    session, notifier = _session(tmp_path, clock)
+
+    async def lines() -> None:
+        widening = (
+            "2026-10-13 11:00:00,000 CRITICAL manager_widening_detected: decision d1 BF B: "
+            "final quantity above the policy quantity"
+        )
+        session._handle_line("momo-ap", widening)
+        session._handle_line("momo-ap", widening)  # the same half hour: held back
+        session._handle_line("manager", "2026-10-13 11:00:01,000 CRITICAL plan_store_failed: plan 20261013-1030-1 (valid) not stored")
+        session._handle_line("momo-ap", "CRITICAL manager_fallback_neutral: plan_error (2026-10-13); momo trades as its unmanaged self")
+        # An expired plan is the plans table's outage alert, not a log alert.
+        session._handle_line("momo-ap", "CRITICAL manager_fallback_neutral: plan_expired (2026-10-13); momo ...")
+        session._handle_line("momo-ap", "INFO momo view: managed by plan 20261013-1130-1")
+        clock.now = _et(11, 31)
+        session._handle_line("momo-ap", widening)
+
+    asyncio.run(lines())
+
+    tokens = [text.splitlines()[0] for text in notifier.texts]
+    assert tokens == [
+        "🚨 AI day manager tripwire: manager_widening_detected",
+        "🚨 AI day manager tripwire: plan_store_failed",
+        "🚨 AI day manager tripwire: manager_fallback_neutral",
+        "🚨 AI day manager tripwire: manager_widening_detected",
+    ]
+    assert "final quantity above the policy quantity" in notifier.texts[0]
