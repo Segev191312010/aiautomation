@@ -946,7 +946,9 @@ def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsy
 
     monkeypatch.setattr(supervisor_module, "run_supervisor", lambda **_kwargs: pytest.fail("ran"))
 
-    assert cli.main(["run", "--dry-run", "--date", "2026-10-13"]) == 0
+    # A fixed simulated clock: on the session's own date the default clock
+    # start is "now", which would make this test depend on the time of day.
+    assert cli.main(["run", "--dry-run", "--date", "2026-10-13", "--clock-start", "07:00"]) == 0
     output = capsys.readouterr().out
     assert output.startswith("DRY RUN: nothing is launched")
     assert "07:55:00  CHILD_START screener pid=1" in output
