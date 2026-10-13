@@ -400,7 +400,9 @@ def sweep_family(
     ordered_sessions = tuple(sorted(replayed))
     results = []
     for index, window in enumerate(candidates):
-        items = tuple(sorted(trades[index], key=lambda trade: (trade.session_date, trade.signal_at, trade.symbol)))
+        items = tuple(
+            sorted(trades[index], key=lambda trade: (trade.session_date, trade.signal_at, trade.symbol))
+        )
         results.append(
             WindowResult(
                 window=window,

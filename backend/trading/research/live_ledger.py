@@ -133,7 +133,12 @@ class LiveLedger:
         )
 
     def by_strategy(self) -> tuple[StrategyLiveR, ...]:
-        names = sorted({trade.strategy for trade in self.trades} | set(self.open) | set(self.attention) | set(self.unfilled))
+        names = sorted(
+            {trade.strategy for trade in self.trades}
+            | set(self.open)
+            | set(self.attention)
+            | set(self.unfilled)
+        )
         rows = []
         for name in names:
             mine = [trade for trade in self.trades if trade.strategy == name]
@@ -315,9 +320,8 @@ def ledger_lines(ledger: LiveLedger, *, week_start: date | None = None) -> list[
         return ["no bridge sessions recorded"]
     lines = []
     if ledger.sessions:
-        lines.append(
-            f"{len(ledger.sessions)} sessions {ledger.sessions[0].isoformat()}..{ledger.sessions[-1].isoformat()}"
-        )
+        first, last = ledger.sessions[0], ledger.sessions[-1]
+        lines.append(f"{len(ledger.sessions)} sessions {first.isoformat()}..{last.isoformat()}")
     for row in ledger.by_strategy():
         text = f"{row.strategy}: {row.trades} trade{'' if row.trades == 1 else 's'}"
         if row.trades:
@@ -325,11 +329,8 @@ def ledger_lines(ledger: LiveLedger, *, week_start: date | None = None) -> list[
                 f", net {_r(row.net_r)} (gross {_r(row.gross_r)}, costs {_r(row.cost_r).lstrip('+')}),"
                 f" {_r(row.expectancy_r)}/trade, {row.wins}/{row.trades} won"
             )
-        extras = [
-            f"{count} {label}"
-            for count, label in ((row.open, "open"), (row.attention, "need attention"), (row.unfilled, "unfilled"))
-            if count
-        ]
+        counts = ((row.open, "open"), (row.attention, "need attention"), (row.unfilled, "unfilled"))
+        extras = [f"{count} {label}" for count, label in counts if count]
         if extras:
             text += "; " + ", ".join(extras)
         lines.append(text)
