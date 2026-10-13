@@ -176,8 +176,12 @@ every strategy (only the pinned bridge would keep running):
 2. Delete `autotrader.db-wal` and `autotrader.db-shm`, then copy the backup
    that `db migrate` printed over `autotrader.db`.
 3. Check out the commit that was running before the deploy.
-4. `autotraderctl db status` must exit 0, and `autotraderctl run --dry-run`
-   must show no `!!!` line.
+4. The older code has no `db` command and its dry run prints no schema line,
+   so check the restored database directly. `sqlite3 -readonly
+   ~/.local/share/autotrader-v1/autotrader.db "select max(version) from
+   autotrader_schema_migrations"` must print the version that older code
+   expects (12 for the phase-0 deploy), and `autotraderctl paper status` must
+   exit 0.
 5. Start the supervisor again: `autotraderctl shadow agent enable`.
 
 Rows written between the migration and the rollback are lost. If
