@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -113,7 +114,7 @@ def pending_migrations(database: Path) -> str | None:
     with an order sender (the main line's explicit migrations, review R-7).
     """
     try:
-        with sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)) as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='autotrader_schema_migrations'"
             ).fetchone()
