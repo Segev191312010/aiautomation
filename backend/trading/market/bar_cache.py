@@ -216,6 +216,10 @@ class BarCache:
         self._pruned_before: date | None = None
 
     @property
+    def writer(self) -> str:
+        return self._writer
+
+    @property
     def available(self) -> bool:
         return self._available
 
