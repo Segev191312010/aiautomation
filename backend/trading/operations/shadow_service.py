@@ -31,7 +31,8 @@ from trading.intelligence.prompts import (
 )
 from trading.intelligence.provider import TradeProposalProvider
 from trading.intelligence.review_provider import ReviewSessionLimits, StructuredAIReviewProvider
-from trading.market.ibkr_boundary import PaperIBKRMarketData
+from trading.market import bar_cache
+from trading.market.ibkr_boundary import IBKRConnectionActor, PaperIBKRMarketData
 from trading.market.tws_actor import (
     PAPER_TWS_HOST,
     TWSActorConfig,
@@ -227,6 +228,32 @@ STRATEGY_POLL_OFFSETS = {
     # freshness limit leaves a 115 s pass (MANAGED_BAR_MAX_AGE).
     "momo-ap": timedelta(seconds=165),
 }
+# Registry entry -> whether its five-minute history is read through the
+# shared bar cache (trading.market.bar_cache) once BAR_CACHE_ENABLED is True.
+# Every entry opts out until the cache has its own review: the table is an
+# unregistered draft, and real MOMO's requests stay direct in any case (a
+# batch another child fetched is not the reply its own request would get,
+# and its decisions are frozen). An entry missing here opts out.
+STRATEGY_USES_BAR_CACHE = {
+    "orb": False,
+    "momo": False,
+    "vwap": False,
+    "gap": False,
+    "orb-v2": False,
+    "vwap-v2": False,
+    "gap-v2": False,
+    "momo-ap": False,
+}
+
+
+def uses_bar_cache(strategy_name: str) -> bool:
+    """Whether the registry entry opted into the shared bar cache."""
+    return bool(STRATEGY_USES_BAR_CACHE.get(strategy_name, False))
+
+
+def bar_cache_active(strategy_name: str) -> bool:
+    """The cache serves a child only with the flag on and its entry opted in."""
+    return bool(bar_cache.BAR_CACHE_ENABLED) and uses_bar_cache(strategy_name)
 
 
 def strategy_family(strategy_name: str) -> str:
@@ -529,8 +556,19 @@ async def run_shadow_session(
         ),
         capacity_checker=documented_line_allocation,
     )
+    data_actor: IBKRConnectionActor = actor
+    if bar_cache_active(strategy_name):
+        # Wraps the history request only; the facade below validates a cached
+        # batch exactly as a direct reply, under this run's own freshness limit.
+        data_actor = bar_cache.CachedBarsActor(
+            actor,
+            cache=bar_cache.BarCache(writer=strategy_name, clock=clock, sleep=sleep),
+            session_date=session.session_date,
+            clock=clock,
+        )
+        logger.info("%s reads five-minute history through the shared bar cache", strategy_name)
     market = PaperIBKRMarketData(
-        actor=actor,
+        actor=data_actor,
         host=PAPER_TWS_HOST,
         volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
         # The limit the runner schedules its polls against is the one enforced.
@@ -789,9 +827,11 @@ __all__ = [
     "STRATEGIES",
     "STRATEGY_FAMILIES",
     "STRATEGY_POLL_OFFSETS",
+    "STRATEGY_USES_BAR_CACHE",
     "UNIVERSES",
     "MANAGED_BAR_MAX_AGE",
     "WATCHLIST_BAR_MAX_AGE",
+    "bar_cache_active",
     "bar_freshness_limit",
     "fresh_run_label",
     "idle_until_cutoff",
@@ -806,4 +846,5 @@ __all__ = [
     "source_sha",
     "strategy_entry_window",
     "strategy_family",
+    "uses_bar_cache",
 ]

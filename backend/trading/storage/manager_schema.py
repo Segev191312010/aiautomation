@@ -481,6 +481,40 @@ MANAGER_PHASE2_TABLES = (
     "autotrader_manager_spend",
 )
 
+# DRAFT, NOT REGISTERED: phase 3 (the shared five-minute bar cache,
+# ``trading.market.bar_cache``). Applied only by its tests on scratch
+# databases until it lands as its own migration after review; a runtime
+# process never creates it. ``bar_cache`` falls back to direct IBKR requests
+# while the table is missing.
+#
+# One row per ``(con_id, bar_size, bar_end_utc)``: the raw history batch the
+# first child fetched for the bar ending at ``bar_end_utc``. A row is first a
+# claim (``fetching``: the claimant's request is in flight, other children
+# wait for it instead of repeating it) and then ``ready`` with the bars; a
+# claim whose request failed is deleted, and one older than IBKR's own 15 s
+# identical-request window is taken over. Rows of past sessions are pruned.
+MANAGER_PHASE3_DRAFT_DDL = (
+    f"""CREATE TABLE IF NOT EXISTS autotrader_bar_cache (
+        con_id INTEGER NOT NULL CHECK(con_id > 0),
+        bar_size TEXT NOT NULL CHECK(bar_size = '5m'),
+        bar_end_utc TEXT NOT NULL CHECK({_utc("bar_end_utc")}),
+        session_date TEXT NOT NULL CHECK({_day("session_date")}),
+        state TEXT NOT NULL CHECK(state IN ('fetching', 'ready')),
+        writer TEXT NOT NULL CHECK(length(writer) BETWEEN 1 AND 64),
+        claimed_at TEXT NOT NULL CHECK({_utc("claimed_at")}),
+        fetched_at TEXT NULL CHECK(fetched_at IS NULL OR {_utc("fetched_at")}),
+        bars_json TEXT NULL CHECK(bars_json IS NULL OR {_json("bars_json", "array")}),
+        bar_count INTEGER NULL CHECK(bar_count IS NULL OR bar_count > 0),
+        CHECK((state = 'ready') = (bars_json IS NOT NULL)),
+        CHECK((state = 'ready') = (fetched_at IS NOT NULL)),
+        CHECK((state = 'ready') = (bar_count IS NOT NULL)),
+        PRIMARY KEY(con_id, bar_size, bar_end_utc)
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_autotrader_bar_cache_session
+        ON autotrader_bar_cache(session_date)""",
+)
+MANAGER_PHASE3_DRAFT_TABLES = ("autotrader_bar_cache",)
+
 
 __all__ = [
     "MANAGER_PHASE1_SCHEMA",
@@ -488,6 +522,8 @@ __all__ = [
     "MANAGER_PHASE2_DDL",
     "MANAGER_PHASE2_MIGRATION",
     "MANAGER_PHASE2_TABLES",
+    "MANAGER_PHASE3_DRAFT_DDL",
+    "MANAGER_PHASE3_DRAFT_TABLES",
     "MANAGER_SETUPS_SCHEMA",
     "MANAGER_TABLES",
 ]
