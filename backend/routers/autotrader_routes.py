@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,9 +13,11 @@ from trading.authority import EngineAuthority
 from trading.contracts import EngineMode, StrategySpec, StrategyState
 from trading.contracts import Run
 from trading.data.repositories import CandidateRepository, RunRepository
+from trading.operations.supervisor import BACKEND_DIR, REVIEWED_BRIDGE_SHA256, file_sha256
 from trading.sendable_identities import (
     API_RESERVED_NAME_PREFIXES,
     RESERVED_STRATEGY_NAME,
+    SENDABLE_IDENTITIES,
     is_api_reserved_name,
 )
 from trading.storage.repository import (
@@ -87,14 +90,52 @@ def _refuse_reserved_name(spec: StrategySpec) -> None:
     )
 
 
+def paper_execution_status(backend: Path = BACKEND_DIR) -> dict[str, object]:
+    """Read-only: whether the PAPER order sender on disk is the reviewed one.
+
+    Real PAPER orders come from the pinned bridge (``SENDABLE_IDENTITIES`` and
+    the owner's manual orders), not from this engine; the supervisor refuses
+    to start any other bridge file, so with one on disk nothing sends. This
+    reports that state and changes nothing.
+    """
+    path = backend / "scripts_local" / "paper_bridge.py"
+    try:
+        actual = file_sha256(path)
+    except OSError:
+        return {
+            "execution_enabled": False,
+            "paper_order_sender": None,
+            "sendable_identities": [],
+            "paper_authority": "blocked_bridge_unreadable",
+            "reason": f"{path.name} is unreadable: the supervisor refuses to start it",
+        }
+    if actual != REVIEWED_BRIDGE_SHA256:
+        return {
+            "execution_enabled": False,
+            "paper_order_sender": None,
+            "sendable_identities": [],
+            "paper_authority": "blocked_bridge_unreviewed",
+            "reason": (
+                f"{path.name} sha256 {actual[:12]} is not the reviewed"
+                f" {REVIEWED_BRIDGE_SHA256[:12]}: the supervisor refuses to start it"
+            ),
+        }
+    return {
+        "execution_enabled": True,
+        "paper_order_sender": "paper_bridge (pinned)",
+        "paper_bridge_sha256": actual,
+        "sendable_identities": list(SENDABLE_IDENTITIES),
+        "paper_authority": "paper_bridge_pinned",
+    }
+
+
 @router.get("/status")
 async def get_engine_status():
     authority = EngineAuthority()
     return {
         "engine": "autotrader-v1",
         "enabled_modes": sorted(mode.value for mode in authority.enabled_modes),
-        "execution_enabled": False,
-        "paper_authority": "blocked_pending_receipt",
+        **paper_execution_status(),
         "live_authority": "unsupported",
     }
 
