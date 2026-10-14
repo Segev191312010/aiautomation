@@ -93,6 +93,7 @@ import hashlib
 import itertools
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
@@ -1033,13 +1034,19 @@ _UNSUPERVISED_PATTERN = (
     r"^[^ ]*python[^ ]* .*(autotraderctl\.py (screener|shadow|notify|telegram) run"
     r"|paper_bridge\.py)"
 )
+# A running supervisor (`autotraderctl run`, never its `--dry-run`): the
+# children under it are its own, not strays.
+_SUPERVISOR_PATTERN = r"^[^ ]*python[^ ]* .*autotraderctl\.py run(?: |$)(?!.*--dry-run)"
+
+# One process: (pid, parent pid, full command line).
+ProcessEntry = tuple[int, int, str]
 
 
-def unsupervised_children() -> list[tuple[int, str]]:
-    """Trading processes already running outside this supervisor; reported, never killed."""
+def process_table() -> list[ProcessEntry]:
+    """Every process with its parent, from ``ps``; empty when ``ps`` is unavailable."""
     try:
         result = subprocess.run(
-            ["/usr/bin/pgrep", "-fl", _UNSUPERVISED_PATTERN],
+            ["/bin/ps", "-axww", "-o", "pid=,ppid=,command="],
             capture_output=True,
             text=True,
             timeout=5,
@@ -1047,11 +1054,44 @@ def unsupervised_children() -> list[tuple[int, str]]:
         )
     except (OSError, subprocess.SubprocessError):
         return []
-    found: list[tuple[int, str]] = []
+    table: list[ProcessEntry] = []
     for line in result.stdout.splitlines():
-        pid, _, command = line.strip().partition(" ")
-        if pid.isdigit() and int(pid) != os.getpid():
-            found.append((int(pid), command))
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            table.append((int(parts[0]), int(parts[1]), parts[2]))
+    return table
+
+
+def unsupervised_children(
+    table: Callable[[], Sequence[ProcessEntry]] = process_table,
+) -> list[tuple[int, str]]:
+    """Trading processes running outside any supervisor; reported, never killed.
+
+    A child whose parent chain reaches a running ``autotraderctl run`` is that
+    supervisor's own (the dry run used to warn about every supervised child,
+    telling the owner to kill the live screener).
+    """
+    entries = list(table())
+    parents = {pid: ppid for pid, ppid, _command in entries}
+    supervisors = {
+        pid for pid, _ppid, command in entries if re.search(_SUPERVISOR_PATTERN, command)
+    }
+
+    def supervised(pid: int) -> bool:
+        seen: set[int] = set()
+        while pid in parents and pid not in seen:
+            seen.add(pid)
+            pid = parents[pid]
+            if pid in supervisors:
+                return True
+        return False
+
+    found: list[tuple[int, str]] = []
+    for pid, _ppid, command in entries:
+        if pid == os.getpid() or not re.search(_UNSUPERVISED_PATTERN, command):
+            continue
+        if not supervised(pid):
+            found.append((pid, command))
     return found
 
 
