@@ -32,6 +32,7 @@ from trading.operations.paths import atomic_private_write
 from trading.research.bars_store import NEW_YORK, BarsStore, ResearchPaths
 from trading.research.live_ledger import LiveLedger, bridge_state_directory, read_live_ledger
 from trading.research.outcomes import TrackerReport, track_outcomes
+from trading.research.overlay import OverlayScorecard, read_scorecard
 from trading.research.paper_promotion import (
     LiveEvidence,
     PromotionReport,
@@ -94,6 +95,8 @@ class NightlyEvidence:
     # Live (tracked) setups of the current identity by signal hour, per strategy.
     live_hours: Mapping[str, tuple[LiveHour, ...]] = field(default_factory=dict)
     week_start: date | None = None
+    # Managed MOMO against MOMO_HOD_V2 on the same setups (phase-3 readiness).
+    phase3: OverlayScorecard | None = None
 
 
 def week_start(day: date) -> date:
@@ -168,6 +171,13 @@ def collect_evidence(
     except Exception:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("paper promotion evaluation failed")
         live, promotion = LiveEvidence(readable=False, note="failed"), ()
+    as_of = now.astimezone(NEW_YORK).date()
+    try:
+        # Every managed session so far: phase 3 is a cumulative question.
+        phase3 = read_scorecard(environment.database, end=as_of, days=None)
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("overlay scorecard failed")
+        phase3 = OverlayScorecard(start=None, end=as_of, readable=False, note=_failed(exc))
     allowed, note = sweep_allowed(environment.clock())
     windows: tuple[FamilyResearch, ...] = ()
     if allowed:
@@ -185,7 +195,8 @@ def collect_evidence(
         windows=windows,
         windows_note=note,
         live_hours=_live_hours(promotion, live),
-        week_start=week_start(now.astimezone(NEW_YORK).date()),
+        week_start=week_start(as_of),
+        phase3=phase3,
     )
 
 
@@ -214,6 +225,7 @@ def write_evidence(
                 ]
                 for name, rows in evidence.live_hours.items()
             },
+            "phase3": None if evidence.phase3 is None else evidence.phase3.payload(),
         },
         "windows.json": {
             "schema": "autotrader-v1/research-windows",

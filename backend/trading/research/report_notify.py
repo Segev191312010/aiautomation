@@ -10,7 +10,9 @@ important first, because one Telegram message is cut at its end:
 2. window research: the replay's swept windows and its trades by signal
    hour, plus the live tracked setups by hour;
 3. live R: every real PAPER bracket in R after commissions;
-4. the replay's own per-strategy summary.
+4. phase-3 readiness: managed MOMO (shadow) against MOMO_HOD_V2 on the same
+   setups, and the do-no-harm verdict (``trading/research/overlay.py``);
+5. the replay's own per-strategy summary.
 
 After a successful replay the plain-text summary goes to the pinned owner
 chat as ONE message:
@@ -391,15 +393,28 @@ def live_r_lines(evidence: NightlyEvidence) -> list[str]:
     ]
 
 
+def phase3_lines(evidence: NightlyEvidence) -> list[str]:
+    """Phase-3 readiness: managed MOMO against MOMO_HOD_V2 on the same setups."""
+    from trading.research.overlay import readiness_lines
+
+    return [] if evidence.phase3 is None else readiness_lines(evidence.phase3)
+
+
 def evidence_text(evidence: NightlyEvidence) -> str:
-    """The evidence, window research and live R sections as one plain text."""
-    return "\n\n".join(
-        (
-            "\n".join(evidence_lines(evidence.promotion, tracker=evidence.tracker)),
-            "\n".join(window_research_lines(evidence)),
-            "\n".join(live_r_lines(evidence)),
-        )
-    )
+    """The evidence, window research, live R and phase-3 sections as one plain text.
+
+    The phase-3 section is appended after the others (absent when the
+    evidence carries no scorecard), so the earlier sections never change.
+    """
+    sections = [
+        "\n".join(evidence_lines(evidence.promotion, tracker=evidence.tracker)),
+        "\n".join(window_research_lines(evidence)),
+        "\n".join(live_r_lines(evidence)),
+    ]
+    phase3 = phase3_lines(evidence)
+    if phase3:
+        sections.append("\n".join(phase3))
+    return "\n\n".join(sections)
 
 
 def compose_summary(replay: str, evidence: NightlyEvidence | None = None) -> str:
@@ -448,6 +463,7 @@ __all__ = [
     "latest_closed_session",
     "live_r_lines",
     "notify_summary",
+    "phase3_lines",
     "summary_message",
     "weekly_state_file",
     "weekly_summary_due",
