@@ -7,6 +7,26 @@ live qualification computes them. Requests are paced, a pacing violation
 backs off and retries, and a competing login or lost connection stops the run
 cleanly: every day already written stays written, and the next run skips it.
 Only sessions that have closed are stored, so a stored day is never partial.
+
+The nightly run (``research record``, 16:20-17:30 ET):
+
+1. first records extended-hours bars (04:00 ET through the close) of the
+   closed session's gap candidates (watchlist and scanner gappers, at most
+   ``MAX_GAP_CANDIDATES``) for GAP_GO's replay: IBKR's all-hours request
+   covers only the current day, so this is the one step a later night can
+   never refill;
+2. records the RTH bars of every qualified contract of that session: the
+   watchlist first, then the day universe by scan rank, then any other
+   qualified scan name, capped at ``RECORDER_MAX_CONTRACTS`` and stopped at
+   ``regular_hours_deadline`` (5 minutes before the window's end) with a
+   "STOPPED early" line and its counts; the next night's lookback takes the
+   rest;
+3. only while ``EVENING_QUALIFICATION_ENABLED`` (off: review R6), qualifies
+   the next session's watchlist; otherwise the screener does it at 08:00
+   exactly as deployed.
+
+A manual ``research backfill`` runs the same steps (without a deadline
+outside the window); each is idempotent.
 """
 from __future__ import annotations
 
@@ -14,7 +34,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from functools import partial
 import logging
@@ -31,6 +51,7 @@ from trading.market.ibkr_boundary import (
     DailyBarBatch,
     IBKRTradeBar,
     MarketDataQualityError,
+    is_competing_session_report,
     liquidity_profile,
 )
 from trading.market.tws_actor import (
@@ -41,19 +62,25 @@ from trading.market.tws_actor import (
     TWSPaperActor,
     TWSRequestError,
     _PendingBars,
-    is_competing_session_report,
 )
-from trading.market.universe import RequestPacer
+from trading.market.universe import (
+    EVENING_QUALIFICATION_ENABLED,
+    DailyHistorySource,
+    QualificationReport,
+    RequestPacer,
+    qualify_universe,
+)
 from trading.operations.paths import PathSecurityError
 from trading.operations.shadow_service import IBKR_API_VOLUME_MULTIPLIER
 from trading.research.bars_store import (
+    EXTENDED_HOURS_START,
     BarsStore,
     BarsStoreError,
     StoredBar,
     StoredDay,
     previous_session,
 )
-from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
+from trading.scheduler.sessions import MARKET_TIMEZONE, market_session, next_market_session
 
 logger = logging.getLogger("autotrader.shadow.research")
 
@@ -78,6 +105,71 @@ STOP_DISCONNECTED = "disconnected"
 STOP_PACING = "pacing"
 STOP_REPEATED_FAILURES = "repeated_failures"
 STOP_STORE_UNWRITABLE = "store_unwritable"
+# A planned stop: the regular-hours pass reached its deadline before the
+# window's end. The missing days are taken by the next night's lookback.
+STOP_DEADLINE = "deadline"
+# Stops after which no further TWS step of the night is attempted.
+CONNECTION_STOPS = frozenset({STOP_COMPETING_SESSION, STOP_DISCONNECTED})
+
+# --- the nightly budget -------------------------------------------------------------
+# The recorder's supervised window, 16:20-17:30 ET (supervisor.RECORDER_WINDOW;
+# a test pins the two).
+RECORDER_WINDOW = (dt_time(16, 20), dt_time(17, 30))
+RECORDER_WINDOW_SECONDS = 70 * 60
+# The regular-hours pass starts no contract later than this before the
+# window's end, so the supervisor's SIGTERM never cuts a night short.
+RECORDER_MARGIN_SECONDS = 5 * 60
+# Contracts recorded per night, at most: the watchlist (~400 qualified of
+# ~500), the day universe (<= 150) and any other qualified scan name, in that
+# priority. A first night for a contract fetches all 21 sessions in the same
+# two requests, only with a longer reply.
+RECORDER_MAX_CONTRACTS = 600
+MAX_GAP_CANDIDATES = 60
+# Watchlist size the evening qualification is planned for (the owner's ~503).
+WATCHLIST_PLANNING_SIZE = 520
+QUALIFY_PACE_SECONDS = 1.0
+# Worst-typical wall time per item: the pacing plus a slow reply.
+RECORD_SECONDS_PER_CONTRACT = 2 * DEFAULT_PACE_SECONDS + 1.0
+# All-hours bars plus, since this step runs first, the daily context request.
+EXTENDED_SECONDS_PER_CONTRACT = 2 * DEFAULT_PACE_SECONDS + 1.0
+QUALIFY_SECONDS_PER_CONTRACT = QUALIFY_PACE_SECONDS + 0.2
+# Gap candidates: GAP_GO's own minimum gap, read from the sweeps of the first
+# hour after the open (the official open makes gap_pct final by then).
+GAP_CANDIDATE_MIN_PCT = Decimal("3")
+GAP_CANDIDATE_WINDOW = timedelta(minutes=60)
+
+
+def nightly_budget_seconds(contracts: int, gap_candidates: int, watchlist: int) -> float:
+    """Worst-typical seconds for one night: extended bars, RTH recording, qualification.
+
+    ``watchlist`` is 0 while evening qualification is off (the default).
+    """
+    return (
+        gap_candidates * EXTENDED_SECONDS_PER_CONTRACT
+        + contracts * RECORD_SECONDS_PER_CONTRACT
+        + watchlist * QUALIFY_SECONDS_PER_CONTRACT
+    )
+
+
+def regular_hours_deadline(started: datetime) -> datetime | None:
+    """When the regular-hours pass starts its last contract, or None.
+
+    Inside the supervised window the pass stops ``RECORDER_MARGIN_SECONDS``
+    before the window's end, less the evening qualification's budget when
+    that step is on. A run started outside the window (an owner's manual
+    backfill) has no deadline.
+    """
+    if started.tzinfo is None or started.utcoffset() is None:
+        raise ValueError("started must be timezone-aware")
+    local = started.astimezone(MARKET_TIMEZONE)
+    opens, closes = RECORDER_WINDOW
+    if not opens <= local.time() < closes:
+        return None
+    end = datetime.combine(local.date(), closes, tzinfo=MARKET_TIMEZONE)
+    reserve = timedelta(seconds=RECORDER_MARGIN_SECONDS)
+    if EVENING_QUALIFICATION_ENABLED:
+        reserve += timedelta(seconds=WATCHLIST_PLANNING_SIZE * QUALIFY_SECONDS_PER_CONTRACT)
+    return (end - reserve).astimezone(timezone.utc)
 
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -141,6 +233,12 @@ class ResearchTWSActor(TWSPaperActor):
 
 class HistorySource(Protocol):
     async def intraday_trade_bars(self, con_id: int, *, duration: str) -> BarBatch: ...
+
+    async def daily_trade_bars(self, con_id: int) -> DailyBarBatch: ...
+
+
+class ExtendedHistorySource(Protocol):
+    async def extended_trade_bars(self, con_id: int) -> BarBatch: ...
 
     async def daily_trade_bars(self, con_id: int) -> DailyBarBatch: ...
 
@@ -364,13 +462,15 @@ async def backfill(
     max_attempts: int = MAX_REQUEST_ATTEMPTS,
     pacing_backoff_seconds: float = PACING_BACKOFF_SECONDS,
     max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
+    deadline: datetime | None = None,
 ) -> BackfillReport:
     """Store the newest ``days`` closed sessions for each contract; resumable.
 
     Sessions already stored are skipped (a fully stored contract sends no
     request), request starts are at least ``pace_seconds`` apart, and the run
     stops early, with everything written so far kept, on a competing login,
-    a lost connection, persistent pacing, or repeated contract failures.
+    a lost connection, persistent pacing, or repeated contract failures. With
+    ``deadline`` no contract starts at or after it (``STOP_DEADLINE``).
     """
     if not 1 <= days <= MAX_BACKFILL_DAYS:
         raise ValueError(f"days must be between 1 and {MAX_BACKFILL_DAYS}")
@@ -392,6 +492,18 @@ async def backfill(
         if not missing:
             already_stored += 1
             continue
+        if deadline is not None and clock() >= deadline:
+            stopped = STOP_DEADLINE
+            remaining = len(instruments) - index
+            logger.warning(
+                "backfill STOPPED early at its %s ET deadline: %d days written for %d contracts,"
+                " %d contracts not attempted (the next night's lookback takes them)",
+                deadline.astimezone(MARKET_TIMEZONE).strftime("%H:%M"),
+                days_written,
+                symbols_written,
+                remaining,
+            )
+            break
         requested += 1
         now = clock()
         duration = f"{request_days(sessions, missing, now)} D"
@@ -507,37 +619,337 @@ class UniverseUnavailableError(RuntimeError):
     """No qualified universe could be read from the runtime database."""
 
 
-def load_qualified_universe(db_path: str | Path) -> tuple[date, tuple[Instrument, ...]]:
-    """The newest session's qualified contracts, read through a read-only handle."""
+def _read_only_database(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path).expanduser()
     if not path.is_file():
         raise UniverseUnavailableError(f"runtime database not found at {path}")
-    uri = f"file:{quote(str(path))}?mode=ro"
+    return sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True)
+
+
+def _has_table(db: sqlite3.Connection, table: str) -> bool:
+    return (
+        db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        is not None
+    )
+
+
+# Tier 0: the owner's watchlist; 1: the day universe by its best scan rank;
+# 2: any other qualified contract (the hot-35's scan additions). The day
+# universe keeps its qualifications out of autotrader_universe_daily, so its
+# names are read from its own table too.
+_UNIVERSE_SQL = """
+    SELECT con_id, symbol, exchange, tier, day_rank FROM (
+    SELECT d.con_id AS con_id, d.symbol AS symbol,
+           COALESCE((SELECT u.primary_exchange FROM autotrader_universe u
+                      WHERE u.con_id = d.con_id AND u.primary_exchange IS NOT NULL
+                      ORDER BY u.source LIMIT 1), {day_exchange}) AS exchange,
+           CASE WHEN EXISTS (SELECT 1 FROM autotrader_universe u WHERE u.con_id = d.con_id) THEN 0
+                WHEN {day_member} THEN 1 ELSE 2 END AS tier,
+           {day_rank} AS day_rank
+      FROM autotrader_universe_daily d
+      {day_join}
+     WHERE d.session_date = ? AND d.qualified = 1
+    {day_only}
+    ) ORDER BY tier, day_rank IS NULL, day_rank, symbol, con_id
+"""
+_DAY_ONLY_SQL = """
+    UNION ALL
+    SELECT du.con_id, du.symbol, du.primary_exchange, 1, du.best_rank
+      FROM autotrader_manager_day_universe du
+     WHERE du.session_date = ? AND du.qualified = 1
+       AND NOT EXISTS (SELECT 1 FROM autotrader_universe_daily d
+                        WHERE d.session_date = du.session_date AND d.con_id = du.con_id
+                          AND d.qualified = 1)
+"""
+
+
+def load_qualified_universe(
+    db_path: str | Path,
+    *,
+    now: datetime | None = None,
+    max_contracts: int | None = None,
+) -> tuple[date, tuple[Instrument, ...]]:
+    """The newest qualified session's contracts, read through a read-only handle.
+
+    With ``now`` the session is the newest one that has closed by then, so a
+    next session already qualified in the evening is never mistaken for the
+    one to record. Contracts come in priority order (watchlist, day universe
+    by scan rank, other scan names) and at most ``max_contracts`` of them.
+    """
+    newest_closed = completed_sessions(now, 1)[-1] if now is not None else None
     try:
-        with closing(sqlite3.connect(uri, uri=True)) as db:
-            row = db.execute(
-                "SELECT MAX(session_date) FROM autotrader_universe_daily WHERE qualified = 1"
-            ).fetchone()
+        with closing(_read_only_database(db_path)) as db:
+            query = "SELECT MAX(session_date) FROM autotrader_universe_daily WHERE qualified = 1"
+            params: tuple[object, ...] = ()
+            if newest_closed is not None:
+                query += " AND session_date <= ?"
+                params = (newest_closed.isoformat(),)
+            row = db.execute(query, params).fetchone()
             if row is None or row[0] is None:
                 raise UniverseUnavailableError("no qualified universe has been recorded")
             session_date = date.fromisoformat(str(row[0]))
-            rows = db.execute(
-                """SELECT d.con_id, d.symbol,
-                          (SELECT u.primary_exchange FROM autotrader_universe u
-                            WHERE u.con_id = d.con_id AND u.primary_exchange IS NOT NULL
-                            ORDER BY u.source LIMIT 1)
-                     FROM autotrader_universe_daily d
-                    WHERE d.session_date = ? AND d.qualified = 1
-                    ORDER BY d.symbol, d.con_id""",
-                (session_date.isoformat(),),
-            ).fetchall()
+            if _has_table(db, "autotrader_manager_day_universe"):
+                sql = _UNIVERSE_SQL.format(
+                    day_exchange="du.primary_exchange",
+                    day_member="du.con_id IS NOT NULL",
+                    day_rank="du.best_rank",
+                    day_join=(
+                        "LEFT JOIN autotrader_manager_day_universe du"
+                        " ON du.session_date = d.session_date AND du.con_id = d.con_id"
+                        " AND du.qualified = 1"
+                    ),
+                    day_only=_DAY_ONLY_SQL,
+                )
+                universe_params: tuple[str, ...] = (session_date.isoformat(),) * 2
+            else:
+                sql = _UNIVERSE_SQL.format(
+                    day_exchange="NULL", day_member="0", day_rank="NULL", day_join="", day_only=""
+                )
+                universe_params = (session_date.isoformat(),)
+            rows = db.execute(sql, universe_params).fetchall()
     except sqlite3.Error as exc:
         raise UniverseUnavailableError(f"qualified universe unreadable: {exc}") from exc
     instruments = tuple(
         Instrument(con_id=int(con_id), symbol=str(symbol), primary_exchange=exchange)
-        for con_id, symbol, exchange in rows
+        for con_id, symbol, exchange, _tier, _rank in rows
     )
+    if max_contracts is not None and len(instruments) > max_contracts:
+        logger.warning(
+            "recording %d of %d qualified contracts (the nightly cap); the rest are scan names",
+            max_contracts,
+            len(instruments),
+        )
+        instruments = instruments[:max_contracts]
     return session_date, instruments
+
+
+def _utc_text(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+# Rows and day-universe rows of the sweeps in the first hour after the open.
+_GAP_ROWS_SQL = """
+    SELECT CAST(json_extract(r.value, '$.con_id') AS INTEGER),
+           json_extract(r.value, '$.symbol'),
+           json_extract(r.value, '$.primary_exchange'),
+           CAST(json_extract(r.value, '$.gap_pct') AS REAL)
+      FROM autotrader_screener_snapshots s, json_each(s.payload_json, '{path}') r
+     WHERE s.session_date = ? AND s.observed_at >= ? AND s.observed_at <= ?
+       AND json_extract(r.value, '$.gap_pct') IS NOT NULL
+"""
+
+
+def load_gap_candidates(
+    db_path: str | Path,
+    session_date: date,
+    *,
+    min_gap_pct: Decimal = GAP_CANDIDATE_MIN_PCT,
+    limit: int = MAX_GAP_CANDIDATES,
+) -> tuple[Instrument, ...]:
+    """The session's gappers: watchlist rows, scan rows and day-universe rows.
+
+    Every contract whose official gap (``gap_pct``) reached ``min_gap_pct`` in
+    a sweep of the first hour after the open, largest gap first, at most
+    ``limit``. Read through a read-only handle; no sweep means no candidates.
+    """
+    session = market_session(session_date)
+    if session is None:
+        return ()
+    bounds = (
+        session_date.isoformat(),
+        _utc_text(session.opens_at),
+        _utc_text(session.opens_at + GAP_CANDIDATE_WINDOW),
+    )
+    best: dict[int, tuple[float, str, str | None]] = {}
+    try:
+        with closing(_read_only_database(db_path)) as db:
+            for path in ("$.rows", "$.day_universe.rows"):
+                for con_id, symbol, exchange, gap in db.execute(
+                    _GAP_ROWS_SQL.format(path=path), bounds
+                ).fetchall():
+                    if con_id is None or int(con_id) <= 0 or not symbol or gap is None:
+                        continue
+                    current = best.get(int(con_id))
+                    if current is None or float(gap) > current[0]:
+                        best[int(con_id)] = (float(gap), str(symbol), exchange)
+    except sqlite3.Error as exc:
+        raise UniverseUnavailableError(f"screener snapshots unreadable: {exc}") from exc
+    ordered = sorted(
+        (
+            (gap, symbol, con_id, exchange)
+            for con_id, (gap, symbol, exchange) in best.items()
+            if Decimal(str(gap)) >= min_gap_pct
+        ),
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    return tuple(
+        Instrument(con_id=con_id, symbol=symbol, primary_exchange=exchange or None)
+        for _gap, symbol, con_id, exchange in ordered[:limit]
+    )
+
+
+# --- extended-hours bars for GAP_GO's replay ---------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ExtendedReport:
+    session_date: date
+    candidates: int
+    already_stored: int = 0
+    written: int = 0
+    failures: tuple[tuple[str, str], ...] = ()
+    skipped: str | None = None
+    stopped: str | None = None
+
+
+def extended_session_bars(
+    raw: Sequence[IBKRTradeBar], *, session_date: date, now: datetime
+) -> list[IBKRTradeBar]:
+    """The session day's completed bars from 04:00 ET through the close."""
+    session = market_session(session_date)
+    if session is None:
+        return []
+    closes_at = session.closes_at.astimezone(timezone.utc)
+    kept: list[IBKRTradeBar] = []
+    for bar in raw:
+        local = bar.interval_start_utc.astimezone(MARKET_TIMEZONE)
+        if local.date() != session_date or local.time() < EXTENDED_HOURS_START:
+            continue
+        if bar.interval_end_utc > closes_at or bar.interval_end_utc > now:
+            continue
+        kept.append(bar)
+    return sorted(kept, key=lambda bar: bar.interval_start_utc)
+
+
+async def record_extended(
+    actor: ExtendedHistorySource,
+    *,
+    session_date: date,
+    instruments: Sequence[Instrument],
+    pace_seconds: float = DEFAULT_PACE_SECONDS,
+    store: BarsStore | None = None,
+    clock: Clock = _utc_now,
+    sleep: Sleeper = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    max_attempts: int = MAX_REQUEST_ATTEMPTS,
+    pacing_backoff_seconds: float = PACING_BACKOFF_SECONDS,
+) -> ExtendedReport:
+    """Store each gap candidate's pre-market and regular session of ``session_date``.
+
+    IBKR's all-hours request (``extended_trade_bars``, "1 D") returns only
+    the current day, so the step runs on the evening of the session itself
+    (first of the night: it can never be refilled later) and is skipped
+    (named) otherwise. The prior close and average dollar volume come from
+    the same session's regular-hours day when stored, else from one daily
+    request, exactly as the regular-hours recording computes them.
+    """
+    store = store or BarsStore()
+    now = clock()
+    session = market_session(session_date)
+    if session is None or now < session.closes_at:
+        return ExtendedReport(session_date, len(instruments), skipped="session_not_closed")
+    if now.astimezone(MARKET_TIMEZONE).date() != session_date:
+        return ExtendedReport(session_date, len(instruments), skipped="not_the_session_day")
+    pacer = RequestPacer(pace_seconds, clock=monotonic, sleep=sleep)
+    already = written = 0
+    failures: list[tuple[str, str]] = []
+    stopped: str | None = None
+    for instrument in instruments:
+        if store.has_day(session_date, instrument.con_id, extended=True):
+            already += 1
+            continue
+        try:
+            batch = await _fetch(
+                partial(actor.extended_trade_bars, instrument.con_id),
+                pacer=pacer,
+                max_attempts=max_attempts,
+                backoff_seconds=pacing_backoff_seconds,
+            )
+            bars = extended_session_bars(batch.bars, session_date=session_date, now=clock())
+            if not bars:
+                failures.append((instrument.symbol, "no extended-hours bars"))
+                continue
+            regular = store.get_day(session_date, instrument.con_id)
+            if regular is not None:
+                prior_close, average = regular.prior_close, regular.avg_dollar_volume
+            else:
+                daily = await _fetch(
+                    partial(actor.daily_trade_bars, instrument.con_id),
+                    pacer=pacer,
+                    max_attempts=max_attempts,
+                    backoff_seconds=pacing_backoff_seconds,
+                )
+                if any(bar.con_id != instrument.con_id for bar in daily.bars):
+                    raise _InstrumentFailure("daily history returned another contract")
+                prior_close, average = daily_context(daily, session_date)
+            store.write_day(
+                StoredDay(
+                    session_date=session_date,
+                    con_id=instrument.con_id,
+                    symbol=instrument.symbol,
+                    bars=stored_bars(bars, con_id=instrument.con_id),
+                    prior_close=prior_close,
+                    avg_dollar_volume=average,
+                    primary_exchange=instrument.primary_exchange
+                    or (None if regular is None else regular.primary_exchange),
+                    fetched_at=clock(),
+                    use_rth=False,
+                )
+            )
+            written += 1
+        except _Stop as stop:
+            stopped = stop.reason
+            failures.append((instrument.symbol, str(stop)))
+            logger.error("extended-hours recording stopped at %s: %s", instrument.symbol, stop)
+            break
+        except _InstrumentFailure as exc:
+            failures.append((instrument.symbol, str(exc)))
+        except BarsStoreError as exc:
+            failures.append((instrument.symbol, str(exc)))
+        except (OSError, PathSecurityError) as exc:
+            stopped = STOP_STORE_UNWRITABLE
+            failures.append((instrument.symbol, str(exc)))
+            break
+    return ExtendedReport(
+        session_date=session_date,
+        candidates=len(instruments),
+        already_stored=already,
+        written=written,
+        failures=tuple(failures),
+        stopped=stopped,
+    )
+
+
+# --- the next session's watchlist qualification ----------------------------------------------
+
+
+def next_session_after_close(now: datetime) -> date:
+    """The session after the newest one that has closed by ``now``."""
+    return next_market_session(completed_sessions(now, 1)[-1]).session_date
+
+
+async def qualify_next_session(
+    history: DailyHistorySource,
+    *,
+    now: datetime,
+    pace_seconds: float = QUALIFY_PACE_SECONDS,
+    clock: Clock = _utc_now,
+    pacer: RequestPacer | None = None,
+) -> QualificationReport:
+    """Qualify the next session's watchlist tonight, exactly as 08:00 would.
+
+    Resumable and idempotent (final rows are skipped); the session calendar
+    picks the date, so a Friday evening qualifies Monday (or the day after a
+    holiday). A split effective at that open is caught by the first sweep's
+    prior-close re-check.
+    """
+    return await qualify_universe(
+        history,
+        session_date=next_session_after_close(now),
+        volume_multiplier=IBKR_API_VOLUME_MULTIPLIER,
+        clock=clock,
+        pacer=pacer or RequestPacer(pace_seconds),
+    )
 
 
 def format_backfill_report(report: BackfillReport, *, universe_date: date | None = None) -> str:
@@ -563,17 +975,52 @@ def format_backfill_report(report: BackfillReport, *, universe_date: date | None
     return "\n".join(lines)
 
 
-async def run_backfill_cli(days: int) -> int:
-    """``autotraderctl research backfill --days N``: read-only, client id 28."""
+def format_extended_report(report: ExtendedReport) -> str:
+    head = f"Extended-hours bars {report.session_date.isoformat()}: {report.candidates} gap candidates"
+    if report.skipped:
+        return f"{head}; skipped ({report.skipped})"
+    lines = [
+        head,
+        f"  already stored: {report.already_stored}  written: {report.written}"
+        f"  failures: {len(report.failures)}",
+    ]
+    lines.extend(f"    {symbol}: {reason}" for symbol, reason in report.failures[:10])
+    lines.append(f"  STOPPED early ({report.stopped})" if report.stopped else "  completed")
+    return "\n".join(lines)
+
+
+def format_qualification_report(report: QualificationReport) -> str:
+    return (
+        f"Next session {report.session_date.isoformat()} qualified tonight:"
+        f" {report.qualified} of {report.instruments} instruments"
+        f" ({report.requested} requested, {len(report.errors)} transient errors,"
+        " retried at 08:00)"
+    )
+
+
+async def run_backfill_cli(days: int, *, clock: Clock = _utc_now) -> int:
+    """``autotraderctl research backfill --days N`` / ``record``: read-only TWS, client id 28.
+
+    The gap candidates' extended-hours bars come first (they can never be
+    refilled), then the regular-hours pass up to ``regular_hours_deadline``,
+    then, only while ``EVENING_QUALIFICATION_ENABLED``, the next session's
+    watchlist qualification. Nothing runs after a competing login or a lost
+    connection. A pass stopped at its deadline is a planned stop (exit 0).
+    """
     from config import cfg
     from trading.operations.settings import ShadowSettingsError, load_shadow_runtime_config
 
     if not 1 <= days <= MAX_BACKFILL_DAYS:
         print(f"error: --days must be between 1 and {MAX_BACKFILL_DAYS}", file=sys.stderr)
         return 2
+    started = clock()
     try:
         config = load_shadow_runtime_config()
-        universe_date, instruments = load_qualified_universe(cfg.DB_PATH)
+        universe_date, instruments = load_qualified_universe(
+            cfg.DB_PATH, now=started, max_contracts=RECORDER_MAX_CONTRACTS
+        )
+        closed = completed_sessions(started, 1)[-1]
+        gappers = load_gap_candidates(cfg.DB_PATH, closed)
     except (ShadowSettingsError, UniverseUnavailableError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -584,15 +1031,30 @@ async def run_backfill_cli(days: int) -> int:
             request_timeout_seconds=HISTORY_REQUEST_TIMEOUT_SECONDS,
         )
     )
-    # Two paced requests per contract that still needs a session.
-    minutes = len(instruments) * 2 * DEFAULT_PACE_SECONDS / 60
+    qualify_tonight = EVENING_QUALIFICATION_ENABLED
+    deadline = regular_hours_deadline(started)
+    minutes = (
+        nightly_budget_seconds(
+            len(instruments), len(gappers), WATCHLIST_PLANNING_SIZE if qualify_tonight else 0
+        )
+        / 60
+    )
     print(
-        f"research backfill: {len(instruments)} contracts qualified"
-        f" {universe_date.isoformat()}, {days} sessions each;"
-        f" at most ~{minutes:.0f} min at {DEFAULT_PACE_SECONDS:.0f} s spacing"
-        " (stored sessions are skipped)",
+        f"research backfill: {len(gappers)} gap candidates of {closed.isoformat()} first, then"
+        f" {len(instruments)} contracts qualified {universe_date.isoformat()}, {days} sessions"
+        " each"
+        + (
+            f" until {deadline.astimezone(MARKET_TIMEZONE).strftime('%H:%M')} ET"
+            if deadline is not None
+            else ""
+        )
+        + ("; then the next session's qualification" if qualify_tonight else "")
+        + f"; at most ~{minutes:.0f} min (stored sessions are skipped)",
         flush=True,
     )
+    extended: ExtendedReport | None = None
+    report: BackfillReport | None = None
+    qualification: QualificationReport | None = None
     try:
         await actor.connect()
         if not actor.managed_accounts or any(
@@ -600,27 +1062,62 @@ async def run_backfill_cli(days: int) -> int:
         ):
             print("error: refusing a TWS login with a non-paper account", file=sys.stderr)
             return 1
-        report = await backfill(
+        extended = await record_extended(
             actor,
-            con_ids_with_symbols=instruments,
-            days=days,
+            session_date=closed,
+            instruments=gappers,
             pace_seconds=DEFAULT_PACE_SECONDS,
+            clock=clock,
         )
+        if extended.stopped not in CONNECTION_STOPS:
+            report = await backfill(
+                actor,
+                con_ids_with_symbols=instruments,
+                days=days,
+                pace_seconds=DEFAULT_PACE_SECONDS,
+                clock=clock,
+                deadline=deadline,
+            )
+        if qualify_tonight and report is not None and report.stopped not in CONNECTION_STOPS:
+            try:
+                qualification = await qualify_next_session(
+                    actor, now=clock(), pace_seconds=QUALIFY_PACE_SECONDS, clock=clock
+                )
+            except TWSActorError as exc:
+                print(f"next-session qualification stopped: {exc}", file=sys.stderr)
     except TWSActorError as exc:
         print(f"error: TWS PAPER data unavailable: {exc}", file=sys.stderr)
         return 1
     finally:
         await actor.disconnect()
-    print(format_backfill_report(report, universe_date=universe_date))
-    return 0 if report.completed else 1
+    if extended is None:  # pragma: no cover - every path above sets it or returns
+        return 1
+    print(format_extended_report(extended))
+    if report is not None:
+        print(format_backfill_report(report, universe_date=universe_date))
+    if qualification is not None:
+        print(format_qualification_report(qualification))
+    elif qualify_tonight:
+        print("Next session not qualified tonight: the screener qualifies it at 08:00.")
+    recorded = report is not None and (report.completed or report.stopped == STOP_DEADLINE)
+    qualified = qualification is not None or not qualify_tonight
+    return 0 if extended.stopped is None and recorded and qualified else 1
 
 
 __all__ = [
     "DEFAULT_PACE_SECONDS",
+    "GAP_CANDIDATE_MIN_PCT",
     "HISTORY_REQUEST_TIMEOUT_SECONDS",
     "MAX_BACKFILL_DAYS",
+    "MAX_GAP_CANDIDATES",
+    "RECORDER_MAX_CONTRACTS",
+    "RECORDER_WINDOW",
+    "RECORDER_WINDOW_SECONDS",
     "RESEARCH_CLIENT_ID",
+    "STOP_DEADLINE",
     "BackfillReport",
+    "ExtendedHistorySource",
+    "ExtendedReport",
     "HistorySource",
     "Instrument",
     "ResearchTWSActor",
@@ -628,10 +1125,19 @@ __all__ = [
     "backfill",
     "completed_sessions",
     "daily_context",
+    "extended_session_bars",
     "format_backfill_report",
+    "format_extended_report",
+    "format_qualification_report",
     "is_pacing_violation",
+    "load_gap_candidates",
     "load_qualified_universe",
+    "next_session_after_close",
+    "nightly_budget_seconds",
+    "qualify_next_session",
+    "record_extended",
     "record_today",
+    "regular_hours_deadline",
     "request_days",
     "run_backfill_cli",
     "split_sessions",

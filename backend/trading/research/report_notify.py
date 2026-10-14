@@ -1,8 +1,19 @@
-"""Weekly Telegram summary of the nightly research replay.
+"""Weekly Telegram summary of the nightly research replay and its evidence.
 
 The supervisor replays the research store every trading evening; the owner's
-phone hears about it once a week. After a successful replay the plain-text
-summary goes to the pinned owner chat as ONE message:
+phone hears about it once a week. The summary has these sections, most
+important first, because one Telegram message is cut at its end:
+
+1. evidence: each strategy ELIGIBLE or not under the paper promotion rule,
+   and why (the rule only reports; nothing is granted), with the AI
+   do-no-harm verdict and the signal-outcome tracker's night;
+2. window research: the replay's swept windows and its trades by signal
+   hour, plus the live tracked setups by hour;
+3. live R: every real PAPER bracket in R after commissions;
+4. the replay's own per-strategy summary.
+
+After a successful replay the plain-text summary goes to the pinned owner
+chat as ONE message:
 
     weekly  after the close of the week's last XNYS session (Friday, or the
             session before a Friday holiday), at most once per ISO week, so a
@@ -20,14 +31,15 @@ reported by exception type alone.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import ROUND_HALF_EVEN, Decimal
 import json
 import logging
 from pathlib import Path
 import time as monotonic_time
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 
@@ -45,6 +57,11 @@ from trading.operations.notifier import (
 from trading.operations.paths import PathSecurityError, UserPaths, atomic_private_write
 from trading.research.bars_store import NEW_YORK, ResearchPaths, previous_session
 from trading.scheduler.sessions import market_session, next_market_session
+
+if TYPE_CHECKING:
+    from trading.research.nightly import NightlyEvidence
+    from trading.research.outcomes import TrackerReport
+    from trading.research.paper_promotion import PromotionReport
 
 logger = logging.getLogger("autotrader.shadow.research")
 
@@ -263,6 +280,135 @@ async def deliver_summary(
     return SENT
 
 
+def _r(value: Decimal | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN):+}R"
+
+
+def _reason_text(report: PromotionReport, reason: str) -> str | None:
+    """One failed check as the numbers behind it; ``None`` when there is no number yet.
+
+    A bound needs two days of trades and a profit factor one trade: before
+    that the check fails without a value worth a phone line (evidence.json
+    keeps every reason).
+    """
+    from trading.research import paper_promotion as rule
+
+    live, replay = report.live, report.replay
+    texts: dict[str, str | None] = {
+        rule.LIVE_SESSIONS_BELOW_MINIMUM: f"live sessions {report.live_sessions}/{rule.MIN_SESSIONS}",
+        rule.LIVE_SETUPS_BELOW_MINIMUM: f"live setups {live.trades}/{rule.MIN_LIVE_SETUPS}",
+        rule.LIVE_LOWER_BOUND_NOT_POSITIVE: _maybe("live bound", live.bound.lower),
+        rule.LIVE_PROFIT_FACTOR_BELOW_MINIMUM: _factor("live", live.profit_factor, live.trades),
+        rule.REPLAY_UNAVAILABLE: "no replay"
+        + (f" ({report.replay_note.split(':')[0]})" if report.replay_note else ""),
+    }
+    if replay is not None:
+        texts.update(
+            {
+                rule.REPLAY_SESSIONS_BELOW_MINIMUM: f"replay sessions {replay.sessions}/{rule.MIN_SESSIONS}",
+                rule.REPLAY_TRADES_BELOW_MINIMUM: f"replay trades {replay.trades}/{rule.MIN_REPLAY_TRADES}",
+                rule.REPLAY_LOWER_BOUND_NOT_POSITIVE: _maybe("replay bound", replay.bound.lower),
+                rule.REPLAY_PROFIT_FACTOR_BELOW_MINIMUM: _factor(
+                    "replay", replay.profit_factor, replay.trades
+                ),
+                rule.REPLAY_DRAWDOWN_ABOVE_MAXIMUM: (
+                    f"replay drawdown {_r(replay.max_drawdown_r).lstrip('+')}"
+                    f" > {rule.MAX_REPLAY_DRAWDOWN_R}R"
+                ),
+            }
+        )
+    return texts.get(reason, reason)
+
+
+def _maybe(label: str, value: Decimal | None) -> str | None:
+    return None if value is None else f"{label} {_r(value)}"
+
+
+def _factor(sample: str, value: Decimal | None, trades: int) -> str | None:
+    if not trades or value is None:
+        return None
+    return f"{sample} PF {value.quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)}"
+
+
+_AI_TEXT = {
+    "advisory": "AI advisory (its picks cost R)",
+    "active": "AI review keeps its say",
+    "insufficient_data": "AI: too little data",
+}
+
+
+def evidence_lines(
+    reports: Sequence[PromotionReport], *, tracker: TrackerReport | None = None
+) -> list[str]:
+    """Per strategy: ELIGIBLE or not under the paper promotion rule, and why."""
+    from trading.research.paper_promotion import AI_INSUFFICIENT, RULE_VERSION
+
+    lines = [f"Paper promotion ({RULE_VERSION}; reports only, nothing is granted)"]
+    for report in reports:
+        if report.eligible:
+            verdict = "ELIGIBLE for the owner's review"
+        else:
+            texts = [text for reason in report.reasons if (text := _reason_text(report, reason))]
+            verdict = "not eligible: " + ", ".join(texts or report.reasons)
+        ai = report.ai
+        ai_text = _AI_TEXT.get(ai.status, ai.status)
+        if ai.status != AI_INSUFFICIENT:
+            ai_text += (
+                f" (picks - all {_r(ai.difference.estimate)}, upper bound {_r(ai.difference.upper)})"
+            )
+        lines.append(f"{report.strategy}: {verdict}; {ai_text}")
+    if tracker is not None:
+        lines.append(tracker.summary_line())
+    return lines
+
+
+def window_research_lines(evidence: NightlyEvidence) -> list[str]:
+    """The replay's swept windows and hours, then the live tracked setups by hour."""
+    from trading.research.windows import window_lines
+
+    lines = ["Window research (replay, rules-only, net R after costs; * = outside the V1 window)"]
+    if evidence.windows_note:
+        lines.append(evidence.windows_note)
+    for family in evidence.windows:
+        lines.extend(window_lines(family))
+    if evidence.live_hours:
+        lines.append("Live tracked setups by signal hour (net R)")
+        for strategy, hours in evidence.live_hours.items():
+            lines.append(
+                f"  {strategy}: "
+                + " · ".join(f"{row.hour:02d}h {row.trades} {_r(row.expectancy_r)}" for row in hours)
+            )
+    return lines
+
+
+def live_r_lines(evidence: NightlyEvidence) -> list[str]:
+    from trading.research.live_ledger import ledger_lines
+
+    return ["Live R (PAPER bridge, after commissions)"] + [
+        f"  {line}" for line in ledger_lines(evidence.live_r, week_start=evidence.week_start)
+    ]
+
+
+def evidence_text(evidence: NightlyEvidence) -> str:
+    """The evidence, window research and live R sections as one plain text."""
+    return "\n\n".join(
+        (
+            "\n".join(evidence_lines(evidence.promotion, tracker=evidence.tracker)),
+            "\n".join(window_research_lines(evidence)),
+            "\n".join(live_r_lines(evidence)),
+        )
+    )
+
+
+def compose_summary(replay: str, evidence: NightlyEvidence | None = None) -> str:
+    """The weekly text: evidence, window research and live R ahead of the replay."""
+    if evidence is None:
+        return replay
+    return f"{evidence_text(evidence)}\n\n{replay}"
+
+
 def notify_summary(
     summary: str,
     *,
@@ -294,11 +440,16 @@ __all__ = [
     "WEEKLY_STATE_FILENAME",
     "NotifyMode",
     "ReportNotifyEnvironment",
+    "compose_summary",
     "deliver_summary",
+    "evidence_lines",
+    "evidence_text",
     "iso_week",
     "latest_closed_session",
+    "live_r_lines",
     "notify_summary",
     "summary_message",
     "weekly_state_file",
     "weekly_summary_due",
+    "window_research_lines",
 ]

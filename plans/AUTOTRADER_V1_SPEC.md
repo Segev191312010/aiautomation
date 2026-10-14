@@ -15,7 +15,10 @@ copying its authority into this engine.
 - Universe: the owner's watchlist (TradingView export, resolved to IBKR
   contracts and qualified daily: $10–$300, ≥ $20M average dollar volume,
   common stock only) ranked by an always-on screener into a hot list, plus
-  allowlisted IBKR scans.
+  allowlisted IBKR scans. Scanner movers held for the day (same qualification
+  rules) form a separate day universe. It feeds the AI day manager and the
+  shadow strategies only, and it never changes the hot list a sendable
+  strategy trades without a reviewed change.
 - Bot entries: limit orders only, as one native bracket (parent DAY limit, GTC
   target and GTC stop in one OCA group) so protection survives an engine crash.
   Engine-driven exits are session-end safety actions only: unfilled entries
@@ -25,6 +28,14 @@ copying its authority into this engine.
 - Pilot limits (bot): at most three open bot positions across all strategies,
   one per symbol, at most 0.5% of net liquidation at risk per trade, per-order
   caps of 25% notional and 1% risk, and a 2% daily-loss circuit breaker.
+- Risk target (owner decision "Paper = go wide", 2026-10-13):
+  - at most 8 open bot positions;
+  - 0.5% risk per trade;
+  - a 4% daily stop;
+  - gross exposure at most 200% of net liquidation, intraday only.
+
+  These apply only through the reviewed execution engine that replaces the
+  bridge; until then the pilot limits above bind.
 - Market regime: the screener classifies risk_on / neutral / risk_off from
   index ETFs and watchlist breadth; momentum entries pause while risk_off.
 - Engine modes: `backtest`, `shadow`, and `paper`.
@@ -71,7 +82,7 @@ events, and never retry or repair an unknown order state automatically.
   The Telegram assistant's model answers questions with read-only tools and
   has no ability to create, change or cancel orders.
 - The deterministic risk engine owns all size, exposure, loss, price, and
-  universe limits.
+  universe limits. The AI day manager may only narrow inside them (see below).
 - The lifecycle service owns optimistic, version-bound status transitions.
 - PAPER submission authority is code-owned (the order sender's strategy-name
   gate) and was granted by the owner on 2026-10-12 for MOMO_HOD strategies and
@@ -81,11 +92,70 @@ events, and never retry or repair an unknown order state automatically.
 - The execution adapter owns order submission only after lifecycle and risk
   checks approve the exact intent.
 
+## AI Day Manager (owner decisions 2026-10-13)
+
+The owner chose a "full manager" AI. Its authority only ever narrows.
+
+**What the manager may do:**
+- Pick a focus list that is a subset of the deterministic candidates.
+- Switch running strategies off for the day.
+- Scale size down by the fixed steps 0, 0.25, 0.5, 0.75 and 1.
+- Say PROPOSE or ABSTAIN on each setup, as the reviewer does.
+
+**What it may never do:**
+- Add a symbol.
+- Switch on a strategy that is not running.
+- Size up.
+- Set or change order fields.
+- Touch orders.
+
+**How this is enforced:**
+- Every managed decision records its eligibility snapshot, plan, policy
+  quantity and size steps, so the narrowing is checked per decision.
+- If the manager is unavailable (no valid plan, an error, its budget spent), a
+  managed strategy falls back to its unmanaged behaviour. A test proves the two
+  identical, and each such decision is marked `manager_fallback_neutral`.
+- The manager's on/off state is an append-only database record, set by the
+  owner through the CLI or the deterministic Telegram command parser. No
+  environment variable, route or config key can enable it.
+
+**Real orders under the manager:**
+- Orders still come only from deterministic code and the single order sender.
+- A managed sendable identity needs:
+  1. an independent review of the managed path;
+  2. the owner's review of its shadow decisions against the unmanaged strategy;
+  3. a supervised first session.
+
+**Hours (owner decision "Both"):** shadow-only strategies may look for setups
+for the whole session (entries 09:35–15:30 ET) to collect evidence. Sendable
+strategies keep their reviewed windows.
+
 ## Evidence Required Before Authority Increases
 
 A shadow strategy becomes eligible for PAPER orders only after its own replay
 on recorded real bars (`trading/research/`) and at least one paper day of
-shadow decisions reviewed by the owner, plus an owner decision. Strategy-quality
+shadow decisions reviewed by the owner, plus an owner decision.
+
+**Paper promotion rule (owner decision "earn it by results", 2026-10-13).** The
+rule is fixed before any data is seen.
+
+The evidence must come from one evidence identity: the rules fingerprint, the
+entry window and the risk policy, plus the manager version and prompt when
+managed. Any change to these resets the window. Over at least 20 sessions:
+- the replay has at least 100 trades;
+- the live shadow setups number at least 30;
+- the day-clustered bootstrap 90% lower bound of expectancy after costs is above
+  zero, on both the replay and the live setups;
+- the profit factor is at least 1.2;
+- the replay drawdown is at most 15R.
+
+**The steps to real orders:**
+1. An independent safety review.
+2. The owner's review of the shadow decisions.
+3. An owner decision.
+4. 5 probation sessions at half size.
+
+Demotion is automatic and only removes risk. Promotion is never automatic. Strategy-quality
 evidence (replay, profit factor, drawdown, expectancy) is collected continuously
 and is a prerequisite for any future real-money authority, which remains outside
 V1. LIVE has no implementation path in this codebase.

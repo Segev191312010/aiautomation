@@ -41,8 +41,14 @@ if TYPE_CHECKING:
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
 # Mirrors trading.operations.shadow_service.STRATEGIES / UNIVERSES (a test pins
 # them); kept literal so parsing never imports the TWS and Claude stack.
-_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap")
-_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers")
+_STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap", "orb-v2", "vwap-v2", "gap-v2", "momo-ap")
+# Managed entries (shadow_service.MANAGED_STRATEGIES) run their family's rules
+# under the AI day manager; the rules-only replay covers them as that family.
+_MANAGED_STRATEGY_CHOICES = ("momo-ap",)
+_REPLAY_STRATEGY_CHOICES = tuple(
+    name for name in _STRATEGY_CHOICES if name not in _MANAGED_STRATEGY_CHOICES
+)
+_UNIVERSE_CHOICES = ("scanner", "watchlist", "gappers", "all-gappers")
 # Three weeks of five-minute bars: enough sessions for a first replay sample.
 DEFAULT_BACKFILL_DAYS = 21
 # The nightly recording keeps the whole replay sample filled: a contract with
@@ -124,6 +130,35 @@ def _parser() -> argparse.ArgumentParser:
         "--with-claude",
         action="store_true",
         help="also send one synthetic setup to Claude (about $0.02)",
+    )
+    probe.add_argument(
+        "--scanner-only",
+        action="store_true",
+        help=(
+            "only the read-only scanner, news and market-data-line probe on the probe's own "
+            "client id; reads no config, database or Keychain"
+        ),
+    )
+    probe.add_argument("--out", type=Path, default=None, help="--scanner-only: write the JSON report here")
+    probe.add_argument("--host", default=None, help="--scanner-only: TWS host (loopback only)")
+    probe.add_argument("--port", type=int, default=None, help="--scanner-only: TWS PAPER port")
+    probe.add_argument(
+        "--client-id",
+        type=int,
+        default=None,
+        help="--scanner-only: TWS client id (default: the probe's own; child ids are refused)",
+    )
+    probe.add_argument(
+        "--fixtures-dir",
+        type=Path,
+        default=None,
+        help="--scanner-only: also write trimmed public test fixtures here",
+    )
+    probe.add_argument(
+        "--from-report",
+        type=Path,
+        default=None,
+        help="--scanner-only --fixtures-dir: rebuild the fixtures from a saved report, without TWS",
     )
     agent = shadow_actions.add_parser(
         "agent", help="manage the LaunchAgent that keeps `autotraderctl run` alive"
@@ -212,12 +247,12 @@ def _parser() -> argparse.ArgumentParser:
         "--strategy",
         dest="strategies",
         nargs="+",
-        choices=_STRATEGY_CHOICES,
+        choices=_REPLAY_STRATEGY_CHOICES,
         default=None,
         metavar="NAME",
         help=(
-            f"strategies to replay, from {' '.join(_STRATEGY_CHOICES)} (default all; gap is"
-            " reported as not replayable: it needs pre-market bars)"
+            f"strategies to replay, from {' '.join(_REPLAY_STRATEGY_CHOICES)} (default all; gap and"
+            " gap-v2 are reported as not replayable: they need pre-market bars)"
         ),
     )
     research_replay.add_argument(
@@ -260,6 +295,29 @@ def _parser() -> argparse.ArgumentParser:
                                help="session date (YYYY-MM-DD); defaults to today in New York")
     execution_run.add_argument("--confirm", action="store_true",
                                help="required: the engine sends PAPER orders for promoted strategies")
+
+    manager = domains.add_parser(
+        "manager", help="the AI day manager (shadow) and the owner's autopilot switch"
+    )
+    manager.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    manager_actions = manager.add_subparsers(dest="action", required=True)
+    manager_run = manager_actions.add_parser(
+        "run", help="write the session's day plans (shadow; no TWS, no orders)"
+    )
+    manager_run.add_argument(
+        "--date", type=date.fromisoformat, default=None, help="session date (default today)"
+    )
+    for switch_action in ("on", "off"):
+        switch = manager_actions.add_parser(
+            switch_action,
+            help=f"turn autopilot {switch_action} (managed MOMO latches it once per session)",
+        )
+        switch.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+        switch.add_argument("--reason", default=None)
+    manager_status = manager_actions.add_parser(
+        "status", help="the switch, today's latch, the plan in force and the spend"
+    )
+    manager_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
 
     database = domains.add_parser(
         "db", help="the database schema: the only place migrations are applied"
@@ -761,8 +819,10 @@ def _run_sync_until_sigterm(work: Callable[[], int]) -> int:
 
 def _research_command(arguments: argparse.Namespace) -> int:
     """Research bars and replay. ``backfill`` and ``record`` read TWS PAPER market
-    data on client 28 (they refuse a non-paper login); ``replay`` reads only the
-    research store. Nothing here can place an order."""
+    data on client 28 (they refuse a non-paper login); ``replay`` reads the
+    research store and, after a full replay, runs the nightly evidence
+    (trading.research.nightly: it writes only the signal-outcome table, and only
+    on a database at this code's schema). Nothing here can place an order."""
     logger = _interactive_research_logger()
     label = f"research {arguments.action}"
     if arguments.action == "replay":
@@ -804,6 +864,69 @@ def _research_command(arguments: argparse.Namespace) -> int:
         return 1
     finally:
         cfg.DB_PATH = original_db_path
+
+
+def _manager_command(arguments: argparse.Namespace) -> int:
+    """``manager run`` (the supervised child) and ``manager on|off|status`` (the switch)."""
+    from trading.manager import service
+
+    if arguments.action != "run":
+        original = cfg.DB_PATH
+        requested = getattr(arguments, "db_path", None)
+        if requested is not None:
+            cfg.DB_PATH = str(requested.expanduser())
+        try:
+            database = Path(cfg.DB_PATH).expanduser()
+            if not database.is_file():
+                print(
+                    f"error: no database at {database}; create it with `autotraderctl db migrate`",
+                    file=sys.stderr,
+                )
+                return 1
+            return asyncio.run(
+                service.switch_command(
+                    arguments.action,
+                    database=str(database),
+                    reason=getattr(arguments, "reason", None),
+                )
+            )
+        except (OSError, ValueError, RuntimeError, aiosqlite.Error) as exc:
+            print(f"error: manager {arguments.action} failed: {type(exc).__name__}", file=sys.stderr)
+            return 1
+        finally:
+            cfg.DB_PATH = original
+
+    from trading.operations.logging import configure_shadow_logging
+
+    logger = configure_shadow_logging()
+    console = logging.StreamHandler(sys.stderr)
+    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(console)
+    label = "manager run"
+    session = service.session_for(arguments.date, now=datetime.now(timezone.utc))
+    if session is None:
+        print(f"error: {label}: not an XNYS trading session", file=sys.stderr)
+        return 1
+
+    async def plan_day() -> int:
+        # Never migrates: a pending migration refuses with exit 75.
+        require_current_schema(process=label)
+        summary = await service.run_manager(
+            session=session, client_factory=service.anthropic_client_factory
+        )
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    try:
+        return asyncio.run(_cancel_on_sigterm(plan_day()))
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+    except SchemaNotReady as exc:
+        return refusal_exit(exc)
+    except Exception as exc:  # noqa: BLE001 - reported without secrets
+        logger.exception("%s failed", label)
+        print(f"error: {label} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
 
 
 def _database_command(arguments: argparse.Namespace) -> int:
@@ -849,6 +972,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _supervise_command(arguments)
     if arguments.domain == "db":
         return _database_command(arguments)
+    if arguments.domain == "manager":
+        return _manager_command(arguments)
     if arguments.domain == "notify":
         return _notify_command(arguments)
     if arguments.domain == "telegram":
@@ -872,6 +997,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.domain == "shadow" and arguments.action == "agent":
         return _shadow_agent(arguments.agent_action)
     if arguments.domain == "shadow" and arguments.action == "probe":
+        scanner_options = ("out", "host", "port", "client_id", "fixtures_dir", "from_report")
+        if arguments.scanner_only:
+            if arguments.con_id is not None or arguments.with_claude:
+                parser.error("--con-id and --with-claude do not apply to --scanner-only")
+            from trading.operations.scanner_probe import run_cli as run_scanner_probe
+
+            return run_scanner_probe(
+                **{name: getattr(arguments, name) for name in scanner_options}
+            )
+        given = [name for name in scanner_options if getattr(arguments, name) is not None]
+        if given:
+            parser.error(f"--{given[0].replace('_', '-')} requires --scanner-only")
         from trading.operations.probe import probe_tws
         from trading.operations.settings import load_shadow_runtime_config
 

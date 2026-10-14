@@ -11,6 +11,13 @@ Autotrader V1 is a clean rebuild of the trading system around typed strategy con
   Telegram assistant. A LaunchAgent can start it at login.
 - **AI:** Claude reviews every deterministic setup (PROPOSE/ABSTAIN) and answers
   owner questions with read-only tools; it never creates orders.
+- **AI day manager (shadow):** the `manager` child writes day plans (09:20,
+  09:46, hourly 10:30–14:30 ET; at most $5 a day) that may only narrow: a
+  focus inside the deterministic candidates, strategies off for the day, size
+  steps down. Managed MOMO (`momo-ap`, AP_MOMO_HOD_V1, never sendable) follows
+  them in shadow; without a valid plan it runs exactly as MOMO_HOD_V2.
+  `autotraderctl manager on|off|status` and Telegram `/autopilot`, `/plan` are
+  the owner's switch; real MOMO_HOD_V2 is unchanged either way.
 - **Owner orders:** any order from the pinned Telegram chat via a strict
   deterministic parser and validator; sent by the single order sender.
 - **Evidence:** every decision is recorded; `trading/research/` records real
@@ -149,24 +156,48 @@ The owner hears of it without any process migrating:
 Applied migrations are frozen (`tests/test_migration_freeze.py`): a schema
 change is always a new migration, never an edit. So a migration holds only
 what its phase uses: migration 13 adds `autotrader_manager_setups` (every
-setup the rules form), and migration 14 the PAPER execution engine's ledger
+setup the rules form; applied in production since the phase-0 deploy, so the
+owner's database is at 13), and migration 14 the PAPER execution engine's ledger
 (`autotrader_exec_*`, empty until the engine, reviewed and unwired on its own
 branch, runs a supervised drill; `backend/trading/storage/execution_ledger_schema.py`).
-The other AI day-manager tables are unregistered drafts in
-`backend/trading/storage/manager_schema.py`, checked by their tests on scratch
-databases and registered when their phase lands (15: phase 1, day universe
-and signal outcomes; 16: phase 2, plans, verdicts, the autopilot switch, the
-day latch and spend). To undo a migration, stop the supervisor,
+Migration 15 holds phase 1's tables (the day universe, the IBKR contract facts
+and the signal outcomes) and migration 16 phase 2's
+(`backend/trading/storage/manager_schema.py`): plans, verdicts, managed
+decisions, the autopilot switch with its day latch, and the spend ledger.
+While 16 is pending, `autotraderctl manager
+on|off|status`, `/autopilot` and `/plan` refuse with a reply naming
+`autotraderctl db migrate`; nothing else changes. To undo a migration, stop the supervisor,
 delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the backup over
 `autotrader.db`.
 
 Deploy runbook (every phase):
 
 1. Merge after 18:30 ET.
-2. `autotraderctl db migrate` (note the backup path it prints; for phase 0 it
-   is v12 to v13, `backups/autotrader.<UTC time>.v12-to-v13.db`, or v12 to v14
-   when the execution-ledger migration has merged too).
+2. `autotraderctl db migrate` (note the backup path it prints; for the
+   autopilot phases 1 and 2 it is v13 to v16,
+   `backups/autotrader.<UTC time>.v13-to-v16.db`).
 3. Restart the supervisor (it keeps the old plan in memory).
 4. `autotraderctl run --dry-run`: no `!!! DATABASE NOT READY` line.
 5. Check the next morning's `CHILD_START` lines in `supervisor.log`.
 6. Watch the first session.
+
+Rollback restores the code and the database together. Older code refuses a
+database migrated past it, so reverting only the code would take down
+`autotraderctl paper stop`, Telegram `/stop`, manual orders, the screener and
+every strategy (only the pinned bridge would keep running):
+
+1. Stop the supervisor: `autotraderctl shadow agent disable`.
+2. Delete `autotrader.db-wal` and `autotrader.db-shm`, then copy the backup
+   that `db migrate` printed over `autotrader.db`.
+3. Check out the commit that was running before the deploy.
+4. The older code has no `db` command and its dry run prints no schema line,
+   so check the restored database directly. `sqlite3 -readonly
+   ~/.local/share/autotrader-v1/autotrader.db "select max(version) from
+   autotrader_schema_migrations"` must print the version that older code
+   expects (13 when rolling the autopilot phases back to the phase-0 code; 12
+   only for the phase-0 deploy itself), and `autotraderctl paper status` must
+   exit 0.
+5. Start the supervisor again: `autotraderctl shadow agent enable`.
+
+Rows written between the migration and the rollback are lost. If
+`db migrate` itself fails, the database is untouched: just revert the merge.

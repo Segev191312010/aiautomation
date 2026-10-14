@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import inspect
-import re
 import threading
 from typing import Any, Protocol
 
@@ -19,6 +18,7 @@ from trading.market.ibkr_boundary import (
     IBKRScannerResult,
     IBKRTradeBar,
     ScannerRequest,
+    is_competing_session_error,
     is_regular_session_bar,
 )
 from trading.market.snapshots import MarketSnapshot, MarketSnapshotError
@@ -26,6 +26,8 @@ from trading.contracts import AccountSnapshot, QuoteSnapshot, RawAccountPosition
 
 PAPER_TWS_HOST = "127.0.0.1"
 PAPER_TWS_PORT = 7497
+# Codes that may mean pacing. 162 and 165 also carry "different IP address"
+# (a login active elsewhere): that text is a competing login, never pacing.
 PACING_ERROR_CODES = frozenset({162, 165, 366, 420})
 # IBKR codes 2100-2199 are informational warnings (farm status, fractional-size
 # trimming) and may carry a request ID; they never fail the request.
@@ -46,13 +48,6 @@ REAL_TIME_MARKET_DATA = 1
 # The API exposes no line-count query; quotes here hold one line at a time.
 DEFAULT_MARKET_DATA_LINES = 100
 DAILY_HISTORY_DURATION = "2 M"
-# "No market data during competing live session": the owner's username is
-# logged in elsewhere (phone/web) and that session owns the data lines.
-COMPETING_SESSION_ERROR_CODE = 10197
-# Historical-data services report the same condition as free text.
-_COMPETING_SESSION_TEXT_CODES = frozenset({162, 165})
-_COMPETING_SESSION_TEXT = "different ip address"
-_TWS_ERROR_REPORT = re.compile(r"^TWS error (-?\d+): (.*)$", re.DOTALL)
 # Streaming tick types collected by market_snapshot (IBKR TickType ids).
 _TICK_BID = 1
 _TICK_ASK = 2
@@ -77,8 +72,24 @@ MAX_SNAPSHOT_LINES = 10
 # keeps a batch under TWS's 50 messages/second client limit.
 SNAPSHOT_START_INTERVAL_SECONDS = 0.05
 # Scans the live screener may merge; the frozen ORB scan() is unaffected.
+# These three feed the hot-35 ranking group, so changing them changes the real
+# MOMO's inputs and needs its own review.
 SCREENER_SCAN_CODES = frozenset({"HOT_BY_VOLUME", "TOP_PERC_GAIN", "MOST_ACTIVE"})
 SCREENER_SCAN_ROWS = 50
+# Gap scans the day universe (never the hot-35) would add from 08:00. Each
+# joins PROVEN_GAP_SCAN_CODES only once `autotraderctl shadow probe
+# --scanner-only` has shown TWS serving it for STK.US.MAJOR, pre-market and in
+# regular hours, with the screener's own parameters.
+CANDIDATE_GAP_SCAN_CODES = ("HIGH_OPEN_GAP", "TOP_OPEN_PERC_GAIN")
+# TODO(probe): empty until `shadow probe --scanner-only` proves a code above.
+PROVEN_GAP_SCAN_CODES: frozenset[str] = frozenset()
+# Built-in ScannerSubscription fields (no TagValue filters) the probe tries;
+# TWS may silently ignore a field or read it in other units.
+CANDIDATE_SCANNER_FIELDS = ("aboveVolume", "marketCapAbove")
+# TODO(probe): empty until `shadow probe --scanner-only` shows a field filters
+# as intended. A proven field applies to the proven gap codes only: the three
+# ranking-group scans keep their reviewed parameters.
+PROVEN_SCANNER_FIELDS: dict[str, float] = {}
 
 
 class TWSActorError(RuntimeError):
@@ -100,22 +111,6 @@ class TWSRequestError(TWSActorError):
 class TWSCompetingSessionError(TWSRequestError):
     """Market data is blocked because the IBKR login is active elsewhere."""
 
-
-def is_competing_session_error(code: int, message: str) -> bool:
-    """Whether a TWS error means another login session holds the market data."""
-    if code == COMPETING_SESSION_ERROR_CODE:
-        return True
-    return code in _COMPETING_SESSION_TEXT_CODES and _COMPETING_SESSION_TEXT in message.lower()
-
-
-def is_competing_session_report(report: str | None) -> bool:
-    """Recognize the actor's ``TWS error <code>: <message>`` text, e.g. in a bar batch."""
-    if not report:
-        return False
-    match = _TWS_ERROR_REPORT.match(report.strip())
-    if match is None:
-        return False
-    return is_competing_session_error(int(match.group(1)), match.group(2))
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,7 +440,23 @@ def _official_screener_scan_factory(scan_code: str, number_of_rows: int) -> Any:
     subscription.numberOfRows = number_of_rows
     subscription.abovePrice = 10.0
     subscription.belowPrice = 300.0
+    for name, value in screener_scan_fields(scan_code).items():
+        setattr(subscription, name, value)
     return subscription
+
+
+def screener_scan_fields(scan_code: str) -> dict[str, float]:
+    """Probe-proven built-in fields for ``scan_code``; never for a ranking-group scan."""
+    if scan_code in SCREENER_SCAN_CODES or scan_code not in PROVEN_GAP_SCAN_CODES:
+        return {}
+    return {
+        name: value for name, value in PROVEN_SCANNER_FIELDS.items() if name in CANDIDATE_SCANNER_FIELDS
+    }
+
+
+def screener_scan_allowed(scan_code: str) -> bool:
+    """The three ranking-group scans, plus any gap scan the probe has proven."""
+    return scan_code in SCREENER_SCAN_CODES or scan_code in PROVEN_GAP_SCAN_CODES
 
 
 def _official_contract_factory(con_id: int) -> Any:
@@ -532,6 +543,16 @@ class TWSPaperActor:
         self._pending_account: _PendingAccount | None = None
         self._last_error: str | None = None
         self._callbacks_seen = 0
+        self._competing_session_listener: Callable[[str], None] | None = None
+
+    def set_competing_session_listener(self, listener: Callable[[str], None] | None) -> None:
+        """Called with TWS's report the moment any competing-login error arrives.
+
+        Runs on the API's reader thread, before any request fails, so a
+        process can say so at once even when the error ends up swallowed
+        (a global notice, a quote-only pass). A failing listener is ignored.
+        """
+        self._competing_session_listener = listener
 
     @property
     def connected(self) -> bool:
@@ -672,7 +693,7 @@ class TWSPaperActor:
         Kept apart from ``scan()``, whose single frozen ORB request must not
         change; rows are returned unfiltered for the caller to vet.
         """
-        if scan_code not in SCREENER_SCAN_CODES:
+        if not screener_scan_allowed(scan_code):
             raise TWSRequestError(f"scan code {scan_code!r} is not allowlisted for the screener")
         self._require_connected()
         async with self._request_gate:
@@ -1234,6 +1255,8 @@ class TWSPaperActor:
                 stock_type=str(getattr(raw, "stockType", "") or ""),
                 primary_exchange=str(getattr(contract, "primaryExchange", "") or ""),
                 min_tick=Decimal(str(getattr(raw, "minTick"))),
+                industry=_detail_text(raw, "industry"),
+                category=_detail_text(raw, "category"),
             )
         except Exception:
             self._set_future_exception(
@@ -1465,6 +1488,13 @@ class TWSPaperActor:
         self._last_error = f"TWS error {code}: {message}"
         competing = is_competing_session_error(code, str(message))
         error_type = TWSCompetingSessionError if competing else TWSRequestError
+        # A login active elsewhere is never pacing, whatever its code.
+        pacing = code in PACING_ERROR_CODES and not competing
+        if competing and self._competing_session_listener is not None:
+            try:
+                self._competing_session_listener(self._last_error)
+            except Exception:  # noqa: BLE001 - a listener never breaks error routing
+                pass
         if request_id == -1:
             if competing:
                 # No stream can deliver data while another login holds it.
@@ -1489,8 +1519,9 @@ class TWSPaperActor:
                 BarBatch(
                     bars=(),
                     connected=self._connected,
-                    pacing_failed=code in PACING_ERROR_CODES,
+                    pacing_failed=pacing,
                     error=self._last_error,
+                    competing_session=competing,
                 ),
             )
         if pending_daily is not None:
@@ -1499,8 +1530,9 @@ class TWSPaperActor:
                 DailyBarBatch(
                     bars=(),
                     connected=self._connected,
-                    pacing_failed=code in PACING_ERROR_CODES,
+                    pacing_failed=pacing,
                     error=self._last_error,
+                    competing_session=competing,
                 ),
             )
         if pending_quote is not None:
@@ -1631,6 +1663,8 @@ class TWSPaperActor:
             session_date=_parse_ibkr_session_date(getattr(raw, "date")),
             close=Decimal(str(getattr(raw, "close"))),
             volume=Decimal(str(getattr(raw, "volume"))),
+            high=_optional_price(getattr(raw, "high", None)),
+            low=_optional_price(getattr(raw, "low", None)),
         )
 
     def _cancel_scanner(self, request_id: int) -> None:
@@ -1673,6 +1707,23 @@ def _snapshot_missing(snapshot: _PendingMarketSnapshot) -> list[str]:
     if _TICK_CLOSE not in prices:
         missing.append("prior close")
     return missing
+
+
+def _detail_text(raw: Any, name: str) -> str:
+    """One whitespace-collapsed ContractDetails text field ('' when absent)."""
+    value = getattr(raw, name, "")
+    return " ".join(str(value or "").split())[:128]
+
+
+def _optional_price(value: Any) -> Decimal | None:
+    """A finite positive price, else None: metadata never fails a bar callback."""
+    if value is None:
+        return None
+    try:
+        price = Decimal(str(value))
+    except Exception:
+        return None
+    return price if price.is_finite() and 0 < price < Decimal("1e9") else None
 
 
 def _parse_ibkr_timestamp(value: Any) -> datetime:

@@ -61,12 +61,14 @@ from trading.research.recorder import (
 )
 from trading.research.replay import (
     ENTRY_TTL,
+    EXTENDED_BAR_STRATEGIES,
     REGISTERED_STRATEGIES,
     RULES_VERSIONS,
     STRATEGY_FACTORIES,
     UNREPLAYABLE,
     UnreplayableStrategyError,
     flatten_at,
+    no_extended_bars,
     replay_strategy,
     result_payload,
     run_replay_cli,
@@ -631,25 +633,42 @@ def test_replay_simulates_a_vwap_pb_setup_like_any_other(tmp_path):
     }
 
 
-def test_gap_go_is_reported_as_not_replayable_never_faked(tmp_path):
+def test_gap_go_replays_only_extended_days_and_never_fakes_without_them(tmp_path):
     store = _capture_store(tmp_path)
 
-    with pytest.raises(UnreplayableStrategyError, match="needs extended bars"):
-        replay_strategy("gap", store)
-    # The registered name alone decides: no evaluator can stand in for it.
+    result = replay_strategy("gap", store)
+
+    # Regular-hours days alone feed nothing: no pre-market, so no GAP sample.
+    assert (result.sessions, result.trades, result.symbol_days, result.outcomes) == ((), (), 0, {})
+    assert result.metadata["bars"].startswith("extended hours")
+    # GAP_GO (V1) replays; only GAP_GO_V2's all-session replay is not wired.
+    assert "gap" not in UNREPLAYABLE and set(UNREPLAYABLE) <= {"gap-v2"}
+    assert no_extended_bars("gap").reason == "needs_extended_bars"
     with pytest.raises(UnreplayableStrategyError):
-        replay_strategy("gap", store, strategy=ORBStrategy())
-    assert UNREPLAYABLE["gap"].reason == "needs_extended_bars"
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setitem(UNREPLAYABLE, "gap", no_extended_bars("gap"))
+            replay_strategy("gap", store, strategy=ORBStrategy())
 
 
 def test_replay_covers_every_registered_live_strategy():
     from trading.operations import shadow_service
 
-    assert REGISTERED_STRATEGIES == tuple(shadow_service.STRATEGIES)
-    assert set(STRATEGY_FACTORIES) | set(UNREPLAYABLE) == set(shadow_service.STRATEGIES)
-    assert not set(STRATEGY_FACTORIES) & set(UNREPLAYABLE)
-    assert set(RULES_VERSIONS) == set(shadow_service.STRATEGIES)
-    for name, factory in STRATEGY_FACTORIES.items():
+    # A managed entry (AI day manager) runs its family's rules: the rules-only
+    # replay covers it as that family.
+    rule_sets = tuple(
+        name for name in shadow_service.STRATEGIES if name not in shadow_service.MANAGED_STRATEGIES
+    )
+    for name in shadow_service.MANAGED_STRATEGIES:
+        family = shadow_service.strategy_family(name)
+        assert family in rule_sets
+        assert shadow_service.STRATEGIES[name][0] is shadow_service.STRATEGIES[family][0]
+    assert REGISTERED_STRATEGIES == rule_sets
+    replayable = {**STRATEGY_FACTORIES, **EXTENDED_BAR_STRATEGIES}
+    assert set(replayable) | set(UNREPLAYABLE) == set(rule_sets)
+    assert not set(STRATEGY_FACTORIES) & set(EXTENDED_BAR_STRATEGIES)
+    assert not set(replayable) & set(UNREPLAYABLE)
+    assert set(RULES_VERSIONS) == set(rule_sets)
+    for name, factory in replayable.items():
         # The replay runs the live evaluator class itself, never a copy.
         assert factory is shadow_service.STRATEGIES[name][0]
 
@@ -971,19 +990,35 @@ def _research_root(tmp_path: Path, monkeypatch) -> Path:
 def test_run_replay_cli_reports_every_registered_strategy_and_skips_gap_explicitly(
     tmp_path, monkeypatch, capsys
 ):
+    from trading.research.nightly import NightlyEnvironment
+
     root = _research_root(tmp_path, monkeypatch)
     _capture_store(tmp_path)
+    # The nightly evidence run that follows a full replay, on paths of its own.
+    environment = NightlyEnvironment(
+        database=tmp_path / "no-database.db",
+        bridge_directory=tmp_path / "bridge",
+        clock=lambda: datetime(2026, 10, 12, 21, 40, tzinfo=UTC),
+    )
 
-    assert run_replay_cli([]) == 0
+    assert run_replay_cli([], environment=environment) == 0
 
     directory = root / "reports" / "2026-10-12"
     assert sorted(path.name for path in directory.iterdir()) == [
+        "evidence.json",
+        "evidence.txt",
+        "live-r.json",
+        "replay-gap-v2.json",
         "replay-gap.json",
         "replay-momo.json",
+        "replay-orb-v2.json",
         "replay-orb.json",
+        "replay-vwap-v2.json",
         "replay-vwap.json",
         "summary.txt",
+        "windows.json",
     ]
+    assert not (tmp_path / "no-database.db").exists()  # the tracker never creates one
     gap = json.loads((directory / "replay-gap.json").read_text())
     assert (gap["status"], gap["reason"], gap["rules_version"]) == (
         "skipped",
@@ -1000,7 +1035,10 @@ def test_run_replay_cli_reports_every_registered_strategy_and_skips_gap_explicit
         "ORB (ORB_V1)",
         "MOMO (MOMO_HOD_V2)",
         "VWAP (VWAP_PB_V1)",
+        "ORB-V2 (ORB_V2)",
+        "VWAP-V2 (VWAP_PB_V2)",
         "GAP (GAP_GO_V1)",
+        "GAP-V2 (GAP_GO_V2)",
     ]
     assert "VWAP (VWAP_PB_V1)\n  0 trades from 2 symbol-days\n  no filled trades" in summary
     assert "GAP (GAP_GO_V1)\n  not replayed: needs extended bars: GAP_GO's gap" in summary

@@ -10,6 +10,12 @@
 - No environment variable may enable PAPER or LIVE execution.
 - AI models may only PROPOSE/ABSTAIN on deterministic setups or answer questions
   with read-only tools; orders come only from deterministic code.
+- AI day manager (owner, 2026-10-13): the model may also narrow. It may pick a
+  focus subset of the deterministic candidates, switch running strategies off
+  for the day, and scale size down by fixed steps. It may never add symbols,
+  risk or orders. If it fails, managed strategies fall back to their unmanaged
+  behaviour. See "AI Day Manager" in the spec. "Autopilot" is only an owner-facing
+  word; no environment variable, route or config key enables the manager.
 - Every change to the order sender needs an independent execution-safety
   review before it runs unattended.
 

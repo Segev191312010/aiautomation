@@ -616,6 +616,144 @@ async def test_import_records_stock_types_by_con_id_beside_the_database(database
 
 
 @pytest.mark.asyncio
+async def test_import_keeps_ibkr_industry_and_category_without_erasing_known_facts(database) -> None:
+    answers = {
+        ("NVDA", "NASDAQ"): details(
+            "NVDA", 4815747, "NASDAQ", industry=" Technology ", category="Semiconductors"
+        ),
+        ("O", "NYSE"): details("O", 13041, "NYSE", stock_type="REIT"),
+    }
+
+    await import_watchlist(FakeResolver(answers), "NASDAQ:NVDA,NYSE:O", clock=lambda: NOW)
+    # A later answer without the classification keeps what was known.
+    answers[("NVDA", "NASDAQ")] = details("NVDA", 4815747, "NASDAQ")
+    await import_watchlist(FakeResolver(answers), "NASDAQ:NVDA", clock=lambda: NOW)
+
+    facts = await universe_module.load_contract_facts()
+    assert facts[4815747] == universe_module.ContractFacts(
+        con_id=4815747,
+        symbol="NVDA",
+        primary_exchange="NASDAQ",
+        stock_type="COMMON",
+        industry="Technology",
+        category="Semiconductors",
+    )
+    assert (facts[13041].stock_type, facts[13041].industry) == ("REIT", None)
+    assert await universe_module.load_contract_facts([13041, 1]) == {13041: facts[13041]}
+    with sqlite3.connect(database) as db:
+        assert db.execute(
+            "SELECT source FROM autotrader_manager_contract_info WHERE con_id = 4815747"
+        ).fetchone() == ("watchlist",)
+
+
+@pytest.mark.asyncio
+async def test_unrecordable_contract_facts_never_fail_the_import(database, monkeypatch, caplog) -> None:
+    async def broken(*args: object, **kwargs: object) -> int:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(universe_module, "record_contract_facts", broken)
+
+    report = await import_watchlist(
+        FakeResolver({("NVDA", "NASDAQ"): details("NVDA", 4815747, "NASDAQ")}),
+        "NASDAQ:NVDA",
+        clock=lambda: NOW,
+    )
+
+    assert report.resolved == 1
+    assert [row.symbol for row in await load_universe()] == ["NVDA"]
+    assert "contract facts were not recorded" in caplog.text
+
+
+def _ranged_history(con_id: int, ranges: list[tuple[str, str, str]]) -> DailyBarBatch:
+    days = [SESSION - timedelta(days=offset) for offset in range(len(ranges), 0, -1)]
+    return DailyBarBatch(
+        bars=tuple(
+            IBKRDailyBar(
+                con_id=con_id,
+                session_date=day,
+                close=Decimal(close),
+                volume=Decimal("500000"),
+                high=Decimal(high),
+                low=Decimal(low),
+            )
+            for day, (high, low, close) in zip(days, ranges)
+        )
+        # Today's forming bar never counts, whatever its range.
+        + (
+            IBKRDailyBar(
+                con_id=con_id,
+                session_date=SESSION,
+                close=Decimal("100"),
+                volume=Decimal("1"),
+                high=Decimal("500"),
+                low=Decimal("1"),
+            ),
+        )
+    )
+
+
+def test_daily_atr_is_wilder_over_the_prior_sessions_and_stored_with_the_qualification() -> None:
+    # 30 prior sessions: the oldest two fall outside the 28-session window.
+    ranges = [("150", "50", "100")] * 2 + [("102", "98", "100")] * 27 + [("106", "100", "104")]
+    batch = _ranged_history(7, ranges)
+
+    result = evaluate_daily_history(
+        batch,
+        con_id=7,
+        symbol="AAPL",
+        session_date=SESSION,
+        volume_multiplier=Decimal("100"),
+        observed_at=NOW,
+    )
+
+    # Seed: 14 ranges of 4 -> 4; 13 more of 4 -> 4; the last true range is 6.
+    expected = (Decimal("4") * 13 + Decimal("6")) / 14
+    assert result.qualified is True
+    assert result.daily_atr == expected.quantize(Decimal("0.0001"))
+    assert universe_module.daily_atr(batch, session_date=SESSION) == result.daily_atr
+
+
+def test_daily_atr_is_unknown_without_ranges_or_history() -> None:
+    complete = _ranged_history(7, [("102", "98", "100")] * 20)
+    missing_range = DailyBarBatch(
+        bars=tuple(replace(bar, high=None) if index == 10 else bar for index, bar in enumerate(complete.bars))
+    )
+    inverted = DailyBarBatch(
+        bars=tuple(
+            replace(bar, high=Decimal("90")) if index == 12 else bar
+            for index, bar in enumerate(complete.bars)
+        )
+    )
+    short = _ranged_history(7, [("102", "98", "100")] * 13)
+
+    assert universe_module.daily_atr(complete, session_date=SESSION) == Decimal("4.0000")
+    assert universe_module.daily_atr(missing_range, session_date=SESSION) is None
+    assert universe_module.daily_atr(inverted, session_date=SESSION) is None
+    assert universe_module.daily_atr(short, session_date=SESSION) is None
+    # Bars without a range (as before this change) still qualify, ATR unknown.
+    assert evaluate_daily_history(
+        history(7), con_id=7, symbol="AAPL", session_date=SESSION,
+        volume_multiplier=Decimal("100"), observed_at=NOW,
+    ).daily_atr is None
+
+
+@pytest.mark.asyncio
+async def test_qualification_stores_the_daily_atr(database) -> None:
+    row = universe_module.evaluate_daily_history(
+        _ranged_history(7, [("102", "98", "100")] * 20),
+        con_id=7,
+        symbol="AAPL",
+        session_date=SESSION,
+        volume_multiplier=Decimal("100"),
+        observed_at=NOW,
+    )
+    await universe_module.upsert_daily(row)
+
+    [stored] = await load_daily(SESSION)
+    assert stored.daily_atr == Decimal("4.0000")
+
+
+@pytest.mark.asyncio
 async def test_qualification_rejects_non_common_types_without_a_history_request(database) -> None:
     await import_watchlist(FakeResolver(TYPED_ANSWERS), TYPED_EXPORT, clock=lambda: NOW)
     # Requesting history for the REIT, ETF or ADR would raise KeyError here.

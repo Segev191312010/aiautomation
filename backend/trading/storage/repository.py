@@ -9,6 +9,7 @@ import aiosqlite
 
 from db.core import get_db, transaction
 from trading.contracts import Decision, StrategyRecord, StrategySpec, StrategyState
+from trading.sendable_identities import require_creatable_name
 from trading.strategy_lifecycle import require_strategy_transition
 
 
@@ -59,6 +60,8 @@ async def _load_record(
 
 
 async def create_strategy(*, spec: StrategySpec, owner_id: str, actor: str) -> StrategyRecord:
+    # The PAPER bridge sends by stored name alone; refuse before any write.
+    require_creatable_name(spec.name)
     now = _timestamp()
     strategy_id = str(uuid4())
     content_hash = spec.fingerprint()
@@ -163,6 +166,8 @@ async def publish_strategy_version(
     actor: str,
     reason: str,
 ) -> StrategyRecord:
+    # A new version's name is what the bridge reads for that version's runs.
+    require_creatable_name(spec.name)
     now = _timestamp()
     content_hash = spec.fingerprint()
     async with transaction() as db:

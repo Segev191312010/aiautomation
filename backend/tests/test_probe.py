@@ -71,6 +71,38 @@ async def test_probe_reports_connection_failure_without_raising():
     assert report["connection"]["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_probe_connects_with_its_own_client_id_never_a_childs():
+    from trading.operations.scanner_probe import PROBE_CLIENT_ID, child_client_ids
+
+    seen = []
+
+    def recording(config):
+        seen.append(config.client_id)
+        return _actor(config)
+
+    report = await probe.probe_tws(_config(), actor_factory=recording)
+
+    assert seen == [PROBE_CLIENT_ID]
+    assert report["connection"]["client_id"] == PROBE_CLIENT_ID
+    assert PROBE_CLIENT_ID not in child_client_ids(17, 18)
+    assert PROBE_CLIENT_ID != _config().data_client_id
+
+
+@pytest.mark.asyncio
+async def test_probe_refuses_a_config_whose_children_hold_the_probe_id():
+    def never(config):
+        raise AssertionError("the probe must not connect")
+
+    # Order client 29 would put the bridge on the probe's id.
+    report = await probe.probe_tws(
+        _config().model_copy(update={"order_client_id": 29}), actor_factory=never
+    )
+
+    assert report["connection"]["ok"] is False
+    assert "collides" in report["connection"]["error"]
+
+
 def test_probe_has_no_order_paths():
     source = inspect.getsource(probe)
     for forbidden in ("placeOrder", "cancelOrder", "submit", "tws_paper_transport"):

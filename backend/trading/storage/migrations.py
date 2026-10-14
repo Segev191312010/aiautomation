@@ -37,7 +37,12 @@ from trading.storage.schema import (
 )
 from trading.storage.execution_ledger_schema import EXECUTION_LEDGER_MIGRATION, EXECUTION_LEDGER_SCHEMA
 from trading.storage.live_market import LIVE_MARKET_SCHEMA
-from trading.storage.manager_schema import MANAGER_SETUPS_SCHEMA
+from trading.storage.manager_schema import (
+    MANAGER_PHASE1_SCHEMA,
+    MANAGER_PHASE2_DDL,
+    MANAGER_PHASE2_MIGRATION,
+    MANAGER_SETUPS_SCHEMA,
+)
 from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
 
 
@@ -289,6 +294,14 @@ async def _live_execution_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, EXECUTION_LEDGER_SCHEMA)
 
 
+async def _manager_phase1_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, MANAGER_PHASE1_SCHEMA)
+
+
+async def _manager_day_plans_ledger(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, MANAGER_PHASE2_DDL)
+
+
 async def _qualified_bracket_identity(db: aiosqlite.Connection) -> None:
     columns = await _table_columns(db, "autotrader_bracket_groups")
     additions = (
@@ -396,10 +409,9 @@ MIGRATIONS = (
         12, "manual-orders-ledger", "v1-manual-orders-ledger-20261012",
         _manual_orders_ledger, MANUAL_ORDERS_SCHEMA,
     ),
-    # Phase 0: only the formed setups the pipeline writes. The other day-
-    # manager tables stay unregistered drafts in manager_schema.py until
-    # their phase lands (15: phase 1, 16: phase 2), so nothing unsettled is
-    # frozen.
+    # Phase 0: only the formed setups the pipeline writes. Each later
+    # day-manager phase registers its own tables when it lands (15: phase 1;
+    # 16: phase 2), so nothing unsettled is frozen.
     Migration(
         13, "manager-setups", "v1-manager-setups-20261013",
         _manager_setups_ledger, MANAGER_SETUPS_SCHEMA,
@@ -410,6 +422,19 @@ MIGRATIONS = (
     Migration(
         EXECUTION_LEDGER_MIGRATION, "execution-engine-ledger", "v1-execution-engine-ledger-20261013",
         _live_execution_ledger, EXECUTION_LEDGER_SCHEMA,
+    ),
+    # Phase 1 of the day manager: the day universe (scan names the manager and
+    # the simulations see, never the hot-35 ranking), IBKR contract facts and
+    # the nightly signal outcomes. Data only; nothing here reaches an order.
+    Migration(
+        15, "manager-day-universe", "v1-manager-day-universe-20261013",
+        _manager_phase1_ledger, MANAGER_PHASE1_SCHEMA,
+    ),
+    # Phase 2, the AI day manager in shadow: plans, verdicts, managed
+    # decisions, the autopilot switch with its day latch, and the spend ledger.
+    Migration(
+        MANAGER_PHASE2_MIGRATION, "manager-day-plans", "v1-manager-day-plans-20261013",
+        _manager_day_plans_ledger, MANAGER_PHASE2_DDL,
     ),
 )
 

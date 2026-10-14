@@ -13,6 +13,7 @@ from decimal import Decimal
 from functools import lru_cache
 from hashlib import sha256
 import json
+import re
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -31,6 +32,57 @@ MAX_DAILY_HISTORY_GAP = timedelta(days=5)
 _NEW_YORK = ZoneInfo("America/New_York")
 _BAR_INTERVAL = timedelta(minutes=5)
 
+# Why a batch was refused. Session reports count refusals by these tokens, so
+# a data-blocked candidate can be traced to stale bars, pacing or a dead link.
+FAULT_STALE = "stale"
+FAULT_PACING = "pacing"
+FAULT_DISCONNECTED = "disconnected"
+FAULT_REQUEST_FAILED = "request_failed"
+FAULT_RECEIPT_IN_FUTURE = "receipt_in_future"
+FAULT_INVALID = "invalid"
+# The owner's IBKR user is logged in elsewhere (phone app, web) and that
+# session holds the market data. Never pacing: waiting does not help, the
+# owner must log out there.
+FAULT_COMPETING_LOGIN = "competing_login"
+MARKET_DATA_FAULTS = frozenset(
+    {
+        FAULT_STALE,
+        FAULT_PACING,
+        FAULT_DISCONNECTED,
+        FAULT_REQUEST_FAILED,
+        FAULT_RECEIPT_IN_FUTURE,
+        FAULT_INVALID,
+        FAULT_COMPETING_LOGIN,
+    }
+)
+COMPETING_LOGIN_MESSAGE = "IBKR login active elsewhere (phone/web) holds the market data"
+
+# "No market data during competing live session": the owner's username is
+# logged in elsewhere (phone/web) and that session owns the data lines.
+COMPETING_SESSION_ERROR_CODE = 10197
+# Historical-data services report the same condition as free text, e.g.
+# "162: ... Trading TWS session is connected from a different IP address".
+_COMPETING_SESSION_TEXT_CODES = frozenset({162, 165})
+_COMPETING_SESSION_TEXT = "different ip address"
+_TWS_ERROR_REPORT = re.compile(r"^TWS error (-?\d+): (.*)$", re.DOTALL)
+
+
+def is_competing_session_error(code: int, message: str) -> bool:
+    """Whether a TWS error means another login session holds the market data."""
+    if code == COMPETING_SESSION_ERROR_CODE:
+        return True
+    return code in _COMPETING_SESSION_TEXT_CODES and _COMPETING_SESSION_TEXT in message.lower()
+
+
+def is_competing_session_report(report: str | None) -> bool:
+    """Recognize the actor's ``TWS error <code>: <message>`` text, e.g. in a bar batch."""
+    if not report:
+        return False
+    match = _TWS_ERROR_REPORT.match(report.strip())
+    if match is None:
+        return False
+    return is_competing_session_error(int(match.group(1)), match.group(2))
+
 
 class MarketDataBoundaryError(ValueError):
     """Raised when market data cannot be admitted to the V1 pipeline."""
@@ -45,7 +97,16 @@ class ScannerSupportError(MarketDataBoundaryError):
 
 
 class MarketDataQualityError(MarketDataBoundaryError):
-    """Raised when data is delayed, incomplete, stale, or otherwise unsafe."""
+    """Raised when data is delayed, incomplete, stale, or otherwise unsafe.
+
+    ``fault`` names the refusal with one of ``MARKET_DATA_FAULTS``.
+    """
+
+    def __init__(self, message: str, *, fault: str = FAULT_INVALID) -> None:
+        if fault not in MARKET_DATA_FAULTS:
+            raise ValueError(f"unknown market-data fault {fault!r}")
+        super().__init__(message)
+        self.fault = fault
 
 
 class ScannerDataError(MarketDataBoundaryError):
@@ -98,7 +159,11 @@ class IBKRScannerResult:
 
 @dataclass(frozen=True)
 class IBKRContractDetails:
-    """Qualified contract facts needed before a scanner row becomes a candidate."""
+    """Qualified contract facts needed before a scanner row becomes a candidate.
+
+    ``industry`` and ``category`` are IBKR's classification text, kept as
+    metadata for the day manager; empty when TWS did not report them.
+    """
 
     con_id: int
     symbol: str
@@ -107,6 +172,8 @@ class IBKRContractDetails:
     stock_type: str
     primary_exchange: str
     min_tick: Decimal
+    industry: str = ""
+    category: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,22 +225,33 @@ class IBKRTradeBar:
 
 @dataclass(frozen=True)
 class BarBatch:
-    """Data and transport health returned by the connection actor."""
+    """Data and transport health returned by the connection actor.
+
+    ``competing_session``: IBKR refused because the login is active elsewhere;
+    such a batch is never ``pacing_failed``.
+    """
 
     bars: tuple[IBKRTradeBar, ...]
     connected: bool = True
     pacing_failed: bool = False
     error: str | None = None
+    competing_session: bool = False
 
 
 @dataclass(frozen=True)
 class IBKRDailyBar:
-    """One regular-session daily TRADES bar; ``volume`` is in the API's raw unit."""
+    """One regular-session daily TRADES bar; ``volume`` is in the API's raw unit.
+
+    ``high`` and ``low`` feed the daily ATR only; a bar without them leaves
+    the ATR unknown and never affects qualification.
+    """
 
     con_id: int
     session_date: date
     close: Decimal
     volume: Decimal
+    high: Decimal | None = None
+    low: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +260,7 @@ class DailyBarBatch:
     connected: bool = True
     pacing_failed: bool = False
     error: str | None = None
+    competing_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -397,12 +476,7 @@ def validate_completed_trade_bars(
     observed_at = _require_aware(now, "now")
     if max_age <= timedelta(0):
         raise ValueError("max_age must be positive")
-    if not batch.connected:
-        raise MarketDataQualityError("IBKR market-data connection is unavailable")
-    if batch.pacing_failed:
-        raise MarketDataQualityError("IBKR market-data pacing limit blocked the request")
-    if batch.error:
-        raise MarketDataQualityError("IBKR market-data request failed")
+    _require_healthy_batch(batch)
 
     validated: list[CompletedBar] = []
     fingerprints: set[str] = set()
@@ -426,7 +500,9 @@ def validate_completed_trade_bars(
             continue
         latest_end = end if latest_end is None or end > latest_end else latest_end
         if received_at > observed_at + timedelta(seconds=1):
-            raise MarketDataQualityError("bar receipt timestamp is in the future")
+            raise MarketDataQualityError(
+                "bar receipt timestamp is in the future", fault=FAULT_RECEIPT_IN_FUTURE
+            )
         if raw.con_id <= 0:
             raise MarketDataQualityError("bar has an invalid conId")
 
@@ -459,8 +535,35 @@ def validate_completed_trade_bars(
     # Older bars are legitimate history (ATR, opening range); freshness is a
     # property of the newest completed interval only.
     if latest_end is not None and observed_at - latest_end > max_age:
-        raise MarketDataQualityError("stale market data cannot feed a candidate")
+        raise MarketDataQualityError(
+            "stale market data cannot feed a candidate", fault=FAULT_STALE
+        )
     return tuple(validated)
+
+
+def _require_healthy_batch(batch: BarBatch | DailyBarBatch) -> None:
+    """Transport health first: no bar of a failed request is ever validated.
+
+    IBKR's own report is kept: several error codes count as pacing here, and
+    only its text tells a real pacing violation from another refusal. A login
+    active elsewhere (10197, or 162/165 "different IP address") is its own
+    fault, checked before pacing, whatever flag a caller set.
+    """
+    report = f" ({batch.error})" if batch.error else ""
+    if not batch.connected:
+        raise MarketDataQualityError(
+            "IBKR market-data connection is unavailable" + report, fault=FAULT_DISCONNECTED
+        )
+    if batch.competing_session or is_competing_session_report(batch.error):
+        raise MarketDataQualityError(COMPETING_LOGIN_MESSAGE + report, fault=FAULT_COMPETING_LOGIN)
+    if batch.pacing_failed:
+        raise MarketDataQualityError(
+            "IBKR market-data pacing limit blocked the request" + report, fault=FAULT_PACING
+        )
+    if batch.error:
+        raise MarketDataQualityError(
+            "IBKR market-data request failed" + report, fault=FAULT_REQUEST_FAILED
+        )
 
 
 def liquidity_profile(
@@ -476,12 +579,7 @@ def liquidity_profile(
     """
     if not volume_multiplier.is_finite() or volume_multiplier <= 0:
         raise ValueError("volume_multiplier must be finite and positive")
-    if not batch.connected:
-        raise MarketDataQualityError("IBKR market-data connection is unavailable")
-    if batch.pacing_failed:
-        raise MarketDataQualityError("IBKR market-data pacing limit blocked the request")
-    if batch.error:
-        raise MarketDataQualityError("IBKR market-data request failed")
+    _require_healthy_batch(batch)
     con_ids = {bar.con_id for bar in batch.bars}
     if len(con_ids) > 1:
         raise MarketDataQualityError("daily history contains multiple contracts")
@@ -500,7 +598,9 @@ def liquidity_profile(
         raise MarketDataQualityError("daily bar has an invalid volume")
     last = window[-1]
     if session_date - last.session_date > MAX_DAILY_HISTORY_GAP:
-        raise MarketDataQualityError("stale daily history cannot feed a candidate")
+        raise MarketDataQualityError(
+            "stale daily history cannot feed a candidate", fault=FAULT_STALE
+        )
     total = sum((bar.close * bar.volume * volume_multiplier for bar in window), Decimal("0"))
     return LiquidityProfile(
         con_id=last.con_id,

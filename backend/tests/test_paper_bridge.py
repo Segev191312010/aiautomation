@@ -304,7 +304,9 @@ def events(capsys: pytest.CaptureFixture[str]) -> list[tuple[str, str]]:
 
 
 async def _shadow_strategy(name: str) -> str:
+    from tests.fakes.legacy_strategies import insert_legacy_shadow_strategy
     from trading.contracts import FixedUniverse, RuleCondition, StrategySpec, StrategyState
+    from trading.sendable_identities import carries_sendable_prefix
     from trading.storage.repository import create_strategy, transition_strategy
 
     spec = StrategySpec(
@@ -313,6 +315,10 @@ async def _shadow_strategy(name: str) -> str:
         conditions=(RuleCondition(feature="rvol", operator="gte", value="1.5"),),
         rationale=f"{name} bridge fixture.",
     )
+    if carries_sendable_prefix(name):
+        # MOMO_HOD_V1 predates the name guard, which now refuses to create it;
+        # the live ledger still holds such records, and the bridge reads them.
+        return (await insert_legacy_shadow_strategy(spec=spec, owner_id="demo")).strategy_id
     record = await create_strategy(spec=spec, owner_id="demo", actor="demo")
     for revision, target in enumerate((StrategyState.BACKTESTING, StrategyState.SHADOW)):
         record = await transition_strategy(

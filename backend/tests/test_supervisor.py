@@ -44,8 +44,9 @@ from trading.scheduler.sessions import market_session
 @pytest.fixture(autouse=True)
 def _two_strategy_schedule(request, monkeypatch):
     """Timeline tests below were written for the ORB+MOMO trading day; the
-    shadow strategies added later (gap, vwap) and the after-close research
-    children (recorder, replay) are covered by their own full_schedule tests."""
+    shadow strategies added later (gap, vwap), the AI day manager's children
+    (manager, momo-ap) and the after-close research children (recorder,
+    replay) are covered by their own full_schedule tests."""
     if request.node.get_closest_marker("full_schedule"):
         return
     monkeypatch.setattr(
@@ -55,6 +56,7 @@ def _two_strategy_schedule(request, monkeypatch):
         supervisor_module, "STRATEGY_UNIVERSES", {"orb": "scanner", "momo": "watchlist"}
     )
     monkeypatch.setattr(supervisor_module, "RESEARCH_CHILDREN", {})
+    monkeypatch.setattr(supervisor_module, "manager_plans", lambda *_args, **_kwargs: ())
 
 ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
@@ -1243,14 +1245,19 @@ def test_default_plan_runs_the_shadow_strategies_and_the_learning_loop_in_their_
 
     plans = {plan.name: plan for plan in plan_session(market_session(date(2026, 10, 13)))}
     assert list(plans) == [
-        "screener", "notifier", "bridge", "orb", "momo", "gap", "vwap", "recorder", "replay",
+        "screener", "notifier", "bridge", "orb-v2", "momo", "gap-v2", "vwap-v2", "manager",
+        "momo-ap", "recorder", "replay",
     ]
     ny = ZoneInfo("America/New_York")
-    assert plans["gap"].starts_at.astimezone(ny).time() == time(9, 28)
-    assert plans["gap"].finishes_at.astimezone(ny).time() == time(10, 30)
-    assert plans["vwap"].starts_at.astimezone(ny).time() == time(10, 25)
-    assert plans["vwap"].finishes_at.astimezone(ny).time() == time(14, 30)
-    assert "gappers" in plans["gap"].argv and "watchlist" in plans["vwap"].argv
+    # The all-session simulations replace ORB_V1, GAP_GO_V1 and VWAP_PB_V1: 09:28-15:31.
+    for name in ("orb-v2", "gap-v2", "vwap-v2"):
+        assert window(plans[name]) == ("09:28", "15:31", "15:30"), name
+        assert plans[name].argv[4:6] == ("--strategy", name)
+        assert plans[name].base_backoff == timedelta(seconds=95)
+    assert window(plans["momo"]) == ("09:55", "15:01", "15:00")
+    assert "all-gappers" in plans["gap-v2"].argv and "watchlist" in plans["vwap-v2"].argv
+    assert "scanner" in plans["orb-v2"].argv
+    assert not {"orb", "gap", "vwap"} & set(plans)
     # After the close: record the session that just closed, then replay the store.
     control = str(BACKEND_DIR / "autotraderctl.py")
     assert plans["recorder"].argv == (str(VENV_PYTHON), control, "research", "record")
@@ -1263,6 +1270,60 @@ def test_default_plan_runs_the_shadow_strategies_and_the_learning_loop_in_their_
         assert plans[name].final_codes == frozenset()
     # The replay reads what the recorder stored, so their windows never overlap.
     assert plans["recorder"].ends_at < plans["replay"].starts_at
+
+
+# --- the AI day manager's children (shadow) ---------------------------------------------
+
+
+@pytest.mark.full_schedule
+@pytest.mark.parametrize(
+    ("day", "manager_window", "momo_ap_window"),
+    [
+        # Plans 09:20 .. 14:30; managed MOMO in MOMO's own 09:55-15:01 window.
+        (date(2026, 10, 13), ("09:15", "14:40", "14:30"), ("09:55", "15:01", "15:00")),
+        # Half day (13:00 close): plans until 11:30, MOMO's cutoff moves to 12:00.
+        (date(2026, 11, 27), ("09:15", "11:40", "11:30"), ("09:55", "12:01", "12:00")),
+    ],
+    ids=["full-day", "half-day"],
+)
+def test_the_day_managers_children_run_in_shadow_in_their_own_windows(
+    day, manager_window, momo_ap_window
+):
+    plans = {plan.name: plan for plan in plans_for(market_session(day))}
+    control = str(BACKEND / "autotraderctl.py")
+
+    assert window(plans["manager"]) == manager_window
+    assert plans["manager"].argv == (str(PYTHON), control, "manager", "run", "--date", day.isoformat())
+    assert plans["manager"].base_backoff == timedelta(seconds=15)
+    assert window(plans["momo-ap"]) == momo_ap_window
+    assert plans["momo-ap"].argv == (
+        str(PYTHON), control, "shadow", "run", "--strategy", "momo-ap", "--universe", "watchlist",
+        "--date", day.isoformat(),
+    )
+    assert plans["momo-ap"].base_backoff == plans["momo"].base_backoff
+    assert window(plans["momo-ap"])[:2] == window(plans["momo"])[:2]
+    # No child has a final exit code: a schema refusal (75) is always retried.
+    assert plans["manager"].final_codes == plans["momo-ap"].final_codes == frozenset()
+
+
+def test_the_manager_child_holds_no_tws_client_and_momo_ap_its_own():
+    from trading.operations.screener_service import SCREENER_CLIENT_ID_OFFSET
+    from trading.operations.shadow_service import STRATEGY_CLIENT_OFFSET
+
+    from trading.operations.supervisor import MANAGED_STRATEGY_STARTS, STRATEGY_STARTS
+
+    data = 17
+    # Every child the supervisor schedules has a client id of its own (an
+    # unscheduled V1 entry shares its V2 replacement's).
+    scheduled = (*STRATEGY_STARTS, *MANAGED_STRATEGY_STARTS)
+    ids = {name: data + STRATEGY_CLIENT_OFFSET[name] for name in scheduled}
+    assert ids["momo-ap"] == 24 and ids["momo"] == 20
+    assert len(set(ids.values())) == len(ids)
+    assert data + SCREENER_CLIENT_ID_OFFSET not in ids.values()
+    # The manager plans from the database and Claude only.
+    assert "manager" not in STRATEGY_CLIENT_OFFSET
+    source = (BACKEND_DIR / "trading" / "manager").glob("*.py")
+    assert not any("TWSPaperActor" in path.read_text(encoding="utf-8") for path in source)
 
 
 # --- the learning loop after the close (recorder, replay) ----------------------------

@@ -1,7 +1,13 @@
-"""File store of real five-minute RTH TRADES bars for strategy research.
+"""File store of real five-minute TRADES bars for strategy research.
 
 One JSON file per contract and session:
-``~/.local/share/autotrader-v1/research/bars/<YYYY-MM-DD>/<con_id>.json``.
+``~/.local/share/autotrader-v1/research/bars/<YYYY-MM-DD>/<con_id>.json`` holds
+the regular session (``use_rth`` 1), and, for gap candidates only,
+``.../research/extended/<YYYY-MM-DD>/<con_id>.json`` the same day from the
+04:00 ET pre-market through the close (``use_rth`` 0, each bar flagged by the
+XNYS calendar). The two series never mix: the regular-hours replays read
+only ``bars/``, and GAP_GO's replay reads ``extended/`` for the session day
+plus ``bars/`` for the earlier sessions' history.
 
 Directories are 0700 and files 0600, and every write is atomic, so a crash
 never leaves a half-written day that a resumed backfill would mistake for a
@@ -12,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
@@ -26,6 +32,8 @@ from trading.scheduler.sessions import market_session
 
 NEW_YORK = ZoneInfo("America/New_York")
 BAR_INTERVAL = timedelta(minutes=5)
+# IBKR's all-hours history starts the US pre-market at 04:00 ET.
+EXTENDED_HOURS_START = time(4, 0)
 SCHEMA = "autotrader-v1/research-bars"
 SCHEMA_VERSION = 1
 # CompletedBar.volume carries TWS's raw unit; rules convert with their own multiplier.
@@ -69,15 +77,20 @@ class ResearchPaths:
         return self.root / "bars"
 
     @property
+    def extended_directory(self) -> Path:
+        return self.root / "extended"
+
+    @property
     def reports_directory(self) -> Path:
         return self.root / "reports"
 
-    def session_directory(self, session_date: date) -> Path:
-        return self.bars_directory / session_date.isoformat()
+    def session_directory(self, session_date: date, *, extended: bool = False) -> Path:
+        base = self.extended_directory if extended else self.bars_directory
+        return base / session_date.isoformat()
 
-    def bars_file(self, session_date: date, con_id: int) -> Path:
+    def bars_file(self, session_date: date, con_id: int, *, extended: bool = False) -> Path:
         _require_con_id(con_id)
-        return self.session_directory(session_date) / f"{con_id}.json"
+        return self.session_directory(session_date, extended=extended) / f"{con_id}.json"
 
     def ensure_private(self, directory: Path) -> Path:
         """Create ``directory`` with every level from ``root`` down private (0700).
@@ -185,7 +198,9 @@ class StoredDay:
 
     ``prior_close`` and ``avg_dollar_volume`` (20 prior sessions, in dollars)
     are what live qualification and MOMO's relative volume use; either is
-    ``None`` when the daily history could not supply it.
+    ``None`` when the daily history could not supply it. ``use_rth`` is the
+    request the bars came from: True for the regular session only, False for
+    an extended-hours day (pre-market from 04:00 ET through the close).
     """
 
     session_date: date
@@ -197,8 +212,11 @@ class StoredDay:
     primary_exchange: str | None = None
     fetched_at: datetime | None = None
     source: str = DEFAULT_SOURCE
+    use_rth: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.use_rth, bool):
+            raise BarsStoreError("use_rth must be a boolean")
         _require_con_id(self.con_id)
         symbol = self.symbol.strip().upper() if isinstance(self.symbol, str) else ""
         if not symbol or len(symbol) > 16:
@@ -215,6 +233,8 @@ class StoredDay:
             local = bar.interval_start_utc.astimezone(NEW_YORK)
             if local.date() != self.session_date:
                 raise BarsStoreError("every bar must belong to the stored session date")
+            if not self.use_rth and local.time() < EXTENDED_HOURS_START:
+                raise BarsStoreError("extended-hours bars start at 04:00 ET")
             if local.minute % 5 or local.second or local.microsecond:
                 raise BarsStoreError("bars must start on a five-minute boundary")
             if previous is not None and bar.interval_start_utc < previous.interval_end_utc:
@@ -251,7 +271,11 @@ def day_to_payload(day: StoredDay) -> dict[str, Any]:
         "avg_dollar_volume": (
             None if day.avg_dollar_volume is None else str(day.avg_dollar_volume)
         ),
-        "request": {"bar_size": "5 mins", "what_to_show": "TRADES", "use_rth": 1},
+        "request": {
+            "bar_size": "5 mins",
+            "what_to_show": "TRADES",
+            "use_rth": 1 if day.use_rth else 0,
+        },
         "volume_unit": VOLUME_UNIT,
         "source": day.source,
         "fetched_at": None if day.fetched_at is None else day.fetched_at.isoformat(),
@@ -327,6 +351,10 @@ def day_from_payload(
     symbol = payload.get("symbol")
     if not isinstance(symbol, str):
         raise BarsStoreError("stored day has no symbol")
+    request = payload.get("request")
+    use_rth = request.get("use_rth", 1) if isinstance(request, Mapping) else 1
+    if isinstance(use_rth, bool) or use_rth not in (0, 1):
+        raise BarsStoreError("stored day has an invalid use_rth request flag")
     return StoredDay(
         session_date=session_date,
         con_id=con_id,
@@ -337,6 +365,7 @@ def day_from_payload(
         primary_exchange=primary,
         fetched_at=None if fetched_raw is None else _timestamp(fetched_raw, "fetched_at"),
         source=str(payload.get("source") or ""),
+        use_rth=use_rth == 1,
     )
 
 
@@ -350,16 +379,20 @@ class BarsStore:
     def paths(self) -> ResearchPaths:
         return self._paths
 
-    def path_for(self, session_date: date, con_id: int) -> Path:
-        return self._paths.bars_file(session_date, con_id)
+    def path_for(self, session_date: date, con_id: int, *, extended: bool = False) -> Path:
+        return self._paths.bars_file(session_date, con_id, extended=extended)
 
-    def has_day(self, session_date: date, con_id: int) -> bool:
-        path = self.path_for(session_date, con_id)
+    def has_day(self, session_date: date, con_id: int, *, extended: bool = False) -> bool:
+        path = self.path_for(session_date, con_id, extended=extended)
         return path.is_file() and not path.is_symlink()
 
     def write_day(self, day: StoredDay, *, overwrite: bool = False) -> Path:
-        """Persist one day atomically; an existing day is kept unless ``overwrite``."""
-        path = self.path_for(day.session_date, day.con_id)
+        """Persist one day atomically; an existing day is kept unless ``overwrite``.
+
+        The day's own ``use_rth`` picks its series: regular hours under
+        ``bars/``, an extended-hours day under ``extended/``.
+        """
+        path = self.path_for(day.session_date, day.con_id, extended=not day.use_rth)
         if path.exists() and not overwrite:
             raise BarsStoreError(
                 f"{day.session_date.isoformat()}/{day.con_id} is already stored"
@@ -368,30 +401,37 @@ class BarsStore:
         encoded = json.dumps(day_to_payload(day), separators=(",", ":"), sort_keys=True)
         return atomic_private_write(path, encoded.encode("utf-8"))
 
-    def read_day(self, session_date: date, con_id: int) -> StoredDay:
-        path = self.path_for(session_date, con_id)
+    def read_day(self, session_date: date, con_id: int, *, extended: bool = False) -> StoredDay:
+        path = self.path_for(session_date, con_id, extended=extended)
+        label = f"{'extended ' if extended else ''}{session_date.isoformat()}/{con_id}"
         if path.is_symlink() or not path.is_file():
-            raise BarsStoreError(f"{session_date.isoformat()}/{con_id} is not stored")
+            raise BarsStoreError(f"{label} is not stored")
         try:
             raw = path.read_bytes()
         except OSError as exc:
-            raise BarsStoreError(f"{session_date.isoformat()}/{con_id} is unreadable") from exc
+            raise BarsStoreError(f"{label} is unreadable") from exc
         if len(raw) > _MAX_FILE_BYTES:
-            raise BarsStoreError(f"{session_date.isoformat()}/{con_id} exceeds the size limit")
+            raise BarsStoreError(f"{label} exceeds the size limit")
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
-            raise BarsStoreError(f"{session_date.isoformat()}/{con_id} is not valid JSON") from exc
-        return day_from_payload(payload, expected_date=session_date, expected_con_id=con_id)
+            raise BarsStoreError(f"{label} is not valid JSON") from exc
+        day = day_from_payload(payload, expected_date=session_date, expected_con_id=con_id)
+        if day.use_rth == extended:
+            # A regular-hours file read as extended (or the reverse) fails closed.
+            raise BarsStoreError(f"{label} was filed in the wrong series")
+        return day
 
-    def get_day(self, session_date: date, con_id: int) -> StoredDay | None:
+    def get_day(
+        self, session_date: date, con_id: int, *, extended: bool = False
+    ) -> StoredDay | None:
         """The stored day, or ``None`` when nothing is filed for it."""
-        if not self.has_day(session_date, con_id):
+        if not self.has_day(session_date, con_id, extended=extended):
             return None
-        return self.read_day(session_date, con_id)
+        return self.read_day(session_date, con_id, extended=extended)
 
-    def _session_dates(self) -> list[date]:
-        directory = self._paths.bars_directory
+    def _session_dates(self, *, extended: bool = False) -> list[date]:
+        directory = self._paths.extended_directory if extended else self._paths.bars_directory
         if directory.is_symlink() or not directory.is_dir():
             return []
         sessions: list[date] = []
@@ -406,12 +446,16 @@ class BarsStore:
                 sessions.append(session_date)
         return sorted(sessions)
 
-    def list_sessions(self) -> tuple[date, ...]:
+    def list_sessions(self, *, extended: bool = False) -> tuple[date, ...]:
         """Session dates with at least one stored contract, oldest first."""
-        return tuple(day for day in self._session_dates() if self.list_con_ids(day))
+        return tuple(
+            day
+            for day in self._session_dates(extended=extended)
+            if self.list_con_ids(day, extended=extended)
+        )
 
-    def list_con_ids(self, session_date: date) -> tuple[int, ...]:
-        directory = self._paths.session_directory(session_date)
+    def list_con_ids(self, session_date: date, *, extended: bool = False) -> tuple[int, ...]:
+        directory = self._paths.session_directory(session_date, extended=extended)
         if directory.is_symlink() or not directory.is_dir():
             return ()
         con_ids: list[int] = []
@@ -437,6 +481,7 @@ class BarsStore:
 __all__ = [
     "BAR_INTERVAL",
     "DEFAULT_SOURCE",
+    "EXTENDED_HOURS_START",
     "SCHEMA",
     "SCHEMA_VERSION",
     "VOLUME_UNIT",

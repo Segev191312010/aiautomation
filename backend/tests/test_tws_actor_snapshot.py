@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import time
 from types import SimpleNamespace
@@ -22,9 +22,8 @@ from trading.market.tws_actor import (
     _CallbackSink,
     _official_client_factory,
     _official_symbol_contract_factory,
-    is_competing_session_error,
-    is_competing_session_report,
 )
+from trading.market.ibkr_boundary import is_competing_session_error, is_competing_session_report
 
 Script = Callable[[Any, int], None]
 
@@ -343,27 +342,98 @@ def test_competing_session_report_rejects_unstructured_text() -> None:
     assert is_competing_session_report("No market data during competing live session") is False
 
 
-@pytest.mark.asyncio
-async def test_competing_session_on_history_keeps_pacing_batch_semantics() -> None:
+ELSEWHERE_162 = (
+    "Historical Market Data Service error message:"
+    "Trading TWS session is connected from a different IP address"
+)
+
+
+def _history_error(code: int, message: str) -> Callable[[Any], FakeTWSClient]:
     def factory(callbacks: Any) -> FakeTWSClient:
         client = FakeTWSClient(callbacks)
 
         def history(*args: object) -> None:
-            callbacks.error(
-                int(args[0]),  # type: ignore[arg-type]
-                165,
-                "HMDS query message:Trading TWS session is connected from a different IP address",
-            )
+            callbacks.error(int(args[0]), code, message)  # type: ignore[arg-type]
 
         client.reqHistoricalData = history  # type: ignore[method-assign]
         return client
 
-    actor = TWSPaperActor(config(), client_factory=factory)
-    await actor.connect()
-    batch = await actor.daily_trade_bars(101)
+    return factory
 
-    assert batch.bars == () and batch.pacing_failed is True
-    assert is_competing_session_report(batch.error)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (162, ELSEWHERE_162),
+        (165, "HMDS query message:Trading TWS session is connected from a different IP address"),
+        (10197, "No market data during competing live session"),
+    ],
+)
+async def test_a_login_elsewhere_on_history_is_a_competing_login_never_pacing(code, message) -> None:
+    """R5 (2026-10-13 13:05-14:15 ET): 162 "different IP address" was counted as pacing."""
+    from trading.market.ibkr_boundary import (
+        FAULT_COMPETING_LOGIN,
+        MarketDataQualityError,
+        liquidity_profile,
+        validate_completed_trade_bars,
+    )
+
+    heard: list[str] = []
+    actor = TWSPaperActor(config(), client_factory=_history_error(code, message))
+    actor.set_competing_session_listener(heard.append)
+    await actor.connect()
+
+    daily = await actor.daily_trade_bars(101)
+    intraday = await actor.completed_trade_bars(101)
+
+    for batch in (daily, intraday):
+        assert batch.bars == () and batch.pacing_failed is False and batch.competing_session is True
+        assert is_competing_session_report(batch.error)
+    assert heard == [f"TWS error {code}: {message}"] * 2
+    with pytest.raises(MarketDataQualityError) as bars:
+        validate_completed_trade_bars(intraday, now=datetime.now(timezone.utc))
+    with pytest.raises(MarketDataQualityError) as history:
+        liquidity_profile(daily, session_date=date(2026, 10, 13), volume_multiplier=Decimal("100"))
+    for refused in (bars.value, history.value):
+        assert refused.fault == FAULT_COMPETING_LOGIN
+        assert str(refused).startswith("IBKR login active elsewhere (phone/web)")
+
+
+@pytest.mark.asyncio
+async def test_a_real_pacing_violation_stays_pacing_and_reaches_no_listener() -> None:
+    from trading.market.ibkr_boundary import FAULT_PACING, MarketDataQualityError, validate_completed_trade_bars
+
+    heard: list[str] = []
+    violation = "Historical Market Data Service error message:Historical data request pacing violation"
+    actor = TWSPaperActor(config(), client_factory=_history_error(162, violation))
+    actor.set_competing_session_listener(heard.append)
+    await actor.connect()
+
+    batch = await actor.completed_trade_bars(101)
+
+    assert (batch.pacing_failed, batch.competing_session, heard) == (True, False, [])
+    with pytest.raises(MarketDataQualityError) as refused:
+        validate_completed_trade_bars(batch, now=datetime.now(timezone.utc))
+    assert refused.value.fault == FAULT_PACING
+
+
+@pytest.mark.asyncio
+async def test_a_global_competing_notice_reaches_the_listener_and_a_failing_one_is_ignored() -> None:
+    heard: list[str] = []
+
+    def broken(report: str) -> None:
+        heard.append(report)
+        raise RuntimeError("listener bug")
+
+    actor = TWSPaperActor(config(), client_factory=lambda callbacks: FakeTWSClient(callbacks))
+    actor.set_competing_session_listener(broken)
+    await actor.connect()
+
+    actor._on_error(-1, 10197, "No market data during competing live session")
+
+    assert heard == ["TWS error 10197: No market data during competing live session"]
+    assert actor.last_error == heard[0]
 
 
 @pytest.mark.asyncio

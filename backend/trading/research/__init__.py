@@ -4,8 +4,12 @@
 client), ``replay`` walks stored sessions through a strategy without
 lookahead and simulates each first setup as a conservative bracket,
 ``stats`` summarizes the outcomes in R, and ``report_notify`` sends the
-weekly summary to the owner's Telegram. The supervisor runs the recording
-and the replay after every session close. Nothing here can place an order.
+weekly summary to the owner's Telegram. After a full replay ``nightly`` runs
+the evidence for the paper promotion rule: ``outcomes`` (every saved setup
+simulated forward), ``live_ledger`` (real PAPER brackets in R),
+``paper_promotion`` (ELIGIBLE or not, reports only) and ``windows`` (wider
+entry windows, by hour). The supervisor runs the recording and the replay
+after every session close. Nothing here can place an order or grant authority.
 """
 from __future__ import annotations
 
