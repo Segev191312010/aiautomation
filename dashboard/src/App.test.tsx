@@ -142,6 +142,42 @@ describe('live dashboard data', () => {
     expect(within(screen.getByRole('region', { name: 'Live screener' })).getByText('NVDA')).toBeTruthy()
   })
 
+  it('polls the five manager routes with the bearer token and renders the autopilot panel without controls', async () => {
+    const fetchMock = installFetch(liveApi())
+    render(<App />)
+
+    const panel = await screen.findByRole('region', { name: 'Autopilot' })
+    expect(within(panel).getByText('Autopilot ON')).toBeTruthy()
+    expect(within(panel).getByText('holding VWAP')).toBeTruthy()
+    expect(within(panel).getByText('Tight stop; half size')).toBeTruthy()
+    expect(within(panel).getByText('$0.62 of $5.00 · 12%')).toBeTruthy()
+    expect(panel.querySelectorAll('button, form, input')).toHaveLength(0)
+    for (const path of ['status', 'plan', 'plans', 'verdicts', 'spend']) {
+      const call = fetchMock.mock.calls.find(([url]) => url === `/api/live/manager/${path}`)
+      expect(headerOf(call, 'Authorization')).toBe('Bearer token-abc')
+      expect((call?.[1] as RequestInit | undefined)?.method ?? 'GET').toBe('GET')
+    }
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/api/autopilot'))).toBe(false)
+  })
+
+  it('says why the autopilot panel is empty while migration 16 is pending', async () => {
+    const pending = { available: false, reason: 'schema_migration_pending', detail: 'schema v15, this code needs v16 (pending: 16)' }
+    installFetch(
+      liveApi({
+        '/api/live/manager/status': () => jsonResponse(pending),
+        '/api/live/manager/plan': () => jsonResponse(pending),
+        '/api/live/manager/plans': () => jsonResponse(pending),
+        '/api/live/manager/verdicts': () => jsonResponse(pending),
+        '/api/live/manager/spend': () => jsonResponse(pending),
+      }),
+    )
+    render(<App />)
+
+    expect(await screen.findByText(/Autopilot data unavailable: database migration pending/)).toBeTruthy()
+    expect(screen.getByText('Would buy: 5266 @ 19.11')).toBeTruthy()
+    expect(screen.queryByText('Autopilot ON')).toBeNull()
+  })
+
   it('charts the top-ranked symbol, then whatever signal the operator clicks', async () => {
     installFetch(liveApi())
     render(<App />)

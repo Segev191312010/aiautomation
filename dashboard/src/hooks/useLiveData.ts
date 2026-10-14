@@ -1,9 +1,23 @@
 import { useEffect, useState } from 'react'
 
-import { ApiError, describeError, getJson } from '../api'
+import {
+  ApiError,
+  describeError,
+  getJson,
+  getManagerPlan,
+  getManagerPlans,
+  getManagerSpend,
+  getManagerStatus,
+  getManagerVerdicts,
+} from '../api'
 import type {
   BridgeOrder,
   LiveStatus,
+  ManagerCurrentPlanView,
+  ManagerPlanHistoryView,
+  ManagerSpendView,
+  ManagerStatusView,
+  ManagerVerdictsView,
   ManualOrder,
   MarketContextView,
   ScreenerRow,
@@ -27,6 +41,11 @@ export type LiveData = {
   signals: Slice<Signal[]>
   orders: Slice<BridgeOrder[]>
   manualOrders: Slice<ManualOrder[]>
+  managerStatus: Slice<ManagerStatusView>
+  managerPlan: Slice<ManagerCurrentPlanView>
+  managerPlans: Slice<ManagerPlanHistoryView>
+  managerVerdicts: Slice<ManagerVerdictsView>
+  managerSpend: Slice<ManagerSpendView>
   paused: boolean
   lastPollAt: number | null
 }
@@ -40,6 +59,11 @@ const INITIAL_STATE: LiveData = {
   signals: EMPTY_SLICE,
   orders: EMPTY_SLICE,
   manualOrders: EMPTY_SLICE,
+  managerStatus: EMPTY_SLICE,
+  managerPlan: EMPTY_SLICE,
+  managerPlans: EMPTY_SLICE,
+  managerVerdicts: EMPTY_SLICE,
+  managerSpend: EMPTY_SLICE,
   paused: false,
   lastPollAt: null,
 }
@@ -126,16 +150,46 @@ export function useLiveData(token: string, signalsDate: string, onUnauthorized: 
       const current = new AbortController()
       controller = current
       const { signal } = current
-      const [status, screener, market, signals, orders, manualOrders] = await Promise.allSettled([
+      const [
+        status,
+        screener,
+        market,
+        signals,
+        orders,
+        manualOrders,
+        managerStatus,
+        managerPlan,
+        managerPlans,
+        managerVerdicts,
+        managerSpend,
+      ] = await Promise.allSettled([
         getJson('/api/live/status', token, signal).then(asStatus),
         getJson('/api/live/screener', token, signal).then(asScreener),
         getJson('/api/live/market', token, signal).then(asMarket),
         getJson(`/api/live/signals${signalsQuery}`, token, signal).then(asList<Signal>('signals')),
         getJson('/api/live/orders', token, signal).then(asList<BridgeOrder>('orders')),
         getJson('/api/live/manual-orders', token, signal).then(asList<ManualOrder>('manual orders')),
+        getManagerStatus(token, signal),
+        getManagerPlan(token, signal),
+        getManagerPlans(token, signal),
+        getManagerVerdicts(token, signal),
+        getManagerSpend(token, signal),
       ])
       if (disposed || signal.aborted) return
-      if ([status, screener, market, signals, orders, manualOrders].some(isUnauthorized)) {
+      const results = [
+        status,
+        screener,
+        market,
+        signals,
+        orders,
+        manualOrders,
+        managerStatus,
+        managerPlan,
+        managerPlans,
+        managerVerdicts,
+        managerSpend,
+      ]
+      if (results.some(isUnauthorized)) {
         onUnauthorized()
         return
       }
@@ -147,6 +201,11 @@ export function useLiveData(token: string, signalsDate: string, onUnauthorized: 
         signals: settle(previous.signals, signals, now),
         orders: settle(previous.orders, orders, now),
         manualOrders: settle(previous.manualOrders, manualOrders, now),
+        managerStatus: settle(previous.managerStatus, managerStatus, now),
+        managerPlan: settle(previous.managerPlan, managerPlan, now),
+        managerPlans: settle(previous.managerPlans, managerPlans, now),
+        managerVerdicts: settle(previous.managerVerdicts, managerVerdicts, now),
+        managerSpend: settle(previous.managerSpend, managerSpend, now),
         paused: false,
         lastPollAt: now,
       }))
