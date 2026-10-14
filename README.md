@@ -115,8 +115,8 @@ market hours, and no other IBKR session receiving market data.
 ### Schema migrations
 
 No process migrates the database by itself. Every process that uses it (the
-screener, the strategies, the recorder, the Telegram assistant, the API)
-checks the migration ledger read-only at start. If a migration is pending, or
+screener, the strategies, the `manager` child, the recorder, the Telegram
+assistant, the API) checks the migration ledger read-only at start. If a migration is pending, or
 the ledger does not match the code, it logs one CRITICAL line with the reason
 (`schema_migration_pending`, `schema_checksum_mismatch`,
 `schema_newer_than_code`, `schema_history_gap`, `schema_unreadable`) and exits
@@ -164,40 +164,74 @@ Migration 15 holds phase 1's tables (the day universe, the IBKR contract facts
 and the signal outcomes) and migration 16 phase 2's
 (`backend/trading/storage/manager_schema.py`): plans, verdicts, managed
 decisions, the autopilot switch with its day latch, and the spend ledger.
-While 16 is pending, `autotraderctl manager
-on|off|status`, `/autopilot` and `/plan` refuse with a reply naming
-`autotraderctl db migrate`; nothing else changes. To undo a migration, stop the supervisor,
-delete `autotrader.db-wal` and `autotrader.db-shm`, and copy the backup over
-`autotrader.db`.
+While a migration a command needs is pending (16 for `autotraderctl manager
+on|off|status`, `/autopilot` and `/plan`), that command refuses with a reply
+naming `autotraderctl db migrate`; nothing else changes.
 
-Deploy runbook (every phase):
+Deploy runbook (every phase; the v13 to v16 autopilot deploy ran it):
 
 1. Merge after 18:30 ET.
-2. `autotraderctl db migrate` (note the backup path it prints; for the
-   autopilot phases 1 and 2 it is v13 to v16,
-   `backups/autotrader.<UTC time>.v13-to-v16.db`).
-3. Restart the supervisor (it keeps the old plan in memory).
-4. `autotraderctl run --dry-run`: no `!!! DATABASE NOT READY` line.
-5. Check the next morning's `CHILD_START` lines in `supervisor.log`.
-6. Watch the first session.
+2. Stop the supervisor FIRST: `autotraderctl shadow agent disable`. A
+   supervisor left running keeps the old plan in memory, and every child it
+   restarts before the migration refuses with exit 75 (the screener, the
+   strategies, the `manager` child and the recorder alike).
+3. `autotraderctl db status` (read-only: the pending migrations and whether
+   `db migrate` is allowed now), then `autotraderctl db migrate` (note the
+   backup path it prints, e.g. `backups/autotrader.<UTC time>.v13-to-v16.db`),
+   then `autotraderctl db status` again: `state` current, no `pending` line.
+4. `autotraderctl run --dry-run` while the supervisor is still stopped: no
+   `!!! DATABASE NOT READY` line, the bridge line `reviewed`, no
+   `WARNING: running outside the supervisor` (with the supervisor stopped,
+   any such process is a stray: stop it before the next step).
+5. Start the supervisor: `autotraderctl shadow agent enable`.
+6. Check the next morning's `CHILD_START` lines in `supervisor.log`.
+7. Watch the first session.
 
-Rollback restores the code and the database together. Older code refuses a
-database migrated past it, so reverting only the code would take down
-`autotraderctl paper stop`, Telegram `/stop`, manual orders, the screener and
-every strategy (only the pinned bridge would keep running):
+A mid-session deploy needs the owner's own two commands,
+`autotraderctl db migrate --during-session-i-know` and
+`autotraderctl shadow agent enable`; the agents' auto-mode classifier blocks
+both, by design.
+
+Checking a database's version directly (the older code has no `db` command,
+and the dry run of a stopped system is the only other read): open it
+immutable, never `-readonly`. Right after a migration the database is in WAL
+mode with its `-wal`/`-shm` files beside it, and `sqlite3 -readonly` fails on
+it with `unable to open database file (14)`; a plain read-only open also
+creates `-wal`/`-shm` files beside the database. This form works and writes
+nothing:
+
+```bash
+sqlite3 'file:/Users/<you>/.local/share/autotrader-v1/autotrader.db?immutable=1' \
+  "select max(version) from autotrader_schema_migrations"
+```
+
+Rollback before any session ran on the new schema restores the code and the
+database together. Older code refuses a database migrated past it, so
+reverting only the code would take down `autotraderctl paper stop`, Telegram
+`/stop`, manual orders, the screener and every strategy (only the pinned
+bridge would keep running):
 
 1. Stop the supervisor: `autotraderctl shadow agent disable`.
 2. Delete `autotrader.db-wal` and `autotrader.db-shm`, then copy the backup
    that `db migrate` printed over `autotrader.db`.
 3. Check out the commit that was running before the deploy.
-4. The older code has no `db` command and its dry run prints no schema line,
-   so check the restored database directly. `sqlite3 -readonly
-   ~/.local/share/autotrader-v1/autotrader.db "select max(version) from
-   autotrader_schema_migrations"` must print the version that older code
-   expects (13 when rolling the autopilot phases back to the phase-0 code; 12
-   only for the phase-0 deploy itself), and `autotraderctl paper status` must
-   exit 0.
+4. Check the restored database with the `?immutable=1` query above: it must
+   print the version the older code expects (13 when rolling the autopilot
+   phases back to the phase-0 code; 12 only for the phase-0 deploy itself),
+   and `autotraderctl paper status` must exit 0.
 5. Start the supervisor again: `autotraderctl shadow agent enable`.
 
-Rows written between the migration and the rollback are lost. If
-`db migrate` itself fails, the database is untouched: just revert the merge.
+Rows written between the migration and the rollback are lost; that is
+acceptable only while no session has run on the new schema. If `db migrate`
+itself fails, the database is untouched: just revert the merge.
+
+Rollback after a session ran on the new schema preserves the data. Never
+copy a backup over a database a session has written to: it would discard
+that session's decisions, manual orders, bridge heartbeats and the kill-switch
+fence. Instead, with the supervisor stopped and the old code checked out,
+undo the migration surgically, in one transaction, rehearsed on a copy first:
+drop the tables the migration added (`backend/trading/storage/manager_schema.py`
+lists them for 15 and 16, `execution_ledger_schema.py` for 14), then delete
+its rows from `autotrader_schema_migrations`, then run the `?immutable=1`
+query and `autotraderctl paper status` before starting the supervisor. Rows
+the session wrote to the older tables stay.

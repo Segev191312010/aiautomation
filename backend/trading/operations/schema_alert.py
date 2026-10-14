@@ -1,7 +1,7 @@
 """Tell the owner's phone when the database needs migration; no process migrates.
 
-While the schema is not current the screener, the strategies and the
-recorder refuse to start (exit 75) and the supervisor retries them. Two
+While the schema is not current the screener, the strategies, the manager
+and the recorder refuse to start (exit 75) and the supervisor retries them. Two
 processes can still reach Telegram and say so, each at most once per day:
 
 * the notifier (07:55-16:15 ET on trading days) keeps running, because it
@@ -58,7 +58,7 @@ SESSION_OVERRIDE_FLAG = "--during-session-i-know"
 
 def schema_alert_text(status: SchemaStatus) -> str:
     """Plain text (no Markdown) for the phone, true to what still runs."""
-    children = "the screener, the strategies and the recorder"
+    children = "the screener, the strategies, the manager and the recorder"
     retry = "refuse to start (exit 75) and retry every few minutes"
     if status.token == SCHEMA_UNREADABLE:
         return (

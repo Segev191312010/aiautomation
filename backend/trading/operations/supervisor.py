@@ -1177,8 +1177,8 @@ def schema_lines(database: str | Path) -> tuple[str, ...]:
         return (f"database     schema v{status.applied_version} current ({status.database})",)
     return (
         f"!!! DATABASE NOT READY ({status.token}): {status.describe()} ({status.database})",
-        "!!! the screener, the strategies and the recorder will refuse to start (exit 75,"
-        " retried with backoff) until `autotraderctl db migrate` (after the close)",
+        "!!! the screener, the strategies, the manager and the recorder will refuse to start"
+        " (exit 75, retried with backoff) until `autotraderctl db migrate` (after the close)",
     )
 
 
