@@ -187,3 +187,40 @@ async def test_a_run_at_or_after_its_cutoff_never_waits():
     await shadow_service.idle_until_cutoff("gap-v2", cutoff, dynamic=False, clock=lambda: cutoff, sleep=sleep)
     await shadow_service.idle_until_cutoff("momo", cutoff, dynamic=True, clock=lambda: et(TUESDAY, 10, 0), sleep=sleep)
     assert calls == []
+
+
+@pytest.mark.anyio
+async def test_a_restart_at_the_window_end_creates_no_run(monkeypatch):
+    """Live 2026-10-13: gap.log showed a fresh run (r0936 ... r1027) per restart.
+
+    Before R1 each early exit was restarted and re-selected a new snapshot (a
+    conflict by construction), then the mid-session deploy changed the source
+    sha (`stored run differs from immutable request`): a fresh labelled run
+    every 5 minutes. Now the idling child exits 0 at its cutoff, its planned
+    finish (no restart); and a child started again at the window end is
+    refused by the closed window before any database write: no run id, no
+    fresh labelled run, no retry (SessionAborted is final).
+    """
+    from trading.orchestration.session_runner import SessionAborted
+
+    order: list[str] = []
+    _fakes(monkeypatch, order)
+    strategies: list[str] = []
+
+    async def strategy(**_kwargs):
+        strategies.append("ensure_strategy")
+        return SimpleNamespace(strategy_id="f" * 32)
+
+    monkeypatch.setattr(shadow_service, "ensure_strategy", strategy)
+    cutoff = shadow_service.strategy_entry_window("gap-v2", TUESDAY)[1]
+
+    with pytest.raises(SessionAborted, match="gap-v2 entry window for 2026-10-13 closed at"):
+        await shadow_service.run_shadow_day(
+            config=runtime_config(), owner_id="demo", session=market_session(TUESDAY),
+            strategy_name="gap-v2", universe="all-gappers", clock=lambda: cutoff,
+        )
+
+    assert order == [] and strategies == []
+    # The supervisor's side of it: a clean exit at the cutoff is the planned finish.
+    plan = next(p for p in sup.plan_session(market_session(TUESDAY)) if p.name == "gap-v2")
+    assert plan.finishes_at == cutoff
