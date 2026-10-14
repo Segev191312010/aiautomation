@@ -16,7 +16,13 @@
   h. the AI day manager (migration 16): a plan summary after the 09:20 and
      09:46 plans, and one alert per outage (no plan in force, a failed or
      timed-out plan, the plan budget spent). While migration 16 is pending
-     these are skipped; everything else is unchanged.
+     these are skipped; everything else is unchanged;
+  i. an unreachable IB Gateway (live 2026-10-14: off all session, no alert):
+     one "IB Gateway unreachable since HH:MM ET" from the bridge's "TWS did
+     not answer", the screener's "TWS connection failed", three strategy
+     children's handshake failures, or no screener sweep within 20 minutes
+     of SESSION_START; repeated at most every 30 minutes while it persists,
+     and one "reconnected" line when a sweep returns.
 
 It only reads the database, the logs, and the bridge state file: nothing here
 can place, modify, or cancel an order. What was delivered, how far each log
@@ -737,6 +743,122 @@ def ibkr_alert_text(problem: str, source: str) -> str:
     )
 
 
+# -- IB Gateway reachability ------------------------------------------------
+# Live 2026-10-14: the Gateway was off all session. The bridge exited 75 every
+# 5 minutes ("TWS did not answer"), the screener logged "TWS connection failed"
+# every 70 s with no sweep, every strategy child exit-1-looped, and nothing
+# told the phone why. One alert names it, repeated at most every half hour
+# while it persists, and one line says when a sweep returns.
+BROKER_UNREACHABLE = "broker_unreachable"
+BROKER_ALERT_INTERVAL = timedelta(minutes=30)
+# The supervisor's SESSION_START (its first child window); pinned by a test.
+SESSION_OPENS = time(7, 55)
+# A healthy screener idles until 08:00 ET, connects, qualifies the universe
+# (~8 minutes) and first sweeps at ~08:10 ET: its first sweep is due within
+# 20 minutes of SESSION_START, not 5 (live 2026-10-13: 08:10 ET).
+FIRST_SWEEP_GRACE = timedelta(minutes=20)
+# Three children's handshake failures (one line each, at their exit) are the
+# Gateway, not one child's bad luck.
+HANDSHAKE_FAILURES_TO_ALERT = 3
+_SESSION_START = re.compile(r"\bSESSION_START\s+date=(?P<date>\d{4}-\d{2}-\d{2})\b")
+_BRIDGE_UNREACHABLE = re.compile(r"TWS did not answer|Couldn't connect to TWS", re.IGNORECASE)
+_SCREENER_UNREACHABLE = re.compile(r"\bTWS connection failed\b", re.IGNORECASE)
+# The child's own last line (`error: shadow run --strategy <name> failed: ...`),
+# not the traceback line above it: one per exit.
+_HANDSHAKE_FAILED = re.compile(r"^error: .*failed: TWSConnectionError: TWS PAPER handshake failed")
+_SWEEP = re.compile(r"\bsweep (?P<date>\d{4}-\d{2}-\d{2}):")
+
+
+def broker_evidence(source: str, line: str) -> str | None:
+    """What one log line says about the Gateway: ``sweep`` (market data flows),
+    ``bridge_refused``, ``screener_failed``, ``handshake_failed``, or None."""
+    if source == "screener":
+        if _SWEEP.search(line):
+            return "sweep"
+        if _SCREENER_UNREACHABLE.search(line):
+            return "screener_failed"
+        return None
+    if source == "bridge":
+        return "bridge_refused" if _BRIDGE_UNREACHABLE.search(line) else None
+    if source == "supervisor":
+        return None
+    return "handshake_failed" if _HANDSHAKE_FAILED.match(line.strip()) else None
+
+
+def _et_hhmm(moment: datetime) -> str:
+    return moment.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
+
+
+@dataclass(slots=True)
+class BrokerWatch:
+    """The Gateway's reachability as the logs show it; the alert and the recovery line.
+
+    In memory only: after a notifier restart during an outage the next
+    evidence line reopens it (the 30-minute cadence lives in the persisted
+    ``alerts``), so "since" is then the restart, not the first failure.
+    """
+
+    session_date: date
+    opened_at: datetime | None = None
+    last_sweep_at: datetime | None = None
+    unreachable_since: datetime | None = None
+    handshake_failures: int = 0
+
+    @property
+    def unreachable(self) -> bool:
+        return self.unreachable_since is not None
+
+    def session_started(self, now: datetime) -> None:
+        if self.opened_at is None:
+            self.opened_at = now
+
+    def observe(self, source: str, line: str, now: datetime) -> str | None:
+        """Feed one log line; the recovery text when a sweep ends an outage, else None."""
+        if source == "supervisor":
+            started = _SESSION_START.search(line)
+            if started is not None and started.group("date") == self.session_date.isoformat():
+                self.session_started(now)
+            return None
+        evidence = broker_evidence(source, line)
+        if evidence is None:
+            return None
+        if evidence == "sweep":
+            self.last_sweep_at = now
+            self.handshake_failures = 0
+            since = self.unreachable_since
+            if since is None:
+                return None
+            self.unreachable_since = None
+            return (
+                f"✅ IB Gateway reconnected {_et_hhmm(now)} ET — market data is back"
+                f" (unreachable since {_et_hhmm(since)} ET)"
+            )
+        if evidence == "handshake_failed":
+            self.handshake_failures += 1
+            if self.handshake_failures < HANDSHAKE_FAILURES_TO_ALERT:
+                return None
+        if self.unreachable_since is None:
+            self.unreachable_since = now
+        return None
+
+    def check(self, now: datetime) -> None:
+        """No sweep since the session opened: the Gateway never answered."""
+        if (
+            self.unreachable_since is None
+            and self.opened_at is not None
+            and self.last_sweep_at is None
+            and now - self.opened_at >= FIRST_SWEEP_GRACE
+        ):
+            self.unreachable_since = self.opened_at
+
+    def alert_text(self) -> str:
+        assert self.unreachable_since is not None
+        return (
+            f"⛔ IB Gateway unreachable since {_et_hhmm(self.unreachable_since)} ET — log in;"
+            " the bot has no market data"
+        )
+
+
 @dataclass(slots=True)
 class _PendingFill:
     first_seen: float
@@ -1333,6 +1455,11 @@ class _NotifierSession:
         self._digest: dict[str, SignalDecision] = {}
         self._digest_members: dict[str, list[str]] = {}
         self._next_manager_poll = float("-inf")
+        self._broker = BrokerWatch(session_date)
+        # Started after SESSION_START (a restart): the log line is behind the
+        # checkpoint, so the session opened no later than now.
+        if environment.clock() >= market_time(session_date, SESSION_OPENS):
+            self._broker.session_started(environment.clock())
 
     async def run(self) -> None:
         for name, tailer in self._tailers.items():
@@ -1377,6 +1504,10 @@ class _NotifierSession:
             self._next_schema_check = self._environment.monotonic() + SCHEMA_CHECK_SECONDS
             await self._check_schema()
         self._poll_logs()
+        self._broker.check(self._environment.clock())
+        if self._broker.unreachable and self._alert_allowed(BROKER_UNREACHABLE, BROKER_ALERT_INTERVAL):
+            logger.warning("%s: %s", BROKER_UNREACHABLE, self._broker.alert_text())
+            self._send(self._broker.alert_text())
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
         if self._environment.monotonic() >= self._next_decision_poll:
@@ -1439,6 +1570,13 @@ class _NotifierSession:
         )
 
     def _handle_line(self, source: str, line: str) -> None:
+        recovered = self._broker.observe(source, line, self._environment.clock())
+        if recovered is not None:
+            logger.info("%s over: %s", BROKER_UNREACHABLE, recovered)
+            self._send(recovered)
+            # The next outage alerts at once, not after the last alert's half hour.
+            if self._state.alerts.pop(BROKER_UNREACHABLE, None) is not None:
+                self._state.dirty = True
         if source == "supervisor":
             if self._schema_refusal(line):
                 return

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from trading.storage.migrations import MIGRATIONS
 
-# Applied to the owner's database (version 13 since the phase-0 deploy after
-# the 2026-10-13 close). Never edit these values: change the schema through a
-# new migration instead.
+# Applied to the owner's database (version 16 since the autopilot deploy after
+# the 2026-10-13 close; the backup it printed is `v13-to-v16`, the rollback
+# target of a pre-session rollback). Never edit these values: change the
+# schema through a new migration instead.
 PRODUCTION_MIGRATIONS: dict[int, tuple[str, str]] = {
     1: ("strategy-version-freeze", "6e874da38dc83e8ab52142ac6efe72771cdff3bb331f42a29a3ddd77fd10d4cc"),
     2: ("run-data-decision-ledger", "85c1fc489bb957848ff6268b1d1702e61469852a63e25517ed4ea287e0b12311"),
@@ -31,6 +32,12 @@ PRODUCTION_MIGRATIONS: dict[int, tuple[str, str]] = {
     11: ("live-market-universe", "85731787bb8ddf1d03dc2c68a5bb432fa2e1ee991847eda0893d1d93bb3e1713"),
     12: ("manual-orders-ledger", "e5e4c9c28b8fdeeb1511f9f35e807f8d13eb2a449e8bd86bd22c28305351611b"),
     13: ("manager-setups", "6eba0bc8eade14dfdf5c472ef73f1ca72a168598a5a9382911d7bb5452cb51da"),
+    # The autopilot deploy (v13 to v16): the execution engine's ledger, phase
+    # 1's day universe, and phase 2's AI day manager in shadow (plans,
+    # verdicts, managed decisions, the switch and its day latch, spend).
+    14: ("execution-engine-ledger", "01f8962c8d82e11d2617b6f0d4886e960e600c22abfb380ac71e8b6ee2fb7f8c"),
+    15: ("manager-day-universe", "0f5bbbec11e4198af10f2d5b15d4b2367a0fd8353ba7ccb9427896ae616fa41f"),
+    16: ("manager-day-plans", "dd1c5832bebd770f90e12133100031d8823c5762a2e9be3c0a8ee86850ce6730"),
 }
 # Every migration the code knows, production or not yet deployed. A new
 # migration is pinned in the commit that adds it; once `autotraderctl db
@@ -38,12 +45,7 @@ PRODUCTION_MIGRATIONS: dict[int, tuple[str, str]] = {
 # PRODUCTION_MIGRATIONS and is frozen like the others.
 PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     **PRODUCTION_MIGRATIONS,
-    # Not yet applied in production (deploy after review, after the close).
-    14: ("execution-engine-ledger", "01f8962c8d82e11d2617b6f0d4886e960e600c22abfb380ac71e8b6ee2fb7f8c"),
-    15: ("manager-day-universe", "0f5bbbec11e4198af10f2d5b15d4b2367a0fd8353ba7ccb9427896ae616fa41f"),
-    # Phase 2, the AI day manager in shadow (plans, verdicts, managed
-    # decisions, the switch and its day latch, spend).
-    16: ("manager-day-plans", "dd1c5832bebd770f90e12133100031d8823c5762a2e9be3c0a8ee86850ce6730"),
+    # Not yet applied in production: none.
 }
 
 

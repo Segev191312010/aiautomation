@@ -365,3 +365,45 @@ async def test_session_rejects_candidates_outside_the_scanner_run(tmp_path, monk
                 portfolio=PortfolioSnapshot(observed_at=NOW, net_liquidation="100000"),
                 now=NOW,
             )
+
+
+@pytest.mark.anyio
+async def test_a_resume_with_an_identical_request_reuses_the_run(tmp_path, monkeypatch):
+    """The stored run is immutable: an identical request resumes it; a changed
+    source sha or a re-selected snapshot conflicts (then a fresh labelled run)."""
+    from trading.orchestration import ShadowPersistenceConflictError
+
+    strategy, run, scanner, candidates = await _shadow_world(
+        tmp_path, monkeypatch, run_id="run-resume"
+    )
+    runner = RepositoryBackedShadowRunner(
+        pipeline=ShadowPipeline(proposal_provider=_Provider()), clock=lambda: NOW
+    )
+    request = dict(run=run, scanner_run=scanner, strategy=strategy, candidates=candidates, policy=RiskPolicy())
+
+    async with runner.open_session(**request, holder_id="child-1"):
+        pass
+    # The restarted child sends the same request: the day's run resumes.
+    async with runner.open_session(**request, holder_id="child-2"):
+        pass
+
+    runs = await RunRepository().list(owner_id="owner-a", limit=10)
+    assert [stored.id for stored in runs] == ["run-resume"]
+    assert await ScannerRunRepository().get(scanner.id) == scanner
+
+    changed_code = run.model_copy(update={"source_sha": "fedcba9"})
+    with pytest.raises(ShadowPersistenceConflictError, match="stored run differs from immutable request"):
+        async with runner.open_session(**{**request, "run": changed_code}, holder_id="child-3"):
+            pass
+
+    parameters = {"scan_code": "HOT_BY_VOLUME", "limit": 60}
+    reselected = scanner.model_copy(
+        update={"parameters": parameters, "parameters_fingerprint": fingerprint_payload(parameters)}
+    )
+    with pytest.raises(ShadowPersistenceConflictError, match="stored scanner run differs from request"):
+        async with runner.open_session(**{**request, "scanner_run": reselected}, holder_id="child-4"):
+            pass
+
+    # Nothing was rewritten: still the one run, the one scanner run.
+    assert [stored.id for stored in await RunRepository().list(owner_id="owner-a", limit=10)] == ["run-resume"]
+    assert await ScannerRunRepository().get(scanner.id) == scanner

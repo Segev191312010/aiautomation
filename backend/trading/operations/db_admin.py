@@ -279,8 +279,8 @@ def run_status(database: Path, *, now: datetime | None = None, out: TextIO | Non
     print(f"state     {status.describe()}", file=stream)
     if status.pending:
         print(
-            f"pending   {_pending_names(status)}: the screener, strategies and recorder refuse"
-            " to start (exit 75) until `autotraderctl db migrate`",
+            f"pending   {_pending_names(status)}: the screener, strategies, manager and recorder"
+            " refuse to start (exit 75) until `autotraderctl db migrate`",
             file=stream,
         )
     day = trading_day_at(now or datetime.now(UTC))

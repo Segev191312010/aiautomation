@@ -816,7 +816,50 @@ def test_only_one_supervisor_may_run(tmp_path):
         pass
 
 
-def test_unsupervised_children_lists_trading_processes_but_not_itself(monkeypatch):
+_PY = "/repo/backend/.venv/bin/python"
+_CTL = "/repo/backend/autotraderctl.py"
+
+
+def test_unsupervised_children_lists_strays_but_not_the_supervisors_own(monkeypatch):
+    # The live case: the dry run, started beside a running supervisor, used to
+    # tell the owner to kill the supervised screener, assistant and bridge.
+    table = [
+        (1, 0, "/sbin/launchd"),
+        (500, 1, f"{_PY} {_CTL} run"),
+        (501, 500, f"{_PY} -u {_CTL} screener run --interval 60"),
+        (502, 500, f"{_PY} -u {_CTL} telegram run"),
+        (503, 500, f"{_PY} -u /repo/backend/scripts_local/paper_bridge.py"),
+        # A grandchild (a child's own helper) is supervised through its parent.
+        (504, 501, f"{_PY} {_CTL} shadow run --strategy momo"),
+        # Strays: a hand-started screener under a shell, and an orphan.
+        (600, 77, f"{_PY} -u {_CTL} screener run --interval 60"),
+        (601, 1, f"{_PY} {_CTL} notify run"),
+        # The dry run itself and its children are no supervisor.
+        (700, 77, f"{_PY} {_CTL} run --dry-run --date 2026-10-13"),
+        (701, 700, f"{_PY} {_CTL} shadow run --strategy orb"),
+        (os.getpid(), 77, f"{_PY} {_CTL} shadow run"),
+        (800, 1, "/usr/bin/vim autotraderctl.py"),
+    ]
+
+    assert supervisor_module.unsupervised_children(lambda: table) == [
+        (600, f"{_PY} -u {_CTL} screener run --interval 60"),
+        (601, f"{_PY} {_CTL} notify run"),
+        (701, f"{_PY} {_CTL} shadow run --strategy orb"),
+    ]
+
+
+def test_unsupervised_children_survive_a_parent_cycle():
+    table = [
+        (10, 11, f"{_PY} {_CTL} screener run"),
+        (11, 10, "/bin/sh"),
+    ]
+
+    assert supervisor_module.unsupervised_children(lambda: table) == [
+        (10, f"{_PY} {_CTL} screener run")
+    ]
+
+
+def test_process_table_reads_ps_and_tolerates_its_absence(monkeypatch):
     calls: list[list[str]] = []
 
     def fake_run(command, **_kwargs):
@@ -825,25 +868,25 @@ def test_unsupervised_children_lists_trading_processes_but_not_itself(monkeypatc
             command,
             0,
             stdout=(
-                "24401 .venv/bin/python -u autotraderctl.py screener run --interval 60\n"
-                f"{os.getpid()} python autotraderctl.py shadow run\n"
+                "    1     0 /sbin/launchd\n"
+                f"  500     1 {_PY} {_CTL} run\n"
+                "  bad line\n"
             ),
             stderr="",
         )
 
     monkeypatch.setattr(supervisor_module.subprocess, "run", fake_run)
-
-    assert supervisor_module.unsupervised_children() == [
-        (24401, ".venv/bin/python -u autotraderctl.py screener run --interval 60")
+    assert supervisor_module.process_table() == [
+        (1, 0, "/sbin/launchd"),
+        (500, 1, f"{_PY} {_CTL} run"),
     ]
-    assert calls[0][:2] == ["/usr/bin/pgrep", "-fl"]
+    assert calls[0][0] == "/bin/ps" and "pid=,ppid=,command=" in calls[0]
 
-
-def test_unsupervised_children_tolerates_a_missing_pgrep(monkeypatch):
     def broken(*_args, **_kwargs):
-        raise FileNotFoundError("pgrep")
+        raise FileNotFoundError("ps")
 
     monkeypatch.setattr(supervisor_module.subprocess, "run", broken)
+    assert supervisor_module.process_table() == []
     assert supervisor_module.unsupervised_children() == []
 
 
@@ -883,6 +926,24 @@ def test_dry_run_simulates_the_day_and_writes_nothing(tmp_path):
     assert "backend/autotraderctl.py shadow run --strategy momo --universe watchlist --date 2026-10-13" in report
     assert "WARNING: running outside the supervisor (kill 24401 before `run`)" in report
     assert list(tmp_path.iterdir()) == []
+
+
+def test_dry_run_warns_about_strays_but_not_the_running_supervisors_children(tmp_path):
+    table = [
+        (500, 1, f"{_PY} {_CTL} run"),
+        (501, 500, f"{_PY} -u {_CTL} screener run --interval 60"),
+        (600, 1, f"{_PY} -u {_CTL} screener run --interval 60"),
+    ]
+
+    report = dry_run_report(
+        session_date=TUESDAY,
+        now=et(date(2026, 10, 12), 22, 0),
+        user_paths=UserPaths(home=tmp_path),
+        unsupervised=lambda: supervisor_module.unsupervised_children(lambda: table),
+    )
+
+    assert "WARNING: running outside the supervisor (kill 600 before `run`)" in report
+    assert "kill 501" not in report
 
 
 def test_dry_run_clock_start_skips_windows_that_closed():
@@ -1469,7 +1530,10 @@ async def test_a_requested_session_after_the_replay_window_launches_nothing():
 
 @pytest.mark.full_schedule
 def test_dry_run_shows_the_learning_loop():
-    report = dry_run_report(session_date=TUESDAY, unsupervised=list)
+    # A fixed clock: without `now` the report simulates from the real clock
+    # when it runs on the session date, and after 18:30 ET on 2026-10-13 the
+    # research windows had closed (red on the night of the deploy).
+    report = dry_run_report(session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), unsupervised=list)
 
     assert "recorder  16:20-17:30  from 16:20" in report
     assert "replay    17:35-18:30  from 17:35" in report

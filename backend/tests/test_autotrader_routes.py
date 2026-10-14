@@ -33,7 +33,13 @@ async def test_autotrader_routes_are_draft_and_shadow_only(tmp_path, monkeypatch
 
         status = await client.get("/api/engine/v1/status", headers=bearer)
         assert status.status_code == 200
-        assert status.json()["execution_enabled"] is False
+        # The bridge in this checkout is the reviewed one: real PAPER orders
+        # are sent for the sendable identities, and the status says so.
+        assert status.json()["execution_enabled"] is True
+        assert status.json()["paper_order_sender"] == "paper_bridge (pinned)"
+        assert status.json()["sendable_identities"] == ["MOMO_HOD_V2"]
+        assert status.json()["paper_authority"] == "paper_bridge_pinned"
+        assert status.json()["live_authority"] == "unsupported"
         assert status.json()["enabled_modes"] == ["backtest", "shadow"]
 
         created = await client.post("/api/engine/v1/strategies", headers=bearer, json=_strategy_payload())
@@ -206,3 +212,32 @@ async def test_api_never_creates_or_publishes_a_reserved_strategy_name(tmp_path,
             },
         )
         assert ordinary.status_code == 201 and ordinary.json()["version"] == 2
+
+
+def test_engine_status_is_truthful_about_the_bridge_on_disk(tmp_path):
+    from routers.autotrader_routes import paper_execution_status
+    from trading.operations.supervisor import BACKEND_DIR, REVIEWED_BRIDGE_SHA256
+    from trading.sendable_identities import SENDABLE_IDENTITIES
+
+    pinned = paper_execution_status(BACKEND_DIR)
+    assert pinned["execution_enabled"] is True
+    assert pinned["paper_order_sender"] == "paper_bridge (pinned)"
+    assert pinned["paper_bridge_sha256"] == REVIEWED_BRIDGE_SHA256
+    assert pinned["sendable_identities"] == list(SENDABLE_IDENTITIES) == ["MOMO_HOD_V2"]
+    assert "reason" not in pinned
+
+    # No bridge file: the supervisor would refuse to start it, so nothing sends.
+    missing = paper_execution_status(tmp_path)
+    assert missing["execution_enabled"] is False
+    assert missing["paper_order_sender"] is None
+    assert missing["sendable_identities"] == []
+    assert missing["paper_authority"] == "blocked_bridge_unreadable"
+    assert "unreadable" in missing["reason"]
+
+    # An edited bridge: the same refusal, named.
+    (tmp_path / "scripts_local").mkdir()
+    (tmp_path / "scripts_local" / "paper_bridge.py").write_text("print('edited')\n")
+    edited = paper_execution_status(tmp_path)
+    assert edited["execution_enabled"] is False
+    assert edited["paper_authority"] == "blocked_bridge_unreviewed"
+    assert f"not the reviewed {REVIEWED_BRIDGE_SHA256[:12]}" in edited["reason"]

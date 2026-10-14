@@ -977,3 +977,127 @@ async def test_the_token_is_redacted_from_the_private_log_file(
     assert TOKEN not in out.getvalue()
     assert TOKEN not in capsys.readouterr().err
     assert stat.S_IMODE(paths.shadow_log_file.stat().st_mode) == 0o600
+
+
+# --------------------------------------------------------------------------
+# IB Gateway unreachable (live 2026-10-14: off all session, no alert)
+# --------------------------------------------------------------------------
+
+_SCREENER_FAILED = (
+    "2026-10-14 15:00:10,014 WARNING TWS connection failed: TWS PAPER handshake failed"
+    " (TWS error 502: Couldn't connect to TWS. Confirm that \"Enable ActiveX and Socket"
+    " EClients\" is enabled and connection port is the same as \"Socket Port\" on the TWS)"
+)
+_BRIDGE_502 = (
+    "11:06:47 ET  INFO TWS -1 502 Couldn't connect to TWS. Confirm that \"Enable ActiveX and"
+    " Socket EClients\" is enabled and connection port is the same as \"Socket Port\""
+)
+_BRIDGE_REFUSED = "11:06:57 ET  CRITICAL TWS did not answer on 127.0.0.1:7497 (client 18) — exit 75"
+_CHILD_TRACEBACK = "trading.market.tws_actor.TWSConnectionError: TWS PAPER handshake failed"
+_CHILD_FAILED = "error: shadow run --strategy orb-v2 failed: TWSConnectionError: TWS PAPER handshake failed"
+_SWEEP_LINE = "2026-10-13 15:10:02,263 INFO sweep 2026-10-13: qualified=396 quoted=396 errors=0 hot=35 seconds=89.8"
+
+
+def test_broker_evidence_classifies_the_live_lines():
+    from trading.operations.notify_service import SESSION_OPENS, broker_evidence
+    from trading.operations.supervisor import SCREENER_WINDOW
+
+    assert broker_evidence("screener", _SCREENER_FAILED) == "screener_failed"
+    assert broker_evidence("screener", _SWEEP_LINE) == "sweep"
+    assert broker_evidence("screener", "2026-10-13 15:00:00,014 INFO screener connected to TWS") is None
+    assert broker_evidence("bridge", _BRIDGE_502) == "bridge_refused"
+    assert broker_evidence("bridge", _BRIDGE_REFUSED) == "bridge_refused"
+    assert broker_evidence("bridge", "11:50:14 ET  FILL BF B: 1000/3741 sh @ 26.75 (momo)") is None
+    assert broker_evidence("orb-v2", _CHILD_FAILED) == "handshake_failed"
+    # The traceback's last line precedes the child's own error line: not a second exit.
+    assert broker_evidence("orb-v2", _CHILD_TRACEBACK) is None
+    assert broker_evidence("momo", "TWS connection lost during bars") is None
+    assert broker_evidence("supervisor", "2026-10-14T15:03:03+00:00 CHILD_EXIT orb-v2 code=1 restart_in=300") is None
+    # The session opens with the supervisor's first child window.
+    assert SESSION_OPENS == SCREENER_WINDOW[0]
+
+
+def test_broker_watch_thresholds_grace_and_recovery():
+    from trading.operations.notify_service import FIRST_SWEEP_GRACE, BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    # Another date's SESSION_START is not this session's.
+    watch.observe("supervisor", "2026-10-12T11:55:00+00:00 SESSION_START date=2026-10-12", _et(7, 55))
+    assert watch.opened_at is None
+    watch.observe("supervisor", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13", _et(7, 55))
+    assert watch.opened_at == _et(7, 55)
+
+    # Two children's handshake failures are not yet the Gateway; the third is.
+    for name, at in (("orb-v2", _et(8, 1)), ("gap-v2", _et(8, 1, 5))):
+        assert watch.observe(name, _CHILD_FAILED.replace("orb-v2", name), at) is None
+    assert not watch.unreachable
+    assert watch.observe("vwap-v2", _CHILD_FAILED.replace("orb-v2", "vwap-v2"), _et(8, 1, 9)) is None
+    assert watch.unreachable_since == _et(8, 1, 9)
+    assert watch.alert_text() == "⛔ IB Gateway unreachable since 08:01 ET — log in; the bot has no market data"
+    # More evidence keeps the first time; a sweep ends it with one line and resets the count.
+    watch.observe("bridge", _BRIDGE_REFUSED, _et(8, 6))
+    assert watch.unreachable_since == _et(8, 1, 9)
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) == (
+        "✅ IB Gateway reconnected 08:33 ET — market data is back (unreachable since 08:01 ET)"
+    )
+    assert not watch.unreachable and watch.handshake_failures == 0
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 34)) is None
+
+    # No sweep by the first-sweep deadline: unreachable since the session opened.
+    silent = BrokerWatch(SESSION)
+    silent.session_started(_et(7, 55))
+    silent.check(_et(7, 55) + FIRST_SWEEP_GRACE - timedelta(seconds=1))
+    assert not silent.unreachable
+    silent.check(_et(7, 55) + FIRST_SWEEP_GRACE)
+    assert silent.unreachable_since == _et(7, 55)
+    assert "since 07:55 ET" in silent.alert_text()
+    # A healthy day's first sweep at 08:10 ET keeps it quiet for good.
+    healthy = BrokerWatch(SESSION)
+    healthy.session_started(_et(7, 55))
+    healthy.observe("screener", _SWEEP_LINE, _et(8, 10))
+    healthy.check(_et(9, 0))
+    assert not healthy.unreachable
+
+
+@pytest.mark.anyio
+async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unreachable(
+    tmp_path, monkeypatch
+):
+    from datetime import time
+
+    from trading.operations import notify_service
+
+    await _use_database(tmp_path, monkeypatch)
+    paths = UserPaths(home=tmp_path / "home")
+    save_chat_id(telegram_config_file(paths), CHAT_ID)
+    logs = paths.log_directory
+    logs.mkdir(parents=True, exist_ok=True)
+    for name in ("bridge.log", "screener.log", "supervisor.log", "orb-v2.log", "gap-v2.log", "vwap-v2.log"):
+        (logs / name).write_text("")
+    # The notifier's day is cut at 08:36 ET so the simulated minute ticks stay few.
+    monkeypatch.setattr(notify_service, "SESSION_END", time(8, 36))
+
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    clock.at(_et(8, 0, 10), _append(logs / "screener.log", _SCREENER_FAILED))
+    clock.at(_et(8, 1, 20), _append(logs / "screener.log", _SCREENER_FAILED))
+    clock.at(_et(8, 6, 57), _append(logs / "bridge.log", _BRIDGE_502, _BRIDGE_REFUSED))
+    for name, at in (("orb-v2", _et(8, 8)), ("gap-v2", _et(8, 8, 2)), ("vwap-v2", _et(8, 8, 4))):
+        clock.at(at, _append(logs / f"{name}.log", _CHILD_TRACEBACK, _CHILD_FAILED.replace("orb-v2", name)))
+    clock.at(_et(8, 29, 50), _append(logs / "screener.log", _SCREENER_FAILED))
+    clock.at(_et(8, 30, 20), _append(logs / "screener.log", _SCREENER_FAILED))
+    clock.at(_et(8, 33, 0), _append(logs / "screener.log", _SWEEP_LINE))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    sent = telegram.sent()
+    unreachable = [text for text in sent if text.startswith("⛔ IB Gateway unreachable")]
+    reconnected = [text for text in sent if text.startswith("✅ IB Gateway reconnected")]
+    # One alert at the first evidence, one repeat after the half hour, one recovery line.
+    assert unreachable == ["⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"] * 2
+    assert reconnected == ["✅ IB Gateway reconnected 08:33 ET — market data is back (unreachable since 08:00 ET)"]
+    assert sent.index(unreachable[0]) < sent.index(reconnected[0])
+    # The bridge's own CRITICAL line still reaches the phone, as before.
+    assert any(text.startswith("⚠️ CRITICAL TWS did not answer") for text in sent)
+    assert state_file(paths, SESSION).exists()
