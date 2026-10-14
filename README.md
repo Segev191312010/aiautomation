@@ -18,6 +18,10 @@ Autotrader V1 is a clean rebuild of the trading system around typed strategy con
   them in shadow; without a valid plan it runs exactly as MOMO_HOD_V2.
   `autotraderctl manager on|off|status` and Telegram `/autopilot`, `/plan` are
   the owner's switch; real MOMO_HOD_V2 is unchanged either way.
+  `autotraderctl manager scorecard [--days N] [--date D] [--json]` scores the
+  managed shadow against MOMO_HOD_V2 on the same setups (read-only, no ids)
+  and says whether phase 3 is ready for review; the weekly research summary
+  carries the same "Phase-3 readiness" section.
 - **Owner orders:** any order from the pinned Telegram chat via a strict
   deterministic parser and validator; sent by the single order sender.
 - **Evidence:** every decision is recorded; `trading/research/` records real

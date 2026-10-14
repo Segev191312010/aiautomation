@@ -69,6 +69,13 @@ def _clock_time(value: str) -> time:
         raise argparse.ArgumentTypeError(f"expected HH:MM, got {value!r}") from exc
 
 
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autotraderctl")
     parser.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
@@ -275,6 +282,24 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="the switch, today's latch, the plan in force and the spend"
     )
     manager_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    manager_scorecard = manager_actions.add_parser(
+        "scorecard",
+        help=(
+            "read-only: managed MOMO (shadow) against MOMO_HOD_V2 on the same setups,"
+            " and whether phase 3 is ready for review"
+        ),
+    )
+    manager_scorecard.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    manager_scorecard.add_argument(
+        "--days", type=_positive_int, default=None, help="sessions back from --date (default 20)"
+    )
+    manager_scorecard.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        default=None,
+        help="the last session of the range (YYYY-MM-DD; default today, ET)",
+    )
+    manager_scorecard.add_argument("--json", action="store_true", help="machine-readable output")
 
     database = domains.add_parser(
         "db", help="the database schema: the only place migrations are applied"
@@ -715,8 +740,29 @@ def _research_command(arguments: argparse.Namespace) -> int:
         cfg.DB_PATH = original_db_path
 
 
+def _manager_scorecard(arguments: argparse.Namespace, database: Path) -> int:
+    """``manager scorecard``: the AI overlay against MOMO_HOD_V2, read-only, no identifiers."""
+    from trading.research import overlay
+    from trading.scheduler.sessions import MARKET_TIMEZONE
+
+    end = arguments.date or datetime.now(timezone.utc).astimezone(MARKET_TIMEZONE).date()
+    days = arguments.days if arguments.days is not None else overlay.DEFAULT_DAYS
+    card = overlay.read_scorecard(database, end=end, days=days)
+    if not card.readable:
+        print(
+            f"error: scorecard unavailable: {card.note}; run `autotraderctl db migrate` after the close",
+            file=sys.stderr,
+        )
+        return 1
+    if arguments.json:
+        print(json.dumps(card.payload(), indent=2))
+    else:
+        print(overlay.scorecard_text(card))
+    return 0
+
+
 def _manager_command(arguments: argparse.Namespace) -> int:
-    """``manager run`` (the supervised child) and ``manager on|off|status`` (the switch)."""
+    """``manager run`` (the child), ``manager on|off|status`` (the switch), ``manager scorecard``."""
     from trading.manager import service
 
     if arguments.action != "run":
@@ -732,6 +778,8 @@ def _manager_command(arguments: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            if arguments.action == "scorecard":
+                return _manager_scorecard(arguments, database)
             return asyncio.run(
                 service.switch_command(
                     arguments.action,

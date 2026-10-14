@@ -146,7 +146,8 @@ def test_a_full_replay_runs_the_evidence_and_leads_the_weekly_summary_with_it(ni
         "  MOMO_HOD_V2: 3 trades, net +1.44R (gross +1.60R, costs 0.16R), +0.48R/trade, 2/3 won",
         "  this week: 3 trades, net +1.44R",
     ]
-    assert sections[3][0] == "Research replay 2026-10-12..2026-10-12: 1 sessions, 2 symbols"
+    # Section 4 is the phase-3 readiness block (tests/test_overlay.py); the replay follows it.
+    assert sections[4][0] == "Research replay 2026-10-12..2026-10-12: 1 sessions, 2 symbols"
     assert summary in capsys.readouterr().out
 
     directory = night["root"] / "reports" / "2026-10-12"
