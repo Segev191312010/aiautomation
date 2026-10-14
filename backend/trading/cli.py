@@ -295,6 +295,11 @@ def _parser() -> argparse.ArgumentParser:
                                help="session date (YYYY-MM-DD); defaults to today in New York")
     execution_run.add_argument("--confirm", action="store_true",
                                help="required: the engine sends PAPER orders for promoted strategies")
+    drill_capture = execution_actions.add_parser(
+        "drill-capture",
+        help="read-only: record what a real TWS reports for the engine's drill checklist (never in a session)",
+    )
+    drill_capture.add_argument("--out", type=Path, required=True, help="the JSON report to write")
 
     manager = domains.add_parser(
         "manager", help="the AI day manager (shadow) and the owner's autopilot switch"
@@ -995,6 +1000,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _research_command(arguments)
     if arguments.domain in {"universe", "screener"}:
         return _market_data_command(arguments)
+    if arguments.domain == "execution" and arguments.action == "drill-capture":
+        from trading.execution.drill_capture import main as drill_capture_main
+
+        return drill_capture_main(arguments.out)
     if arguments.domain == "execution" and arguments.action == "run":
         from trading.execution.runner import main as run_engine
 
