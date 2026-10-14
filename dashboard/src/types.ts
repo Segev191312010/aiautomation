@@ -198,3 +198,171 @@ export type SelectedSymbol = {
   symbol: string
   exchange: string | null
 }
+
+/**
+ * `/api/live/manager/*`: the AI day manager, read-only. Every route answers
+ * `{ available: false }` while migration 16 is pending. Amounts are decimal strings.
+ */
+export type ManagerUnavailable = {
+  available: false
+  reason: string
+  detail: string
+}
+
+export type ManagerSwitch = {
+  state: 'on' | 'off'
+  since: string | null
+  source: 'cli' | 'telegram' | null
+  reason: string | null
+}
+
+export type ManagerLatch = {
+  family: string
+  mode: string
+  managed: boolean
+  latched_at: string
+}
+
+export type ManagerMigrations = {
+  applied_version: number
+  code_version: number
+  current: boolean
+}
+
+export type ManagerPlanCounts = {
+  attempts: number
+  valid: number
+  in_force: string | null
+}
+
+export type ManagerSpend = {
+  spend_date: string
+  purpose: string
+  calls: number
+  spent_usd: string
+  reserved_usd: string
+  committed_usd: string
+  budget_usd: string
+  remaining_usd: string
+  used_pct: number
+  exhausted: boolean
+}
+
+export type ManagerDayUniverse = {
+  qualified: number
+  seen: number
+}
+
+export type ManagerCompetingLogin = {
+  active: boolean
+  last_alert_at: string | null
+}
+
+export type ManagerStatus = {
+  available: true
+  server_time_utc: string
+  session_date: string
+  switch: ManagerSwitch
+  latch: ManagerLatch | null
+  migrations: ManagerMigrations
+  plans: ManagerPlanCounts
+  spend: ManagerSpend
+  day_universe: ManagerDayUniverse
+  competing_login: ManagerCompetingLogin
+}
+
+export type ManagerStatusView = ManagerStatus | ManagerUnavailable
+
+export type ManagerStrategyStep = {
+  strategy: string
+  step: string
+  on: boolean
+  reason: string
+}
+
+export type ManagerFocusEntry = {
+  con_id: number
+  symbol: string | null
+  strategies: string[]
+  note: string
+}
+
+export type ManagerDropped = {
+  kind: string
+  token: string
+  detail: string
+  widening: boolean
+}
+
+/** One plan attempt in the history; `in_force` marks only the plan that governs now. */
+export type ManagerPlanSummary = {
+  plan_id: string
+  slot: string
+  attempt: number
+  created_at: string
+  valid_until: string | null
+  outcome: string
+  valid: boolean
+  in_force: boolean
+  regime: string | null
+  focus_count: number | null
+  dropped_count: number
+  latency_ms: number | null
+  cost_usd: string
+  input_tokens: number | null
+  output_tokens: number | null
+  model: string
+  manager_version: string
+}
+
+export type ManagerPlan = ManagerPlanSummary & {
+  strategies: ManagerStrategyStep[]
+  focus: ManagerFocusEntry[]
+  dropped: ManagerDropped[]
+  gates: Record<string, boolean>
+}
+
+export type ManagerCurrentPlan = {
+  available: true
+  session_date: string
+  in_force: boolean
+  plan: ManagerPlan | null
+  last_attempt: ManagerPlanSummary | null
+  neutral_reason: string | null
+}
+
+export type ManagerCurrentPlanView = ManagerCurrentPlan | ManagerUnavailable
+
+export type ManagerPlanHistory = {
+  available: true
+  session_date: string
+  plans: ManagerPlanSummary[]
+}
+
+export type ManagerPlanHistoryView = ManagerPlanHistory | ManagerUnavailable
+
+export type ManagerVerdict = {
+  id: number
+  created_at: string
+  mode: 'managed' | 'neutral'
+  step: string
+  skipped: boolean
+  note: string | null
+  plan_id: string | null
+  symbol: string | null
+  strategy: string | null
+  detected_at: string | null
+  entry_price: string | null
+  stop_price: string | null
+  target_price: string | null
+}
+
+export type ManagerVerdicts = {
+  available: true
+  session_date: string
+  verdicts: ManagerVerdict[]
+}
+
+export type ManagerVerdictsView = ManagerVerdicts | ManagerUnavailable
+
+export type ManagerSpendView = (ManagerSpend & { available: true }) | ManagerUnavailable

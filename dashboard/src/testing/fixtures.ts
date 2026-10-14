@@ -1,6 +1,18 @@
 import { vi } from 'vitest'
 
-import type { BridgeOrder, LiveStatus, ManualOrder, MarketContextView, ScreenerSnapshot, Signal } from '../types'
+import type {
+  BridgeOrder,
+  LiveStatus,
+  ManagerCurrentPlan,
+  ManagerPlanHistory,
+  ManagerSpendView,
+  ManagerStatus,
+  ManagerVerdicts,
+  ManualOrder,
+  MarketContextView,
+  ScreenerSnapshot,
+  Signal,
+} from '../types'
 
 export const TOKEN_KEY = 'autotrader.live.token'
 
@@ -233,6 +245,170 @@ export const MANUAL_ORDERS_FIXTURE: ManualOrder[] = [
   },
 ]
 
+// The AI day manager's morning as the backend route tests seed it (10:05 ET).
+
+const MANAGER_SPEND = {
+  spend_date: '2026-10-13',
+  purpose: 'plan',
+  calls: 2,
+  spent_usd: '0.6223',
+  reserved_usd: '0',
+  committed_usd: '0.6223',
+  budget_usd: '5',
+  remaining_usd: '4.3777',
+  used_pct: 12.4,
+  exhausted: false,
+}
+
+export const MANAGER_STATUS_FIXTURE: ManagerStatus = {
+  available: true,
+  server_time_utc: '2026-10-13T14:05:00.000Z',
+  session_date: '2026-10-13',
+  switch: { state: 'on', since: '2026-10-13T13:02:00.000Z', source: 'telegram', reason: 'trial week' },
+  latch: { family: 'momo', mode: 'managed', managed: true, latched_at: '2026-10-13T13:55:00.000Z' },
+  migrations: { applied_version: 16, code_version: 16, current: true },
+  plans: { attempts: 3, valid: 2, in_force: '20261013-0946-2' },
+  spend: MANAGER_SPEND,
+  day_universe: { qualified: 2, seen: 3 },
+  competing_login: { active: false, last_alert_at: null },
+}
+
+const PLAN_0920 = {
+  plan_id: '20261013-0920-1',
+  slot: '09:20',
+  attempt: 1,
+  created_at: '2026-10-13T13:20:40.000Z',
+  valid_until: '2026-10-13T14:35:40.000Z',
+  outcome: 'valid',
+  valid: true,
+  in_force: false,
+  regime: 'trend_up',
+  focus_count: 1,
+  dropped_count: 1,
+  latency_ms: 8400,
+  cost_usd: '0.4123',
+  input_tokens: 6500,
+  output_tokens: 4200,
+  model: 'claude-opus-5-5',
+  manager_version: 'manager-v1',
+}
+
+const PLAN_0946_FAILED = {
+  ...PLAN_0920,
+  plan_id: '20261013-0946-1',
+  slot: '09:46',
+  created_at: '2026-10-13T13:47:30.000Z',
+  valid_until: null,
+  outcome: 'ai_timeout',
+  valid: false,
+  regime: null,
+  focus_count: null,
+  dropped_count: 0,
+  latency_ms: 90000,
+  cost_usd: '0',
+  input_tokens: null,
+  output_tokens: null,
+}
+
+const PLAN_0946 = {
+  ...PLAN_0920,
+  plan_id: '20261013-0946-2',
+  attempt: 2,
+  slot: '09:46',
+  created_at: '2026-10-13T13:50:10.000Z',
+  valid_until: '2026-10-13T15:05:10.000Z',
+  in_force: true,
+  regime: 'range',
+  focus_count: 3,
+  dropped_count: 0,
+  latency_ms: 7200,
+  cost_usd: '0.21',
+  input_tokens: 7100,
+  output_tokens: 3900,
+}
+
+export const MANAGER_PLAN_FIXTURE: ManagerCurrentPlan = {
+  available: true,
+  session_date: '2026-10-13',
+  in_force: true,
+  plan: {
+    ...PLAN_0946,
+    strategies: [
+      { strategy: 'momo', step: '0.5', on: true, reason: 'choppy tape' },
+      { strategy: 'orb', step: '1', on: true, reason: 'clean ranges' },
+    ],
+    focus: [
+      { con_id: 4931, symbol: 'BF B', strategies: ['momo', 'orb'], note: 'holding VWAP' },
+      { con_id: 265598, symbol: 'AAPL', strategies: ['momo'], note: 'fresh highs' },
+      { con_id: 777, symbol: null, strategies: ['orb'], note: 'no symbol known' },
+    ],
+    dropped: [],
+    gates: { kill_switch: false, day_stop: false, risk_off: false },
+  },
+  last_attempt: null,
+  neutral_reason: null,
+}
+
+export const MANAGER_PLANS_FIXTURE: ManagerPlanHistory = {
+  available: true,
+  session_date: '2026-10-13',
+  plans: [PLAN_0946, PLAN_0946_FAILED, PLAN_0920],
+}
+
+export const MANAGER_VERDICTS_FIXTURE: ManagerVerdicts = {
+  available: true,
+  session_date: '2026-10-13',
+  verdicts: [
+    {
+      id: 3,
+      created_at: '2026-10-13T14:03:00.000Z',
+      mode: 'neutral',
+      step: '1',
+      skipped: false,
+      note: null,
+      plan_id: null,
+      symbol: null,
+      strategy: null,
+      detected_at: null,
+      entry_price: null,
+      stop_price: null,
+      target_price: null,
+    },
+    {
+      id: 2,
+      created_at: '2026-10-13T14:01:00.000Z',
+      mode: 'managed',
+      step: '0',
+      skipped: true,
+      note: 'Extended from VWAP',
+      plan_id: '20261013-0946-2',
+      symbol: 'AAPL',
+      strategy: 'AP_MOMO_HOD_V1',
+      detected_at: '2026-10-13T14:00:30.000Z',
+      entry_price: '230.5',
+      stop_price: '229',
+      target_price: '233.5',
+    },
+    {
+      id: 1,
+      created_at: '2026-10-13T13:58:00.000Z',
+      mode: 'managed',
+      step: '0.5',
+      skipped: false,
+      note: 'Tight stop; half size',
+      plan_id: '20261013-0946-2',
+      symbol: 'BF B',
+      strategy: 'AP_MOMO_HOD_V1',
+      detected_at: '2026-10-13T13:57:30.000Z',
+      entry_price: '42.1',
+      stop_price: '41.6',
+      target_price: '43.1',
+    },
+  ],
+}
+
+export const MANAGER_SPEND_FIXTURE: ManagerSpendView = { available: true, ...MANAGER_SPEND }
+
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -251,6 +427,11 @@ export function liveApi(overrides: Record<string, () => Response> = {}): Handler
     '/api/live/signals': () => jsonResponse(SIGNALS_FIXTURE),
     '/api/live/orders': () => jsonResponse(ORDERS_FIXTURE),
     '/api/live/manual-orders': () => jsonResponse(MANUAL_ORDERS_FIXTURE),
+    '/api/live/manager/status': () => jsonResponse(MANAGER_STATUS_FIXTURE),
+    '/api/live/manager/plan': () => jsonResponse(MANAGER_PLAN_FIXTURE),
+    '/api/live/manager/plans': () => jsonResponse(MANAGER_PLANS_FIXTURE),
+    '/api/live/manager/verdicts': () => jsonResponse(MANAGER_VERDICTS_FIXTURE),
+    '/api/live/manager/spend': () => jsonResponse(MANAGER_SPEND_FIXTURE),
     ...overrides,
   }
   return (path) => {

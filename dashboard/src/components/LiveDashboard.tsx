@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useColorScheme } from '../hooks/useColorScheme'
 import { useLiveData } from '../hooks/useLiveData'
 import type { ScreenerRow, SelectedSymbol } from '../types'
+import { AutopilotPanel } from './AutopilotPanel'
 import { ManualOrdersPanel } from './ManualOrdersPanel'
 import { OrdersPanel } from './OrdersPanel'
 import { ScreenerTable } from './ScreenerTable'
@@ -45,6 +46,13 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
   const active = useMemo(() => (selection ? withExchange(selection, rows) : null), [selection, rows])
   const handleSelect = useCallback((next: SelectedSymbol) => setSelection(next), [])
 
+  // The five manager polls usually fail together (one backend); one line says so.
+  const managerProblem =
+    live.managerStatus.error ??
+    live.managerPlan.error ??
+    live.managerPlans.error ??
+    live.managerVerdicts.error ??
+    live.managerSpend.error
   const problems = useMemo(
     () =>
       [
@@ -54,6 +62,7 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
         live.signals.error,
         live.orders.error,
         live.manualOrders.error,
+        managerProblem === null ? null : `Autopilot: ${managerProblem}`,
       ].filter((problem): problem is string => Boolean(problem)),
     [
       live.status.error,
@@ -62,6 +71,7 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
       live.signals.error,
       live.orders.error,
       live.manualOrders.error,
+      managerProblem,
     ],
   )
   const today = live.status.data?.session_date ?? null
@@ -113,6 +123,15 @@ export function LiveDashboard({ token, onUnauthorized, onLock }: LiveDashboardPr
             orders={live.manualOrders.data}
             error={live.manualOrders.error}
             onSelect={handleSelect}
+          />
+        </section>
+        <section className="panel autopilot-panel" aria-label="Autopilot">
+          <AutopilotPanel
+            status={live.managerStatus}
+            plan={live.managerPlan}
+            plans={live.managerPlans}
+            verdicts={live.managerVerdicts}
+            spend={live.managerSpend}
           />
         </section>
       </main>
