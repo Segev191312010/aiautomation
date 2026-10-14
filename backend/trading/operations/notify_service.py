@@ -751,6 +751,10 @@ def ibkr_alert_text(problem: str, source: str) -> str:
 # while it persists, and one line says when a sweep returns.
 BROKER_UNREACHABLE = "broker_unreachable"
 BROKER_ALERT_INTERVAL = timedelta(minutes=30)
+# The supervisor's bridge child and the bridge's own "ask again later" exit
+# (`— exit 75` in its log); both pinned by tests.
+BRIDGE_CHILD_NAME = "bridge"
+BRIDGE_RESTART_CODE = 75
 # The supervisor's SESSION_START (its first child window); pinned by a test.
 SESSION_OPENS = time(7, 55)
 # A healthy screener idles until 08:00 ET, connects, qualifies the universe
@@ -803,6 +807,12 @@ class BrokerWatch:
     last_sweep_at: datetime | None = None
     unreachable_since: datetime | None = None
     handshake_failures: int = 0
+    # Who the outage took down: the bridge (its own refusal line) and the
+    # children whose log showed the handshake failure. Their exits are the
+    # outage, not news of their own; the next alert counts them.
+    bridge_refused: bool = False
+    handshake_children: set[str] = field(default_factory=set)
+    restarting: dict[str, int] = field(default_factory=dict)
 
     @property
     def unreachable(self) -> bool:
@@ -811,6 +821,27 @@ class BrokerWatch:
     def session_started(self, now: datetime) -> None:
         if self.opened_at is None:
             self.opened_at = now
+
+    def broker_exit(self, name: str, code: int | None) -> bool:
+        """Whether a ``CHILD_EXIT`` is the outage (counted, not forwarded).
+
+        Live 2026-10-14: ~12 "<child> exited (code N), restarting" lines an
+        hour and never a plain "Gateway off". The bridge's exit 75 after its
+        "TWS did not answer", and a child's exit 1 after its handshake
+        failure, are folded into the broker alert; any other exit goes through.
+        """
+        if not self.unreachable:
+            return False
+        if name == BRIDGE_CHILD_NAME:
+            caused = code == BRIDGE_RESTART_CODE and self.bridge_refused
+        else:
+            caused = code == 1 and name in self.handshake_children
+        if caused:
+            self.restarting[name] = self.restarting.get(name, 0) + 1
+        return caused
+
+    def alert_sent(self) -> None:
+        self.restarting.clear()
 
     def observe(self, source: str, line: str, now: datetime) -> str | None:
         """Feed one log line; the recovery text when a sweep ends an outage, else None."""
@@ -825,6 +856,9 @@ class BrokerWatch:
         if evidence == "sweep":
             self.last_sweep_at = now
             self.handshake_failures = 0
+            self.bridge_refused = False
+            self.handshake_children.clear()
+            self.restarting.clear()
             since = self.unreachable_since
             if since is None:
                 return None
@@ -833,7 +867,10 @@ class BrokerWatch:
                 f"✅ IB Gateway reconnected {_et_hhmm(now)} ET — market data is back"
                 f" (unreachable since {_et_hhmm(since)} ET)"
             )
+        if evidence == "bridge_refused":
+            self.bridge_refused = True
         if evidence == "handshake_failed":
+            self.handshake_children.add(source)
             self.handshake_failures += 1
             if self.handshake_failures < HANDSHAKE_FAILURES_TO_ALERT:
                 return None
@@ -853,10 +890,14 @@ class BrokerWatch:
 
     def alert_text(self) -> str:
         assert self.unreachable_since is not None
-        return (
+        text = (
             f"⛔ IB Gateway unreachable since {_et_hhmm(self.unreachable_since)} ET — log in;"
             " the bot has no market data"
         )
+        count = len(self.restarting)
+        if count:
+            text += f" ({count} {'child' if count == 1 else 'children'} restarting)"
+        return text
 
 
 @dataclass(slots=True)
@@ -1507,7 +1548,8 @@ class _NotifierSession:
         self._broker.check(self._environment.clock())
         if self._broker.unreachable and self._alert_allowed(BROKER_UNREACHABLE, BROKER_ALERT_INTERVAL):
             logger.warning("%s: %s", BROKER_UNREACHABLE, self._broker.alert_text())
-            self._send(self._broker.alert_text())
+            self._send_alert(BROKER_UNREACHABLE, self._broker.alert_text())
+            self._broker.alert_sent()
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
         if self._environment.monotonic() >= self._next_decision_poll:
@@ -1558,7 +1600,7 @@ class _NotifierSession:
         )
         if SCHEMA_ALERT_KEY in self._state.delivered or SCHEMA_ALERT_KEY in self._in_flight:
             return
-        self._send(schema_alert_text(status), key=SCHEMA_ALERT_KEY)
+        self._send_alert(SCHEMA_ALERT_KEY, schema_alert_text(status), key=SCHEMA_ALERT_KEY)
 
     def _schema_refusal(self, line: str) -> bool:
         """A child's exit 75 while the schema is not current: already in the alert."""
@@ -1573,25 +1615,28 @@ class _NotifierSession:
         recovered = self._broker.observe(source, line, self._environment.clock())
         if recovered is not None:
             logger.info("%s over: %s", BROKER_UNREACHABLE, recovered)
-            self._send(recovered)
+            self._send_alert("broker_reconnected", recovered)
             # The next outage alerts at once, not after the last alert's half hour.
             if self._state.alerts.pop(BROKER_UNREACHABLE, None) is not None:
                 self._state.dirty = True
         if source == "supervisor":
             if self._schema_refusal(line):
                 return
+            name = supervisor_child_name(line) or "unknown"
+            # An exit the outage caused is the broker alert's (its count), not a line of its own.
+            if self._broker.broker_exit(name, child_exit_code(line)):
+                return
             text = supervisor_event_text(line)
             if not text:
                 return
-            name = supervisor_child_name(line) or "unknown"
             if self._alert_allowed(f"child_exit:{name}", CHILD_EXIT_ALERT_INTERVAL):
-                self._send(text)
+                self._send_alert(f"child_exit:{name}", text)
             return
         tripwire = manager_tripwire(line)
         if tripwire is not None:
             token, text = tripwire
             if self._alert_allowed(f"tripwire:{token}", TRIPWIRE_ALERT_INTERVAL):
-                self._send(text)
+                self._send_alert(f"tripwire:{token}", text)
         if source == "bridge":
             self._handle_bridge_line(line)
             # The bridge already reports its own disconnects as CRITICAL.
@@ -1599,7 +1644,7 @@ class _NotifierSession:
         else:
             problem = ibkr_session_problem(line)
         if problem and self._alert_allowed("ibkr_session"):
-            self._send(ibkr_alert_text(problem, source))
+            self._send_alert(f"ibkr_session:{problem}", ibkr_alert_text(problem, source))
 
     def _handle_bridge_line(self, line: str) -> None:
         event = parse_bridge_line(line)
@@ -1802,6 +1847,12 @@ class _NotifierSession:
         if key is not None:
             self._in_flight.add(key)
         self._enqueue(_Outbound(text=text, key=key))
+
+    def _send_alert(self, alert: str, text: str, *, key: str | None = None) -> None:
+        """An alert or child-exit line; logged as queued so the day's checker can
+        verify delivery (live 2026-10-14: the lines went out and the log said nothing)."""
+        logger.info("alert queued: %s", alert)
+        self._send(text, key=key)
 
     def _enqueue(self, outbound: _Outbound) -> None:
         outbound.future = self._notifier.notify(outbound.text)
