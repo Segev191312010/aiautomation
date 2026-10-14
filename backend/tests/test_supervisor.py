@@ -1530,7 +1530,10 @@ async def test_a_requested_session_after_the_replay_window_launches_nothing():
 
 @pytest.mark.full_schedule
 def test_dry_run_shows_the_learning_loop():
-    report = dry_run_report(session_date=TUESDAY, unsupervised=list)
+    # A fixed clock: without `now` the report simulates from the real clock
+    # when it runs on the session date, and after 18:30 ET on 2026-10-13 the
+    # research windows had closed (red on the night of the deploy).
+    report = dry_run_report(session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), unsupervised=list)
 
     assert "recorder  16:20-17:30  from 16:20" in report
     assert "replay    17:35-18:30  from 17:35" in report
