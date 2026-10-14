@@ -1548,7 +1548,7 @@ class _NotifierSession:
         self._broker.check(self._environment.clock())
         if self._broker.unreachable and self._alert_allowed(BROKER_UNREACHABLE, BROKER_ALERT_INTERVAL):
             logger.warning("%s: %s", BROKER_UNREACHABLE, self._broker.alert_text())
-            self._send(self._broker.alert_text())
+            self._send_alert(BROKER_UNREACHABLE, self._broker.alert_text())
             self._broker.alert_sent()
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
@@ -1600,7 +1600,7 @@ class _NotifierSession:
         )
         if SCHEMA_ALERT_KEY in self._state.delivered or SCHEMA_ALERT_KEY in self._in_flight:
             return
-        self._send(schema_alert_text(status), key=SCHEMA_ALERT_KEY)
+        self._send_alert(SCHEMA_ALERT_KEY, schema_alert_text(status), key=SCHEMA_ALERT_KEY)
 
     def _schema_refusal(self, line: str) -> bool:
         """A child's exit 75 while the schema is not current: already in the alert."""
@@ -1615,7 +1615,7 @@ class _NotifierSession:
         recovered = self._broker.observe(source, line, self._environment.clock())
         if recovered is not None:
             logger.info("%s over: %s", BROKER_UNREACHABLE, recovered)
-            self._send(recovered)
+            self._send_alert("broker_reconnected", recovered)
             # The next outage alerts at once, not after the last alert's half hour.
             if self._state.alerts.pop(BROKER_UNREACHABLE, None) is not None:
                 self._state.dirty = True
@@ -1630,13 +1630,13 @@ class _NotifierSession:
             if not text:
                 return
             if self._alert_allowed(f"child_exit:{name}", CHILD_EXIT_ALERT_INTERVAL):
-                self._send(text)
+                self._send_alert(f"child_exit:{name}", text)
             return
         tripwire = manager_tripwire(line)
         if tripwire is not None:
             token, text = tripwire
             if self._alert_allowed(f"tripwire:{token}", TRIPWIRE_ALERT_INTERVAL):
-                self._send(text)
+                self._send_alert(f"tripwire:{token}", text)
         if source == "bridge":
             self._handle_bridge_line(line)
             # The bridge already reports its own disconnects as CRITICAL.
@@ -1644,7 +1644,7 @@ class _NotifierSession:
         else:
             problem = ibkr_session_problem(line)
         if problem and self._alert_allowed("ibkr_session"):
-            self._send(ibkr_alert_text(problem, source))
+            self._send_alert(f"ibkr_session:{problem}", ibkr_alert_text(problem, source))
 
     def _handle_bridge_line(self, line: str) -> None:
         event = parse_bridge_line(line)
@@ -1847,6 +1847,12 @@ class _NotifierSession:
         if key is not None:
             self._in_flight.add(key)
         self._enqueue(_Outbound(text=text, key=key))
+
+    def _send_alert(self, alert: str, text: str, *, key: str | None = None) -> None:
+        """An alert or child-exit line; logged as queued so the day's checker can
+        verify delivery (live 2026-10-14: the lines went out and the log said nothing)."""
+        logger.info("alert queued: %s", alert)
+        self._send(text, key=key)
 
     def _enqueue(self, outbound: _Outbound) -> None:
         outbound.future = self._notifier.notify(outbound.text)

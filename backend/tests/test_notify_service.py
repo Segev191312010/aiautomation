@@ -1100,11 +1100,16 @@ def test_broker_watch_folds_the_outages_child_exits_into_its_alert():
 
 @pytest.mark.anyio
 async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unreachable(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog
 ):
     from datetime import time
 
     from trading.operations import notify_service
+
+    # The eod checker verifies delivery from the notifier log: every alert is logged as queued.
+    for name in ("autotrader.shadow", "autotrader.shadow.notify"):
+        monkeypatch.setattr(logging.getLogger(name), "propagate", True)
+    caplog.set_level(logging.INFO, logger="autotrader.shadow.notify")
 
     await _use_database(tmp_path, monkeypatch)
     paths = UserPaths(home=tmp_path / "home")
@@ -1153,6 +1158,13 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
     # The outage's own exits are folded into that count; an unrelated exit still goes through.
     exits = [text for text in sent if text.startswith("⚙️")]
     assert exits == ["⚙️ momo exited (code 1), restarting in 300 s"]
+    queued = [record.getMessage() for record in caplog.records if record.getMessage().startswith("alert queued: ")]
+    assert queued == [
+        "alert queued: broker_unreachable",
+        "alert queued: child_exit:momo",
+        "alert queued: broker_unreachable",
+        "alert queued: broker_reconnected",
+    ]
     # The bridge's own CRITICAL line still reaches the phone, as before.
     assert any(text.startswith("⚠️ CRITICAL TWS did not answer") for text in sent)
     assert state_file(paths, SESSION).exists()
