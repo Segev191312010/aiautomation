@@ -30,9 +30,16 @@
   independent execution-safety review and a supervised drill on the paper
   account, and the owner explicitly decides to switch the order sender.
   `autotraderctl execution run --confirm` starts it by hand for that drill
-  only, and refuses while the bridge runs. Only one sender may ever run: the
-  bridge stays the only scheduled one until the switch, and the bridge is
-  retired after the engine's first clean paper week.
+  only, and refuses while the bridge runs; `autotraderctl run --drill-date D`
+  (an explicit flag only) plans that one session without the bridge and
+  refuses without a grant for the deployed code; `execution drill-capture`
+  records what a real TWS reports, read-only, on its own client id. Only one
+  sender may ever run: the bridge stays the only scheduled one until the
+  switch, and the bridge is retired after the engine's first clean paper
+  week. The branch carries the deployed main line's migrations 13-16 and no
+  other; merging main changes the engine's digest, so grants are issued
+  again after each re-review (`docs/PAPER_EXECUTION_STATUS.md`, "Deploy
+  order").
 - Its PAPER authority comes only from an append-only promotion record in the
   ledger (`autotrader_exec_promotions`, the execution-ledger migration),
   written by `autotraderctl execution promote --confirm` for a `MOMO_HOD`

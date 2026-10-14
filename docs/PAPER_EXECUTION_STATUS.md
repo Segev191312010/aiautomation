@@ -81,7 +81,7 @@ Order sources:
   loop by up to 20 s, a few-second startup window, and two untested guards
   (startup replay exclusion, the SLD path).
 
-## The execution engine (C2): built, not wired; drill blocker fixed, re-review pending
+## The execution engine (C2): built, not wired; drill preparation done, re-review pending
 
 `backend/trading/execution/live_executor.py` is built and tested against a fake
 TWS only. Nothing schedules it: no supervisor child, LaunchAgent or schedule
@@ -135,7 +135,20 @@ over the bridge:
   printed) and refuses when there is no database or the backup fails.
 - the code digest binds the whole import graph of the engine and its runner,
   the process entry files (`autotraderctl.py`, `trading/cli.py`) and the
-  installed ibapi release, which must be the reviewed 9.81.1.post1.
+  installed ibapi release, which must be the reviewed 9.81.1.post1. The
+  branch merged the deployed main line (88b963d: explicit migrations 13-16,
+  the AI day manager), which changed that digest: every grant must be issued
+  again, after the re-review, for the code that is deployed.
+- `autotraderctl run --drill-date YYYY-MM-DD` (an explicit flag only; no
+  config key, no environment variable) plans that one session without the
+  bridge, logs `DRILL_MODE date=... bridge=not-planned`, and refuses unless
+  the deployed engine code holds an active PAPER grant (what `execution
+  status` shows); the dry run prints `DRILL MODE: bridge not planned`. Every
+  other session is planned exactly as before.
+- `autotraderctl execution drill-capture --out <json>` records, read-only
+  and on its own TWS client id (30), what a real TWS reports for the drill
+  checklist; it refuses inside a trading day or next to the bridge, and its
+  source can never place, modify or cancel an order (a static test).
 
 The bridge's review lessons (H1, H2, M1-M4, L1-L8, N1-N7, D3) are ported with a
 regression test each. The recorded TWS callback sequences in
@@ -244,6 +257,11 @@ signatures, not captured from a live TWS.
     the digest left out the process entry files and the ibapi release R-2
     depends on. B: a cancelled sell reporting filledQuantity 0 keeps its
     shares reserved (R-2's conservative rule, kept for now).
+  - Probe F (third pass, 2026-10-14): D's fix trusted the F leg's persisted
+    "Submitted" when TWS reported nothing after a restart, so a market sell
+    gone with a TWS restart counted as working. Fixed: only what IBKR
+    reports now counts; such a sell is flagged UNPROTECTED and is a
+    `missing_order` finding (`test_rr3_f_*`).
 - Fixed: the ledger is migration 14, shipped alone on `c2/ledger-schema-14`
   (see "Migration numbering"); promote, revoke and the runner never migrate
   and refuse anything but exactly this code's schema (exit 78); A, D and E
@@ -276,26 +294,54 @@ and the kill switch stays the normal `autotraderctl paper stop`: it writes
 only the fence row, never migrates and never waits for a migration, and the
 engine reads it before every entry.
 
+### Deploy order and the drill checklist
+
+Deploy order, each step after the close:
+
+1. The main line with migrations 13-16 is deployed (2026-10-14 02:35 Israel;
+   the owner's database is at v16; those migrations are frozen).
+2. Merge the engine branch (`feat/c2-execution-engine`, which carries the
+   same 13-16 and no other migration) after its re-review; nothing in it
+   runs on a schedule.
+3. `autotraderctl execution promote --confirm` for `MOMO_HOD_V2` on the paper
+   account, for the deployed digest (`execution status` shows it); promote
+   never migrates and backs the database up first.
+4. The drill day: `autotraderctl run --drill-date D` (the supervisor plans
+   that session without the bridge), then `autotraderctl execution run
+   --confirm --date D` by hand, supervised all day. The kill switch stays
+   the normal `autotraderctl paper stop`.
+
+Drill checklist (the reviewer's seven points, plus what the two re-reviews
+added), to be recorded from the real TWS, the capture script first
+(`execution drill-capture`, the evening before, bridge stopped):
+
+- a bracket fill, a partial fill, a modify echo, a rejected modify and a
+  restart mid-send, as recorded callback sequences;
+- how TWS reports untransmitted legs after a client crash;
+- `reqCompletedOrders(apiOnly=False)` for TWS GUI sells: the raw
+  filledQuantity of a filled, a partly filled then cancelled and an unfilled
+  cancelled sell; `completedTime`'s format and zone; permId; whether
+  Inactive orders are listed (R-2, R-3, B);
+- whether `reqExecutions` with an empty client filter returns the GUI's
+  executions, a positive fill signal that could replace B's conservative
+  rule;
+- the lag of a `reqPositions` answer after a `Filled` report, and the
+  four-part snapshot's latency (R-1's retries are sized for it);
+- what TWS sends on 1101 and whether a renewed `reqPositions` answers;
+- error 326 on a second connection with the engine's client id (the
+  interlock's premise);
+- a fallback sell across a TWS restart: does TWS still list it, or must the
+  UNPROTECTED path (probe F) carry the day.
+
 ## Still to do
 
 - Supervised first live runs: the first owner order through the bridge (the
   09:35 one-share test) and the first 15:45 flatten modify against a real TWS.
-- Execution engine: a re-review of the second re-review's fixes, the merge of
-  the main line and `c2/ledger-schema-14`, and the runner.
-- Deploy `c2/ledger-schema-14` with the main line and run
-  `autotraderctl db migrate` after the close, before any drill.
-- Execution engine: the supervised drill on the paper account (the
-  reviewer's checklist), started with `execution run --confirm` on a day the
-  bridge does not run (a supervisor drill mode is still to be built). It
-  captures the recorded callback sequences from a real TWS (bracket fill,
-  partial fill, modify echo, rejected modify, restart mid-send), checks how
-  TWS reports untransmitted legs after a client crash, and records exactly
-  how `reqCompletedOrders(apiOnly=False)` reports TWS GUI sells: the raw
-  filledQuantity of a filled, a partly filled then cancelled and an unfilled
-  cancelled sell, and the `completedTime` format and time zone. It also
-  checks whether `reqExecutions` with an empty client filter returns the TWS
-  GUI's executions: a positive fill signal that could replace R-2's
-  conservative "0 may have sold" rule for cancelled sells.
+- Execution engine: a re-review of the second re-review's fixes, probe F,
+  the merge of the deployed main line (88b963d), the drill mode, the capture
+  script and the runner.
+- Execution engine: the supervised drill on the paper account, per the
+  deploy order and checklist above.
 - Execution engine: a decision on how owner manual orders are sent once the
   bridge is retired; it needs its own review.
 - Replace the bridge with the execution engine (ledger, reconciliation every 2
