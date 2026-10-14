@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from middleware import RateLimitMiddleware, RequestLogMiddleware, SecurityHeadersMiddleware
 from routers.auth import router as auth_router
 from routers.autotrader_routes import router as autotrader_router
+from routers.live_manager_routes import router as live_manager_router
 from routers.live_routes import router as live_router
 from startup import validate_startup
 from trading.operations.schema_gate import require_current_schema
@@ -30,6 +31,7 @@ app.add_middleware(RateLimitMiddleware)
 app.include_router(auth_router)
 app.include_router(autotrader_router)
 app.include_router(live_router)
+app.include_router(live_manager_router)
 
 
 @app.get("/api/health")
