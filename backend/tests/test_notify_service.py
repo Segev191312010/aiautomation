@@ -1059,6 +1059,45 @@ def test_broker_watch_thresholds_grace_and_recovery():
     assert not healthy.unreachable
 
 
+def test_broker_watch_folds_the_outages_child_exits_into_its_alert():
+    from trading.operations import supervisor
+    from trading.operations.notify_service import (
+        BRIDGE_CHILD_NAME,
+        BRIDGE_RESTART_CODE,
+        BrokerWatch,
+    )
+
+    assert BRIDGE_CHILD_NAME == supervisor.BRIDGE_CHILD
+    assert f"exit {BRIDGE_RESTART_CODE}" in _BRIDGE_REFUSED
+
+    watch = BrokerWatch(SESSION)
+    # Before any outage every exit is its own news.
+    assert not watch.broker_exit("bridge", 75) and not watch.broker_exit("orb-v2", 1)
+
+    watch.observe("screener", _SCREENER_FAILED, _et(8, 0, 10))
+    watch.observe("bridge", _BRIDGE_REFUSED, _et(8, 6, 57))
+    watch.observe("orb-v2", _CHILD_FAILED, _et(8, 8))
+    assert watch.broker_exit("bridge", 75)
+    assert watch.broker_exit("orb-v2", 1)
+    assert watch.broker_exit("orb-v2", 1)
+    # A child with no handshake line, a bridge exit with another code, a
+    # clean exit, and a launch refusal (no code) all go through.
+    assert not watch.broker_exit("momo", 1)
+    assert not watch.broker_exit("bridge", 1)
+    assert not watch.broker_exit("orb-v2", 0)
+    assert not watch.broker_exit("bridge", None)
+    assert watch.restarting == {"bridge": 1, "orb-v2": 2}
+    assert watch.alert_text().endswith("the bot has no market data (2 children restarting)")
+    watch.alert_sent()
+    assert watch.restarting == {} and "restarting" not in watch.alert_text()
+    assert watch.broker_exit("orb-v2", 1)
+    assert watch.alert_text().endswith("(1 child restarting)")
+    # The sweep ends the outage and forgets who it took down.
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) is not None
+    assert not watch.bridge_refused and not watch.handshake_children and not watch.restarting
+    assert not watch.broker_exit("orb-v2", 1)
+
+
 @pytest.mark.anyio
 async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unreachable(
     tmp_path, monkeypatch
@@ -1082,8 +1121,16 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
     clock.at(_et(8, 0, 10), _append(logs / "screener.log", _SCREENER_FAILED))
     clock.at(_et(8, 1, 20), _append(logs / "screener.log", _SCREENER_FAILED))
     clock.at(_et(8, 6, 57), _append(logs / "bridge.log", _BRIDGE_502, _BRIDGE_REFUSED))
+    clock.at(_et(8, 7, 0), _append(logs / "supervisor.log", "2026-10-13T12:07:00+00:00 CHILD_EXIT bridge code=75 restart_in=300"))
     for name, at in (("orb-v2", _et(8, 8)), ("gap-v2", _et(8, 8, 2)), ("vwap-v2", _et(8, 8, 4))):
         clock.at(at, _append(logs / f"{name}.log", _CHILD_TRACEBACK, _CHILD_FAILED.replace("orb-v2", name)))
+        clock.at(at + timedelta(seconds=10), _append(
+            logs / "supervisor.log", f"2026-10-13T12:08:10+00:00 CHILD_EXIT {name} code=1 restart_in=300"
+        ))
+    # An exit the outage did not cause (no handshake line in momo.log) is still news.
+    clock.at(_et(8, 9, 0), _append(logs / "supervisor.log", "2026-10-13T12:09:00+00:00 CHILD_EXIT momo code=1 restart_in=300"))
+    for name in ("orb-v2", "gap-v2", "vwap-v2"):
+        clock.at(_et(8, 13, 30), _append(logs / "supervisor.log", f"2026-10-13T12:13:30+00:00 CHILD_EXIT {name} code=1 restart_in=300"))
     clock.at(_et(8, 29, 50), _append(logs / "screener.log", _SCREENER_FAILED))
     clock.at(_et(8, 30, 20), _append(logs / "screener.log", _SCREENER_FAILED))
     clock.at(_et(8, 33, 0), _append(logs / "screener.log", _SWEEP_LINE))
@@ -1094,10 +1141,18 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
     sent = telegram.sent()
     unreachable = [text for text in sent if text.startswith("⛔ IB Gateway unreachable")]
     reconnected = [text for text in sent if text.startswith("✅ IB Gateway reconnected")]
-    # One alert at the first evidence, one repeat after the half hour, one recovery line.
-    assert unreachable == ["⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"] * 2
+    # One alert at the first evidence, one repeat after the half hour that counts
+    # the children the outage keeps restarting, one recovery line.
+    assert unreachable == [
+        "⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data",
+        "⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"
+        " (4 children restarting)",
+    ]
     assert reconnected == ["✅ IB Gateway reconnected 08:33 ET — market data is back (unreachable since 08:00 ET)"]
     assert sent.index(unreachable[0]) < sent.index(reconnected[0])
+    # The outage's own exits are folded into that count; an unrelated exit still goes through.
+    exits = [text for text in sent if text.startswith("⚙️")]
+    assert exits == ["⚙️ momo exited (code 1), restarting in 300 s"]
     # The bridge's own CRITICAL line still reaches the phone, as before.
     assert any(text.startswith("⚠️ CRITICAL TWS did not answer") for text in sent)
     assert state_file(paths, SESSION).exists()
