@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from tests.fakes.engine_harness import ACCOUNT, Clock, build, ny, promote
+from tests.fakes.engine_harness import ACCOUNT, Clock, allow_test_strategy, build, ny, promote
 from trading.execution.live_executor import ExecutionRefused
 from trading.execution.promotion import ExecutionAuthorityError, ExecutionSwitches, revoke_promotion
 
@@ -393,6 +393,7 @@ async def test_at_most_three_bot_positions_one_per_symbol(tmp_path, monkeypatch)
 async def test_the_shared_book_spans_every_promoted_strategy(tmp_path, monkeypatch) -> None:
     risky = {"quantity": 5000, "entry": "50.00", "stop": "49.00", "target": "52.00"}  # 5000 risk = 0.5% each
     h = await build(tmp_path, monkeypatch)
+    allow_test_strategy(monkeypatch, "MOMO_HOD_V3")
     await promote("MOMO_HOD_V3")
     await h.decide("AAA", con_id=8100, **risky)
     await h.decide("BBB", con_id=8101, strategy="MOMO_HOD_V3", **risky)
@@ -411,6 +412,7 @@ async def test_the_shared_book_spans_every_promoted_strategy(tmp_path, monkeypat
 
 async def test_one_strategys_realized_loss_spends_the_daily_budget_of_every_strategy(tmp_path, monkeypatch) -> None:
     h = await build(tmp_path, monkeypatch)
+    allow_test_strategy(monkeypatch, "MOMO_HOD_V3")
     await promote("MOMO_HOD_V3")
     await h.decide("AAA", con_id=8200, quantity=1000, entry="50.00", stop="49.50", target="51.00")
     await h.engine.tick()

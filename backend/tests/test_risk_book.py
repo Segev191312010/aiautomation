@@ -1,12 +1,10 @@
-"""The shared PAPER risk book (trading/risk/book.py) and the aggregate-budget regression."""
+"""The shared PAPER risk book (trading/risk/book.py): the engine's own limits, pure."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
 
-from trading.contracts import AIReview, PortfolioSnapshot, RiskPolicy, RuleSetup
 from trading.risk.book import (
     DAILY_RISK_PCT,
     MAX_BOT_POSITIONS,
@@ -19,7 +17,6 @@ from trading.risk.book import (
     evaluate_new_trade,
     position_risk,
 )
-from trading.risk.engine import size_and_evaluate_trade
 
 
 NET_LIQ = Decimal("100000")
@@ -101,45 +98,3 @@ def test_position_risk_values_held_shares_at_their_fill_and_pending_at_the_limit
                          stop=Decimal("49")) == 0
     with pytest.raises(ValueError):
         position_risk(held=-1, average_entry=None, pending=0, entry=Decimal("50"), stop=Decimal("49"))
-
-
-# ---- regression: aggregate reservations were compared with the per-trade budget ----------
-
-
-def _wide_stop_setup() -> RuleSetup:
-    """Entry 100, stop 97: notional bounds the size at 150 shares, so the trade risks 450 (0.45%)."""
-    return RuleSetup(
-        run_id="run", candidate_id="candidate", strategy_id="strategy", strategy_version=1, symbol="AAPL",
-        opening_range_high="100", opening_range_low="97", atr="3", entry_limit="100", stop_price="97",
-        target_price="106", bar_fingerprints=(HASH,), quote_fingerprint=HASH,
-        detected_at=datetime(2026, 8, 27, 14, 0, tzinfo=timezone.utc),
-    )
-
-
-def _evaluate(reserved_risk: str):
-    setup = _wide_stop_setup()
-    review = AIReview(
-        setup_fingerprint=setup.fingerprint(), decision="PROPOSE", confidence="0.8",
-        rationale="Aggregate budget regression.", model_id="test-model", prompt_version="test-prompt",
-        response_hash=HASH, latency_ms=1, cost_usd="0",
-    )
-    now = datetime(2026, 8, 27, 14, 0, tzinfo=timezone.utc)
-    portfolio = PortfolioSnapshot(observed_at=now, net_liquidation=NET_LIQ, reserved_risk=Decimal(reserved_risk))
-    return size_and_evaluate_trade(
-        policy=RiskPolicy(), portfolio=portfolio, setup=setup, review=review,
-        admitted_symbols=frozenset({"AAPL"}), now=now,
-    )
-
-
-def test_risk_engine_compares_reserved_risk_with_the_open_risk_budget() -> None:
-    """The old engine refused 450 new + 400 reserved because 850 > 500 (the per-trade budget)."""
-    approval = _evaluate("400")
-    assert approval.approved, approval.codes
-    assert approval.intent is not None and approval.intent.risk_amount == Decimal("450")
-
-
-def test_risk_engine_still_refuses_beyond_the_open_risk_budget() -> None:
-    approval = _evaluate("1051")  # 1051 + 450 = 1501 > 1500
-    assert not approval.approved
-    assert approval.codes == ("risk_reservation_limit_exceeded",)
-    assert _evaluate("1050").approved  # exactly 1500 fits

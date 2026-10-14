@@ -68,6 +68,17 @@ async def promote(strategy: str = STRATEGY, *, account: str = ACCOUNT, code_dige
                           code_digest=code_digest)
 
 
+def allow_test_strategy(monkeypatch: Any, name: str) -> None:
+    """Let a test seed decisions of a second MOMO_HOD identity (the shared book must span them).
+
+    Only ``MOMO_HOD_V2`` is sendable today; ``MOMO_HOD_AP_V1`` joins in its reviewed phase-3 commit. The
+    name guard is widened for the test only.
+    """
+    from trading import sendable_identities
+
+    monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", (*sendable_identities.SENDABLE_IDENTITIES, name))
+
+
 @dataclass
 class Harness:
     engine: Any
@@ -186,6 +197,6 @@ async def build(
 
 
 __all__ = [
-    "ACCOUNT", "CLIENT_ID", "DEFAULT_QUOTE", "SESSION", "STRATEGY", "Clock", "Harness", "build", "ledger_db",
-    "make_engine", "ny", "promote", "stepping",
+    "ACCOUNT", "CLIENT_ID", "DEFAULT_QUOTE", "SESSION", "STRATEGY", "Clock", "Harness", "allow_test_strategy",
+    "build", "ledger_db", "make_engine", "ny", "promote", "stepping",
 ]

@@ -12,7 +12,6 @@ import aiosqlite
 
 from db.core import get_db, transaction
 from trading.contracts import PortfolioSnapshot, RiskApproval, RiskPolicy
-from trading.risk.book import OPEN_RISK_PCT
 
 
 class ReservationError(ValueError):
@@ -124,7 +123,6 @@ class RiskReservationRepository:
             raise ReservationError("risk approval amounts must be positive")
 
         risk_budget = portfolio.net_liquidation * policy.max_risk_per_trade_pct / Decimal("100")
-        open_risk_budget = portfolio.net_liquidation * OPEN_RISK_PCT / Decimal("100")
         position_budget = portfolio.net_liquidation * policy.max_position_notional_pct / Decimal("100")
         total_budget = portfolio.net_liquidation * policy.max_total_notional_pct / Decimal("100")
         daily_loss = portfolio.daily_loss
@@ -189,9 +187,7 @@ class RiskReservationRepository:
             current_notional = sum(
                 (position.market_value for position in portfolio.positions), Decimal("0")
             )
-            # This trade alone was checked against the per-trade budget above; the
-            # risk other active reservations hold shares the aggregate budget.
-            if intent.risk_amount + reserved_risk > open_risk_budget:
+            if intent.risk_amount + reserved_risk > risk_budget:
                 raise ReservationError("risk reservation budget exceeded")
             if intent.notional_amount + current_notional + reserved_notional > total_budget:
                 raise ReservationError("total notional budget exceeded")

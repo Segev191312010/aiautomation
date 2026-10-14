@@ -16,6 +16,7 @@ import pytest
 from config import cfg
 from db.core import init_db
 from tests.fakes.decision_ledger import DecisionSeeder
+from tests.fakes.engine_harness import allow_test_strategy
 from trading.storage.execution_ledger import (
     BracketRecord,
     DecisionAlreadyClaimed,
@@ -72,7 +73,8 @@ def staged(decision: str, bracket: str, symbol: str, *, quantity: int = 100, fir
     )
 
 
-async def test_staging_rechecks_the_shared_book_atomically(ledger_path) -> None:
+async def test_staging_rechecks_the_shared_book_atomically(ledger_path, monkeypatch) -> None:
+    allow_test_strategy(monkeypatch, "MOMO_HOD_V9")  # a fourth decision under another identity's run
     first, second, third = await asyncio.to_thread(seed_decisions, 3)
     ledger = ExecutionLedger(clock=lambda: NOW)
     # 3000 x 1.00 = 3000 risk each against a 500000 book: 0.6% each would break the 0.5% new-trade cap,
