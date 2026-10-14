@@ -41,10 +41,27 @@ copying its authority into this engine.
 - Engine modes: `backtest`, `shadow`, and `paper`.
 - Release authority (owner decisions 2026-10-12): PAPER order submission is
   allowed only for strategies whose catalogue name starts with `MOMO_HOD`
-  (currently MOMO_HOD_V2). ORB_V1, VWAP_PB_V1 and GAP_GO_V1 are shadow-only.
+  (currently MOMO_HOD_V2). ORB_V1, VWAP_PB_V1 and GAP_GO_V1 are shadow-only,
+  as are their all-session successors ORB_V2, VWAP_PB_V2 and GAP_GO_V2 (owner
+  decision "Both", 2026-10-13; they are the scheduled simulations, the V1s
+  stay registered for the CLI and the replay) and the managed AP_MOMO_HOD_V1.
   The PAPER account is a sandbox: its gate proves mechanical safety, not
   strategy profitability. Every change to the order sender needs an
   independent execution-safety review before it runs unattended.
+- Supervised children (phase 2): the `manager` child (`autotraderctl manager
+  run`) plans the day around its slots for the shadow strategies; it opens no
+  TWS connection and has no order authority. The managed strategy child
+  (`momo-ap`, AP_MOMO_HOD_V1) is shadow-only. The Telegram `/autopilot
+  on|off|status` switch is shadow-only in phase 2: it latches the manager's
+  plans for AP_MOMO_HOD_V1 for the day and never changes real MOMO.
+- Schema (applied in production since the deploy after the 2026-10-13 close,
+  frozen by `tests/test_migration_freeze.py`): migration 14 holds the PAPER
+  execution engine's ledger (`autotrader_exec_*`, empty until the reviewed
+  engine runs a supervised drill), 15 phase 1's tables (the day universe, the
+  IBKR contract facts, the signal outcomes) and 16 phase 2's (plans, verdicts,
+  managed decisions, the autopilot switch with its day latch, spend). Every
+  database child, the `manager` included, refuses a pending migration (exit
+  75); only `autotraderctl db migrate` changes the schema.
 - Owner manual orders: the owner may place any order (including selling
   existing holdings) from the pinned Telegram chat, sent without confirmation.
   Orders come only from the deterministic parser and validator in

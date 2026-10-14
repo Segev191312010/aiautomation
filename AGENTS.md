@@ -4,9 +4,22 @@
 - `backend/trading/` is the trading-domain implementation. The temporary PAPER
   order sender `backend/scripts_local/paper_bridge.py` is the ONLY process that
   sends orders (TWS client 18) until the reviewed execution engine replaces it.
-- PAPER order authority (owner, 2026-10-12): MOMO_HOD strategies and owner manual
-  orders from the pinned Telegram chat. ORB_V1, VWAP_PB_V1 and GAP_GO_V1 are
-  shadow-only. LIVE has no path. See `plans/AUTOTRADER_V1_SPEC.md`.
+- PAPER order authority (owner, 2026-10-12): MOMO_HOD strategies (currently
+  MOMO_HOD_V2) and owner manual orders from the pinned Telegram chat. Every
+  other strategy is shadow-only: ORB_V1, VWAP_PB_V1 and GAP_GO_V1, their
+  all-session successors ORB_V2, VWAP_PB_V2 and GAP_GO_V2 (owner decision
+  "Both", 2026-10-13), and the managed AP_MOMO_HOD_V1. The `manager` child
+  (`autotraderctl manager run`) plans the day for the shadow strategies: it
+  opens no TWS connection and has no order authority. The Telegram
+  `/autopilot on|off|status` switch is shadow-only in phase 2: it latches the
+  manager's plans for AP_MOMO_HOD_V1 and never touches real MOMO. LIVE has no
+  path. See `plans/AUTOTRADER_V1_SPEC.md`.
+- Schema: migrations 14 (execution-engine ledger, empty until the reviewed
+  engine runs a drill), 15 (day universe, contract facts, signal outcomes) and
+  16 (manager plans, verdicts, managed decisions, the autopilot switch and its
+  day latch, spend) are applied in production since the deploy after the
+  2026-10-13 close and frozen like 1–13 (`tests/test_migration_freeze.py`);
+  schema changes go into a new migration.
 - No environment variable may enable PAPER or LIVE execution.
 - AI models may only PROPOSE/ABSTAIN on deterministic setups or answer questions
   with read-only tools; orders come only from deterministic code.
