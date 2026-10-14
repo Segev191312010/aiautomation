@@ -289,8 +289,15 @@ def plan_session(
     python: Path = VENV_PYTHON,
     backend: Path = BACKEND_DIR,
     cutoff_for: StrategyCutoff = strategy_cutoff,
+    drill_date: date | None = None,
 ) -> tuple[ChildPlan, ...]:
-    """The session's children in launch order, each with an explicit ``--date``."""
+    """The session's children in launch order, each with an explicit ``--date``.
+
+    On the execution engine's drill date (``autotraderctl run --drill-date``,
+    an explicit flag only: no config key, no environment variable) the bridge
+    is not planned, so the engine started by hand is that day's only order
+    sender. Every other session is planned exactly as before.
+    """
     day = session.session_date
     iso = day.isoformat()
     interpreter = str(python)
@@ -317,16 +324,19 @@ def plan_session(
             finishes_at=at(NOTIFIER_FINISH),
             base_backoff=SERVICE_BACKOFF,
         ),
-        ChildPlan(
-            name=BRIDGE_CHILD,
-            argv=(interpreter, bridge, "--date", iso),
-            starts_at=at(BRIDGE_START),
-            ends_at=session.closes_at.astimezone(UTC),
-            finishes_at=(session.closes_at - BRIDGE_FINISH_BEFORE_CLOSE).astimezone(UTC),
-            base_backoff=SERVICE_BACKOFF,
-            final_codes=frozenset({BRIDGE_REFUSED_CODE}),
-        ),
     ]
+    if drill_date is None or day != drill_date:
+        plans.append(
+            ChildPlan(
+                name=BRIDGE_CHILD,
+                argv=(interpreter, bridge, "--date", iso),
+                starts_at=at(BRIDGE_START),
+                ends_at=session.closes_at.astimezone(UTC),
+                finishes_at=(session.closes_at - BRIDGE_FINISH_BEFORE_CLOSE).astimezone(UTC),
+                base_backoff=SERVICE_BACKOFF,
+                final_codes=frozenset({BRIDGE_REFUSED_CODE}),
+            )
+        )
     for name, start in STRATEGY_STARTS.items():
         cutoff = cutoff_for(name, day).astimezone(UTC)
         if cutoff <= at(start):
@@ -1066,6 +1076,52 @@ async def _run_until_signalled(supervisor: Supervisor, session_date: date | None
             loop.remove_signal_handler(signum)
 
 
+def drill_authority_problem(database: str | Path, *, account: str | None = None) -> str | None:
+    """Why a drill day may not be planned without the bridge, or None.
+
+    The engine replaces the bridge for that day only when its exact deployed
+    code holds an active PAPER grant (what ``autotraderctl execution status``
+    shows): without one nothing would send orders at all. Read-only.
+    """
+    from trading.execution.promotion import ExecutionAuthorityError, active_strategies, engine_code_digest
+    from trading.storage.migrations import inspect_schema
+
+    if str(database) == ":memory:" or not Path(database).expanduser().is_file():
+        return f"no autotrader database at {database}"
+    status = inspect_schema(database)
+    if not status.current:
+        return f"the database schema is not this code's ({status.describe()})"
+    try:
+        digest = engine_code_digest()
+        if account is None:
+            from trading.operations.settings import load_shadow_runtime_config
+
+            account = load_shadow_runtime_config().paper_account_id
+        records = asyncio.run(_promotion_records(database, account))
+    except Exception as exc:  # noqa: BLE001 - any doubt means no drill: the bridge is planned instead
+        return f"the engine's PAPER authority cannot be read ({type(exc).__name__}: {exc})"
+    try:
+        active = active_strategies(records, account=account, code_digest=digest)
+    except ExecutionAuthorityError as exc:
+        return str(exc)
+    if not active:
+        return (f"no active PAPER grant for the deployed engine code {digest[:12]} on the configured paper"
+                " account (`autotraderctl execution status`); grant it with `execution promote` first")
+    return None
+
+
+async def _promotion_records(database: str | Path, account: str) -> list[object]:
+    from config import cfg
+    from trading.execution.promotion import promotion_history
+
+    original = cfg.DB_PATH
+    cfg.DB_PATH = str(database)
+    try:
+        return list(await promotion_history(account=account))
+    finally:
+        cfg.DB_PATH = original
+
+
 def run_supervisor(
     *,
     session_date: date | None = None,
@@ -1074,12 +1130,26 @@ def run_supervisor(
     backend: Path = BACKEND_DIR,
     echo: TextIO | None = None,
     unsupervised: Callable[[], list[tuple[int, str]]] = unsupervised_children,
+    drill_date: date | None = None,
+    drill_authority: Callable[[], str | None] | None = None,
 ) -> int:
     """``autotraderctl run``: supervise in the foreground until signalled."""
     paths = user_paths or UserPaths.current()
     if session_date is not None and market_session(session_date) is None:
         print(f"error: {session_date.isoformat()} is not an XNYS trading session", file=sys.stderr)
         return 1
+    if drill_date is not None:
+        if market_session(drill_date) is None:
+            print(f"error: --drill-date {drill_date.isoformat()} is not an XNYS trading session", file=sys.stderr)
+            return 1
+        if drill_authority is None:
+            from config import cfg
+
+            drill_authority = partial(drill_authority_problem, cfg.DB_PATH)
+        problem = drill_authority()
+        if problem is not None:
+            print(f"error: drill mode refused for {drill_date.isoformat()}: {problem}", file=sys.stderr)
+            return 1
     try:
         with single_instance(paths.data_directory / LOCK_FILE_NAME):
             log = SupervisorLog(
@@ -1094,6 +1164,8 @@ def run_supervisor(
                         f"{iso_utc(_utc_now())} PREFLIGHT_WARNING unsupervised pid={pid} "
                         f"(stop it: kill {pid}) cmd={command}"
                     )
+                if drill_date is not None:
+                    log(f"{iso_utc(_utc_now())} DRILL_MODE date={drill_date.isoformat()} bridge=not-planned")
                 supervisor = Supervisor(
                     launcher=SubprocessLauncher(
                         paths.log_directory,
@@ -1101,7 +1173,7 @@ def run_supervisor(
                         pinned={BRIDGE_CHILD: REVIEWED_BRIDGE_SHA256},
                     ),
                     emit=log,
-                    planner=partial(plan_session, python=python, backend=backend),
+                    planner=partial(plan_session, python=python, backend=backend, drill_date=drill_date),
                     always=always_on_plans(python=python, backend=backend),
                 )
                 return asyncio.run(_run_until_signalled(supervisor, session_date))
@@ -1223,6 +1295,7 @@ def dry_run_report(
     backend: Path = BACKEND_DIR,
     unsupervised: Callable[[], list[tuple[int, str]]] = unsupervised_children,
     database: str | Path | None = None,
+    drill_date: date | None = None,
 ) -> str:
     """The planned child timeline for one session, simulated; launches and writes nothing."""
     if database is None:
@@ -1231,7 +1304,7 @@ def dry_run_report(
         database = cfg.DB_PATH
     schema = schema_lines(database)
     current = now or _utc_now()
-    planner = partial(plan_session, python=python, backend=backend)
+    planner = partial(plan_session, python=python, backend=backend, drill_date=drill_date)
     if session_date is None:
         session, plans = upcoming_session(current, planner)
     else:
@@ -1250,6 +1323,7 @@ def dry_run_report(
     lines = [
         "DRY RUN: nothing is launched and no log is written.",
         *(line for line in schema if line.startswith("!!!")),
+        *(["DRILL MODE: bridge not planned"] if drill_date == session.session_date else []),
         f"session      {session.session_date.isoformat()} ({session.session_date:%a}), "
         f"XNYS {_local(session.opens_at)}-{_local(session.closes_at)} ET"
         + (" (half day)" if session.half_day else ""),
@@ -1317,6 +1391,7 @@ __all__ = [
     "VENV_PYTHON",
     "always_on_plans",
     "bridge_review_line",
+    "drill_authority_problem",
     "child_exit_line",
     "child_start_line",
     "dry_run_report",

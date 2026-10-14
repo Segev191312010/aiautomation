@@ -365,6 +365,15 @@ def _parser() -> argparse.ArgumentParser:
         metavar="HH:MM",
         help="with --dry-run: simulate a supervisor started at this ET time",
     )
+    supervise.add_argument(
+        "--drill-date",
+        type=date.fromisoformat,
+        default=None,
+        help=(
+            "the execution engine's supervised drill day (YYYY-MM-DD): that session is planned without"
+            " the bridge; refused unless the deployed engine code holds a PAPER grant"
+        ),
+    )
     return parser
 
 
@@ -947,10 +956,10 @@ def _supervise_command(arguments: argparse.Namespace) -> int:
     from trading.operations import supervisor
 
     if not arguments.dry_run:
-        return supervisor.run_supervisor(session_date=arguments.date)
+        return supervisor.run_supervisor(session_date=arguments.date, drill_date=arguments.drill_date)
     try:
         report = supervisor.dry_run_report(
-            session_date=arguments.date, clock_start=arguments.clock_start
+            session_date=arguments.date, clock_start=arguments.clock_start, drill_date=arguments.drill_date
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -940,7 +940,7 @@ def test_cli_run_starts_the_supervisor(monkeypatch):
 
     assert cli.main(["run"]) == 0
     assert cli.main(["run", "--date", "2026-10-13"]) == 0
-    assert calls == [{"session_date": None}, {"session_date": TUESDAY}]
+    assert calls == [{"session_date": None, "drill_date": None}, {"session_date": TUESDAY, "drill_date": None}]
 
 
 def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsys):
@@ -1482,3 +1482,113 @@ def test_dry_run_shows_the_learning_loop():
         "18:30:00  SESSION_END date=2026-10-13",
     ):
         assert expected in report
+
+
+# --- drill mode: the engine's day without the bridge ---------------------------------------
+
+
+@pytest.mark.parametrize("day", [date(2026, 10, 14), date(2026, 11, 27)], ids=["regular", "half-day"])
+def test_without_the_flag_the_plan_and_the_dry_run_are_unchanged(day):
+    session = market_session(day)
+    assert session is not None
+    assert plan_session(session, python=PYTHON, backend=BACKEND, drill_date=None) == plans_for(session)
+    assert dry_run_report(session_date=day, unsupervised=list) == dry_run_report(
+        session_date=day, unsupervised=list, drill_date=None
+    )
+    # Another day's drill never touches this session.
+    other = dry_run_report(session_date=day, unsupervised=list, drill_date=date(2026, 10, 15))
+    assert other == dry_run_report(session_date=day, unsupervised=list)
+
+
+@pytest.mark.parametrize("day", [date(2026, 10, 14), date(2026, 11, 27)], ids=["regular", "half-day"])
+def test_on_the_drill_date_only_the_bridge_is_not_planned(day):
+    session = market_session(day)
+    assert session is not None
+    usual = {plan.name for plan in plans_for(session)}
+    drill = plan_session(session, python=PYTHON, backend=BACKEND, drill_date=day)
+    assert {plan.name for plan in drill} == usual - {supervisor_module.BRIDGE_CHILD}
+    assert [plan.argv for plan in drill] == [plan.argv for plan in plans_for(session) if plan.name != supervisor_module.BRIDGE_CHILD]
+    report = dry_run_report(session_date=day, unsupervised=list, drill_date=day)
+    assert "DRILL MODE: bridge not planned" in report.splitlines()
+    assert "CHILD_START bridge" not in report and "paper_bridge.py" not in report
+    assert "CHILD_START screener" in report
+
+
+def test_run_refuses_a_drill_without_a_grant_for_the_deployed_engine(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(supervisor_module.Supervisor, "run",
+                        lambda self, session_date=None: pytest.fail("ran"))
+    code = supervisor_module.run_supervisor(
+        session_date=TUESDAY, user_paths=UserPaths(home=tmp_path), drill_date=TUESDAY,
+        drill_authority=lambda: "no active PAPER grant for the deployed engine code",
+    )
+    assert code == 1
+    assert "drill mode refused for 2026-10-13: no active PAPER grant" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []  # nothing started, no log written
+
+    code = supervisor_module.run_supervisor(session_date=TUESDAY, user_paths=UserPaths(home=tmp_path),
+                                            drill_date=date(2026, 10, 17))
+    assert code == 1 and "--drill-date 2026-10-17 is not an XNYS trading session" in capsys.readouterr().err
+
+
+async def _granted_database(path: Path, *, grant: bool) -> Path:
+    from config import cfg
+    from db.core import init_db
+    from trading.execution.promotion import grant_promotion
+
+    original = cfg.DB_PATH
+    cfg.DB_PATH = str(path)
+    try:
+        await init_db()
+        if grant:
+            await grant_promotion(strategy_name="MOMO_HOD_V2", account="DU1234567", actor="owner", reason="drill")
+    finally:
+        cfg.DB_PATH = original
+    return path
+
+
+def test_drill_authority_reads_the_grant_for_the_deployed_code_read_only(tmp_path):
+    from trading.operations.supervisor import drill_authority_problem
+
+    absent = tmp_path / "absent.db"
+    assert (drill_authority_problem(absent, account="DU1234567") or "").startswith("no autotrader database")
+    assert not absent.exists()
+    ungranted = asyncio.run(_granted_database(tmp_path / "ungranted.db", grant=False))
+    problem = drill_authority_problem(ungranted, account="DU1234567")
+    assert problem is not None and "no active PAPER grant for the deployed engine code" in problem
+    granted = asyncio.run(_granted_database(tmp_path / "granted.db", grant=True))
+    assert drill_authority_problem(granted, account="DU1234567") is None
+    assert drill_authority_problem(granted, account="DU7654321") is not None  # another account's grant is none
+
+
+def test_drill_mode_is_logged_and_planned_without_the_bridge(tmp_path, monkeypatch):
+    planned: list[tuple[str, ...]] = []
+
+    async def record(self, session_date=None):
+        session = market_session(session_date)
+        planned.extend(plan.name for plan in self._planner(session))
+        return 0
+
+    monkeypatch.setattr(supervisor_module.Supervisor, "run", record)
+    paths = UserPaths(home=tmp_path)
+    echo = io.StringIO()
+    code = supervisor_module.run_supervisor(session_date=TUESDAY, user_paths=paths, drill_date=TUESDAY, echo=echo,
+                          drill_authority=lambda: None, unsupervised=list)
+    assert code == 0
+    assert supervisor_module.BRIDGE_CHILD not in planned and "screener" in planned
+    assert any(line.endswith("DRILL_MODE date=2026-10-13 bridge=not-planned") for line in echo.getvalue().splitlines())
+
+
+def test_cli_drill_date_is_an_explicit_flag_only(monkeypatch):
+    from trading import cli
+
+    parser = cli._parser()
+    assert parser.parse_args(["run"]).drill_date is None
+    assert parser.parse_args(["run", "--drill-date", "2026-10-14"]).drill_date == date(2026, 10, 14)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(supervisor_module, "run_supervisor", lambda **kwargs: calls.append(kwargs) or 0)
+    assert cli.main(["run", "--drill-date", "2026-10-14"]) == 0
+    assert calls == [{"session_date": None, "drill_date": date(2026, 10, 14)}]
+    backend = Path(__file__).resolve().parents[1]
+    assert "drill" not in (backend / "trading/operations/settings.py").read_text().lower()  # no config key
+    for module in ("trading/operations/supervisor.py", "trading/cli.py"):  # no environment variable
+        assert re.search(r"(getenv|environ)[^\n]*drill", (backend / module).read_text(), re.I) is None
