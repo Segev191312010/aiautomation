@@ -2109,7 +2109,9 @@ class LiveExecutor:
         sell = bracket.legs.get("F")
         if sell is None:
             return "the flatten fallback cancelled target and stop and no market sell is working"
-        status = self.leg_status(bracket, "F") or sell.broker_status
+        # Only what IBKR reports now counts: a status persisted before a restart proves nothing once TWS
+        # no longer lists the order (third re-review, probe F).
+        status = self.leg_status(bracket, "F")
         if status in WORKING_ORDER_STATUSES or status == "Filled":
             return None  # working, or filled with its executions on the way
         if status is not None:
@@ -2117,6 +2119,9 @@ class LiveExecutor:
                     f" {status} at IBKR")
         if sell.state == "staged":
             return "the flatten fallback cancelled target and stop and its market sell was recorded but never sent"
+        if sell.broker_status in WORKING_ORDER_STATUSES or sell.broker_status == "Filled":
+            return (f"the flatten fallback cancelled target and stop and IBKR no longer reports its market sell"
+                    f" {sell.order_id} ({sell.broker_status} before the restart)")
         age = self.now() - sell.created_at
         if sell.state != "unknown" and age < FALLBACK_SELL_ACK_GRACE:
             return None  # placed moments ago: TWS's acknowledgement may still be on its way
@@ -2253,6 +2258,9 @@ class LiveExecutor:
     def expected_live_legs(self, bracket: BracketRecord) -> tuple[LegCode, ...]:
         if bracket.state == "working":
             return () if bracket.parent_cancel_requested else ("P", "T", "S")
+        if bracket.state == "open" and bracket.flatten_state == "selling":
+            sell = bracket.legs.get("F")  # a sent market sell IBKR must still report (probe F)
+            return ("F",) if sell is not None and sell.state == "sent" else ()
         if bracket.state != "open" or bracket.flatten_state not in ("none", "repricing", "repriced"):
             return ()
         legs: list[LegCode] = ["T", "S"]
@@ -2333,8 +2341,9 @@ class LiveExecutor:
                 findings.append(Finding("missing_order", f"missing:{leg.id}",
                                         f"{bracket.symbol}: {LEG_NAMES[code]} order {leg.order_id} is not reported by"
                                         " IBKR — check TWS"))
-            if expected and len(missing) == len(expected):
+            if expected and len(missing) == len(expected) and bracket.flatten_state != "selling":
                 # IBKR reports nothing of it: never managed or re-sent again; only the owner resolves it.
+                # (A fallback sell IBKR no longer reports is flagged UNPROTECTED instead, every tick.)
                 self.mark_attention(bracket, "not found at IBKR",
                                     message=f"{bracket.symbol}: bracket not found at IBKR — check TWS")
         for row in executions:

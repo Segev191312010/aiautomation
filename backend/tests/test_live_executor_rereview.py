@@ -626,3 +626,54 @@ async def test_rr2_e_a_recorded_but_unsent_fallback_sell_is_flagged_unprotected_
     assert ("CRITICAL", f"HELD: 100 sh UNPROTECTED — the flatten fallback cancelled target and stop and its market"
             f" sell {why}; act in TWS") in out
     assert ("CRITICAL", "HELD: still open per the execution ledger (100 sh) — act in TWS") not in out
+
+
+# ---- third re-review: probe F ------------------------------------------------------------------------------
+
+
+async def test_rr3_f_a_market_sell_tws_no_longer_reports_after_a_restart_is_unprotected(
+    tmp_path, monkeypatch
+) -> None:
+    h = await build(tmp_path, monkeypatch)
+    bracket = await open_bracket(h)
+    h.tws._cancel(h.tws.orders[(CLIENT_ID, 101)])
+    h.clock.value = ny(15, 45, 1)
+    await h.engine.tick()
+    assert sells(h) == [(103, "SELL", "MKT", 100)]
+    h.clock.advance(2)
+    await h.engine.tick()  # observe_legs persists the acknowledged status for the F leg
+    assert bracket.legs["F"].broker_status == "Submitted"
+    del h.tws.orders[(CLIENT_ID, 103)]  # TWS restarted and no longer knows the order
+
+    restarted = await h.restart(clock=Clock(ny(15, 47)))
+    restarted.events()
+    for _ in range(3):
+        restarted.clock.advance(5)
+        await restarted.engine.tick()
+
+    out = restarted.events()
+    # The probe trusted the persisted "Submitted": no flag, no finding, 100 sh bare until the close.
+    assert ("CRITICAL", "HELD: 100 sh UNPROTECTED — the flatten fallback cancelled target and stop and IBKR no"
+            " longer reports its market sell 103 (Submitted before the restart); act in TWS") in out
+    assert f"missing:{bracket.id}:F" in restarted.engine.findings  # entries pause until it is resolved
+    assert sells(h) == [(103, "SELL", "MKT", 100)]  # never sent again
+
+
+async def test_rr3_f_a_market_sell_tws_still_reports_after_a_restart_is_trusted(tmp_path, monkeypatch) -> None:
+    h = await build(tmp_path, monkeypatch)
+    bracket = await open_bracket(h)
+    h.tws._cancel(h.tws.orders[(CLIENT_ID, 101)])
+    h.clock.value = ny(15, 45, 1)
+    await h.engine.tick()
+    h.clock.advance(2)
+    await h.engine.tick()
+
+    restarted = await h.restart(clock=Clock(ny(15, 47)))
+    restarted.events()
+    await restarted.engine.tick()
+
+    assert not any("UNPROTECTED" in text for text in restarted.critical())
+    assert f"missing:{bracket.id}:F" not in restarted.engine.findings  # reqOpenOrders still lists it
+    h.tws.fill(103, 100, "49.90")
+    await restarted.engine.tick()
+    assert restarted.bracket("HELD").state == "closed"
