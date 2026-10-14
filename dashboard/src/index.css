@@ -394,7 +394,8 @@ code,
 .live-grid {
   display: grid;
   grid-template-columns: minmax(520px, 5fr) minmax(0, 4fr) minmax(0, 3fr);
-  grid-template-rows: minmax(340px, 3fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(210px, 1.4fr);
+  /* Row minimums sum to 820px so a 1080p window never scrolls the page; the panel scrolls inside. */
+  grid-template-rows: minmax(340px, 3fr) minmax(150px, 1fr) minmax(150px, 1fr) minmax(180px, 1.3fr);
   grid-template-areas:
     'screener chart chart'
     'screener signals orders'
