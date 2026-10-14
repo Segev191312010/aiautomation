@@ -156,14 +156,18 @@ The owner hears of it without any process migrating:
 Applied migrations are frozen (`tests/test_migration_freeze.py`): a schema
 change is always a new migration, never an edit. So a migration holds only
 what its phase uses: migration 13 adds `autotrader_manager_setups` (every
-setup the rules form; applied in production since the phase-0 deploy, so the
-owner's database is at 13), and migration 14 the PAPER execution engine's ledger
-(`autotrader_exec_*`, empty until the engine, reviewed and unwired on its own
-branch, runs a supervised drill; `backend/trading/storage/execution_ledger_schema.py`).
-Migration 15 holds phase 1's tables (the day universe, the IBKR contract facts
-and the signal outcomes) and migration 16 phase 2's
+setup the rules form; applied in production since the phase-0 deploy), and
+migration 14 the PAPER execution engine's ledger (`autotrader_exec_*`, empty
+until the engine, reviewed and unwired on its own branch, runs a supervised
+drill; `backend/trading/storage/execution_ledger_schema.py`). Migration 15
+holds phase 1's tables (the day universe, the IBKR contract facts and the
+signal outcomes) and migration 16 phase 2's
 (`backend/trading/storage/manager_schema.py`): plans, verdicts, managed
 decisions, the autopilot switch with its day latch, and the spend ledger.
+Migrations 14 to 16 are applied in production since the autopilot deploy
+after the 2026-10-13 close, so the owner's database is at 16 and every
+migration the code knows is frozen; the backup that deploy printed
+(`v13-to-v16`) is the restore target of a pre-session rollback.
 While a migration a command needs is pending (16 for `autotraderctl manager
 on|off|status`, `/autopilot` and `/plan`), that command refuses with a reply
 naming `autotraderctl db migrate`; nothing else changes.
