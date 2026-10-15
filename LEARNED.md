@@ -41,3 +41,6 @@
   `HOME` and `DB_PATH` pointed at temporary paths.
 - 2026-10-14: usage limits cut agents off mid-task; commit per slice and resume
   from `git status`/`git log`, never from memory of what was "about to" land.
+
+## Read-only SQLite opens in the data directory
+- `mode=ro` is safe on the live WAL database in its writable data directory: SQLite recreates a missing `-shm`. `immutable=1` returns a stale view of a WAL database with an un-checkpointed `-wal` ("no such table" on an existing table): use it only on a checkpointed copy.

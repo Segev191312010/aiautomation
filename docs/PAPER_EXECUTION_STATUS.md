@@ -126,7 +126,13 @@ Order sources:
   the AI day manager counts only `MOMO_HOD_V2` brackets toward MOMO's slots
   (`trading/manager/context.py`), so other identities' brackets never shrink
   its view from v7b on. Independent execution-safety re-read of the v7a.1
-  hunks: PENDING.
+  hunks (2026-10-15): **GO**, nothing on the order path. Two LOW
+  availability-only notes, fail-closed as shipped, to fold into the next
+  logic re-pin (not v7b, which is data-only): the opener's retry wraps only
+  `connect()`, not a CANTOPEN raised at the first statement; with the database
+  being replaced at that instant the two fence reads can add about one second
+  between the last expiry check and `placeOrder` (vs the 15 s TTL) — re-run
+  the expiry check after the fence reads.
 
 ## Still to do
 
