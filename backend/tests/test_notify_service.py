@@ -127,6 +127,15 @@ async def _no_hot_list(session_date: date) -> tuple[()]:
     return ()
 
 
+def _bridge_alive(clock: FakeTime) -> Callable[[], object]:
+    """A bridge heartbeat that is always current: the bridge is running."""
+
+    async def read() -> datetime:
+        return clock.now
+
+    return read
+
+
 def _environment(
     paths: UserPaths,
     telegram: FakeTelegram,
@@ -137,6 +146,7 @@ def _environment(
     configure_logging: bool = False,
     read_market_context=_no_market_context,
     read_hot_list=_no_hot_list,
+    read_bridge_heartbeat=None,
 ) -> NotifyEnvironment:
     return NotifyEnvironment(
         paths=paths,
@@ -149,6 +159,7 @@ def _environment(
         configure_logging=configure_logging,
         read_market_context=read_market_context,
         read_hot_list=read_hot_list,
+        read_bridge_heartbeat=read_bridge_heartbeat or _bridge_alive(clock),
     )
 
 
@@ -365,7 +376,8 @@ def _write_bridge_state(paths: UserPaths, entries: dict, *, legacy: bool = False
     else:
         path = paths.data_directory / "bridge" / f"{SESSION.isoformat()}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"submitted": entries}), encoding="utf-8")
+    document = {"schema": "paper-bridge-state.v5", "session_date": SESSION.isoformat(), "submitted": entries}
+    path.write_text(json.dumps(document), encoding="utf-8")
     return path
 
 
@@ -610,6 +622,140 @@ def test_a_log_created_while_the_notifier_was_down_is_read_from_its_start(tmp_pa
     restarted.close()
 
 
+def test_log_tailer_survives_the_1835_rename_rotation_and_never_replays_the_old_file(tmp_path):
+    path = tmp_path / "supervisor.log"
+    archive = tmp_path / "supervisor.log.2026-10-13"
+    path.write_text("from yesterday\n", encoding="utf-8")
+    tailer = LogTailer(path)
+    tailer.start(None)
+    _append(path, "before 1")()
+    assert tailer.poll() == ["before 1"]
+
+    # Rotation: the old file is renamed (a last line already in it) and, a moment
+    # later, a new file is created under the name.
+    _append(path, "before 2")()
+    path.rename(archive)
+    assert tailer.poll() == ["before 2"]  # the old file's unread tail, once
+    assert tailer.poll() == []  # no file under the name yet: nothing, no crash
+    path.write_text("after 1\n", encoding="utf-8")
+    assert tailer.poll() == ["after 1"]
+    _append(path, "after 2")()
+    # A writer that kept the old descriptor is past: the archive is never read again.
+    _append(archive, "late into the archive")()
+    assert tailer.poll() == ["after 2"]
+    assert tailer.poll() == []
+    import zlib
+
+    assert tailer.checkpoint() == {
+        "dev": path.stat().st_dev, "ino": path.stat().st_ino, "offset": len("after 1\nafter 2\n"),
+        # The new file's first bytes: its fingerprint across a copy-then-truncate.
+        "head": zlib.crc32(b"after 1\nafter 2\n"), "head_len": len("after 1\nafter 2\n"),
+    }
+    tailer.close()
+
+
+def test_log_tailer_survives_copy_then_truncate_rotation(tmp_path):
+    import shutil
+
+    path = tmp_path / "launchd.err.log"
+    path.write_text("old 1\nold 2\n", encoding="utf-8")
+    tailer = LogTailer(path)
+    tailer.start(None)
+    _append(path, "old 3")()
+    assert tailer.poll() == ["old 3"]
+    inode = path.stat().st_ino
+
+    # Copy, then truncate in place: the same file, now shorter than the read offset.
+    shutil.copyfile(path, tmp_path / "launchd.err.log.1")
+    with path.open("r+", encoding="utf-8") as stream:
+        stream.truncate(0)
+    _append(path, "new 1")()
+    assert path.stat().st_ino == inode
+    assert tailer.poll() == ["new 1"]
+    _append(path, "new 2")()
+    assert tailer.poll() == ["new 2"]
+
+    # Truncated again, and regrown past the read offset before the next poll:
+    # the size alone cannot tell, the file's first bytes can.
+    shutil.copyfile(path, tmp_path / "launchd.err.log.2")
+    with path.open("r+", encoding="utf-8") as stream:
+        stream.truncate(0)
+    regrown = [f"2026-10-14T22:35:{second:02d}+00:00 telegram poll ok" for second in range(3)]
+    _append(path, *regrown)()
+    assert path.stat().st_size > len("new 1\nnew 2\n")
+    assert tailer.poll() == regrown
+    tailer.close()
+
+
+def test_a_rotation_while_the_notifier_was_down_resumes_at_the_new_files_start(tmp_path):
+    path = tmp_path / "bridge.log"
+    path.write_text("", encoding="utf-8")
+    first = LogTailer(path)
+    first.start(None)
+    _append(path, "10:00:00 ET  SENT A (orb): BUY 1 @ 1.00")()
+    assert first.poll() == ["10:00:00 ET  SENT A (orb): BUY 1 @ 1.00"]
+    checkpoint = first.checkpoint()
+    first.close()
+
+    # Renamed and recreated while down: only the new file is read, from its start.
+    _append(path, "10:01:00 ET  never seen: written after the checkpoint, then archived")()
+    path.rename(tmp_path / "bridge.log.1")
+    path.write_text("10:05:00 ET  FILL A: 1/1 sh @ 1.00 (orb)\n", encoding="utf-8")
+    renamed = LogTailer(path)
+    renamed.start(checkpoint)
+    assert renamed.poll() == ["10:05:00 ET  FILL A: 1/1 sh @ 1.00 (orb)"]
+    checkpoint = renamed.checkpoint()
+    renamed.close()
+
+    # Copied and truncated while down: same file, shorter than the checkpoint.
+    with path.open("r+", encoding="utf-8") as stream:
+        stream.truncate(0)
+    _append(path, "10:09:00 ET  EXIT A")()
+    truncated = LogTailer(path)
+    truncated.start(checkpoint)
+    assert truncated.poll() == ["10:09:00 ET  EXIT A"]
+    checkpoint = truncated.checkpoint()
+    truncated.close()
+
+    # Copied, truncated and regrown past the checkpoint while down: the
+    # fingerprint differs, so the file is read from its start, not mid-line.
+    with path.open("r+", encoding="utf-8") as stream:
+        stream.truncate(0)
+    _append(path, "10:30:00 ET  SENT B (orb): BUY 2 @ 2.00", "10:31:00 ET  FILL B: 2/2 sh @ 2.00 (orb)")()
+    assert path.stat().st_size > checkpoint["offset"]
+    regrown = LogTailer(path)
+    regrown.start(checkpoint)
+    assert regrown.poll() == ["10:30:00 ET  SENT B (orb): BUY 2 @ 2.00", "10:31:00 ET  FILL B: 2/2 sh @ 2.00 (orb)"]
+    regrown.close()
+    # A checkpoint saved before the fingerprint existed still resumes.
+    legacy = {key: checkpoint[key] for key in ("dev", "ino", "offset")}
+    _append(path, "10:40:00 ET  EXIT B")()
+    plain = LogTailer(path)
+    plain.start({**legacy, "offset": path.stat().st_size - len("10:40:00 ET  EXIT B\n")})
+    assert plain.poll() == ["10:40:00 ET  EXIT B"]
+    plain.close()
+
+
+def test_log_tailer_never_crashes_on_a_vanished_unreadable_or_replaced_path(tmp_path, caplog):
+    path = tmp_path / "momo.log"
+    path.write_text("x\n", encoding="utf-8")
+    tailer = LogTailer(path)
+    tailer.start(None)
+    path.unlink()
+    assert tailer.poll() == []
+    path.mkdir()  # something else took the name
+    assert tailer.poll() == []
+    path.rmdir()
+    path.write_text("y\n", encoding="utf-8")
+    path.chmod(0)
+    try:
+        assert tailer.poll() == [] and tailer.poll() == []
+    finally:
+        path.chmod(0o600)
+    assert tailer.poll() == ["y"]
+    tailer.close()
+
+
 # --------------------------------------------------------------------------
 # e. Daily report
 # --------------------------------------------------------------------------
@@ -675,6 +821,22 @@ async def test_daily_report_counts_outcomes_trades_ai_cost_and_screener(tmp_path
         "AI: 3 Claude reviews · $0.14",
         "Market at close: Risk-off · S&P -1.2% · Nasdaq -1.6% · 120↑/269↓ (15:59:20 ET)",
         "Screener: last snapshot 15:59:43 ET",
+        "",
+        "OPS",
+        "• Restarts today: unknown (no supervisor.log)",
+        "• Suspensions/storms: none",
+        # Built outside the notifier (the phone's /report): no Gateway counts here.
+        "• Gateway: not counted here (the notifier's 16:05 report has it)",
+        "• Refusals: none",
+        "• Fenced: none",
+        # GHI needs attention but never bought a share: the bridge calls that flat.
+        "• Close: flat at 16:05 ET",
+        "• GAP_GO_V2: 0 trades · P&L $0.00",
+        "• MOMO_HOD_V2: 0 trades · P&L $0.00",
+        "• ORB_V2: 0 trades · P&L $0.00",
+        "• VWAP_PB_V2: 0 trades · P&L $0.00",
+        # Brackets written before bridge v7 carry only the family name.
+        "• momo: 2 trades · P&L -$204.59",
     ]
 
 
@@ -705,6 +867,144 @@ async def test_daily_report_falls_back_to_the_legacy_bridge_file_for_this_date(t
     assert "Screener: last snapshot none today" in lines
     assert "AI: 0 Claude reviews · $0.00" in lines
     assert "Market at close: unavailable" in lines
+
+
+def test_the_close_line_names_a_bridge_not_flat_at_its_check_and_a_late_flatten():
+    from tests.test_paper_bridge import pb as bridge
+    from trading.operations.notify_service import (
+        FLATTEN_BEFORE_CLOSE,
+        VERIFY_BEFORE_CLOSE,
+        close_line,
+    )
+
+    # The bridge's own checkpoints: flatten at close - 15 min, flat check at close - 10 min.
+    assert (FLATTEN_BEFORE_CLOSE, VERIFY_BEFORE_CLOSE) == (bridge.FLATTEN_BEFORE_CLOSE, bridge.VERIFY_BEFORE_CLOSE)
+    held = {"symbol": "ZZZ", "status": "open", "filled": 100, "exit_filled": 0}
+    flattened = {**held, "flatten_attempted": True}
+    closed = {"symbol": "DEF", "status": "closed", "filled": 50, "exit_filled": 50}
+
+    assert close_line(SESSION, [held], now=_et(15, 49)) == (
+        "• Close: not checked yet (the bridge checks it is flat at 15:50 ET)"
+    )
+    assert close_line(SESSION, [closed], now=_et(16, 5)) == "• Close: flat at 16:05 ET"
+    assert close_line(SESSION, [closed], now=_et(16, 5), held_at_verify="") == "• Close: flat at 15:50 ET"
+    # Live 2026-10-15: the Mac slept 14:47-16:12 ET. Built at wake, before the late flatten...
+    assert close_line(SESSION, [held], now=_et(16, 12)) == (
+        "• Close: ⚠️ bridge not flat at 15:50 ET — ZZZ 100 sh; flatten not run (due 15:45 ET);"
+        " still open at 16:12 ET"
+    )
+    # ...or after it.
+    assert close_line(SESSION, [flattened], now=_et(16, 13), flatten_at=_et(16, 12, 20)) == (
+        "• Close: ⚠️ bridge not flat at 15:50 ET — ZZZ 100 sh; flatten ran late at 16:12 ET"
+        " (due 15:45 ET); still open at 16:13 ET"
+    )
+    # Seen at the check, flattened on time, flat by the report.
+    assert close_line(
+        SESSION, [closed], now=_et(16, 5), held_at_verify="ZZZ 100 sh", flatten_at=_et(15, 45, 2)
+    ) == "• Close: ⚠️ bridge not flat at 15:50 ET — ZZZ 100 sh; flatten ran 15:45 ET; flat by 16:05 ET"
+    # A half day closes at 13:00: flatten 12:45, check 12:50.
+    half_day = date(2026, 11, 27)
+    at = datetime(2026, 11, 27, 13, 5, tzinfo=MARKET_TIMEZONE)
+    assert close_line(half_day, [held], now=at) == (
+        "• Close: ⚠️ bridge not flat at 12:50 ET — ZZZ 100 sh; flatten not run (due 12:45 ET);"
+        " still open at 13:05 ET"
+    )
+    # A state file that cannot be read never reads as flat (no brackets is not "flat").
+    unreadable = "bridge state unreadable (JSONDecodeError)"
+    assert close_line(SESSION, [], now=_et(16, 5), problem=unreadable) == (
+        "• Close: ⚠️ unknown (bridge state unreadable (JSONDecodeError))"
+    )
+    assert close_line(SESSION, [], now=_et(16, 5), held_at_verify="ZZZ 100 sh", problem=unreadable) == (
+        "• Close: ⚠️ unknown (bridge state unreadable (JSONDecodeError)); at 15:50 ET the state showed ZZZ 100 sh"
+    )
+    assert close_line(SESSION, [], now=_et(16, 5), held_at_verify="", problem=unreadable).endswith(
+        "; at 15:50 ET the state showed flat"
+    )
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_bridge_state_makes_the_ops_close_line_unknown_not_flat(tmp_path, monkeypatch):
+    await _use_database(tmp_path, monkeypatch)
+    paths = UserPaths(home=tmp_path / "home")
+    path = _write_bridge_state(paths, {})
+    path.write_text("{not json", encoding="utf-8")
+
+    lines = format_daily_report(
+        await collect_daily_report(SESSION, paths, read_market_context=_no_market_context, now=_et(16, 5))
+    ).splitlines()
+
+    assert "• Close: ⚠️ unknown (bridge state unreadable (JSONDecodeError))" in lines
+    assert "• Per identity: unavailable (bridge state unreadable (JSONDecodeError))" in lines
+    assert not any(line.startswith("• Close: flat") for line in lines)
+
+
+@pytest.mark.anyio
+async def test_the_1605_report_ends_with_an_ops_section(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from trading.operations.notify_service import OpsCounters
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    await _use_database(tmp_path, monkeypatch)
+    paths = UserPaths(home=tmp_path / "home")
+    paths.log_directory.mkdir(parents=True, exist_ok=True)
+    (paths.log_directory / "supervisor.log").write_text("\n".join([
+        "2026-10-12T20:00:00+00:00 CHILD_START bridge pid=10",  # yesterday
+        "2026-10-13T03:59:00+00:00 CHILD_START telegram pid=11",  # 23:59 ET yesterday
+        "2026-10-13T03:59:30+00:00 CHILD_SUSPENDED orb-v2 count=6 window=30m",  # yesterday too
+        "2026-10-13T04:01:00+00:00 CHILD_START telegram pid=12",  # 00:01 ET today
+        "2026-10-13T13:25:00+00:00 LAUNCH_REFUSED bridge code=78 reason=unreviewed",
+        "2026-10-13T13:31:00+00:00 CHILD_START bridge pid=20",
+        "2026-10-13T13:41:00+00:00 CHILD_EXIT bridge code=75 restart_in=300",
+        "2026-10-13T13:46:00+00:00 CHILD_START bridge pid=21",
+        "2026-10-13T13:55:00+00:00 CHILD_START momo pid=30",
+        "2026-10-13T14:42:00+00:00 CHILD_SUSPENDED momo count=6 window=30m",
+        "2026-10-13T14:50:00+00:00 CHILD_RESUMED momo reason=port_open",
+        "2026-10-13T15:05:00+00:00 CHILD_RESTART_STORM bridge count=6 window=30m",
+    ]) + "\n", encoding="utf-8")
+    store = SQLitePaperKillStore()
+    await store.stop(reason="sentinel: daily loss 1.30 R > 1.25 R (realized -$130.00)", identity="ORB_V2")
+    await store.stop(reason="telegram /halt by owner", identity="VWAP_PB_V2")
+    await store.resume(reason="owner: checked", identity="VWAP_PB_V2")
+    _write_bridge_state(paths, {
+        "m1": _bracket("AAA", "closed", strategy_name="MOMO_HOD_V2", filled=100, exit_filled=100,
+                       realized_pnl="120.50"),
+        "m2": _bracket("ZZZ", "open", strategy_name="MOMO_HOD_V2", filled=100, flatten_attempted=True),
+        "o1": _bracket("BBB", "closed", strategy_name="ORB_V2", filled=100, exit_filled=100,
+                       realized_pnl="-130.00"),
+        "v1": _bracket("CCC", "cancelled", strategy_name="VWAP_PB_V2"),
+        "g1": _bracket("DDD", "skipped", strategy_name="GAP_GO_V2", skip_reason="identity_stopped:GAP_GO_V2"),
+    })
+    counters = OpsCounters(
+        gateway_outages=2, gateway_unreachable_seconds=1990, gateway_flaps=3, preflight_refused=1,
+        held_at_verify="ZZZ 100 sh", flatten_seen_at=_et(16, 2, 1),
+    )
+
+    report = await collect_daily_report(
+        SESSION, paths, read_market_context=_no_market_context, now=_et(16, 5), ops_counters=counters
+    )
+    lines = format_daily_report(report).splitlines()
+
+    assert lines[lines.index("OPS") - 1:] == [
+        "",
+        "OPS",
+        "• Restarts today: bridge=2 momo=1 telegram=1",
+        "• Suspensions/storms: momo suspended 10:42 ET; bridge restart storm 11:05 ET",
+        "• Gateway: 2 outages, 34 min unreachable, 3 flaps",
+        "• Refusals: bridge LAUNCH_REFUSED unreviewed 09:25 ET; PREFLIGHT_REFUSED ×1 (bridge.log)",
+        "• Fenced: ORB_V2 (sentinel: daily loss 1.30 R > 1.25 R (realized -$130.00))",
+        "• Close: ⚠️ bridge not flat at 15:50 ET — ZZZ 100 sh; flatten ran late at 16:02 ET"
+        " (due 15:45 ET); still open at 16:05 ET: ZZZ 100 sh",
+        "• GAP_GO_V2: 0 trades · P&L $0.00",
+        "• MOMO_HOD_V2: 2 trades · P&L +$120.50",
+        "• ORB_V2: 1 trade · P&L -$130.00",
+        "• VWAP_PB_V2: 0 trades · P&L $0.00",
+    ]
+    # An outage still open at the report says so.
+    still_down = replace(counters, gateway_outages=1, gateway_unreachable_seconds=600, gateway_flaps=0,
+                         gateway_down_since=_et(15, 55))
+    lines = format_daily_report(replace(report, ops=replace(report.ops, counters=still_down))).splitlines()
+    assert "• Gateway: 1 outage, 10 min unreachable, 0 flaps; still unreachable since 15:55 ET" in lines
 
 
 # --------------------------------------------------------------------------
@@ -1226,6 +1526,8 @@ async def _gateway_logs(tmp_path: Path, monkeypatch, caplog, *, until) -> UserPa
     logs.mkdir(parents=True, exist_ok=True)
     for name in ("bridge.log", "screener.log", "supervisor.log", "orb-v2.log", "gap-v2.log", "momo.log"):
         (logs / name).write_text("")
+    # The bridge's (empty) state for the day: the Sentinel can see (heartbeat: _environment).
+    _write_bridge_state(paths, {})
     monkeypatch.setattr(notify_service, "SESSION_END", until)
     return paths
 
@@ -1470,3 +1772,311 @@ def test_real_decisions_are_exactly_the_sendable_identities(monkeypatch):
     monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))
     assert is_real_decision(decision("ORB_V2"))  # v7b: the grant reaches the phone at once
     assert not is_real_decision(decision("VWAP_PB_V2"))
+
+
+# --------------------------------------------------------------------------
+# j-l. The Sentinel, the fences at start, the OPS counts (T-6, T-9)
+# --------------------------------------------------------------------------
+
+
+def _set_written(path: Path, moment: datetime) -> None:
+    import os
+
+    os.utime(path, (moment.timestamp(), moment.timestamp()))
+
+
+def _fence_rows(database: Path) -> dict[str, tuple[int, str]]:
+    import sqlite3
+
+    with sqlite3.connect(database) as connection:
+        return {
+            name: (stopped, reason)
+            for name, stopped, reason in connection.execute(
+                "SELECT name, stopped, reason FROM autotrader_execution_fences"
+            )
+        }
+
+
+async def _notify_day(tmp_path: Path, monkeypatch) -> UserPaths:
+    await _use_database(tmp_path, monkeypatch)
+    paths = UserPaths(home=tmp_path / "home")
+    save_chat_id(telegram_config_file(paths), CHAT_ID)
+    paths.log_directory.mkdir(parents=True, exist_ok=True)
+    for name in ("bridge.log", "screener.log", "supervisor.log"):
+        (paths.log_directory / name).write_text("")
+    return paths
+
+
+@pytest.mark.anyio
+async def test_the_sentinel_fences_from_the_notifier_once_and_a_restart_keeps_it(tmp_path, monkeypatch):
+    from datetime import time
+
+    from trading.operations import notify_service
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    _write_bridge_state(paths, {
+        "orb": _bracket("ABC", "closed", strategy="orb", strategy_name="ORB_V2", entry="50.00",
+                        stop="49.00", filled=100, exit_filled=100, realized_pnl="-130.00"),
+    })
+    monkeypatch.setattr(notify_service, "SESSION_END", time(10, 10))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, FakeTime(_et(10, 0)))) == 0
+
+    fence = (
+        "⛔ auto-fence ORB_V2: daily loss 1.30 R > 1.25 R (realized -$130.00) — new entries blocked;"
+        " resume: autotraderctl paper resume --identity ORB_V2"
+    )
+    assert [text for text in telegram.sent() if "auto-fence" in text] == [fence]
+    from config import cfg
+
+    assert _fence_rows(Path(cfg.DB_PATH)) == {
+        "paper:ORB_V2": (1, "sentinel: daily loss 1.30 R > 1.25 R (realized -$130.00)")
+    }
+    saved = json.loads(state_file(paths, SESSION).read_text(encoding="utf-8"))
+    assert "sentinel_fence:ORB_V2" in saved["alerts"]
+
+    # A restart the same day neither fences again nor announces its own fence as news.
+    monkeypatch.setattr(notify_service, "SESSION_END", time(10, 20))
+    restarted = FakeTelegram()
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, FakeTime(_et(10, 10)))) == 0
+    assert not any("auto-fence" in text or "Fenced at start" in text for text in restarted.sent())
+
+
+@pytest.mark.anyio
+async def test_fenced_identities_are_announced_once_at_the_0755_start(tmp_path, monkeypatch):
+    import sqlite3
+    from datetime import time
+
+    from config import cfg
+    from trading.operations import notify_service
+    from trading.operations.notify_service import fences_at_start_text
+    from trading.operations.sentinel import replay_mismatch_reason  # the nightly replay's reason
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    store = SQLitePaperKillStore()
+    # Last night's replay fenced ORB_V2; the owner's VWAP_PB_V2 fence was resumed.
+    await store.stop(reason=replay_mismatch_reason(2), identity="ORB_V2")
+    await store.stop(reason="telegram /halt by owner", identity="VWAP_PB_V2")
+    await store.resume(reason="owner: checked", identity="VWAP_PB_V2")
+    with sqlite3.connect(cfg.DB_PATH) as connection:
+        connection.execute(
+            "UPDATE autotrader_execution_fences SET updated_at='2026-10-12T22:31:05+00:00' WHERE name='paper:ORB_V2'"
+        )
+    monkeypatch.setattr(notify_service, "SESSION_END", time(8, 0))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, FakeTime(_et(7, 55)))) == 0
+
+    announcement = (
+        "⛔ Fenced at start — no new entries for:\n"
+        "• ORB_V2: sentinel: replay mismatch 2 decisions (since Mon 12 Oct 18:31 ET)\n"
+        "Resume is the owner's: autotraderctl paper resume --identity <IDENTITY>"
+    )
+    assert telegram.sent() == [startup_text(SESSION), announcement]
+    assert announcement == fences_at_start_text(
+        [("ORB_V2", "sentinel: replay mismatch 2 decisions", "2026-10-12T22:31:05+00:00")]
+    )
+    # Once per date.
+    again = FakeTelegram()
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, again, FakeTime(_et(7, 57)))) == 0
+    assert again.sent() == []
+
+
+@pytest.mark.anyio
+async def test_the_start_announcement_is_retried_while_the_fence_table_cannot_be_read(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from datetime import time
+    import sqlite3
+
+    from trading.operations import notify_service
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    await SQLitePaperKillStore().stop(reason="sentinel: replay mismatch 1 decisions", identity="GAP_GO_V2")
+
+    class Locked(SQLitePaperKillStore):
+        """``database is locked`` for the first two reads (07:55 start, first retry)."""
+
+        failures = 2
+
+        async def identity_rows(self):
+            if self.failures:
+                self.failures -= 1
+                raise sqlite3.OperationalError("database is locked")
+            return await super().identity_rows()
+
+    store = Locked()
+    monkeypatch.setattr(notify_service, "SESSION_END", time(8, 0))
+    telegram = FakeTelegram()
+    env = _environment(paths, telegram, FakeTime(_et(7, 55)))
+    env = replace(env, fence_store=store)
+
+    assert await run_notifier(session_date=SESSION, env=env) == 0
+
+    assert store.failures == 0
+    announced = [text for text in telegram.sent() if text.startswith("⛔ Fenced at start")]
+    assert len(announced) == 1
+    assert "• GAP_GO_V2: sentinel: replay mismatch 1 decisions (since " in announced[0]
+
+
+@pytest.mark.anyio
+async def test_the_report_counts_the_days_outages_refusals_and_a_late_flatten(tmp_path, monkeypatch):
+    """A hung bridge: no state since 14:47 ET, open at the 15:50 check, flattened at 16:02."""
+    from datetime import time
+
+    from trading.operations import notify_service
+    from trading.operations.notify_service import NotifyState
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    # An earlier run today counted one outage of 10 minutes and two flaps.
+    earlier = NotifyState(path=state_file(paths, SESSION), session_date=SESSION)
+    earlier.counters = {"gateway_outages": 1, "gateway_unreachable_seconds": 600, "gateway_flaps": 2}
+    earlier.save()
+    held = _bracket("ZZZ", "open", strategy_name="MOMO_HOD_V2", entry="50.00", stop="49.00", filled=100)
+    state = _write_bridge_state(paths, {"m1": held})
+    _set_written(state, _et(14, 47))
+
+    def flatten() -> None:
+        _write_bridge_state(paths, {"m1": {**held, "flatten_attempted": True}})
+        _set_written(state, _et(16, 2))
+
+    clock = FakeTime(_et(15, 49, 30))
+    clock.at(_et(16, 1), _append(paths.log_directory / "bridge.log", "16:01:00 ET  CRITICAL PREFLIGHT_REFUSED caps: SOMEDAY_V2"))
+    clock.at(_et(16, 2), flatten)
+    monkeypatch.setattr(notify_service, "SESSION_END", time(16, 6))
+    telegram = FakeTelegram()
+
+    async def stuck() -> datetime:
+        return _et(14, 47)
+
+    env = _environment(paths, telegram, clock, read_bridge_heartbeat=stuck)
+    assert await run_notifier(session_date=SESSION, env=env) == 0
+
+    sent = telegram.sent()
+    blind = [text for text in sent if text.startswith("⚠️ sentinel blind")]
+    assert blind == [
+        "⚠️ sentinel blind since 14:47 ET — no bridge update for 62 min (state file and heartbeat);"
+        " no auto-fence while it cannot see"
+    ]
+    # After the bridge's window nothing is judged: no "sees again" for a bridge still stale.
+    assert not any(text.startswith("✅ sentinel") for text in sent)
+    (report,) = [text for text in sent if text.startswith("📊 Daily report")]
+    ops = report.splitlines()[report.splitlines().index("OPS"):]
+    assert ops[3:7] == [
+        "• Gateway: 1 outage, 10 min unreachable, 2 flaps",
+        "• Refusals: PREFLIGHT_REFUSED ×1 (bridge.log)",
+        "• Fenced: none",
+        "• Close: ⚠️ bridge not flat at 15:50 ET — ZZZ 100 sh; flatten ran late at 16:02 ET"
+        " (due 15:45 ET); still open at 16:05 ET: ZZZ 100 sh",
+    ]
+    assert "• MOMO_HOD_V2: 1 trade · P&L $0.00" in ops
+    saved = json.loads(state_file(paths, SESSION).read_text(encoding="utf-8"))
+    assert saved["counters"] == {
+        "gateway_outages": 1, "gateway_unreachable_seconds": 600, "gateway_flaps": 2, "preflight_refused": 1,
+    }
+    assert saved["alerts"]["ops_held_at_verify"] == "ZZZ 100 sh"
+    assert saved["alerts"]["ops_flatten_seen_at"] == _et(16, 2).isoformat()
+
+
+@pytest.mark.anyio
+async def test_a_sentinel_that_fails_is_paged_as_blind_every_half_hour(tmp_path, monkeypatch):
+    from datetime import time
+
+    from trading.operations import notify_service, sentinel
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    _write_bridge_state(paths, {})
+
+    async def broken(self, now):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(sentinel.Sentinel, "check", broken)
+    monkeypatch.setattr(notify_service, "SESSION_END", time(11, 5))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, FakeTime(_et(10, 0)))) == 0
+
+    assert [text for text in telegram.sent() if "sentinel" in text] == [
+        "⚠️ sentinel blind since 10:00 ET — its check failed (RuntimeError); no auto-fence while it cannot see",
+    ] * 3
+
+
+def _rotated(carried: list[str], marker_at: str, *, before: bool) -> list[str]:
+    marker = f"{marker_at} LOG_ROTATED date=2026-10-13 renamed=9 truncated=3 pruned=0 carried={len(carried)}"
+    return [*carried, marker] if before else [marker, *carried]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("before", [True, False], ids=["carried-before-marker", "carried-after-marker"])
+async def test_ops_counts_never_count_the_rotations_carried_lines_twice(tmp_path, monkeypatch, before):
+    from trading.operations.notify_service import collect_ops, without_carried
+
+    await _use_database(tmp_path, monkeypatch)
+    paths = UserPaths(home=tmp_path / "home")
+    logs = paths.log_directory
+    logs.mkdir(parents=True, exist_ok=True)
+    start = "2026-10-13T13:31:00+00:00 CHILD_START bridge pid=20"
+    suspended = "2026-10-13T14:42:00+00:00 CHILD_SUSPENDED momo count=6 window=30m"
+    # 18:35 ET: the day's file became supervisor.log.2026-10-13 ...
+    (logs / "supervisor.log.2026-10-13").write_text("\n".join([
+        "2026-10-13T04:01:00+00:00 CHILD_START telegram pid=12",
+        start,
+        "2026-10-13T13:46:00+00:00 CHILD_START bridge pid=21",
+        suspended,
+    ]) + "\n", encoding="utf-8")
+    # ... and the new file starts with its newest state lines, copied verbatim.
+    current = [
+        *_rotated([start, suspended], "2026-10-13T22:35:00+00:00", before=before),
+        "2026-10-13T22:40:00+00:00 CHILD_START screener pid=40",
+    ]
+    (logs / "supervisor.log").write_text("\n".join(current) + "\n", encoding="utf-8")
+    assert without_carried(current) == ["2026-10-13T22:40:00+00:00 CHILD_START screener pid=40"]
+
+    # The phone's /report after the rotation: the archive plus the new file, once each.
+    ops = await collect_ops(SESSION, paths, None, now=_et(19, 0))
+    assert ops.restarts == "bridge=2 screener=1 telegram=1"
+    assert ops.capped == ("momo suspended 10:42 ET",)
+
+
+@pytest.mark.anyio
+async def test_the_rotations_carried_lines_never_reach_the_phone_again(tmp_path, monkeypatch):
+    from datetime import time
+
+    from trading.operations import notify_service
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    _write_bridge_state(paths, {})
+    supervisor_log = paths.log_directory / "supervisor.log"
+    exit_line = "2026-10-13T18:00:00+00:00 CHILD_EXIT momo code=1 restart_in=300"
+    suspended = "2026-10-13T18:05:00+00:00 CHILD_SUSPENDED momo count=6 window=30m"
+    yesterday = "2026-10-12T20:00:00+00:00 CHILD_EXIT gap-v2 code=1 restart_in=300"
+
+    def rotate() -> None:
+        supervisor_log.rename(supervisor_log.with_name("supervisor.log.2026-10-13"))
+        supervisor_log.write_text("\n".join([
+            yesterday,  # carried before the marker (an older day's line)
+            "2026-10-13T18:40:00+00:00 LOG_ROTATED date=2026-10-13 renamed=9 truncated=3 pruned=0 carried=3",
+            exit_line,  # carried after the marker, verbatim
+            suspended,
+        ]) + "\n", encoding="utf-8")
+
+    clock = FakeTime(_et(13, 55))
+    clock.at(_et(14, 0), _append(supervisor_log, exit_line))
+    clock.at(_et(14, 5), _append(supervisor_log, suspended))
+    # Past both half-hour limits: a re-read copy would go out again.
+    clock.at(_et(14, 40), rotate)
+    clock.at(_et(14, 42), _append(supervisor_log, "2026-10-13T18:42:00+00:00 CHILD_EXIT orb-v2 code=1 restart_in=300"))
+    monkeypatch.setattr(notify_service, "SESSION_END", time(14, 45))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    # (No screener runs here: the Gateway alert is not under test.)
+    children = [text for text in telegram.sent() if text.startswith(("⚙️", "⛔")) and "IB Gateway" not in text]
+    assert children == [
+        "⚙️ momo exited (code 1), restarting in 300 s",
+        "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
+        "⚙️ orb-v2 exited (code 1), restarting in 300 s",
+    ]
