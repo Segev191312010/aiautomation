@@ -151,7 +151,8 @@ launchd  (LaunchAgent com.maccabi.autotrader-v1.shadow)
     └── heartbeat          [PLANNED] external dead-man's ping (always-on)
 ```
 
-**Restart policy** (`supervisor.py`): backoff 15 → 30 → 60 → 120 → 300 s, capped at 5 min, reset after 5 min healthy. A restart-count cap is `[PLANNED]` (P1).
+**Restart policy** (`supervisor.py`): backoff 15 → 30 → 60 → 120 → 300 s, capped at 5 min, reset after 5 min healthy.
+**Restart cap** `[NOW]`: exits are counted per child over a rolling 30 min, only while port 7497 answers (`CHILD_EXIT_UNCOUNTED <name> reason=port_closed` otherwise; always-on children always count). At 6, a scheduled child is suspended into a probe every 5 min (`CHILD_SUSPENDED`) and resumes when a probe stays up 5 min, the port reopens, or its window ends (`CHILD_RESUMED`). The bridge and always-on children are never suspended: they page `CHILD_RESTART_STORM` and keep their backoff.
 
 | Exit code | Meaning | What happens / what you do |
 |---|---|---|
@@ -433,7 +434,7 @@ EXPECT  PAPER kill switch: INACTIVE   (+ one line per identity row: identity <ID
 #### 4.3.2 `paper stop` (global)
 ```
 STATUS  [NOW]
-WHO     OWNER / AGENT+
+WHO     OWNER / AGENT+ (only when the owner asked for this exact stop in the current session; never unattended)
 EXAMPLE $CTL paper stop --reason "unattributed fills, investigating"
 EFFECT  Global fence stopped=1. Stop-only: there is no global resume.
 ```
@@ -441,7 +442,8 @@ EFFECT  Global fence stopped=1. Stop-only: there is no global resume.
 #### 4.3.3 `paper stop --identity`
 ```
 STATUS  [NOW]
-WHO     OWNER / AGENT+   (runtime auto-fence rules are [PLANNED], see Part 8)
+WHO     OWNER / AGENT+ (only when the owner asked for this exact stop in the current session; never unattended).
+        The runtime auto-fence (Part 8.4, [PLANNED]) is deterministic code with owner-set thresholds, not an agent action.
 EXAMPLE $CTL paper stop --identity ORB_V2 --reason "slippage 3x shadow on 2 fills"
 EFFECT  Row paper:ORB_V2 stopped=1 → next ORB_V2 entry skipped "identity_stopped:ORB_V2" (forwarded to the phone).
         Bridge connect line becomes CRITICAL while any identity row is stopped.
@@ -459,7 +461,7 @@ ERRORS  exit 2 without --identity (global resume does not exist)
 #### 4.3.5 `/closeall` (Telegram) — emergency flatten
 ```
 STATUS  [NOW]
-WHO     OWNER
+WHO     OWNER only (it sends orders; AGENTS.md: orders come only from deterministic code, and phone order commands only from the owner's pinned chat)
 USE     Mid-session emergency, together with `paper stop`. Never deploy as an emergency fix.
 ```
 
@@ -527,6 +529,8 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `TWS did not answer` / exit 75 | bridge.log | Gateway down or slow, restart loop |
 | `TWS PAPER handshake failed` | children | Gateway down |
 | `IBKR login active elsewhere` | screener/children | Competing phone/web login; market data refused |
+| `CHILD_EXIT_UNCOUNTED <name> reason=port_closed` | supervisor.log | Exit while the Gateway port was closed: not counted toward the cap |
+| `CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM` | supervisor.log | Restart cap (Part 2.2); each reaches the phone |
 
 ```bash
 tail -n 3  $L/supervisor.log
@@ -559,8 +563,18 @@ backend/.venv/bin/python -m pytest backend/tests/test_paper_bridge.py \
 
 # full suite (tests/conftest.py isolates HOME and DB_PATH; run from backend/)
 backend/.venv/bin/python -m pytest backend/tests -q -p no:cacheprovider
+
+# AGENTS.md quality gates — BEFORE ANY COMMIT (backend tests, pip-audit, git diff --check,
+# dashboard typecheck, build and tests):
+SKIP_DOCKER=1 scripts/run_quality_gates.sh
+# BEFORE SHIPPING (a deploy) — the same plus both Docker images; needs the Docker daemon,
+# so run it outside session hours:
+scripts/run_quality_gates.sh
 ```
-The ledger records the suite count for every reviewed commit; this document lists no baselines.
+In a worktree the script needs `backend/.venv/bin/{python,pytest,pip-audit}` and a real
+`dashboard/node_modules` directory (an ignored path: a symlink would show as untracked; an
+APFS clone `cp -cR` of the live checkout's modules is fine when the package files are unchanged).
+The ledger records the suite and gate results for every reviewed commit; this document lists no baselines.
 
 **Mutation check** (on a scratch copy, never the live tree): each mutation must make ≥ 1 test fail.
 Examples: prefix match restored · identity fence ignored · global cap hard-coded · entries/day ignores cancelled · `parse_ref` positional · duplicate spec name not refused · `identity_multiplier` returns 1 for a sendable name without a row · CAPS row dropped passes preflight · last entry hard-coded 15:30 on a 13:00 close · vwap-v2 slot moved into MOMO's pass.
@@ -575,8 +589,11 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | IB Gateway unreachable / reconnected alert; competing-login alert | `[NOW]` (904af38 A10) |
 | `/closeall`, `/close`, `/sell`, `/cancel`, `/stop <sym> <price>`, `/buy` | `[NOW]` owner orders |
 | `/status` (supervisor, bridge heartbeat, regime, kill switch, identity fences) | `[NOW]` |
-| `/status` extended (Gateway port, schema, launchd, recorder/replay, power), `/fences` | `[PLANNED]` P1 |
-| `/halt <IDENTITY>` + `/confirm <nonce>` (identity stop only, 60 s nonce; no resume from the phone) | `[PLANNED]` P1 |
+| `/status` extended (Gateway port, schema, LaunchAgent from the plist, recorder/replay, power, today's restarts), `/fences` | `[NOW]` |
+| `/halt <IDENTITY>` + `/confirm <code>` (identity stop only, 6-character code valid 60 s; no resume from the phone) | `[NOW]` |
+| Gateway unreachable alert with hysteresis (one pair per outage, flap count in the digest) | `[NOW]` |
+| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`) | `[NOW]` |
+| Overnight Gateway watch with quiet hours, external dead-man's switch, competing-login page | `[PLANNED]` P1-B |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
 
@@ -606,13 +623,17 @@ sntp time.apple.com      # abort any timed step if |offset| > 2 s
 | Read logs, status, git, DB read-only | ✓ | ✓ | ✓ | ✓ |
 | Build / test / mutate in worktrees and scratch copies | — | ✓ | ✓ | ✓ |
 | Run an independent review (separate agent) | — | ✓ | ✓ | ✓ |
-| `run --dry-run`, `--preflight`, `deploy --check` `[PLANNED]` | — | ✓ | ✓ | ✓ |
+| `run --dry-run`, `--preflight`, `deploy check` (read-only) | — | ✓ | ✓ | ✓ |
 | Deploy (merge/reset live tree, agent disable/enable) | — | ✗ | ✗ (P2 write half pending) | ✓ |
 | `db migrate` on live DB | — | ✗ | ✗ | ✓ |
-| `paper stop --identity`, `/halt` | `[PLANNED]` auto-fence rules | ✗ | ✓ | ✓ |
-| `paper stop` (global) / `/closeall` | — | ✗ | ✓ | ✓ |
+| `paper stop --identity` | `[PLANNED]` auto-fence rules | ✗ | ✓ (owner asked for this exact stop) | ✓ |
+| `/halt <IDENTITY>` (phone) | — | ✗ | ✗ | ✓ |
+| `paper stop` (global) | — | ✗ | ✓ (owner asked for this exact stop) | ✓ |
+| `/closeall` and every phone order command | — | ✗ | ✗ | ✓ |
 | `paper resume --identity` | ✗ | ✗ | only with exact identity typed by owner | ✓ |
-| Edit `paper_bridge.py` | — | ✓ in worktree + re-pin + ES review | ✓ same | ✓ |
+| Commit | — | only on a worktree branch, for work the owner asked for (an approved plan names it), after the quality gates | same | ✓ |
+| Push, or rewrite already-pushed history | ✗ | ✗ | ✓ when asked | ✓ |
+| Edit `paper_bridge.py` | — | only for work the owner asked for: worktree branch + re-pin in the same commit + ES review | same | ✓ |
 | Increase size / caps / add sendable identity | ✗ | implement on a branch **after** owner decision | same | decides |
 | Decrease size / caps | `[PLANNED]` within rules | propose | implement | ✓ |
 | Delete or hand-edit files on the live tree or under `$D` | ✗ | ✗ | ✗ | ✓ |
@@ -630,12 +651,14 @@ sntp time.apple.com      # abort any timed step if |offset| > 2 s
 2. Branch      worktree from the CURRENT deploy candidate (not from an older live sha)
 3. Build       smallest diff; logic and data in separate commits when the send path changes
 4. Test        targeted → full suite (isolated HOME) → mutation set
+               → SKIP_DOCKER=1 scripts/run_quality_gates.sh (AGENTS.md, before any commit)
 5. Re-pin      if paper_bridge.py changed: new sha into supervisor.py in the SAME commit
+               Commit only on the worktree branch, only for work the owner asked for
 6. Review      independent ES review of the diff vs the current pin → ledger verdict line
                naming the exact head (I-11); any later docs/reviews-only commit gets an addendum
 7. Rehearse    on a live-DB copy: dry run, preflight, fence stop/resume, rollback drill
 8. Owner reads the review awake
-9. Deploy      in the window, runbook 6.2
+9. Deploy      in the window, runbook 6.2, after the full gates incl. Docker passed on the candidate head
 10. Observe    one full real session before the next step that depends on it
 ```
 
@@ -645,9 +668,23 @@ Pattern to copy: **v7a** (identity-agnostic logic, MOMO-only data) → one obser
 
 Variables: `CANDIDATE` (branch), `EXPECTED_PARENT` (live sha now), `EXPECTED_PIN`, `SCOPE` (reviewed slices), `LEDGER=docs/reviews/<date>-ledger.md` (read from the candidate branch: the live tree may not have it).
 
+`autotraderctl deploy check` (read-only, from P1-A on) runs every STEP 0 check below and exits 78 on
+any refusal. **Run it from the candidate's worktree**, not from the live checkout: its schema check
+compares the database with the migrations of the code that runs it, so only the candidate's code
+notices a migration the candidate adds.
+
+```bash
+# from the candidate worktree's backend/:
+.venv/bin/python autotraderctl.py deploy check --candidate $CANDIDATE --repo /Users/salomon/aiautomation
+```
+
+A commit cannot contain its own sha, so in practice the ledger's verdict line names an earlier
+commit and every commit after it touches only `docs/reviews/` (I-11's exception); `deploy check`
+prints the matched line and those commits.
+
 ```bash
 # STEP 0 — pre-checks (abort on ANY mismatch)
-git -C .. show $CANDIDATE:$LEDGER | grep -E "<HEAD_SHA> verdict=GO"     # FIRST: the line must name the candidate head (I-11)
+git -C .. show $CANDIDATE:$LEDGER | grep -E "<VERDICT_SHA> verdict=GO"  # FIRST: then `git -C .. diff --name-only <VERDICT_SHA>..$CANDIDATE` touches only docs/reviews/ (I-11)
 git -C .. status --short                       # only known-benign entries
 git -C .. rev-parse --short HEAD               # == EXPECTED_PARENT
 PREV_SHA=$(git -C .. rev-parse HEAD); echo "$(date -Iseconds) $CANDIDATE PREV_SHA=$PREV_SHA" >> $L/deploys.log   # outside the tree
@@ -947,5 +984,8 @@ Resolved as stated; `AGENTS.md` wins wherever it speaks.
 | D-7 | Snapshot table, pin list, suite baselines | Already stale when written | Pointers to the ledger and status doc |
 | D-8 | Reports in Hebrew | Reports to date in English | Kept, marked editable by the owner |
 | D-9 | Ledger at `docs/ledger.md`, reports `docs/reviews/N1-…` | `docs/reviews/<date>-ledger.md`, `<date>-<subject>-review.md` | Real names |
-| D-10 | Runtime auto-fence as an agent permission | AGENTS.md: AI may only narrow | Auto-fence is deterministic code with owner thresholds; agents never run stop/resume |
+| D-10 | Runtime auto-fence as an agent permission | AGENTS.md: AI may only narrow | Auto-fence is deterministic code with owner thresholds; agents run `paper stop` only when the owner asked for that exact stop (AGENT+), never unattended; resume as 4.3.4 |
 | D-11 | "foreign positions count against the global cap" | `slots_used` counts unmanaged live **orders**; a bare position blocks its symbol | Corrected in 3.2 |
+| D-12 | Part 5 gave AGENT+ `/closeall`; 4.3.2–4.3.4 and D-10 disagreed on stop/resume | AGENTS.md: orders come only from deterministic code; phone order commands are the owner's | `/closeall` and phone orders OWNER only; stop AGENT+ only when asked; D-10 reworded (found by the v7b head re-read, 2026-10-15) |
+| D-13 | Part 5 / 6.1 let an unattended agent edit the bridge and commit | AGENTS.md: do not commit, push or rewrite history unless the owner asks | Commits only on worktree branches for work the owner asked for; push only when asked |
+| D-14 | 4.8 / 6.1 tested with pytest only | AGENTS.md: `SKIP_DOCKER=1 scripts/run_quality_gates.sh` before any commit, Docker gates before shipping | Added to 4.8, 6.1 and the deploy step |
