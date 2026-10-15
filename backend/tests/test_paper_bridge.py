@@ -3573,3 +3573,59 @@ def test_v7a_the_bridge_never_reconnects_in_process() -> None:
                 private_connect_callers.add(node.name)
     assert connect_callers == {"_connect"}
     assert private_connect_callers == {"_connected_session"}
+
+
+@pytest.mark.parametrize("row", [
+    dict(max_positions=0, max_entries_per_day=None, last_entry_before_close=timedelta(minutes=60)),
+    dict(max_positions=True, max_entries_per_day=None, last_entry_before_close=timedelta(minutes=60)),
+    dict(max_positions=1, max_entries_per_day=0, last_entry_before_close=timedelta(minutes=60)),
+    dict(max_positions=1, max_entries_per_day=None, last_entry_before_close=timedelta(0)),
+    dict(max_positions=1, max_entries_per_day=None, last_entry_before_close=timedelta(hours=7)),
+    dict(max_positions=1, max_entries_per_day=None, last_entry_before_close=60),
+])
+def test_v7a1_a_caps_row_that_could_widen_anything_is_refused(row: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        pb.Caps(**row)
+
+
+def test_v7a1_the_caps_table_is_read_only_and_valid() -> None:
+    with pytest.raises(TypeError):
+        pb.IDENTITY_CAPS["ORB_V2"] = pb.Caps(1, 1, timedelta(minutes=30))  # type: ignore[index]
+    with pytest.raises(TypeError):
+        del pb.IDENTITY_CAPS["MOMO_HOD_V2"]  # type: ignore[attr-defined]
+    for caps in pb.IDENTITY_CAPS.values():
+        pb.Caps(caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close)
+    assert pb.caps_problem() is None
+
+
+def test_v7a1_the_shared_read_only_opener_retries_a_transient_open_and_fails_closed_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute("CREATE TABLE autotrader_execution_fences (name TEXT PRIMARY KEY, stopped INTEGER)")
+        connection.commit()
+    real_connect = pb.sqlite3.connect
+    failures = {"left": 2}
+    calls: list[str] = []
+
+    def flaky(path: str, **kwargs: Any) -> Any:
+        calls.append(path)
+        if failures["left"]:
+            failures["left"] -= 1
+            raise sqlite3.OperationalError("unable to open database file")
+        return real_connect(path, **kwargs)
+
+    monkeypatch.setattr(pb.sqlite3, "connect", flaky)
+    monkeypatch.setattr(pb.time, "sleep", lambda _s: None)
+    assert pb.paper_kill_switch_active(db) is False  # two transient failures, then the real open
+    assert len(calls) == 3 and all(uri.endswith("?mode=ro") for uri in calls)
+
+    failures["left"] = 10  # never recovers: the last attempt raises, callers stay fail-closed
+    with pytest.raises(sqlite3.OperationalError):
+        pb.paper_kill_switch_active(db)
+
+    calls.clear()
+    with pytest.raises(sqlite3.OperationalError):
+        pb.paper_kill_switch_active(tmp_path / "missing.db")  # no file: no retry at all
+    assert len(calls) == 1

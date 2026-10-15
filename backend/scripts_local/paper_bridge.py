@@ -52,6 +52,7 @@ Safety rules (all enforced here because the shadow pipeline sizes per run):
   may send orders (no prefix: a prefix once gave ORB_V2 ORB_V1's cutoff). The
   name comes from the strategy version of the decision's run, never the run id.
   A sendable name without an IDENTITY_CAPS row is skipped (fail closed).
+  Caps rows are validated at import and the table is read-only at runtime.
 - The PAPER kill fence (name 'paper') and the identity's own fence (name
   'paper:<IDENTITY>') are checked before every entry; unreadable means stopped.
   An identity fence blocks only that identity's new entries; exits, the
@@ -123,7 +124,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from contextlib import closing
 import copy
 from dataclasses import asdict, dataclass, field, replace
@@ -140,7 +141,7 @@ import threading
 import time
 import tomllib
 import traceback
-from types import FrameType, ModuleType
+from types import FrameType, MappingProxyType, ModuleType
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -195,11 +196,27 @@ STRATEGY_CUTOFFS = {"momo": clock_time(15, 0), "orb": clock_time(12, 0)}
 
 @dataclass(frozen=True)
 class Caps:
-    """One identity's entry limits; its last entry is the session close minus the offset."""
+    """One identity's entry limits; its last entry is the session close minus the offset.
+
+    A row is refused at import when it could widen anything: at least one
+    position, at least one entry per day when capped, and a last-entry offset
+    inside the session (0 < offset <= 6 h). The table is read-only: nothing at
+    runtime may add, drop or change a row (a test and --preflight pin it).
+    """
 
     max_positions: int
     max_entries_per_day: int | None
     last_entry_before_close: timedelta
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_positions, bool) or not isinstance(self.max_positions, int) or self.max_positions < 1:
+            raise ValueError("max_positions must be an int >= 1")
+        entries = self.max_entries_per_day
+        if entries is not None and (isinstance(entries, bool) or not isinstance(entries, int) or entries < 1):
+            raise ValueError("max_entries_per_day must be None or an int >= 1")
+        offset = self.last_entry_before_close
+        if not isinstance(offset, timedelta) or not timedelta(0) < offset <= timedelta(hours=6):
+            raise ValueError("last_entry_before_close must be a timedelta in (0, 6 h]")
 
 
 # Exactly the ledger names the owner granted PAPER order authority
@@ -208,10 +225,10 @@ class Caps:
 # names nobody granted. Every sendable name needs a caps row; --preflight and
 # a test refuse a mismatch, and the gate skips an uncapped name (fail closed).
 SENDABLE_STRATEGY_NAMES = frozenset({"MOMO_HOD_V2"})
-IDENTITY_CAPS: dict[str, Caps] = {
+IDENTITY_CAPS: Mapping[str, Caps] = MappingProxyType({
     "MOMO_HOD_V2": Caps(max_positions=3, max_entries_per_day=None,
                         last_entry_before_close=timedelta(minutes=60)),  # 15:00 on a full day
-}
+})
 SHADOW_ONLY = "shadow-only strategy"
 TICK = Decimal("0.01")
 FLATTEN_DISCOUNT = Decimal("0.995")
@@ -768,8 +785,28 @@ class StateStore:
 # ---- ledger reads (read-only) ----------------------------------------------------
 
 
+READ_ONLY_OPEN_RETRIES = 3  # a database being replaced or re-journaled is retried, briefly
+READ_ONLY_OPEN_RETRY_S = 0.25
+
+
 def _read_only(db: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"{db.expanduser().resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    """A read-only connection (``mode=ro``), shared by every ledger read, the fences and --preflight.
+
+    "unable to open database file" while the file exists is retried a few times
+    (a migration or backup replacing the file, a WAL being re-journaled); a
+    missing file or any other error raises at once, so every caller stays
+    fail-closed on a database that is really unreadable.
+    """
+    uri = f"{db.expanduser().resolve().as_uri()}?mode=ro"
+    for attempt in range(READ_ONLY_OPEN_RETRIES):
+        try:
+            return sqlite3.connect(uri, uri=True, timeout=5)
+        except sqlite3.OperationalError as exc:
+            transient = "unable to open database file" in str(exc) and db.expanduser().is_file()
+            if not transient or attempt == READ_ONLY_OPEN_RETRIES - 1:
+                raise
+            time.sleep(READ_ONLY_OPEN_RETRY_S)
+    raise AssertionError("unreachable")
 
 
 DECISIONS_SQL = """

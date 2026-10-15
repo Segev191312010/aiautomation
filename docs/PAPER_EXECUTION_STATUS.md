@@ -112,10 +112,21 @@ Order sources:
   identity-fence and caps SKIPs, F-4 LOW a registry check that cannot run is
   a refusal token, F-5 LOW a hung preflight keeps its partial output, F-6 LOW
   Telegram status names the identity fences that are on, F-7 LOW a
-  tautological test assertion. Deferred to the v7b re-pin: F-3 LOW
-  (validate `Caps` values and freeze `IDENTITY_CAPS`). Deploy only
-  pre-session, never mid-session (a bracket placed by v5 would be re-encoded
-  with the v7a orderRef on a modify).
+  tautological test assertion. Deploy only pre-session, never mid-session (a
+  bracket placed by v5 would be re-encoded with the v7a orderRef on a modify).
+- 2026-10-15: bridge v7a.1 (small logic follow-up, deployed with v7a), sha256
+  9790eb3c1e81a3c74ceaab5245570ea07ee9cbfd407a0fa167d51015456af01f: F-3 — `Caps` rows are validated at import (positions >= 1, entries
+  per day None or >= 1, last-entry offset in (0, 6 h]) and `IDENTITY_CAPS` is a
+  read-only mapping; the shared read-only opener `_read_only` retries a
+  transient "unable to open database file" three times at 250 ms while the
+  file exists and raises at once otherwise, so --preflight and the session's
+  fence reads keep one fail-closed path (the LEARNED 10-14 artefact did not
+  reproduce on SQLite 3.50.4: a `mode=ro` open of a WAL database with its -shm
+  absent succeeds in a writable directory and fails only in a read-only one);
+  the AI day manager counts only `MOMO_HOD_V2` brackets toward MOMO's slots
+  (`trading/manager/context.py`), so other identities' brackets never shrink
+  its view from v7b on. Independent execution-safety re-read of the v7a.1
+  hunks: PENDING.
 
 ## Still to do
 

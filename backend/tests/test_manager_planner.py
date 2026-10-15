@@ -668,3 +668,18 @@ def test_the_managers_lines_reach_shadow_log_with_timestamps(tmp_path):
     stamp = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4}"
     assert re.search(stamp + r" CRITICAL autotrader\.shadow\.manager\.managed manager_widening_detected: ", text)
     assert re.search(stamp + r" ERROR autotrader\.shadow\.manager\.planner plan 20261013-0920-1 failed", text)
+
+
+def test_only_the_managed_identitys_brackets_occupy_its_slots():
+    trades = (
+        {"symbol": "AAA", "status": "open", "strategy_name": "MOMO_HOD_V2", "realized_pnl": "0"},
+        {"symbol": "BBB", "status": "sent", "strategy_name": "ORB_V2", "realized_pnl": "0"},
+        {"symbol": "CCC", "status": "closed", "strategy_name": "VWAP_PB_V2", "realized_pnl": "-12.5"},
+        {"symbol": "DDD", "status": "open", "strategy_name": "", "strategy": "momo", "realized_pnl": "0"},
+        {"symbol": "EEE", "status": "skipped", "strategy_name": "GAP_GO_V2", "skip_reason": "daily loss limit reached"},
+    )
+    summary = bridge_summary(trades, None)
+    assert summary["active"] == ["AAA", "DDD"]  # ORB_V2's working entry is not MOMO's slot
+    assert summary["slots_used"] == 2 and summary["slots_free"] == BRIDGE_MAX_OPEN - 2
+    assert summary["realized_pnl_usd"] == "-12.5"  # the loss is account-wide
+    assert summary["day_stop"] is True

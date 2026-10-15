@@ -39,8 +39,11 @@ from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
 
 logger = logging.getLogger("autotrader.shadow.manager.context")
 
-# MOMO_HOD_V2's position cap in the pinned bridge (IDENTITY_CAPS, bridge v7a);
-# a test loads the bridge to keep the two equal.
+# The identity the manager narrows; only its brackets occupy its slots. Other
+# sendable identities (bridge v7b) have their own caps and never count here.
+MANAGED_IDENTITY = "MOMO_HOD_V2"
+# MANAGED_IDENTITY's position cap in the pinned bridge (IDENTITY_CAPS, bridge
+# v7a); a test loads the bridge to keep the two equal.
 BRIDGE_MAX_OPEN = 3
 BRIDGE_ACTIVE_STATUSES = frozenset({"pending", "sent", "open", "needs_attention"})
 DAILY_LOSS_SKIP = "daily loss limit reached"
@@ -283,6 +286,13 @@ def default_bridge_reader(session_date: date) -> tuple[Sequence[Mapping[str, Any
     return trades, problem
 
 
+def _is_managed_identity(trade: Mapping[str, Any]) -> bool:
+    """A bracket of MANAGED_IDENTITY. A row without a name is MOMO's: before bridge v7
+    nothing else sent, so pre-v7 state files name no identity."""
+    name = str(trade.get("strategy_name") or "").strip()
+    return name == MANAGED_IDENTITY or not name
+
+
 def bridge_summary(trades: Sequence[Mapping[str, Any]], problem: str | None) -> dict[str, object]:
     """Realized P&L, open slots and whether the day's loss stop has fired."""
     if problem:
@@ -300,7 +310,9 @@ def bridge_summary(trades: Sequence[Mapping[str, Any]], problem: str | None) -> 
             realized += Decimal(str(trade.get("realized_pnl") or "0"))
         except (InvalidOperation, ValueError):
             pass
-        if status in BRIDGE_ACTIVE_STATUSES:
+        # Realized P&L and the loss stop are account-wide (the shared -2%); the
+        # slots are the managed identity's own.
+        if status in BRIDGE_ACTIVE_STATUSES and _is_managed_identity(trade):
             active.append(str(trade.get("symbol") or "?"))
     return {
         "available": True,
@@ -504,6 +516,7 @@ async def build_context(
 
 __all__ = [
     "BRIDGE_MAX_OPEN",
+    "MANAGED_IDENTITY",
     "CandidateRow",
     "ContextPack",
     "bridge_summary",
