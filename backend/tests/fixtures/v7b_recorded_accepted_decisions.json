@@ -1,0 +1,65 @@
+{
+ "note": "Every shadow_accepted decision in the PAPER ledger as of 2026-10-15 (backup copy, read-only), reduced to symbol, strategy and the recorded risk intent. No run, owner, candidate or decision ids. No ORB_V2 / VWAP_PB_V2 / GAP_GO_V2 decision has been accepted yet (10-14: ai_abstained / rule_rejected only), so the v7b golden applies the identity multipliers to these recorded quantities.",
+ "rows": [
+  {
+   "index": 0,
+   "session_date": "2026-10-12",
+   "strategy_name": "ORB_V1",
+   "symbol": "MMED",
+   "quantity": 5266,
+   "entry_limit": "19.11",
+   "stop_price": "18.94",
+   "target_price": "19.45"
+  },
+  {
+   "index": 1,
+   "session_date": "2026-10-12",
+   "strategy_name": "MOMO_HOD_V1",
+   "symbol": "BF B",
+   "quantity": 3741,
+   "entry_limit": "26.77",
+   "stop_price": "26.69",
+   "target_price": "26.93"
+  },
+  {
+   "index": 2,
+   "session_date": "2026-10-13",
+   "strategy_name": "MOMO_HOD_V2",
+   "symbol": "T",
+   "quantity": 4363,
+   "entry_limit": "22.89",
+   "stop_price": "22.71",
+   "target_price": "23.25"
+  },
+  {
+   "index": 3,
+   "session_date": "2026-10-13",
+   "strategy_name": "VWAP_PB_V1",
+   "symbol": "FANG",
+   "quantity": 504,
+   "entry_limit": "198.07",
+   "stop_price": "196.55",
+   "target_price": "201.11"
+  },
+  {
+   "index": 4,
+   "session_date": "2026-10-13",
+   "strategy_name": "VWAP_PB_V1",
+   "symbol": "KD",
+   "quantity": 8117,
+   "entry_limit": "12.3",
+   "stop_price": "12.21",
+   "target_price": "12.48"
+  },
+  {
+   "index": 5,
+   "session_date": "2026-10-13",
+   "strategy_name": "VWAP_PB_V1",
+   "symbol": "DXC",
+   "quantity": 7604,
+   "entry_limit": "13.13",
+   "stop_price": "12.97",
+   "target_price": "13.45"
+  }
+ ]
+}

@@ -171,7 +171,7 @@ STRATEGIES = {
 # Registry keys whose spec name is a sendable identity: the children that send
 # real PAPER orders through the bridge. Every other key's name must stay out
 # of SENDABLE_IDENTITIES (registry_problems refuses the launch otherwise).
-SENDABLE_KEYS = frozenset({"momo"})
+SENDABLE_KEYS = frozenset({"momo", "orb-v2", "vwap-v2", "gap-v2"})
 
 
 def registered_spec_names(

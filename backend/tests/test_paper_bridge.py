@@ -518,8 +518,10 @@ def test_fills_never_decrease_and_missing_executions_never_divide_by_zero(tmp_pa
 
 
 def test_startup_reconciliation_flags_brackets_ibkr_does_not_report(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The slot mechanism under the v5 global cap of 3 (v7b's shipped sum is 6).
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {"MOMO_HOD_V2": pb.IDENTITY_CAPS["MOMO_HOD_V2"]})
     ghost = bracket("ghost", "GHST", status="sent", parent=20)
     held = bracket("held", "HELD", status="open", parent=30, filled=100)
     working = bracket("work", "WORK", status="sent", parent=40)
@@ -827,7 +829,7 @@ def test_tws_disconnect_exits_75_for_a_supervised_restart(
     out = events(capsys)
     assert any(kind == "CRITICAL" and text.startswith("TWS connection lost") for kind, text in out)
     assert ("INFO", "bridge stopped (exit 75)") in out
-    assert any(kind == "INFO" and text.startswith("PAPER bridge v7a connected") for kind, text in out)
+    assert any(kind == "INFO" and text.startswith("PAPER bridge v7b connected") for kind, text in out)
     assert bridge_env.state_file.exists()
 
 
@@ -1375,8 +1377,10 @@ def test_l3_a_parent_cancel_lost_while_disconnected_is_resent_after_a_restart(
 
 
 def test_l4_unmanaged_live_orders_block_their_symbol_and_take_a_slot(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The slot mechanism under the v5 global cap of 3 (v7b's shipped sum is 6).
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {"MOMO_HOD_V2": pb.IDENTITY_CAPS["MOMO_HOD_V2"]})
     held = bracket("a", "AAA", status="open", parent=40, filled=100)
     broker = connected_broker(
         bid=Decimal("50.10"),
@@ -3300,12 +3304,21 @@ def _fence_row(db_path: Path, identity: str, stopped: int) -> None:
         connection.commit()
 
 
+V7B_CAPS_LINES = [
+    "sendable identities = GAP_GO_V2, MOMO_HOD_V2, ORB_V2, VWAP_PB_V2",
+    "caps GAP_GO_V2 positions=1 entries/day=1 last_entry=close-30m",
+    "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m",
+    "caps ORB_V2 positions=1 entries/day=1 last_entry=close-30m",
+    "caps VWAP_PB_V2 positions=1 entries/day=2 last_entry=close-30m",
+]
+
+
 def _bracket_named(name: str, decision_id: str = "d") -> Any:
     return pb.Bracket(decision_id=decision_id, symbol="SYM", con_id=1, primary_exchange="NASDAQ",
                       strategy=pb.strategy_family(name), strategy_name=name, qty=0, entry="0", stop="0", target="0")
 
 
-@pytest.mark.parametrize("name", ["MOMO_HOD_V2", " MOMO_HOD_V2 "])
+@pytest.mark.parametrize("name", ["MOMO_HOD_V2", " MOMO_HOD_V2 ", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"])
 def test_v7a_exactly_the_sendable_names_send(tmp_path: Path, name: str) -> None:
     assert pb.may_send_orders(name)
     broker = connected_broker(bid=Decimal("50.10"))
@@ -3315,7 +3328,8 @@ def test_v7a_exactly_the_sendable_names_send(tmp_path: Path, name: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["MOMO_HOD_V1", "AP_MOMO_HOD_V1", "momo_hod_v2", "MOMO_HOD_V2X", "ORB_V1", "ORB_V2", "SH_MOMO_HOD_V3", ""]
+    "name", ["MOMO_HOD_V1", "AP_MOMO_HOD_V1", "momo_hod_v2", "MOMO_HOD_V2X", "ORB_V1", "orb_v2", "ORB_V2X",
+             "VWAP_PB_V1", "GAP_GO_V1", "SH_MOMO_HOD_V3", ""]
 )
 def test_v7a_a_name_that_is_not_exactly_sendable_is_shadow_only(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
@@ -3330,20 +3344,23 @@ def test_v7a_a_name_that_is_not_exactly_sendable_is_shadow_only(
 
 
 def test_v7a_every_sendable_name_has_a_caps_row_and_nothing_else_does(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert pb.SENDABLE_STRATEGY_NAMES == frozenset(pb.IDENTITY_CAPS) == {"MOMO_HOD_V2"}
+    assert pb.SENDABLE_STRATEGY_NAMES == frozenset(pb.IDENTITY_CAPS) == {
+        "MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"
+    }
+    # The owner's caps table (plan rev 3): MOMO as before; one position each for the three.
     assert pb.IDENTITY_CAPS["MOMO_HOD_V2"] == pb.Caps(3, None, timedelta(minutes=60))
-    assert pb.global_max_open() == 3 == sum(caps.max_positions for caps in pb.IDENTITY_CAPS.values())
+    assert pb.IDENTITY_CAPS["ORB_V2"] == pb.Caps(1, 1, timedelta(minutes=30))
+    assert pb.IDENTITY_CAPS["VWAP_PB_V2"] == pb.Caps(1, 2, timedelta(minutes=30))
+    assert pb.IDENTITY_CAPS["GAP_GO_V2"] == pb.Caps(1, 1, timedelta(minutes=30))
+    assert pb.global_max_open() == 6 == sum(caps.max_positions for caps in pb.IDENTITY_CAPS.values())
     assert pb.caps_problem() is None
-    assert pb.caps_lines() == [
-        "sendable identities = MOMO_HOD_V2",
-        "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m",
-    ]
+    assert pb.caps_lines() == V7B_CAPS_LINES
+    shipped = dict(pb.IDENTITY_CAPS)
     monkeypatch.setattr(pb, "IDENTITY_CAPS", {})
-    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: MOMO_HOD_V2"
+    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: GAP_GO_V2, MOMO_HOD_V2, ORB_V2, VWAP_PB_V2"
     assert pb.global_max_open() == 0
-    monkeypatch.setattr(pb, "IDENTITY_CAPS", {"MOMO_HOD_V2": pb.Caps(3, None, timedelta(minutes=60)),
-                                              "ORB_V2": pb.Caps(1, 1, timedelta(minutes=30))})
-    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: ORB_V2"
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {**shipped, "SOMEDAY_V2": pb.Caps(1, 1, timedelta(minutes=30))})
+    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: SOMEDAY_V2"
 
 
 @pytest.mark.anyio
@@ -3401,10 +3418,9 @@ def test_v7a_the_connect_line_names_the_sendable_set_its_caps_and_the_fences(
     bridge_env.install(broker, Clock(ny(10, 0)))
     assert pb.main(["--date", "2026-10-13"]) == pb.EXIT_RESTART
     out = events(capsys)
-    start = out.index(next(item for item in out if item[1].startswith("PAPER bridge v7a connected")))
-    assert out[start + 1:start + 4] == [
-        ("INFO", "sendable identities = MOMO_HOD_V2"),
-        ("INFO", "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m"),
+    start = out.index(next(item for item in out if item[1].startswith("PAPER bridge v7b connected")))
+    assert out[start + 1:start + 7] == [
+        *(("INFO", line) for line in V7B_CAPS_LINES),
         ("INFO", "fenced identities = none"),
     ]
 
@@ -3520,8 +3536,7 @@ def test_v7a_preflight_prints_the_identity_lines_without_connecting(
     assert pb.main(["--preflight"]) == pb.EXIT_OK
     out = events(capsys)
     assert out[1:] == [
-        ("INFO", "sendable identities = MOMO_HOD_V2"),
-        ("INFO", "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m"),
+        *(("INFO", line) for line in V7B_CAPS_LINES),
         ("INFO", "fenced identities = none"),
     ]
     assert pb.main(["--preflight", "--date", "2026-10-13"]) == pb.EXIT_OK
@@ -3533,7 +3548,7 @@ def test_v7a_preflight_prints_the_identity_lines_without_connecting(
 
     monkeypatch.setattr(pb, "IDENTITY_CAPS", {})
     assert pb.main(["--preflight"]) == pb.EXIT_REFUSED
-    assert ("CRITICAL", "PREFLIGHT_REFUSED caps: MOMO_HOD_V2") in events(capsys)
+    assert ("CRITICAL", "PREFLIGHT_REFUSED caps: GAP_GO_V2, MOMO_HOD_V2, ORB_V2, VWAP_PB_V2") in events(capsys)
     monkeypatch.undo()
 
 

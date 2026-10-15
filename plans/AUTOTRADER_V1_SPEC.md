@@ -39,12 +39,20 @@ copying its authority into this engine.
 - Market regime: the screener classifies risk_on / neutral / risk_off from
   index ETFs and watchlist breadth; momentum entries pause while risk_off.
 - Engine modes: `backtest`, `shadow`, and `paper`.
-- Release authority (owner decisions 2026-10-12): PAPER order submission is
-  allowed only for strategies whose catalogue name starts with `MOMO_HOD`
-  (currently MOMO_HOD_V2). ORB_V1, VWAP_PB_V1 and GAP_GO_V1 are shadow-only,
-  as are their all-session successors ORB_V2, VWAP_PB_V2 and GAP_GO_V2 (owner
-  decision "Both", 2026-10-13; they are the scheduled simulations, the V1s
-  stay registered for the CLI and the replay) and the managed AP_MOMO_HOD_V1.
+- Release authority (owner decisions 2026-10-12, widened 2026-10-14 18:38 and
+  2026-10-15 01:30): PAPER order submission is allowed only for a strategy
+  whose catalogue name is exactly one of the sendable identities
+  (`trading/sendable_identities.SENDABLE_IDENTITIES`, pinned equal to the
+  bridge's allowlist): MOMO_HOD_V2 at the base policy (0.5%/15%, 3 positions),
+  ORB_V2 at quarter size (0.125%/3.75%, 1 position, 1 entry a day), VWAP_PB_V2
+  and GAP_GO_V2 at half size (0.25%/7.5%, 1 position, 2 and 1 entries a day).
+  Sizes are fixed per-identity multipliers of the base policy, caps are per
+  identity in the bridge, and each identity has its own fence row
+  (`paper:<IDENTITY>`). The three new identities send only from bridge v7b
+  (independent review, deploy planned 2026-10-19 after one observed v7a
+  session). ORB_V1, VWAP_PB_V1 and GAP_GO_V1 are shadow-only (they stay
+  registered for the CLI and the replay), as are the managed AP_MOMO_HOD_V1
+  and every SH_ research identity.
   The PAPER account is a sandbox: its gate proves mechanical safety, not
   strategy profitability. Every change to the order sender needs an
   independent execution-safety review before it runs unattended.
@@ -101,9 +109,11 @@ events, and never retry or repair an unknown order state automatically.
 - The deterministic risk engine owns all size, exposure, loss, price, and
   universe limits. The AI day manager may only narrow inside them (see below).
 - The lifecycle service owns optimistic, version-bound status transitions.
-- PAPER submission authority is code-owned (the order sender's strategy-name
-  gate) and was granted by the owner on 2026-10-12 for MOMO_HOD strategies and
-  for owner manual orders. Environment variables cannot enable it.
+- PAPER submission authority is code-owned (the order sender's exact-match
+  strategy-name gate) and was granted by the owner on 2026-10-12 for
+  MOMO_HOD_V2 and owner manual orders, and on 2026-10-14/15 for ORB_V2,
+  VWAP_PB_V2 and GAP_GO_V2 at reduced size. Environment variables cannot
+  enable it.
 - The PAPER account must be an IBKR paper account (`DU` prefix), and every
   account TWS reports as managed must also be a paper account.
 - The execution adapter owns order submission only after lifecycle and risk

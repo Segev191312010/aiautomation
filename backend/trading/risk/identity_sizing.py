@@ -26,6 +26,9 @@ from trading.risk.engine import require_size_multiplier
 IDENTITY_SIZE_MULTIPLIER: Mapping[str, Decimal] = MappingProxyType(
     {
         "MOMO_HOD_V2": Decimal("1"),
+        "ORB_V2": Decimal("0.25"),
+        "VWAP_PB_V2": Decimal("0.5"),
+        "GAP_GO_V2": Decimal("0.5"),
     }
 )
 for _name, _value in IDENTITY_SIZE_MULTIPLIER.items():

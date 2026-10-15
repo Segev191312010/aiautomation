@@ -1,5 +1,6 @@
-"""TEMPORARY supervised PAPER bridge v7a (owner request 2026-10-12; v5 = C1.1 hardening + GO fixes;
-v7a = per-identity authority: exact-match allowlist, identity fence, caps, orderRef identity).
+"""TEMPORARY supervised PAPER bridge v7b (owner request 2026-10-12; v5 = C1.1 hardening + GO fixes;
+v7a = per-identity authority: exact-match allowlist, identity fence, caps, orderRef identity;
+v7b = the four identities MOMO_HOD_V2, ORB_V2, VWAP_PB_V2, GAP_GO_V2, data rows only).
 
 Consumes accepted decisions of ONE New York session from the shadow ledger and
 manages each as an IBKR native bracket on the PAPER account until the session
@@ -152,7 +153,7 @@ from ibapi.execution import ExecutionFilter
 from ibapi.order import Order
 from ibapi.wrapper import EWrapper
 
-BRIDGE_VERSION = "v7a"
+BRIDGE_VERSION = "v7b"
 STATE_SCHEMA = "paper-bridge-state.v5"
 NY = ZoneInfo("America/New_York")
 DATA_DIR = Path.home() / ".local/share/autotrader-v1"
@@ -224,10 +225,16 @@ class Caps:
 # equal). Membership is exact and case-sensitive: a prefix would also match
 # names nobody granted. Every sendable name needs a caps row; --preflight and
 # a test refuse a mismatch, and the gate skips an uncapped name (fail closed).
-SENDABLE_STRATEGY_NAMES = frozenset({"MOMO_HOD_V2"})
+SENDABLE_STRATEGY_NAMES = frozenset({"MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"})
 IDENTITY_CAPS: Mapping[str, Caps] = MappingProxyType({
     "MOMO_HOD_V2": Caps(max_positions=3, max_entries_per_day=None,
                         last_entry_before_close=timedelta(minutes=60)),  # 15:00 on a full day
+    "ORB_V2": Caps(max_positions=1, max_entries_per_day=1,
+                   last_entry_before_close=timedelta(minutes=30)),  # 15:30 on a full day
+    "VWAP_PB_V2": Caps(max_positions=1, max_entries_per_day=2,
+                       last_entry_before_close=timedelta(minutes=30)),
+    "GAP_GO_V2": Caps(max_positions=1, max_entries_per_day=1,
+                      last_entry_before_close=timedelta(minutes=30)),
 })
 SHADOW_ONLY = "shadow-only strategy"
 TICK = Decimal("0.01")

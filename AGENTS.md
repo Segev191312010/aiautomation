@@ -4,11 +4,17 @@
 - `backend/trading/` is the trading-domain implementation. The temporary PAPER
   order sender `backend/scripts_local/paper_bridge.py` is the ONLY process that
   sends orders (TWS client 18) until the reviewed execution engine replaces it.
-- PAPER order authority (owner, 2026-10-12): MOMO_HOD strategies (currently
-  MOMO_HOD_V2) and owner manual orders from the pinned Telegram chat. Every
-  other strategy is shadow-only: ORB_V1, VWAP_PB_V1 and GAP_GO_V1, their
-  all-session successors ORB_V2, VWAP_PB_V2 and GAP_GO_V2 (owner decision
-  "Both", 2026-10-13), and the managed AP_MOMO_HOD_V1. The `manager` child
+- PAPER order authority (owner, 2026-10-12; widened 2026-10-14 18:38 and
+  2026-10-15 01:30): exactly the sendable identities MOMO_HOD_V2 (0.5%/15%,
+  up to 3 positions), ORB_V2 (quarter size: 0.125%/3.75%, 1 position, 1 entry
+  a day), VWAP_PB_V2 and GAP_GO_V2 (half size: 0.25%/7.5%, 1 position, 2 and
+  1 entries a day), plus owner manual orders from the pinned Telegram chat.
+  The three new identities send only from bridge v7b, after its independent
+  review and deploy (planned 2026-10-19) and one observed v7a session; until
+  then only MOMO_HOD_V2 sends. Every other name is shadow-only: ORB_V1,
+  VWAP_PB_V1 and GAP_GO_V1, the managed AP_MOMO_HOD_V1 and every SH_ research
+  identity. Authority is the bridge's exact-match allowlist, pinned equal to
+  `trading/sendable_identities.SENDABLE_IDENTITIES`. The `manager` child
   (`autotraderctl manager run`) plans the day for the shadow strategies: it
   opens no TWS connection and has no order authority. The Telegram
   `/autopilot on|off|status` switch is shadow-only in phase 2: it latches the

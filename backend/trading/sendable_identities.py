@@ -25,7 +25,7 @@ logger = logging.getLogger("autotrader.shadow.authority")
 # The legacy MOMO guard: any MOMO_HOD* name outside the tuple is refused at
 # creation (the live ledger holds pre-guard MOMO_HOD_V1 records).
 SENDABLE_NAME_PREFIX = "MOMO_HOD"
-SENDABLE_IDENTITIES: tuple[str, ...] = ("MOMO_HOD_V2",)
+SENDABLE_IDENTITIES: tuple[str, ...] = ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")
 # Only code creates these: sendable identities and autopilot-managed ones.
 API_RESERVED_NAME_PREFIXES: tuple[str, ...] = (SENDABLE_NAME_PREFIX, "AP_")
 

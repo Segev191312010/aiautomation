@@ -112,7 +112,7 @@ async def ledger(tmp_path, monkeypatch):
 
 
 def test_sendable_identities_are_pinned_exactly():
-    assert SENDABLE_IDENTITIES == ("MOMO_HOD_V2",)
+    assert SENDABLE_IDENTITIES == ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")
     assert isinstance(SENDABLE_IDENTITIES, tuple)
     assert API_RESERVED_NAME_PREFIXES == ("MOMO_HOD", "AP_")
     assert (SENDABLE_NAME_REFUSED, SENDABLE_SPEC_MISMATCH, RESERVED_STRATEGY_NAME) == (
@@ -169,7 +169,7 @@ def test_only_the_registry_strategy_with_a_sendable_name_carries_the_prefix():
 
 
 def test_sendable_keys_are_pinned_and_registered():
-    assert SENDABLE_KEYS == frozenset({"momo"})
+    assert SENDABLE_KEYS == frozenset({"momo", "orb-v2", "vwap-v2", "gap-v2"})
     assert SENDABLE_KEYS <= set(STRATEGIES)
 
 

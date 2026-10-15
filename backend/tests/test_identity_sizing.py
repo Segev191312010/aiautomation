@@ -121,13 +121,16 @@ def test_quantity_is_floor_of_policy_quantity_times_multiplier(identity, multipl
 
 
 def test_identity_multiplier_contract():
-    assert identity_multiplier("ORB_V2", sendable=False) == Decimal("1")
+    assert identity_multiplier("ORB_V9", sendable=False) == Decimal("1")
     assert identity_multiplier("anything", sendable=False) == Decimal("1")
     assert identity_multiplier("MOMO_HOD_V2", sendable=True) == Decimal("1")
     assert identity_multiplier(" MOMO_HOD_V2 ", sendable=True) == Decimal("1")
+    assert identity_multiplier("ORB_V2", sendable=True) == Decimal("0.25")
+    assert identity_multiplier("VWAP_PB_V2", sendable=True) == Decimal("0.5")
+    assert identity_multiplier("GAP_GO_V2", sendable=True) == Decimal("0.5")
     # Fail closed: a sendable name without a row is None, never 1.
-    assert identity_multiplier("ORB_V2", sendable=True) is None
-    assert type(identity_multiplier("ORB_V2", sendable=False)) is Decimal
+    assert identity_multiplier("ORB_V9", sendable=True) is None
+    assert type(identity_multiplier("ORB_V9", sendable=False)) is Decimal
 
 
 @pytest.mark.parametrize("bad", [0.5, Decimal("0"), Decimal("1.5"), Decimal("NaN"), "0.5"])

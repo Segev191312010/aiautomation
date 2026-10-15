@@ -151,7 +151,7 @@ _BRIDGE_EVENT_CLOCK = re.compile(r"^\d{2}:\d{2}:\d{2} ET  (?=[A-Z]+ )")
 # refused (exit 78, phone alert) instead of sending orders unattended. Change
 # this only in the commit that records that review in
 # docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
-REVIEWED_BRIDGE_SHA256 = "9790eb3c1e81a3c74ceaab5245570ea07ee9cbfd407a0fa167d51015456af01f"
+REVIEWED_BRIDGE_SHA256 = "7d313fd075d29e1e62c11eab52fd7832a0aaab21fd0b616c0ce2ee3f47962af4"
 # The all-session simulations (orb-v2, gap-v2, vwap-v2) replace ORB_V1,
 # GAP_GO_V1 and VWAP_PB_V1 here (owner decision "Both", 2026-10-13); the V1
 # strategies stay registered for the CLI and the replay but are not scheduled.

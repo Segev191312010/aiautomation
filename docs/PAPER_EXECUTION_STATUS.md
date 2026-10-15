@@ -23,7 +23,8 @@ Order sources:
 - **Bot decisions** — accepted decisions of strategies whose catalogue name is
   exactly one of the sendable identities (`SENDABLE_STRATEGY_NAMES` in the
   bridge, pinned by a test to `trading.sendable_identities.SENDABLE_IDENTITIES`;
-  v7a: `MOMO_HOD_V2` only). Other strategies are recorded but never sent. Every
+  v7a: `MOMO_HOD_V2` only; v7b: `MOMO_HOD_V2`, `ORB_V2`, `VWAP_PB_V2`,
+  `GAP_GO_V2`). Other strategies are recorded but never sent. Every
   sendable identity has a caps row (`IDENTITY_CAPS`: max positions, max entries
   per day, last entry as an offset from the session close) and a fixed size
   multiplier (`trading.risk.identity_sizing`, applied upstream in the shadow
@@ -159,6 +160,15 @@ Order sources:
   test-coverage gap (the held-instruments test now distinguishes the exact
   gate from the old prefix under a widened tuple) and two prose nits fixed in
   the following docs/tests commit.
+- 2026-10-15: bridge v7b (data only, on top of v7a.3), sha256 7d313fd075d29e1e62c11eab52fd7832a0aaab21fd0b616c0ce2ee3f47962af4: the
+  allowlist becomes MOMO_HOD_V2, ORB_V2, VWAP_PB_V2, GAP_GO_V2; caps rows
+  ORB_V2 (1 position, 1 entry/day, last entry close-30m), VWAP_PB_V2 (1, 2,
+  close-30m), GAP_GO_V2 (1, 1, close-30m); size multipliers 0.25 / 0.5 / 0.5;
+  `SENDABLE_KEYS` orb-v2, vwap-v2, gap-v2. `git diff v7a.1..v7b` on the bridge
+  and the trading package is rows, names, the version line and the pin — no
+  logic. Independent execution-safety review of the data diff: PENDING.
+  Deploys only after one observed v7a session (Friday 2026-10-16), planned
+  Monday 2026-10-19 (Sunday deploy with the Gateway 2FA login).
 
 ## Still to do
 
