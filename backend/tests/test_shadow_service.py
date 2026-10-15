@@ -247,6 +247,152 @@ async def test_only_watchlist_sessions_add_symbols_that_heat_up_later(
     assert loaded == [4242]
 
 
+# --- the identity size factor reaches the pipeline (v7b.2, review MEDIUM-2) ----------
+
+
+def _production_universe(strategy_name: str) -> str:
+    from trading.operations.supervisor import MANAGED_STRATEGY_UNIVERSES, STRATEGY_UNIVERSES
+
+    return {**STRATEGY_UNIVERSES, **MANAGED_STRATEGY_UNIVERSES}.get(strategy_name, "scanner")
+
+
+async def _pipeline_keywords(monkeypatch, strategy_name: str) -> tuple[dict[str, object], str]:
+    """Run ``run_shadow_session`` on fakes; the ``ShadowPipeline`` keywords and the spec name."""
+    captured: dict[str, object] = {}
+
+    class FakeActor:
+        connected = True
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            pass
+
+        async def preflight(self, *, required_data_lines: int) -> SimpleNamespace:
+            return SimpleNamespace(ready=True, reasons=())
+
+        async def account_snapshot(self) -> None:
+            raise AssertionError("the fake runner never reads the account")
+
+    class FakeMarket:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def load_contract(self, con_id: int) -> None:
+            pass
+
+    class FakeRunner:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def run(self, **kwargs: object) -> SessionReport:
+            return SessionReport(run_id=str(kwargs["run_id"]), session_date=TUESDAY)
+
+    class FakeController:
+        """The day manager's controller, for the managed entry: no database, no model."""
+
+        admits = None
+
+        def entry_gate(self, gate):
+            return gate
+
+        async def record_unfocused(self, **_kwargs: object) -> None:
+            return None
+
+    async def managed_session(**kwargs: object):
+        return FakeController(), kwargs["neutral"]
+
+    async def strategy(**kwargs: object) -> SimpleNamespace:
+        captured["spec_name"] = kwargs["spec"].name
+        return SimpleNamespace(strategy_id="f" * 32)
+
+    def pipeline(**kwargs: object) -> object:
+        captured["pipeline"] = kwargs
+        return object()
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    usage = SimpleNamespace(usage=SimpleNamespace(calls=0, cost_usd=Decimal("0")))
+    monkeypatch.setattr(shadow_service, "ensure_strategy", strategy)
+    monkeypatch.setattr(shadow_service, "_managed_session", managed_session)
+    monkeypatch.setattr(shadow_service, "read_anthropic_api_key", lambda: "sk-test")
+    monkeypatch.setattr(shadow_service, "build_anthropic_client", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "AnthropicMessagesTransport", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "StructuredAIReviewProvider", lambda **_kwargs: usage)
+    monkeypatch.setattr(shadow_service, "TWSPaperActor", FakeActor)
+    monkeypatch.setattr(shadow_service, "PaperIBKRMarketData", FakeMarket)
+    monkeypatch.setattr(shadow_service, "ShadowPipeline", pipeline)
+    monkeypatch.setattr(shadow_service, "RepositoryBackedShadowRunner", lambda **_kwargs: object())
+    monkeypatch.setattr(shadow_service, "ShadowSessionRunner", FakeRunner)
+    monkeypatch.setattr(shadow_service, "source_sha", lambda: "abc1234")
+
+    await shadow_service.run_shadow_session(
+        config=runtime_config(),
+        owner_id="demo",
+        session=market_session(TUESDAY),
+        clock=lambda: et(TUESDAY, 9, 0),
+        sleep=no_sleep,
+        strategy_name=strategy_name,
+        universe=_production_universe(strategy_name),
+    )
+    keywords = captured["pipeline"]
+    assert isinstance(keywords, dict)
+    return keywords, str(captured["spec_name"])
+
+
+@pytest.mark.parametrize("strategy_name", sorted(shadow_service.STRATEGIES))
+async def test_every_session_builds_its_pipeline_with_its_identity_size_factor(monkeypatch, strategy_name):
+    """The first hop of the production path: run_shadow_session -> ShadowPipeline.
+
+    A sendable key gets its own row of the size table (ORB_V2 0.25, VWAP_PB_V2 and
+    GAP_GO_V2 0.5, MOMO_HOD_V2 1); every shadow key gets exactly Decimal("1").
+    """
+    from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+
+    keywords, spec_name = await _pipeline_keywords(monkeypatch, strategy_name)
+
+    assert "identity_multiplier" in keywords, "the session dropped the identity size factor"
+    factor = keywords["identity_multiplier"]
+    assert type(factor) is Decimal
+    if strategy_name in shadow_service.SENDABLE_KEYS:
+        assert factor == IDENTITY_SIZE_MULTIPLIER[spec_name]
+    else:
+        assert spec_name not in IDENTITY_SIZE_MULTIPLIER
+        assert factor == Decimal("1")
+
+
+def test_the_factor_check_covers_every_sendable_key_and_a_shadow_key():
+    from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+
+    keys = set(shadow_service.STRATEGIES)
+    assert shadow_service.SENDABLE_KEYS <= keys
+    assert keys - shadow_service.SENDABLE_KEYS  # at least one shadow key is checked for x1
+    rows = {shadow_service.STRATEGIES[key][1]().name for key in shadow_service.SENDABLE_KEYS}
+    assert rows == set(IDENTITY_SIZE_MULTIPLIER)
+    # At least one sendable row is below 1, so a session that sizes everything x1 is caught.
+    assert min(IDENTITY_SIZE_MULTIPLIER.values()) < Decimal("1")
+
+
+async def test_a_sendable_session_without_a_size_row_passes_none_never_one(monkeypatch):
+    """The launch preflight refuses this registry; the session still never turns it into x1."""
+    from types import MappingProxyType
+
+    from trading.risk import identity_sizing
+
+    trimmed = {name: value for name, value in identity_sizing.IDENTITY_SIZE_MULTIPLIER.items() if name != "ORB_V2"}
+    monkeypatch.setattr(identity_sizing, "IDENTITY_SIZE_MULTIPLIER", MappingProxyType(trimmed))
+
+    keywords, spec_name = await _pipeline_keywords(monkeypatch, "orb-v2")
+
+    assert spec_name == "ORB_V2"
+    assert "identity_multiplier" in keywords and keywords["identity_multiplier"] is None
+
+
 # --- resume fallback -----------------------------------------------------------------
 
 
