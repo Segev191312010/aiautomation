@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -17,18 +22,29 @@ import pytest
 from trading.contracts import AccountSnapshot, RawAccountPosition
 from trading.market.screener import ScreenerPayload
 from trading.market.snapshots import MarketSnapshot
+from trading.operations import telegram_tools
 from trading.operations.paths import UserPaths
 from trading.operations.telegram_tools import (
+    PMSET_COMMAND,
+    SUPERVISOR_LOG_TAIL_BYTES,
     TELEGRAM_TWS_CLIENT_ID,
     TOOL_DEFINITIONS,
     DataTools,
+    LaunchAgentState,
     TWSDataSession,
     ToolError,
     age_text,
+    child_starts_on,
     format_manual_row,
     format_supervisor,
+    gateway_port_open,
+    launch_agent_text,
     market_clock,
     normalize_symbol,
+    power_source_text,
+    read_launch_agent,
+    restarts_text,
+    run_read_only_command,
     supervisor_state,
     tws_problem,
 )
@@ -37,6 +53,34 @@ ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
 DAY = date(2026, 10, 13)
 ACCOUNT = "DU1234567"
+# The real probes, kept before the guard below replaces them module-wide.
+REAL_GATEWAY_PROBE = gateway_port_open
+REAL_COMMAND_RUNNER = run_read_only_command
+
+
+@dataclass
+class ProbeGuard:
+    gateway_calls: int = 0
+    commands: list[tuple[str, ...]] = field(default_factory=list)
+
+
+@pytest.fixture(autouse=True)
+def no_real_probes(monkeypatch) -> ProbeGuard:
+    """No test here may connect to the Gateway port or run a system command:
+    a DataTools built without fakes reaches these stand-ins instead."""
+    guard = ProbeGuard()
+
+    async def gateway() -> bool:
+        guard.gateway_calls += 1
+        return False
+
+    def command(argv: Sequence[str], timeout_seconds: float) -> str:
+        guard.commands.append(tuple(argv))
+        return "Now drawing from 'AC Power'\n"
+
+    monkeypatch.setattr(telegram_tools, "gateway_port_open", gateway)
+    monkeypatch.setattr(telegram_tools, "run_read_only_command", command)
+    return guard
 
 
 def et(hour: int, minute: int, second: int = 0, day: date = DAY) -> datetime:
@@ -212,7 +256,14 @@ def tools_for(
     ledger: FakeLedger | None = None,
     kill: FakeKill | None = None,
     alive: bool = True,
+    gateway: Any = True,
+    power: Any = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t100%; charged;\n",
+    schema: Any = "schema v16 is current",
+    agent: Any = LaunchAgentState(True, 4242),
+    global_fence: Any = None,
+    budget: float = 2.0,
 ) -> DataTools:
+    """Every outside source is a fake: a value, or an exception to raise, or a callable."""
     session = None
     if actor is not None:
         session = TWSDataSession(account=ACCOUNT, factory=lambda config: actor)
@@ -221,6 +272,27 @@ def tools_for(
         if isinstance(screener, Exception):
             raise screener
         return screener
+
+    def answer(value: Any) -> Any:
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    async def gateway_probe() -> bool:
+        return await gateway() if callable(gateway) else answer(gateway)
+
+    def run_command(argv: Sequence[str], timeout_seconds: float) -> str:
+        assert tuple(argv) == PMSET_COMMAND and timeout_seconds == budget
+        return power(argv) if callable(power) else answer(power)
+
+    def read_schema() -> str:
+        return schema() if callable(schema) else answer(schema)
+
+    def read_agent(paths: UserPaths) -> LaunchAgentState:
+        return agent(paths) if callable(agent) else answer(agent)
+
+    async def read_global_fence() -> Any:
+        return answer(global_fence)
 
     return DataTools(
         paths=UserPaths(home=tmp_path),
@@ -231,6 +303,12 @@ def tools_for(
         ledger=ledger or FakeLedger(),
         read_screener=read_screener,
         pid_alive=lambda pid: alive,
+        gateway_probe=gateway_probe,
+        run_command=run_command,
+        read_schema=read_schema,
+        read_launch_agent=read_agent,
+        read_global_fence=read_global_fence,
+        ops_budget_seconds=budget,
     )
 
 
@@ -627,3 +705,295 @@ async def test_status_names_the_identity_fences_that_are_on(tmp_path):
     assert "ORB_V2" not in text
     clear = tools_for(tmp_path, screener=payload(), kill=FakeKill(identities=(("MOMO_HOD_V2", False),)))
     assert await clear._kill_switch_text() == "Kill switch: off"
+
+
+# --------------------------------------------------------------------------
+# Extended /status (T-1): Gateway, schema, LaunchAgent, recorder/replay, power, restarts
+# --------------------------------------------------------------------------
+
+# Yesterday's research runs, then a start late yesterday evening ET (03:30Z is
+# 23:30 ET on the 12th), then today's supervisor run with a bridge restart.
+OPS_LOG = """\
+2026-10-12T20:20:00+00:00 CHILD_START recorder pid=4100
+2026-10-12T21:02:00+00:00 CHILD_EXIT recorder code=0 restart_in=none
+2026-10-12T21:35:00+00:00 CHILD_START replay pid=4101
+2026-10-12T22:05:00+00:00 CHILD_EXIT replay code=0 restart_in=none
+2026-10-13T03:30:00+00:00 CHILD_START telegram pid=4000
+""" + SUPERVISOR_LOG + """\
+2026-10-13T14:05:00+00:00 CHILD_EXIT bridge code=75 restart_in=15
+2026-10-13T14:05:15+00:00 CHILD_START bridge pid=4310
+"""
+
+
+def write_research(tmp_path: Path) -> None:
+    research = UserPaths(home=tmp_path).data_directory / "research"
+    (research / "bars" / "2026-10-12").mkdir(parents=True)
+    (research / "bars" / "2026-10-12" / "265598.json").write_text("{}")
+    (research / "bars" / "2026-10-13").mkdir()  # no contract stored: not a recorded session
+    (research / "bars" / "not-a-date").mkdir()
+    for day in ("2026-10-09", "2026-10-12"):
+        (research / "reports" / day).mkdir(parents=True)
+        (research / "reports" / day / "summary.txt").write_text("replay\n")
+    (research / "reports" / "2026-10-12" / "evidence.json").write_text("{}")
+    (research / "reports" / "2026-10-13").mkdir()  # no summary yet
+    (research / "reports" / "telegram-weekly.json").write_text("{}")
+
+
+def ops_lines(text: str) -> list[str]:
+    heads = ("Kill switch", "Identity fences", "Gateway", "Schema", "LaunchAgent", "Recorder/replay",
+             "Power", "Restarts today")
+    return [line for line in text.splitlines() if line.startswith(heads)]
+
+
+async def test_status_adds_every_operations_line_from_its_source(tmp_path):
+    write_supervisor_log(tmp_path, OPS_LOG)
+    write_research(tmp_path)
+    tools = tools_for(tmp_path, screener=payload(), kill=FakeKill(identities=(("ORB_V2", True),)))
+
+    text = await tools.status()
+
+    assert ops_lines(text) == [
+        "Kill switch: off",
+        "Identity fences ON: ORB_V2 (autotraderctl paper resume --identity)",
+        "Gateway 7497: OPEN",
+        "Schema: schema v16 is current",
+        "LaunchAgent: loaded pid 4242",
+        "Recorder/replay: recorder ok Mon 12 Oct 17:02 ET, bars through 2026-10-12"
+        " · replay ok Mon 12 Oct 18:05 ET, report 2026-10-12 with evidence",
+        "Power: AC",
+        "Restarts today: bridge=2 orb=1 screener=1 telegram=1",
+    ]
+    # The original lines are unchanged and come first.
+    assert text.splitlines()[0] == "🤖 Status · Tue 13 Oct 10:30:00 ET"
+    assert text.index("Regime:") < text.index("Kill switch:") < text.index("Gateway 7497:")
+
+
+async def test_status_lines_degrade_to_their_own_reason_and_never_raise(tmp_path):
+    class BrokenKill(FakeKill):
+        async def is_stopped(self) -> bool:
+            raise sqlite3.OperationalError("database is locked")
+
+    tools = tools_for(
+        tmp_path,
+        screener=payload(),
+        kill=BrokenKill(),
+        gateway=False,
+        schema=sqlite3.OperationalError("unable to open database file"),
+        agent=LaunchAgentState(False),
+        power=subprocess.TimeoutExpired(list(PMSET_COMMAND), 2.0),
+    )
+
+    text = await tools.status()
+
+    assert ops_lines(text) == [
+        "Kill switch: UNREADABLE (OperationalError) — treated as ON by the bridge",
+        "Gateway 7497: CLOSED",
+        "Schema: unknown (OperationalError)",
+        "LaunchAgent: not loaded",
+        "Recorder/replay: recorder no run in the log tail, bars through none"
+        " · replay no run in the log tail, report none",
+        "Power: unknown (TimeoutExpired)",
+        "Restarts today: unknown (no supervisor.log)",
+    ]
+
+    def agent_error(paths: UserPaths) -> LaunchAgentState:
+        raise PermissionError("plist unreadable")
+
+    async def gateway_error() -> bool:
+        raise RuntimeError("probe bug")
+
+    other = await tools_for(tmp_path, screener=payload(), gateway=gateway_error, agent=agent_error,
+                            power="no such line").status()
+    assert "Gateway 7497: unknown (RuntimeError)" in other
+    assert "LaunchAgent: unknown (PermissionError)" in other
+    assert "Power: unknown" in other.splitlines()
+
+
+async def test_a_hung_probe_costs_its_own_line_only_within_the_budget(tmp_path):
+    class HungKill(FakeKill):
+        async def is_stopped(self) -> bool:
+            await asyncio.Event().wait()
+            return True
+
+    async def hung_gateway() -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    def slow_schema() -> str:
+        time.sleep(0.3)
+        return "schema v16 is current"
+
+    write_supervisor_log(tmp_path, OPS_LOG)
+    tools = tools_for(tmp_path, screener=payload(), kill=HungKill(), gateway=hung_gateway,
+                      schema=slow_schema, budget=0.05)
+    started = time.monotonic()
+
+    text = await tools.status()
+
+    assert time.monotonic() - started < 1.0  # the probes run side by side, each bounded
+    lines = ops_lines(text)
+    assert "Kill switch: unknown (no answer in 0.05 s)" in lines
+    assert "Gateway 7497: CLOSED (no answer in 0.05 s)" in lines
+    assert "Schema: unknown (no answer in 0.05 s)" in lines
+    assert "Power: AC" in lines and "LaunchAgent: loaded pid 4242" in lines
+    assert "Restarts today: bridge=2 orb=1 screener=1 telegram=1" in lines
+
+
+async def test_status_without_injected_probes_uses_the_module_probes_and_pmset(tmp_path, no_real_probes):
+    tools = DataTools(paths=UserPaths(home=tmp_path), tws=None, clock=lambda: NOW, kill_switch=FakeKill(),
+                      ledger=FakeLedger(), read_screener=lambda: asyncio.sleep(0, None),
+                      read_schema=lambda: "schema v16 is current")
+
+    text = await tools.status()
+
+    assert no_real_probes.gateway_calls == 1
+    assert no_real_probes.commands == [("/usr/bin/pmset", "-g", "batt")]
+    assert "Gateway 7497: CLOSED" in text and "Power: AC" in text
+    # The default LaunchAgent reader only looks for the plist (none in this home).
+    assert "LaunchAgent: unknown (no plist installed; launchctl not queried)" in text
+
+
+async def test_restart_counts_say_at_least_when_today_runs_past_the_log_tail(tmp_path):
+    line = "2026-10-13T14:00:00+00:00 CHILD_START bridge pid=4302\n"
+    write_supervisor_log(tmp_path, line * (SUPERVISOR_LOG_TAIL_BYTES // len(line) + 500))
+
+    text = await tools_for(tmp_path, screener=payload()).status()
+
+    (restarts,) = [entry for entry in text.splitlines() if entry.startswith("Restarts today:")]
+    assert restarts.startswith("Restarts today: bridge=")
+    assert restarts.endswith(" (at least: older lines are past the log tail)")
+
+
+def test_child_starts_count_the_et_day_only():
+    lines = OPS_LOG.splitlines()
+    assert child_starts_on(lines, DAY) == {"telegram": 1, "screener": 1, "bridge": 2, "orb": 1}
+    assert child_starts_on(lines, date(2026, 10, 12)) == {"recorder": 1, "replay": 1, "telegram": 1}
+    assert restarts_text({}) == "none"
+    assert restarts_text({"screener": 1, "bridge": 3}) == "bridge=3 screener=1"
+
+
+@pytest.mark.parametrize(
+    ("output", "text"),
+    [
+        ("Now drawing from 'AC Power'\n", "AC"),
+        ("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t81%; discharging;\n", "battery"),
+        ("Now drawing from 'UPS Power'\n", "battery (UPS)"),
+        ("Now drawing from 'Solar'\n", "unknown (Solar)"),
+        ("", "unknown"),
+    ],
+)
+def test_power_source_comes_from_pmset_first_line(output, text):
+    assert power_source_text(output) == text
+
+
+@pytest.mark.parametrize(
+    ("state", "text"),
+    [
+        (LaunchAgentState(True, 4242), "loaded pid 4242"),
+        (LaunchAgentState(True), "loaded (no pid)"),
+        (LaunchAgentState(False), "not loaded"),
+        (LaunchAgentState(None, detail="plist current; launchctl not queried"),
+         "unknown (plist current; launchctl not queried)"),
+        (LaunchAgentState(None), "unknown"),
+    ],
+)
+def test_launch_agent_line(state, text):
+    assert launch_agent_text(state) == text
+
+
+def test_the_launch_agent_line_reads_the_plist_and_never_runs_launchctl(tmp_path, monkeypatch):
+    from trading.operations.launchd import LaunchdManager
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the assistant must never run launchctl")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    paths = UserPaths(home=tmp_path)
+    assert read_launch_agent(paths) == LaunchAgentState(None, detail="no plist installed; launchctl not queried")
+
+    plist = paths.launch_agent_file
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(LaunchdManager.current(user_paths=paths).serialized_payload())
+    assert read_launch_agent(paths).detail == "plist current; launchctl not queried"
+    plist.write_bytes(b"<plist/>")
+    assert read_launch_agent(paths).detail == "plist differs from this code; launchctl not queried"
+
+
+async def test_the_gateway_probe_is_a_plain_tcp_connect(monkeypatch):
+    """Against a loopback listener on a free port, never the real 7497."""
+    from trading.market import tws_actor
+
+    async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.close()
+
+    server = await asyncio.start_server(accept, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    monkeypatch.setattr(tws_actor, "PAPER_TWS_PORT", port)
+    try:
+        assert await REAL_GATEWAY_PROBE() is True
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert await REAL_GATEWAY_PROBE() is False
+
+
+def test_the_command_runner_returns_stdout_and_refuses_a_failure():
+    assert REAL_COMMAND_RUNNER([sys.executable, "-c", "print('ok')"], 10.0) == "ok\n"
+    with pytest.raises(OSError, match="exited with 3"):
+        REAL_COMMAND_RUNNER([sys.executable, "-c", "raise SystemExit(3)"], 10.0)
+
+
+# --------------------------------------------------------------------------
+# /fences (T-1)
+# --------------------------------------------------------------------------
+
+
+async def test_fences_lists_the_global_row_and_every_identity_row(tmp_path):
+    kill = FakeKill(identities=(("MOMO_HOD_V2", True), ("ORB_V2", False)))
+    tools = tools_for(tmp_path, kill=kill,
+                      global_fence=(True, "owner /stop via Telegram", "2026-10-13T14:00:00+00:00"))
+
+    assert (await tools.fences()).splitlines() == [
+        "🚧 Fences · Tue 13 Oct 10:30:00 ET",
+        "paper (global): STOPPED · owner /stop via Telegram · Tue 13 Oct 10:00 ET",
+        "paper:MOMO_HOD_V2: STOPPED · owner · Thu 15 Oct 08:00 ET",
+        "paper:ORB_V2: clear · owner · Thu 15 Oct 08:00 ET",
+        "Stop one identity: /halt <IDENTITY> · resume: autotraderctl paper resume --identity (Mac only)",
+    ]
+
+
+async def test_fences_without_rows_or_readable_rows_say_so(tmp_path):
+    empty = (await tools_for(tmp_path).fences()).splitlines()
+    assert empty[1:3] == ["paper (global): clear (no row)", "Identity fences: none written"]
+
+    class BrokenKill(FakeKill):
+        async def identity_rows(self) -> list[tuple[str, bool, str, str]]:
+            raise sqlite3.OperationalError("no such table")
+
+    broken = await tools_for(tmp_path, kill=BrokenKill(),
+                             global_fence=sqlite3.OperationalError("locked")).fences()
+    assert broken.splitlines()[1:3] == [
+        "paper (global): UNREADABLE (OperationalError) — the bridge treats an unreadable fence as stopped",
+        "Identity fences: UNREADABLE (OperationalError) — the bridge treats an unreadable fence as stopped",
+    ]
+
+
+async def test_fences_read_the_real_rows_of_a_scratch_database(tmp_path, monkeypatch):
+    from config import cfg
+    from db.core import init_db
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "fences.db"))
+    await init_db()
+    store = SQLitePaperKillStore()
+    await store.stop(reason="slippage 3x shadow", identity="ORB_V2")
+    await store.resume(reason="explained", identity="GAP_GO_V2")
+    tools = DataTools(paths=UserPaths(home=tmp_path), tws=None, clock=lambda: NOW)
+
+    lines = (await tools.fences()).splitlines()
+    assert lines[1] == "paper (global): clear (no row)"
+    assert lines[2].startswith("paper:GAP_GO_V2: clear · explained · ")
+    assert lines[3].startswith("paper:ORB_V2: STOPPED · slippage 3x shadow · ")
+
+    await store.stop(reason="owner stop")
+    assert (await tools.fences()).splitlines()[1].startswith("paper (global): STOPPED · owner stop · ")

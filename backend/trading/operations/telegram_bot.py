@@ -29,6 +29,13 @@ manager's switch and plan only through this module's deterministic command
 routing (``trading.manager.telegram``); no data tool offered to Claude can
 read or write the switch.
 
+Identity fences. ``/halt <IDENTITY>`` stops one sendable identity's new
+entries, only after ``/confirm <nonce>`` within 60 s (one pending halt per
+chat, in memory: a restart forgets it). The name must be exactly one of
+``SENDABLE_IDENTITIES``; the write is ``paper:<IDENTITY>`` stopped=1, never
+the global row. There is no resume from the phone: ``autotraderctl paper
+resume --identity`` at the Mac only. ``/fences`` lists every fence row.
+
 Schema. The assistant never migrates. It starts while only migrations newer
 than ``schema_gate.TELEGRAM_ASSISTANT_REQUIRES`` are pending, so /stop and
 manual exits stay available (a test pins every table this module, the data
@@ -52,6 +59,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import sys
 import time as monotonic_time
 from typing import Any, Literal, Protocol, TextIO
@@ -101,6 +109,7 @@ from trading.operations.telegram_tools import (
     universe_contract,
 )
 from trading.scheduler.sessions import MARKET_TIMEZONE
+from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 
 logger = logging.getLogger("autotrader.shadow.telegram")
 
@@ -144,8 +153,15 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 EXIT_COMMANDS = frozenset({"stop", "sell", "close", "closeall", "cancel"})
 ORDER_COMMANDS = frozenset({"buy", "sell", "stop", "close", "closeall", "cancel"})
 READ_COMMANDS = frozenset(
-    {"status", "pnl", "positions", "orders", "hot", "market", "signals", "report", "quote"}
+    {"status", "pnl", "positions", "orders", "hot", "market", "signals", "report", "quote", "fences"}
 )
+# One identity's fence, stop only, two steps: /halt <IDENTITY> then /confirm <nonce>.
+# Like the kill switch they reduce risk, so the flood limit never holds them back.
+HALT_COMMANDS = frozenset({"halt", "confirm"})
+HALT_REASON = "telegram /halt by owner"
+HALT_CONFIRM_WINDOW = timedelta(seconds=60)
+HALT_NONCE_BYTES = 3  # secrets.token_hex(3): six hex characters
+_HALT_NONCE = re.compile(r"^[0-9a-f]{6}$")
 # The AI day manager's switch and plan, by the command parser only.
 MANAGER_COMMANDS = frozenset({"autopilot", "plan"})
 _FORWARD_FIELDS = (
@@ -169,7 +185,7 @@ VIA_BOT_NOTICE = "Messages sent via another bot are ignored."
 NOT_TEXT_NOTICE = "Only text messages are understood — send a command or a question. /help"
 FLOOD_NOTICE = (
     "⚠️ Over 20 messages in a minute — further messages are ignored for a moment. "
-    "/stop, /close, /closeall and /cancel always go through."
+    "/stop, /halt, /confirm, /close, /closeall and /cancel always go through."
 )
 BUDGET_NOTICE = "Daily question budget reached — commands still work."
 BUSY_NOTICE = "Still answering earlier questions — ask again in a minute. Commands work meanwhile."
@@ -210,7 +226,7 @@ HELP_TEXT = """\
 🤖 Autotrader assistant (IBKR PAPER account)
 
 Data
-/status — system health, market open/closed, kill switch
+/status — system health: market, processes, Gateway, schema, power, kill switch
 /positions — account positions (🤖 bot / 👤 yours)
 /pnl — today's P&L
 /orders — open orders (manual + bot brackets)
@@ -233,6 +249,10 @@ Sentences work too: "buy 100 shares of AAPL at 180".
 Word-like tickers need a $: $ALL, $IT, $ON.
 
 /stop alone = kill switch ON: blocks all new buys (bot and manual). There is no /resume.
+
+Strategy fences — stop only; resume is at the Mac (autotraderctl)
+/fences — the kill switch and every strategy fence, with reason and time
+/halt ORB_V2 — stop one strategy's new entries; then /confirm <code> within 60 s
 
 Anything else: just ask, e.g. "how are we doing today?"
 Edits and forwards are ignored; an order older than 60 s is not sent."""
@@ -367,6 +387,111 @@ def message_age(inbound: Inbound, now: datetime) -> timedelta:
 def stale_text(age: timedelta) -> str:
     shown = "unknown age" if age == timedelta.max else age_text(age.total_seconds())
     return f"⏱ Stale message ({shown}) — NOT sent. Send it again if you still want it."
+
+
+# --------------------------------------------------------------------------
+# /halt <IDENTITY> and /confirm <nonce> (pure)
+# --------------------------------------------------------------------------
+
+
+def halt_identity(args: str) -> str | None:
+    """``/halt``'s argument when it is exactly one sendable identity once stripped.
+
+    Case-sensitive and whole, the bridge's own match: ``orb_v2``, ``ORB_V2 now``
+    and ``ORB_V1`` (shadow only) are refused.
+    """
+    name = args.strip()
+    return name if is_sendable_identity(name) else None
+
+
+def halt_refused_text(given: str) -> str:
+    shown = " ".join(given.split())[:40]
+    head = f"❌ {shown!r} is not a sendable identity." if shown else "❌ /halt needs an identity."
+    return (
+        f"{head} Send /halt with exactly one of (case-sensitive): {', '.join(SENDABLE_IDENTITIES)}. "
+        "Nothing written."
+    )
+
+
+def halt_prompt_text(identity: str, nonce: str) -> str:
+    seconds = int(HALT_CONFIRM_WINDOW.total_seconds())
+    return (
+        f"halt {identity}: confirm with /confirm {nonce} within {seconds} s "
+        "(stop only; resume is CLI-only)"
+    )
+
+
+def halt_stopped_text(identity: str) -> str:
+    return (
+        f"identity fence {identity}: STOPPED "
+        "(new entries blocked; exits, flatten and manual orders unaffected)"
+    )
+
+
+def new_halt_nonce() -> str:
+    return secrets.token_hex(HALT_NONCE_BYTES)
+
+
+@dataclass(frozen=True, slots=True)
+class PendingHalt:
+    identity: str
+    nonce: str
+    requested_at: datetime
+
+    def expired(self, now: datetime, window: timedelta = HALT_CONFIRM_WINDOW) -> bool:
+        # A clock that went backwards expires it too: ask again rather than guess.
+        return now < self.requested_at or now - self.requested_at > window
+
+
+HaltOutcome = Literal["confirmed", "no_pending", "expired", "wrong_nonce"]
+
+
+class HaltRequests:
+    """One pending /halt per chat, in memory only; a new /halt replaces it.
+
+    Confirmation needs the exact nonce of the pending request within the
+    window. A wrong nonce writes nothing and keeps the request (retype it); an
+    expired one is dropped. Nothing here writes a fence: the caller does, and
+    only for a ``confirmed`` outcome.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        new_nonce: Callable[[], str] = new_halt_nonce,
+        window: timedelta = HALT_CONFIRM_WINDOW,
+    ) -> None:
+        self._clock = clock
+        self._new_nonce = new_nonce
+        self._window = window
+        self._pending: dict[int, PendingHalt] = {}
+
+    def request(self, chat_id: int, identity: str) -> PendingHalt:
+        if halt_identity(identity) != identity:
+            raise ValueError(f"{identity!r} is not a sendable identity")
+        nonce = self._new_nonce()
+        if not _HALT_NONCE.match(nonce):
+            raise ValueError("a halt nonce is six lowercase hex characters")
+        pending = PendingHalt(identity, nonce, self._clock())
+        self._pending[chat_id] = pending
+        return pending
+
+    def pending(self, chat_id: int) -> PendingHalt | None:
+        return self._pending.get(chat_id)
+
+    def confirm(self, chat_id: int, nonce: str) -> tuple[HaltOutcome, PendingHalt | None]:
+        pending = self._pending.get(chat_id)
+        if pending is None:
+            return "no_pending", None
+        if pending.expired(self._clock(), self._window):
+            del self._pending[chat_id]
+            return "expired", pending
+        given = nonce.strip().lower().encode("utf-8")
+        if not secrets.compare_digest(given, pending.nonce.encode("utf-8")):
+            return "wrong_nonce", pending
+        del self._pending[chat_id]
+        return "confirmed", pending
 
 
 class InboundRateLimit:
@@ -996,6 +1121,14 @@ class KillSwitchControl(Protocol):
     async def stop(self, *, reason: str) -> None: ...
 
 
+class IdentityFenceControl(Protocol):
+    """``SQLitePaperKillStore``'s identity rows; /confirm always names the identity."""
+
+    async def is_stopped(self, *, identity: str | None = None) -> bool: ...
+
+    async def stop(self, *, reason: str, identity: str | None = None) -> None: ...
+
+
 class Questions(Protocol):
     async def answer(self, question: str, *, message_id: int | None) -> str: ...
 
@@ -1034,10 +1167,12 @@ class TelegramAssistant:
         questions_unavailable: str = "",
         state: AssistantState,
         manager: ManagerControl | None = None,
+        fences: IdentityFenceControl | None = None,
         clock: Clock = _utc_now,
         monotonic: Callable[[], float] = monotonic_time.monotonic,
         sleep: Sleeper = asyncio.sleep,
         watch_sleep: Sleeper = asyncio.sleep,
+        new_nonce: Callable[[], str] = new_halt_nonce,
     ) -> None:
         if _int_id(owner_id) is None or owner_id == 0:
             raise ValueError("a pinned owner chat id is required")
@@ -1050,6 +1185,8 @@ class TelegramAssistant:
         self._questions = questions
         self._questions_unavailable = questions_unavailable
         self._manager = manager
+        self._fences = fences
+        self._halts = HaltRequests(clock=clock, new_nonce=new_nonce)
         self._state = state
         self._clock = clock
         self._monotonic = monotonic
@@ -1226,8 +1363,8 @@ class TelegramAssistant:
             return f"error:{type(exc).__name__}"
 
     def _is_exit(self, text: str, command: str | None) -> bool:
-        """Exits and the kill switch are never held back by the flood limit."""
-        if command in EXIT_COMMANDS:
+        """Exits, the kill switch and identity halts are never held back by the flood limit."""
+        if command in EXIT_COMMANDS or command in HALT_COMMANDS:
             return True
         try:
             return self._desk.is_exit(text)
@@ -1243,6 +1380,12 @@ class TelegramAssistant:
         if command == "resume":
             self._reply(RESUME_TEXT)
             return "command:resume"
+        # Deterministic, before the order parser and Claude: /halt is never an
+        # order (the protective stop order is /stop <sym> <price>).
+        if command == "halt":
+            return self._halt_command(inbound, args)
+        if command == "confirm":
+            return await self._confirm_command(inbound, args)
         if command in MANAGER_COMMANDS:
             self._reply(await self._manager_command(command, args))
             return f"command:{command}"
@@ -1283,6 +1426,7 @@ class TelegramAssistant:
             "market": tools.market,
             "signals": tools.signals,
             "report": tools.report,
+            "fences": tools.fences,
         }
         return await handlers[command]()
 
@@ -1317,6 +1461,61 @@ class TelegramAssistant:
             "and /cancel still work. There is no /resume (see /resume for why)."
         )
         return "kill_switch:on"
+
+    def _halt_command(self, inbound: Inbound, args: str) -> str:
+        identity = halt_identity(args)
+        if identity is None:
+            logger.info("/halt refused: not exactly one sendable identity")
+            self._reply(halt_refused_text(args))
+            return "halt:refused"
+        pending = self._halts.request(inbound.chat_id, identity)
+        logger.info("/halt %s requested; waiting for /confirm", identity)
+        self._reply(halt_prompt_text(identity, pending.nonce))
+        return f"halt:pending:{identity}"
+
+    async def _confirm_command(self, inbound: Inbound, args: str) -> str:
+        outcome, pending = self._halts.confirm(inbound.chat_id, args)
+        if outcome == "no_pending" or pending is None:
+            self._reply("❌ No /halt is waiting for confirmation — send /halt <IDENTITY> first. Nothing written.")
+            return "halt:confirm:no_pending"
+        identity = pending.identity
+        if outcome == "expired":
+            self._reply(f"⌛ /halt {identity} expired — send /halt {identity} again. Nothing written.")
+            return "halt:confirm:expired"
+        if outcome == "wrong_nonce":
+            self._reply(
+                f"❌ Wrong code for /halt {identity} — nothing written. "
+                "Send /confirm with the code from the /halt reply."
+            )
+            return "halt:confirm:wrong_nonce"
+        return await self._halt_identity(identity)
+
+    async def _halt_identity(self, identity: str) -> str:
+        """Write ``paper:<IDENTITY>`` stopped=1, then read it back; never the global row."""
+        manual = f'autotraderctl paper stop --identity {identity} --reason "{HALT_REASON}"'
+        if halt_identity(identity) != identity:
+            # Tripwire: only a sendable name may reach the store (fence_name(None) is global).
+            logger.critical("halt refused: %r is not a sendable identity", identity, stack_info=True)
+            self._reply(halt_refused_text(identity))
+            return "halt:refused"
+        if self._fences is None:
+            self._reply(f"🚨 Identity fences are unavailable here — NOT stopped. Run on the Mac: {manual}")
+            return "halt:unavailable"
+        try:
+            await self._fences.stop(reason=HALT_REASON, identity=identity)
+            stopped = await self._fences.is_stopped(identity=identity)
+        except Exception as exc:  # noqa: BLE001 - the owner must know it did not take
+            logger.exception("identity fence %s via /halt failed", identity)
+            self._reply(
+                f"🚨 identity fence {identity} NOT confirmed ({type(exc).__name__}). Run on the Mac: {manual}"
+            )
+            return "halt:failed"
+        if not stopped:
+            self._reply(f"🚨 identity fence {identity} NOT confirmed. Run on the Mac: {manual}")
+            return "halt:unconfirmed"
+        logger.warning("INCIDENT halt identity=%s via=telegram", identity)
+        self._reply(halt_stopped_text(identity))
+        return f"halt:stopped:{identity}"
 
     # -- orders --------------------------------------------------------------
 
@@ -1612,6 +1811,7 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
         tools=tools,
         desk=desk,
         kill_switch=kill_switch,
+        fences=kill_switch,
         questions=questions,
         questions_unavailable=unavailable,
         state=state,

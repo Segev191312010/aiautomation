@@ -138,6 +138,9 @@ class FakeTools:
     async def report(self) -> str:
         return await self._text("report")
 
+    async def fences(self) -> str:
+        return await self._text("fences")
+
     async def quote(self, symbol: str) -> str:
         self.quotes.append(symbol)
         return f"quote {symbol}"
@@ -233,6 +236,29 @@ class FakeKillSwitch:
         self.stopped = True
 
 
+class FakeFences:
+    """The identity rows of SQLitePaperKillStore: what /confirm writes, and nothing else."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self.rows: dict[str | None, str] = {}
+        self.error: BaseException | None = None
+        self.takes = True
+
+    async def stop(self, *, reason: str, identity: str | None = None) -> None:
+        self.calls.append((reason, identity))
+        if self.error is not None:
+            raise self.error
+        if self.takes:
+            self.rows[identity] = reason
+
+    async def is_stopped(self, *, identity: str | None = None) -> bool:
+        return identity in self.rows
+
+
+NONCES = ("a1b2c3", "d4e5f6", "c0ffee", "0badf0")
+
+
 class FakeQuestions:
     def __init__(self, answer: str = "Here is the answer.", error: BaseException | None = None) -> None:
         self.asked: list[tuple[str, int | None]] = []
@@ -280,6 +306,7 @@ class Harness:
     questions: FakeQuestions | None
     state: AssistantState
     assistant: TelegramAssistant
+    fences: FakeFences
 
     async def feed(self, *updates: Mapping[str, Any]) -> None:
         self.updates.batches.append(list(updates))
@@ -298,6 +325,8 @@ def make(tmp_path: Path, *, questions: FakeQuestions | None = None, with_questio
     if questions is None and with_questions:
         questions = FakeQuestions()
     state = AssistantState.load(tmp_path / "telegram" / "state.json")
+    fences = FakeFences()
+    nonces = list(NONCES)
     assistant = TelegramAssistant(
         owner_id=OWNER,
         updates=updates,
@@ -305,14 +334,16 @@ def make(tmp_path: Path, *, questions: FakeQuestions | None = None, with_questio
         tools=tools,  # type: ignore[arg-type]
         desk=desk,
         kill_switch=kill,
+        fences=fences,
         questions=questions,
         questions_unavailable="" if with_questions else "no Anthropic API key in the Keychain",
         state=state,
         clock=time.clock,
         monotonic=time.monotonic,
         sleep=time.sleep,
+        new_nonce=lambda: nonces.pop(0),
     )
-    return Harness(time, updates, replies, tools, desk, kill, questions, state, assistant)
+    return Harness(time, updates, replies, tools, desk, kill, questions, state, assistant, fences)
 
 
 @pytest.fixture
@@ -1795,3 +1826,313 @@ async def test_an_order_the_bridge_never_picks_up_is_reported_once_as_not_sent(h
         "(is the bridge running? /status)"
     ]
     assert harness.state.notified[ORDER_ID] == "expired"
+
+
+# --------------------------------------------------------------------------
+# T-1: /halt <IDENTITY> + /confirm <nonce>, /fences
+# --------------------------------------------------------------------------
+
+HALT_PROMPT = "halt ORB_V2: confirm with /confirm a1b2c3 within 60 s (stop only; resume is CLI-only)"
+HALT_STOPPED = (
+    "identity fence ORB_V2: STOPPED (new entries blocked; exits, flatten and manual orders unaffected)"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "parsed"),
+    [
+        ("/halt ORB_V2", ("halt", "ORB_V2")),
+        ("/HALT@AutotraderBot  ORB_V2 ", ("halt", "ORB_V2")),
+        ("/confirm a1b2c3", ("confirm", "a1b2c3")),
+        ("/fences", ("fences", "")),
+        ("/stop AAPL 12.5", ("stop", "AAPL 12.5")),
+        ("/stop", ("stop", "")),
+    ],
+)
+def test_halt_confirm_and_fences_parse_as_their_own_commands(text, parsed):
+    assert bot.split_command(text) == parsed
+
+
+@pytest.mark.parametrize("given", ["ORB_V2", " ORB_V2 ", "MOMO_HOD_V2", "VWAP_PB_V2", "GAP_GO_V2"])
+def test_halt_takes_exactly_a_sendable_identity(given):
+    assert bot.halt_identity(given) == given.strip()
+
+
+@pytest.mark.parametrize(
+    "given", ["", "orb_v2", "Orb_V2", "ORB_V1", "ORB_V2 now", "ORB_V2X", "AP_MOMO_HOD_V1", "SH_ORB", "all", "AAPL 12.5"]
+)
+def test_halt_refuses_any_other_name(given):
+    assert bot.halt_identity(given) is None
+
+
+async def test_stop_with_a_symbol_and_price_is_a_stop_order_never_a_halt(harness):
+    stop_order = ParsedText("order", request={"action": "SELL_STOP", "symbol": "AAPL"})
+    harness.desk.parse_table["/stop AAPL 12.5"] = stop_order
+
+    await harness.feed(message(1, "/stop AAPL 12.5"))
+
+    assert [parsed for parsed, _ in harness.desk.submitted] == [stop_order]
+    assert harness.assistant._halts.pending(OWNER) is None
+    assert harness.fences.calls == [] and not harness.kill.stopped
+    assert harness.desk.outcomes[1].startswith("order:queued:")
+
+
+async def test_halt_then_the_right_nonce_stops_only_that_identity(harness, caplog):
+    await harness.feed(message(1, "/halt ORB_V2"))
+
+    assert harness.replies.texts == [HALT_PROMPT]
+    assert harness.fences.calls == []  # nothing is written before the confirmation
+    assert harness.desk.outcomes[1] == "halt:pending:ORB_V2"
+
+    harness.time.now += timedelta(seconds=30)
+    with caplog.at_level(logging.WARNING, logger="autotrader.shadow.telegram"):
+        await harness.feed(message(2, "/confirm a1b2c3"))
+
+    assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+    assert harness.replies.texts[-1] == HALT_STOPPED
+    assert harness.desk.outcomes[2] == "halt:stopped:ORB_V2"
+    incidents = [record.getMessage() for record in caplog.records if "INCIDENT" in record.getMessage()]
+    assert incidents == ["INCIDENT halt identity=ORB_V2 via=telegram"]
+    # Deterministic: never the order parser, never Claude, never the global switch.
+    assert harness.desk.parsed == [] and harness.questions.asked == []
+    assert not harness.kill.stopped and harness.kill.reasons == []
+    # The request is spent: the same nonce again writes nothing.
+    await harness.feed(message(3, "/confirm a1b2c3"))
+    assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+    assert harness.replies.texts[-1].startswith("❌ No /halt is waiting")
+
+
+async def test_a_wrong_nonce_writes_nothing_and_the_right_one_still_works(harness):
+    await harness.feed(message(1, "/halt ORB_V2"))
+    for update_id, text in ((2, "/confirm d4e5f6"), (3, "/confirm"), (4, "/confirm a1b2c3 a1b2c3"), (5, "/confirm a1b2c")):
+        await harness.feed(message(update_id, text))
+        assert harness.fences.calls == []
+        assert harness.replies.texts[-1].startswith("❌ Wrong code for /halt ORB_V2 — nothing written.")
+        assert harness.desk.outcomes[update_id] == "halt:confirm:wrong_nonce"
+
+    await harness.feed(message(6, "/confirm A1B2C3"))  # a phone's capital letters are still the code
+    assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+
+
+@pytest.mark.parametrize(("seconds", "written"), [(59, True), (60, True), (61, False), (3600, False)])
+async def test_the_nonce_expires_after_sixty_seconds(harness, seconds, written):
+    await harness.feed(message(1, "/halt ORB_V2"))
+    harness.time.now += timedelta(seconds=seconds)
+
+    await harness.feed(message(2, "/confirm a1b2c3"))
+
+    if written:
+        assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+        return
+    assert harness.fences.calls == []
+    assert harness.replies.texts[-1] == "⌛ /halt ORB_V2 expired — send /halt ORB_V2 again. Nothing written."
+    assert harness.desk.outcomes[2] == "halt:confirm:expired"
+    # An expired request is gone.
+    await harness.feed(message(3, "/confirm a1b2c3"))
+    assert harness.fences.calls == [] and harness.replies.texts[-1].startswith("❌ No /halt is waiting")
+
+
+async def test_a_clock_that_goes_backwards_expires_the_request(harness):
+    await harness.feed(message(1, "/halt ORB_V2"))
+    harness.time.now -= timedelta(seconds=5)
+
+    await harness.feed(message(2, "/confirm a1b2c3"))
+
+    assert harness.fences.calls == [] and harness.desk.outcomes[2] == "halt:confirm:expired"
+
+
+async def test_a_new_halt_replaces_the_pending_one(harness):
+    await harness.feed(message(1, "/halt ORB_V2"), message(2, "/halt GAP_GO_V2"))
+    assert harness.replies.texts[-1] == (
+        "halt GAP_GO_V2: confirm with /confirm d4e5f6 within 60 s (stop only; resume is CLI-only)"
+    )
+
+    await harness.feed(message(3, "/confirm a1b2c3"))  # the replaced request's nonce
+    assert harness.fences.calls == []
+    assert harness.replies.texts[-1].startswith("❌ Wrong code for /halt GAP_GO_V2")
+
+    await harness.feed(message(4, "/confirm d4e5f6"))
+    assert harness.fences.calls == [("telegram /halt by owner", "GAP_GO_V2")]
+
+
+@pytest.mark.parametrize("text", ["/halt orb_v2", "/halt ORB_V1", "/halt", "/halt ORB_V2 now", "/halt AP_MOMO_HOD_V1"])
+async def test_a_name_that_is_not_sendable_is_refused_and_nothing_is_written(harness, text):
+    await harness.feed(message(1, text))
+
+    reply = harness.replies.texts[-1]
+    assert reply.startswith("❌") and reply.endswith("Nothing written.")
+    assert "MOMO_HOD_V2, ORB_V2, VWAP_PB_V2, GAP_GO_V2" in reply
+    assert harness.desk.outcomes[1] == "halt:refused"
+    assert harness.assistant._halts.pending(OWNER) is None
+    await harness.feed(message(2, "/confirm a1b2c3"))
+    assert harness.fences.calls == [] and harness.desk.parsed == [] and harness.questions.asked == []
+
+
+async def test_confirm_without_a_pending_halt_is_refused(harness):
+    await harness.feed(message(1, "/confirm a1b2c3"))
+
+    assert harness.replies.texts == [
+        "❌ No /halt is waiting for confirmation — send /halt <IDENTITY> first. Nothing written."
+    ]
+    assert harness.fences.calls == [] and harness.desk.outcomes[1] == "halt:confirm:no_pending"
+
+
+async def test_a_halt_that_does_not_take_is_reported_with_the_mac_command(harness):
+    harness.fences.error = OSError("disk I/O error")
+    await harness.feed(message(1, "/halt ORB_V2"), message(2, "/confirm a1b2c3"))
+
+    assert harness.replies.texts[-1] == (
+        "🚨 identity fence ORB_V2 NOT confirmed (OSError). Run on the Mac: "
+        'autotraderctl paper stop --identity ORB_V2 --reason "telegram /halt by owner"'
+    )
+    assert harness.desk.outcomes[2] == "halt:failed"
+
+    harness.fences.error = None
+    harness.fences.takes = False  # written but not read back as stopped
+    await harness.feed(message(3, "/halt ORB_V2"), message(4, "/confirm d4e5f6"))
+    assert harness.replies.texts[-1].startswith("🚨 identity fence ORB_V2 NOT confirmed. Run on the Mac:")
+    assert harness.desk.outcomes[4] == "halt:unconfirmed"
+
+
+async def test_a_halt_without_an_identity_store_is_refused_loudly(tmp_path):
+    h = make(tmp_path)
+    h.assistant._fences = None
+    await h.feed(message(1, "/halt ORB_V2"), message(2, "/confirm a1b2c3"))
+
+    assert h.replies.texts[-1].startswith("🚨 Identity fences are unavailable here — NOT stopped.")
+    assert h.desk.outcomes[2] == "halt:unavailable"
+
+
+async def test_there_is_no_resume_from_the_phone(harness):
+    await harness.feed(message(1, "/halt ORB_V2"), message(2, "/confirm a1b2c3"))
+    await harness.feed(message(3, "/resume ORB_V2"))
+
+    assert harness.replies.texts[-1] == bot.RESUME_TEXT
+    assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+    assert harness.fences.rows == {"ORB_V2": "telegram /halt by owner"}
+
+
+async def test_halt_and_confirm_pass_the_flood_limit(harness):
+    await harness.feed(*(message(n, "/hot") for n in range(1, 22)))
+    assert harness.replies.texts.count(bot.FLOOD_NOTICE) == 1
+
+    await harness.feed(message(30, "/halt ORB_V2"), message(31, "/confirm a1b2c3"))
+
+    assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+    assert "/halt" in bot.FLOOD_NOTICE and "/confirm" in bot.FLOOD_NOTICE
+
+
+async def test_fences_is_a_read_command(harness):
+    await harness.feed(message(1, "/fences"))
+
+    assert harness.tools.calls == ["fences"] and harness.replies.texts == ["fences text"]
+
+
+def test_help_lists_halt_and_fences_and_says_resume_is_at_the_mac():
+    for words in ("/fences", "/halt ORB_V2", "/confirm", "stop only", "autotraderctl"):
+        assert words in bot.HELP_TEXT
+
+
+def test_halt_requests_refuse_a_bad_name_or_nonce_at_the_source():
+    requests = bot.HaltRequests(clock=lambda: NOW, new_nonce=lambda: "a1b2c3")
+    with pytest.raises(ValueError):
+        requests.request(OWNER, "ORB_V1")
+    bad = bot.HaltRequests(clock=lambda: NOW, new_nonce=lambda: "")
+    with pytest.raises(ValueError):
+        bad.request(OWNER, "ORB_V2")
+    assert len(bot.new_halt_nonce()) == 6 and int(bot.new_halt_nonce(), 16) >= 0
+
+
+async def fence_database(tmp_path: Path, monkeypatch) -> Path:
+    from config import cfg
+    from db.core import init_db
+
+    path = tmp_path / "fences.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(path))
+    await init_db()
+    return path
+
+
+async def test_acceptance_halt_and_confirm_write_the_identity_row_the_bridge_reads(tmp_path, monkeypatch):
+    """Scratch DB: /halt ORB_V2 + /confirm -> paper:ORB_V2 stopped by the real store; the
+    pinned bridge's own predicate (loaded read-only, unchanged) sees it; the global row is untouched."""
+    import importlib.util
+
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    database = await fence_database(tmp_path, monkeypatch)
+    h = make(tmp_path)
+    store = SQLitePaperKillStore()
+    h.assistant._fences = store
+
+    await h.feed(message(1, "/halt ORB_V2"), message(2, "/confirm a1b2c3"))
+
+    assert h.replies.texts == [HALT_PROMPT, HALT_STOPPED]
+    assert [(name, stopped, reason) for name, stopped, reason, _at in await store.identity_rows()] == [
+        ("ORB_V2", True, "telegram /halt by owner")
+    ]
+    assert await store.is_stopped(identity="ORB_V2") and not await store.is_stopped()
+    bridge_path = Path(__file__).resolve().parents[1] / "scripts_local" / "paper_bridge.py"
+    spec = importlib.util.spec_from_file_location("paper_bridge_t1_acceptance", bridge_path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bridge
+    try:
+        spec.loader.exec_module(bridge)
+        assert bridge.identity_fence_active(database, "ORB_V2")
+        assert bridge.fenced_identities(database) == ["ORB_V2"]
+        assert not bridge.paper_kill_switch_active(database)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+
+async def test_end_to_end_the_composition_root_wires_the_real_fence_store(tmp_path, monkeypatch):
+    """run_telegram_assistant -> _serve with a mock Bot API: the store it builds is the one /confirm writes."""
+    import httpx
+
+    from trading.operations.keychain import KeychainReadError
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    await fence_database(tmp_path, monkeypatch)
+    sent: list[str] = []
+    stage = {"n": 0}
+
+    def ok(result: Any) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        method = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content or b"{}")
+        if method == "sendMessage":
+            sent.append(payload["text"])
+            return ok({"message_id": len(sent)})
+        assert method == "getUpdates", method
+        await asyncio.sleep(0.01)  # let the reply sender run
+        now = datetime.now(UTC)
+        if stage["n"] == 0:
+            stage["n"] = 1
+            return ok([message(1, "/halt ORB_V2", sent_at=now)])
+        if stage["n"] == 1:
+            prompts = [text for text in sent if text.startswith("halt ORB_V2: confirm with /confirm ")]
+            if not prompts:
+                return ok([])
+            stage["n"] = 2
+            nonce = prompts[0].split("/confirm ", 1)[1].split()[0]
+            return ok([message(2, f"/confirm {nonce}", sent_at=now)])
+        if not any(text == HALT_STOPPED for text in sent):
+            return ok([])
+        return httpx.Response(401, json={"ok": False, "error_code": 401, "description": "Unauthorized"})
+
+    def no_key() -> str:
+        raise KeychainReadError("no key in this test")
+
+    environment = env(tmp_path, transport=httpx.MockTransport(handle), read_anthropic_key=no_key)
+    save_chat_id(telegram_config_file(environment.paths), OWNER)
+
+    assert await asyncio.wait_for(bot.run_telegram_assistant(env=environment), 20) == bot.EXIT_CONFIG
+    assert HALT_STOPPED in sent
+    rows = await SQLitePaperKillStore().identity_rows()
+    assert [(name, stopped, reason) for name, stopped, reason, _at in rows] == [
+        ("ORB_V2", True, "telegram /halt by owner")
+    ]
+    assert not await SQLitePaperKillStore().is_stopped()

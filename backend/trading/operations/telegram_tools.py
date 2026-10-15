@@ -24,6 +24,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import subprocess
 import time as monotonic_time
 from typing import Any, Protocol
 
@@ -625,6 +626,252 @@ def heartbeat_text(age: float | None, *, max_age: float = 20.0) -> str:
 
 
 # --------------------------------------------------------------------------
+# Operations health (the extended /status lines) and /fences
+# --------------------------------------------------------------------------
+
+# Each extended /status line has its own budget and never raises: a probe that
+# fails or hangs reads "unknown" on its own line and never costs the reply.
+OPS_PROBE_SECONDS = 2.0
+PMSET_COMMAND = ("/usr/bin/pmset", "-g", "batt")
+_POWER_SOURCE = re.compile(r"Now drawing from '(?P<source>[^']+)'")
+_POWER_SOURCES = {"AC Power": "AC", "Battery Power": "battery", "UPS Power": "battery (UPS)"}
+RESEARCH_CHILD_NAMES = ("recorder", "replay")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+GLOBAL_FENCE_LABEL = "paper (global)"
+FENCE_REASON_CHARS = 120
+
+CommandRunner = Callable[[Sequence[str], float], str]
+GlobalFenceRow = tuple[bool, str, str]  # (stopped, reason, updated_at)
+
+
+async def gateway_port_open() -> bool:
+    """A plain TCP connect to the local PAPER API port, closed at once.
+
+    Reachability only (no API handshake, no client id): an open port with a
+    competing IBKR login still refuses market data. The caller bounds the wait.
+    """
+    from trading.market.tws_actor import PAPER_TWS_HOST, PAPER_TWS_PORT
+
+    try:
+        _reader, writer = await asyncio.open_connection(PAPER_TWS_HOST, PAPER_TWS_PORT)
+    except OSError:
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True
+
+
+def run_read_only_command(argv: Sequence[str], timeout_seconds: float) -> str:
+    """Stdout of a fixed, read-only system command (``pmset -g batt``); never a shell."""
+    completed = subprocess.run(
+        list(argv), check=False, capture_output=True, text=True, timeout=timeout_seconds
+    )
+    if completed.returncode != 0:
+        raise OSError(f"{Path(argv[0]).name} exited with {completed.returncode}")
+    return completed.stdout
+
+
+def power_source_text(output: str) -> str:
+    """``AC``, ``battery`` or ``unknown`` from ``pmset -g batt``'s first line."""
+    match = _POWER_SOURCE.search(output)
+    if match is None:
+        return "unknown"
+    source = match.group("source")
+    return _POWER_SOURCES.get(source, f"unknown ({source[:40]})")
+
+
+def schema_state_text() -> str:
+    """``autotraderctl db status``'s state line from the same read-only ledger read.
+
+    ``inspect_schema`` opens the database ``mode=ro`` and never creates,
+    migrates or writes it (``trading.operations.db_admin.run_status``).
+    """
+    from config import cfg
+    from trading.storage.migrations import inspect_schema
+
+    return inspect_schema(Path(cfg.DB_PATH)).describe()
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchAgentState:
+    """``loaded`` is None when launchd was not asked."""
+
+    loaded: bool | None
+    pid: int | None = None
+    detail: str = ""
+
+
+def launch_agent_text(state: LaunchAgentState) -> str:
+    if state.loaded is None:
+        return f"unknown ({state.detail})" if state.detail else "unknown"
+    if not state.loaded:
+        return "not loaded"
+    return f"loaded pid {state.pid}" if state.pid is not None else "loaded (no pid)"
+
+
+def read_launch_agent(paths: UserPaths) -> LaunchAgentState:
+    """The plist only. The assistant never runs launchctl: loading and unloading
+    the agent are the owner's ``autotraderctl shadow agent`` commands at the Mac."""
+    from trading.operations.launchd import LaunchdManager
+
+    manager = LaunchdManager.current(user_paths=paths)
+    if not manager.is_installed():
+        return LaunchAgentState(None, detail="no plist installed; launchctl not queried")
+    if manager.is_current():
+        return LaunchAgentState(None, detail="plist current; launchctl not queried")
+    return LaunchAgentState(None, detail="plist differs from this code; launchctl not queried")
+
+
+def child_starts_on(lines: Sequence[str], day: date) -> dict[str, int]:
+    """``CHILD_START <name>`` lines per child whose time falls on ``day`` (ET)."""
+    counts: dict[str, int] = {}
+    for line in lines:
+        match = _LOG_LINE.match(line.strip())
+        if match is None or match.group("kind") != "CHILD_START":
+            continue
+        at = _parse_iso(match.group("at"))
+        found = _CHILD_START.match(match.group("rest") or "")
+        if at is None or found is None or at.astimezone(MARKET_TIMEZONE).date() != day:
+            continue
+        name = found.group("name")
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def restarts_text(counts: Mapping[str, int], *, partial: bool = False) -> str:
+    if not counts:
+        return "none"
+    text = " ".join(f"{name}={counts[name]}" for name in sorted(counts))
+    return f"{text} (at least: older lines are past the log tail)" if partial else text
+
+
+def _first_line_day(lines: Sequence[str]) -> date | None:
+    for line in lines:
+        match = _LOG_LINE.match(line.strip())
+        at = _parse_iso(match.group("at")) if match is not None else None
+        if at is not None:
+            return at.astimezone(MARKET_TIMEZONE).date()
+    return None
+
+
+def last_child_events(
+    lines: Sequence[str], names: Sequence[str]
+) -> dict[str, tuple[str, datetime, str]]:
+    """Each named child's newest ``("start", at, pid)`` or ``("exit", at, code)``."""
+    events: dict[str, tuple[str, datetime, str]] = {}
+    for line in lines:
+        match = _LOG_LINE.match(line.strip())
+        if match is None or match.group("kind") not in {"CHILD_START", "CHILD_EXIT"}:
+            continue
+        at = _parse_iso(match.group("at"))
+        rest = match.group("rest") or ""
+        if at is None:
+            continue
+        if match.group("kind") == "CHILD_START":
+            found = _CHILD_START.match(rest)
+            if found is not None and found.group("name") in names:
+                events[found.group("name")] = ("start", at, found.group("pid"))
+        else:
+            found = _CHILD_EXIT.match(rest)
+            if found is not None and found.group("name") in names:
+                events[found.group("name")] = ("exit", at, found.group("code"))
+    return events
+
+
+def _child_event_text(event: tuple[str, datetime, str] | None) -> str:
+    if event is None:
+        return "no run in the log tail"
+    kind, at, value = event
+    when = et_clock(at, "%a %d %b %H:%M ET")
+    if kind == "start":
+        return f"running since {when}"
+    return f"ok {when}" if value == "0" else f"exit {value} {when}"
+
+
+def _newest_dated(directory: Path) -> list[Path]:
+    if directory.is_symlink() or not directory.is_dir():
+        return []
+    dated = [
+        item
+        for item in directory.iterdir()
+        if _ISO_DATE.match(item.name) and item.is_dir() and not item.is_symlink()
+    ]
+    return sorted(dated, key=lambda item: item.name, reverse=True)
+
+
+def newest_recorded_session(paths: UserPaths) -> date | None:
+    """The newest session with stored research bars (the recorder's output)."""
+    from trading.research.bars_store import BarsStore, ResearchPaths
+
+    research = ResearchPaths.for_user(paths)
+    store = BarsStore(research)
+    for directory in _newest_dated(research.bars_directory):
+        try:
+            day = date.fromisoformat(directory.name)
+        except ValueError:
+            continue
+        if store.list_con_ids(day):
+            return day
+    return None
+
+
+def newest_replay_report(paths: UserPaths) -> tuple[str | None, bool]:
+    """``(date, evidence written)`` of the newest replay report directory.
+
+    The replay writes ``summary.txt`` (``research.replay.write_reports``); a full
+    run adds ``evidence.json`` beside it (``research.nightly.write_evidence``).
+    """
+    from trading.research.bars_store import ResearchPaths
+
+    for directory in _newest_dated(ResearchPaths.for_user(paths).reports_directory):
+        if (directory / "summary.txt").is_file():
+            return directory.name, (directory / "evidence.json").is_file()
+    return None, False
+
+
+def research_outcome_text(paths: UserPaths, lines: Sequence[str]) -> str:
+    """The recorder's and the replay's newest run (supervisor log) and output (files)."""
+    events = last_child_events(lines, RESEARCH_CHILD_NAMES)
+    recorded = newest_recorded_session(paths)
+    report, evidence = newest_replay_report(paths)
+    recorder = (
+        f"recorder {_child_event_text(events.get('recorder'))}, "
+        f"bars through {recorded.isoformat() if recorded else 'none'}"
+    )
+    replay = (
+        f"replay {_child_event_text(events.get('replay'))}, "
+        f"report {report or 'none'}{' with evidence' if evidence else ''}"
+    )
+    return f"{recorder} · {replay}"
+
+
+async def read_global_fence() -> GlobalFenceRow | None:
+    """The global ``paper`` row, read only (the store exposes the identity rows)."""
+    from db.core import get_db
+    from trading.storage.runtime_fence import GLOBAL_FENCE
+
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT stopped, reason, updated_at FROM autotrader_execution_fences WHERE name=?",
+            (GLOBAL_FENCE,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    if row is None:
+        return None
+    return bool(int(row[0])), str(row[1]), str(row[2])
+
+
+def fence_line(label: str, stopped: bool, reason: str, updated_at: str) -> str:
+    when = _parse_iso(updated_at)
+    shown = et_clock(when, "%a %d %b %H:%M ET") if when is not None else (updated_at or "time unknown")
+    why = " ".join(str(reason).split())[:FENCE_REASON_CHARS] or "no reason"
+    return f"{label}: {'STOPPED' if stopped else 'clear'} · {why} · {shown}"
+
+
+# --------------------------------------------------------------------------
 # Screener and market context
 # --------------------------------------------------------------------------
 
@@ -724,9 +971,11 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "description": (
             "System health right now: market open/closed and the next open, the supervisor and "
             "each child process (screener, bridge, strategies, notifier, telegram), the bridge "
-            "heartbeat, the market regime, and whether the PAPER kill switch is on. Call this when "
-            "the owner asks whether things are running, why nothing is happening, or about the "
-            "kill switch."
+            "heartbeat, the market regime, whether the PAPER kill switch or any identity fence is "
+            "on, whether the IB Gateway port answers, the database schema state, the LaunchAgent, "
+            "the last research recorder and replay runs, AC or battery power, and today's child "
+            "starts. Call this when the owner asks whether things are running, why nothing is "
+            "happening, or about the kill switch."
         ),
         "strict": True,
         "input_schema": _no_input_schema(),
@@ -834,6 +1083,15 @@ class DataTools:
     ledger: ManualLedger = field(default_factory=DefaultManualLedger)
     read_screener: Callable[[], Awaitable[Any | None]] = newest_screener_payload
     pid_alive: Callable[[int], bool] = _pid_alive
+    # The extended /status lines and /fences (each bounded by ops_budget_seconds).
+    # The two that leave the process (a TCP connect, a subprocess) resolve at call
+    # time when None, so a test can replace them for a whole module.
+    gateway_probe: Callable[[], Awaitable[bool]] | None = None
+    run_command: CommandRunner | None = None
+    read_schema: Callable[[], str] = schema_state_text
+    read_launch_agent: Callable[[UserPaths], LaunchAgentState] = read_launch_agent
+    read_global_fence: Callable[[], Awaitable[GlobalFenceRow | None]] = read_global_fence
+    ops_budget_seconds: float = OPS_PROBE_SECONDS
 
     def __post_init__(self) -> None:
         if self.kill_switch is None:
@@ -924,13 +1182,104 @@ class DataTools:
         now = self._now()
         lines = [f"🤖 Status · {et_clock(now, '%a %d %b %H:%M:%S ET')}"]
         lines.append("Market: " + market_clock(now).text())
-        state = supervisor_state(
-            read_log_tail(self.paths.log_directory / "supervisor.log"), pid_alive=self.pid_alive
-        )
+        log = self.paths.log_directory / "supervisor.log"
+        tail = read_log_tail(log)
+        state = supervisor_state(tail, pid_alive=self.pid_alive)
         lines.extend(format_supervisor(state, now))
         lines.append(await self._heartbeat_text())
         lines.append(await self._regime_line(now))
-        lines.append(await self._kill_switch_text())
+        lines.extend(await self._ops_lines(now, log, tail))
+        return "\n".join(lines)
+
+    async def _bounded(
+        self, label: str, read: Callable[[], Awaitable[str]], *, on_timeout: str | None = None
+    ) -> str:
+        """``<label>: <value>`` within the budget; a failure or a hang is a value, never a raise."""
+        budget = self.ops_budget_seconds
+        try:
+            value = await asyncio.wait_for(read(), budget)
+        except asyncio.TimeoutError:
+            value = on_timeout or f"unknown (no answer in {budget:g} s)"
+        except Exception as exc:  # noqa: BLE001 - one failed probe never costs the reply
+            value = f"unknown ({type(exc).__name__})"
+        return f"{label}: {value}" if label else value
+
+    async def _ops_lines(self, now: datetime, log: Path, tail: Sequence[str]) -> list[str]:
+        """Fences, Gateway port, schema, LaunchAgent, recorder/replay, power, restarts."""
+        from trading.market.tws_actor import PAPER_TWS_PORT
+
+        budget = self.ops_budget_seconds
+        gateway_probe = self.gateway_probe or gateway_port_open
+        run_command = self.run_command or run_read_only_command
+
+        async def gateway() -> str:
+            return "OPEN" if await gateway_probe() else "CLOSED"
+
+        async def schema() -> str:
+            return await asyncio.to_thread(self.read_schema)
+
+        async def launch_agent() -> str:
+            return launch_agent_text(await asyncio.to_thread(self.read_launch_agent, self.paths))
+
+        async def research() -> str:
+            return await asyncio.to_thread(research_outcome_text, self.paths, tail)
+
+        async def power() -> str:
+            return power_source_text(await asyncio.to_thread(run_command, PMSET_COMMAND, budget))
+
+        async def restarts() -> str:
+            if not log.is_file() or log.is_symlink():
+                return "unknown (no supervisor.log)"
+            day = now.astimezone(MARKET_TIMEZONE).date()
+            partial = log.stat().st_size > SUPERVISOR_LOG_TAIL_BYTES and _first_line_day(tail) == day
+            return restarts_text(child_starts_on(tail, day), partial=partial)
+
+        return list(
+            await asyncio.gather(
+                # The kill switch and identity fences: _kill_switch_text's own lines.
+                self._bounded(
+                    "", self._kill_switch_text, on_timeout=f"Kill switch: unknown (no answer in {budget:g} s)"
+                ),
+                self._bounded(
+                    f"Gateway {PAPER_TWS_PORT}", gateway, on_timeout=f"CLOSED (no answer in {budget:g} s)"
+                ),
+                self._bounded("Schema", schema),
+                self._bounded("LaunchAgent", launch_agent),
+                self._bounded("Recorder/replay", research),
+                self._bounded("Power", power),
+                self._bounded("Restarts today", restarts),
+            )
+        )
+
+    async def fences(self) -> str:
+        """``/fences``: the global row and every identity row, one line each."""
+        now = self._now()
+        budget = self.ops_budget_seconds
+        lines = [f"🚧 Fences · {et_clock(now, '%a %d %b %H:%M:%S ET')}"]
+        unreadable = "UNREADABLE ({}) — the bridge treats an unreadable fence as stopped"
+        try:
+            row = await asyncio.wait_for(self.read_global_fence(), budget)
+        except Exception as exc:  # noqa: BLE001 - unreadable means unknown, said plainly
+            lines.append(f"{GLOBAL_FENCE_LABEL}: {unreadable.format(type(exc).__name__)}")
+        else:
+            lines.append(
+                f"{GLOBAL_FENCE_LABEL}: clear (no row)" if row is None else fence_line(GLOBAL_FENCE_LABEL, *row)
+            )
+        reader = getattr(self.kill_switch, "identity_rows", None)
+        try:
+            if reader is None:
+                raise ToolError("identity rows unavailable")
+            rows = await asyncio.wait_for(reader(), budget)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"Identity fences: {unreadable.format(type(exc).__name__)}")
+        else:
+            if not rows:
+                lines.append("Identity fences: none written")
+            for name, stopped, reason, updated_at in rows:
+                lines.append(fence_line(f"paper:{name}", bool(stopped), reason, updated_at))
+        lines.append(
+            "Stop one identity: /halt <IDENTITY> · resume: autotraderctl paper resume --identity (Mac only)"
+        )
         return "\n".join(lines)
 
     async def _regime_line(self, now: datetime) -> str:
