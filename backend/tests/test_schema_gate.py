@@ -469,6 +469,11 @@ async def test_the_api_refuses_to_start_on_a_pending_migration_and_starts_once_c
 # --- the supervisor's dry run reports it loudly, read-only ---------------------------
 
 
+def _preflight_ok(session_date, *, python, backend):
+    """The bridge's own --preflight is a subprocess against the real home; never run it here."""
+    return 0, "INFO sendable identities = MOMO_HOD_V2\n"
+
+
 def test_the_dry_run_reports_a_pending_migration_loudly_and_reads_only(tmp_path):
     from trading.operations.supervisor import dry_run_report
 
@@ -476,7 +481,7 @@ def test_the_dry_run_reports_a_pending_migration_loudly_and_reads_only(tmp_path)
     before = _snapshot(pending)
 
     report = dry_run_report(
-        session_date=date(2026, 10, 13), clock_start=None, unsupervised=list, database=pending
+        session_date=date(2026, 10, 13), clock_start=None, unsupervised=list, database=pending, preflight=_preflight_ok
     ).splitlines()
 
     assert report[0] == "DRY RUN: nothing is launched and no log is written."
@@ -485,12 +490,12 @@ def test_the_dry_run_reports_a_pending_migration_loudly_and_reads_only(tmp_path)
     assert _snapshot(pending) == before
 
     current = migrate_database(tmp_path / "current.db")
-    report = dry_run_report(session_date=date(2026, 10, 13), unsupervised=list, database=current)
+    report = dry_run_report(session_date=date(2026, 10, 13), unsupervised=list, database=current, preflight=_preflight_ok)
     assert f"database     schema v{LATEST} current" in report
     assert "!!!" not in report
 
     missing = tmp_path / "missing" / "autotrader.db"
-    report = dry_run_report(session_date=date(2026, 10, 13), unsupervised=list, database=missing)
+    report = dry_run_report(session_date=date(2026, 10, 13), unsupervised=list, database=missing, preflight=_preflight_ok)
     assert "!!! DATABASE NOT READY" in report and "no database file" in report
     assert not missing.parent.exists()
 

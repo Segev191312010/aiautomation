@@ -967,7 +967,7 @@ def test_dry_run_clock_start_skips_windows_that_closed():
 
 def test_dry_run_rejects_a_closed_day():
     with pytest.raises(ValueError, match="not an XNYS trading session"):
-        dry_run_report(session_date=date(2026, 10, 17))
+        dry_run_report(session_date=date(2026, 10, 17), preflight=_PREFLIGHT_OK)
 
 
 # --- CLI: run and notify -------------------------------------------------------------
@@ -1546,7 +1546,7 @@ def test_dry_run_shows_the_learning_loop():
     # A fixed clock: without `now` the report simulates from the real clock
     # when it runs on the session date, and after 18:30 ET on 2026-10-13 the
     # research windows had closed (red on the night of the deploy).
-    report = dry_run_report(session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), unsupervised=list)
+    report = dry_run_report(session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), unsupervised=list, preflight=_PREFLIGHT_OK)
 
     assert "recorder  16:20-17:30  from 16:20" in report
     assert "replay    17:35-18:30  from 17:35" in report
@@ -1715,3 +1715,30 @@ def test_a_bridge_preflight_that_cannot_run_is_a_failed_dry_run(tmp_path):
     assert code != 0 and output
     lines = supervisor_module.bridge_preflight_lines(TUESDAY, python=Path(sys.executable), backend=backend)
     assert lines[-1].startswith(f"!!! BRIDGE PREFLIGHT FAILED (exit {code})")
+
+
+def test_a_registry_check_that_cannot_run_is_a_refusal_token_not_a_traceback(monkeypatch):
+    import trading.operations.shadow_service as shadow_service
+
+    def broken(**_):
+        raise RuntimeError("catalogue import exploded")
+
+    monkeypatch.setattr(shadow_service, "registry_problems", broken)
+    assert supervisor_module.registry_refusals() == ["registry_check_failed=RuntimeError"]
+    lines = supervisor_module.registry_lines(supervisor_module.registry_refusals())
+    assert lines[0].startswith("!!! LAUNCH_REFUSED registry code=78 reason=registry_check_failed=RuntimeError")
+
+
+def test_a_hung_bridge_preflight_keeps_its_partial_output_and_fails_the_dry_run(monkeypatch, tmp_path):
+    import subprocess
+
+    def hang(argv, **_):
+        raise subprocess.TimeoutExpired(argv, 60, output="INFO sendable identities = MOMO_HOD_V2\n")
+
+    monkeypatch.setattr(supervisor_module.subprocess, "run", hang)
+    code, output = supervisor_module.run_bridge_preflight(TUESDAY, python=PYTHON, backend=tmp_path)
+    assert code == 127
+    assert output.splitlines() == [
+        "INFO sendable identities = MOMO_HOD_V2",
+        "bridge preflight could not run (TimeoutExpired after 60 s)",
+    ]

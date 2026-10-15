@@ -465,6 +465,11 @@ def test_bridge_lines_map_to_phone_messages():
     assert text("15:50:00 ET  CRITICAL ABC: still open after flatten (100 sh)").startswith("⚠️ CRITICAL")
     assert text("12:00:00 ET  SKIP GHI (momo): daily loss limit reached").startswith("⛔ SKIP GHI")
     assert text("12:00:00 ET  SKIP GHI (momo): PAPER kill switch is active").startswith("⛔ SKIP")
+    # Bridge v7a: the owner's per-identity brake and the fail-closed caps/fence skips reach the phone.
+    assert text("12:00:00 ET  SKIP GHI (momo): identity_stopped:MOMO_HOD_V2").startswith("⛔ SKIP GHI")
+    assert text("12:00:00 ET  SKIP GHI: identity fence unreadable (OperationalError) — fail closed").startswith("⛔ SKIP")
+    assert text("12:00:00 ET  SKIP GHI (momo): identity_caps_missing:MOMO_HOD_V2").startswith("⛔ SKIP")
+    assert text("12:00:00 ET  SKIP GHI (momo): symbol already has an active bracket") is None
     for quiet in (
         "12:00:00 ET  SKIP DEF (momo): decision 75s old",
         "12:00:00 ET  RESIZE BF B: exits set to the 1200 filled shares",

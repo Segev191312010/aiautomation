@@ -150,11 +150,15 @@ class FakeLedger:
 
 
 class FakeKill:
-    def __init__(self, stopped: bool = False) -> None:
+    def __init__(self, stopped: bool = False, identities: tuple[tuple[str, bool], ...] = ()) -> None:
         self.stopped = stopped
+        self.identities = identities
 
     async def is_stopped(self) -> bool:
         return self.stopped
+
+    async def identity_rows(self) -> list[tuple[str, bool, str, str]]:
+        return [(name, fenced, "owner", "2026-10-15T12:00:00+00:00") for name, fenced in self.identities]
 
 
 def row(symbol: str, rank: int | None, *, con_id: int, score: str, last: str = "17.94", change: str = "13.67") -> dict[str, Any]:
@@ -613,3 +617,13 @@ async def test_run_tool_dispatches_and_reports_unknown_or_bad_input(tmp_path):
     with pytest.raises(ToolError, match="needs a symbol"):
         await tools.run_tool("get_quote", {})
     assert {tool["name"] for tool in TOOL_DEFINITIONS} >= {"get_status", "get_quote"}
+
+
+async def test_status_names_the_identity_fences_that_are_on(tmp_path):
+    fenced = tools_for(tmp_path, screener=payload(), kill=FakeKill(identities=(("MOMO_HOD_V2", True), ("ORB_V2", False))))
+    text = await fenced._kill_switch_text()
+    assert text.startswith("Kill switch: off")
+    assert "Identity fences ON: MOMO_HOD_V2 (autotraderctl paper resume --identity)" in text
+    assert "ORB_V2" not in text
+    clear = tools_for(tmp_path, screener=payload(), kill=FakeKill(identities=(("MOMO_HOD_V2", False),)))
+    assert await clear._kill_switch_text() == "Kill switch: off"

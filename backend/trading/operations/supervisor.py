@@ -1039,9 +1039,12 @@ def child_environment(environment: Mapping[str, str] | None = None) -> dict[str,
 
 def registry_refusals() -> list[str]:
     """``shadow_service.registry_problems()``, imported on use (the TWS and Claude stack)."""
-    from trading.operations.shadow_service import registry_problems
+    try:
+        from trading.operations.shadow_service import registry_problems
 
-    return registry_problems()
+        return registry_problems()
+    except Exception as exc:  # noqa: BLE001 - a check that cannot run is a refusal, never a traceback
+        return [f"registry_check_failed={type(exc).__name__}"]
 
 
 def registry_lines(problems: Sequence[str]) -> tuple[str, ...]:
@@ -1081,6 +1084,10 @@ def run_bridge_preflight(
             text=True,
             timeout=BRIDGE_PREFLIGHT_TIMEOUT_S,
         )
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout or b""
+        text = partial.decode("utf-8", "replace") if isinstance(partial, bytes) else str(partial)
+        return 127, text + f"bridge preflight could not run (TimeoutExpired after {BRIDGE_PREFLIGHT_TIMEOUT_S:.0f} s)\n"
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, f"bridge preflight could not run ({type(exc).__name__}: {exc})\n"
     output = completed.stdout

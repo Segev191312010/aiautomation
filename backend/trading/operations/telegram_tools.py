@@ -892,7 +892,18 @@ class DataTools:
             stopped = await self.kill_switch.is_stopped()  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 - unreadable means unknown, said plainly
             return f"Kill switch: UNREADABLE ({type(exc).__name__}) — treated as ON by the bridge"
-        return "Kill switch: ON (new buys blocked; there is no /resume)" if stopped else "Kill switch: off"
+        text = "Kill switch: ON (new buys blocked; there is no /resume)" if stopped else "Kill switch: off"
+        rows = getattr(self.kill_switch, "identity_rows", None)
+        if rows is None:
+            return text
+        try:
+            fences = await rows()
+        except Exception as exc:  # noqa: BLE001 - unreadable means unknown, said plainly
+            return f"{text}\nIdentity fences: UNREADABLE ({type(exc).__name__}) — treated as ON by the bridge"
+        stopped_names = [name for name, fenced, _reason, _at in fences if fenced]
+        if stopped_names:
+            return f"{text}\nIdentity fences ON: {', '.join(stopped_names)} (autotraderctl paper resume --identity)"
+        return text
 
     async def _heartbeat_text(self) -> str:
         try:

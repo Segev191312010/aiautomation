@@ -653,7 +653,10 @@ def bridge_event_text(event: BridgeEvent) -> str | None:
     """The phone message for a bridge line, or None when it is not forwarded."""
     if event.kind == "SKIP":
         lowered = event.body.lower()
-        if "daily loss" not in lowered and "kill switch" not in lowered:
+        # Owner-visible blocks only: the shared loss stop, the kill switch and, since
+        # bridge v7a, an identity fence or a missing caps row ("identity_stopped:",
+        # "identity fence unreadable", "identity_caps_missing:").
+        if "daily loss" not in lowered and "kill switch" not in lowered and "identity" not in lowered:
             return None
         emoji = "⛔"
     elif event.kind not in BRIDGE_FORWARD_KINDS:

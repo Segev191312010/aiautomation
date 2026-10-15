@@ -3419,15 +3419,19 @@ def test_v7a_the_connect_line_names_the_sendable_set_its_caps_and_the_fences(
 def test_v7a_the_identity_position_cap_is_checked_before_the_global_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(pb, "IDENTITY_CAPS", {"MOMO_HOD_V2": pb.Caps(1, None, timedelta(minutes=60))})
+    # MOMO may hold one; a second row lifts the global cap to 6, so only the identity cap can block.
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {
+        "MOMO_HOD_V2": pb.Caps(1, None, timedelta(minutes=60)),
+        "SOMEDAY_V2": pb.Caps(5, None, timedelta(minutes=30)),
+    })
     held = bracket("a", "AAA", status="open", parent=40, filled=100)
     broker = connected_broker(bid=Decimal("50.10"), positions={400: 100})
     bridge = make_bridge(tmp_path, broker, brackets={"a": held}, decisions=(decision_row("n", "NEWX"),))
     bridge.tick()
     assert broker.placed == []
     assert bridge.brackets["n"].skip_reason == "MOMO_HOD_V2: max 1 positions already active"
-    # The global cap (test_l4) still counts unmanaged live symbols through slots_used.
-    assert bridge.slots_used() == 1 < pb.global_max_open() == 1 or pb.global_max_open() == 1
+    # The global cap was not the reason: one slot used of six (the sum of both rows).
+    assert bridge.slots_used() == 1 and pb.global_max_open() == 6
 
 
 def test_v7a_entries_per_day_count_every_attempt_including_a_cancelled_one(

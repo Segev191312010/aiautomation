@@ -103,9 +103,19 @@ Order sources:
   a63982cc01c36ffcb7d1b7877dfdec4b0b2c7371911d5909e5f36893cbbfb440. Values
   reproduce v5's behaviour for `MOMO_HOD_V2` on normal days (one known change:
   on a 13:00 close its last entry is 12:00, not 12:30). Independent
-  execution-safety review: PENDING — the pin is moved on this branch so the
-  branch is self-consistent; it is not deployed until the review records GO
-  here.
+  execution-safety review of commit 3354c3c (2026-10-15): **GO** on the order
+  path — every claim verified hunk by hunk, 13/13 plan mutations killed, no
+  HIGH. Findings fixed in the follow-up commit without touching the bridge
+  file (pin unchanged): F-1 MEDIUM test hermeticity (dry-run tests ran the
+  real bridge preflight against the operator's home; every test now stubs it
+  and the suite runs under a scratch HOME), F-2 LOW the notifier forwards the
+  identity-fence and caps SKIPs, F-4 LOW a registry check that cannot run is
+  a refusal token, F-5 LOW a hung preflight keeps its partial output, F-6 LOW
+  Telegram status names the identity fences that are on, F-7 LOW a
+  tautological test assertion. Deferred to the v7b re-pin: F-3 LOW
+  (validate `Caps` values and freeze `IDENTITY_CAPS`). Deploy only
+  pre-session, never mid-session (a bracket placed by v5 would be re-encoded
+  with the v7a orderRef on a modify).
 
 ## Still to do
 

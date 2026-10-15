@@ -2,6 +2,7 @@
 Shared test fixtures.
 """
 import os
+import tempfile
 import shutil
 import sys
 from hashlib import sha256
@@ -31,6 +32,10 @@ os.makedirs(_LOCAL_TMP, exist_ok=True)
 # concurrently running suite from leaking state into another process.
 _TEST_DB = os.path.join(_LOCAL_TMP, "test_trading_platform.db")
 os.environ["DB_PATH"] = _TEST_DB
+# Nothing under test may read the operator's real home (the live config, the live
+# database, LaunchAgents): every Path.home() in the suite resolves to a scratch dir.
+_TEST_HOME = tempfile.mkdtemp(prefix="autotrader-test-home-")
+os.environ["HOME"] = _TEST_HOME
 
 # Relaxed rate limits for tests — avoid 429s when multiple test files
 # hit /api/auth/token in the same test session.
