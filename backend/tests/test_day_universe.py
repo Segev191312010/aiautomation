@@ -1079,17 +1079,27 @@ def test_the_section_contract_refuses_inconsistent_lists() -> None:
 
 
 @pytest.mark.asyncio
-async def test_held_symbols_follow_the_bridges_sendable_prefix(database) -> None:
+async def test_held_symbols_follow_the_bridges_exact_sendable_gate(database, monkeypatch) -> None:
+    from trading import sendable_identities
+
     insert_accepted_decision(database, con_id=700, symbol="HELD", strategy=" MOMO_HOD_V2 ", suffix="a")
     insert_accepted_decision(database, con_id=701, symbol="ORBY", strategy="ORB_V1", suffix="b")
     insert_accepted_decision(database, con_id=702, symbol="APMO", strategy="AP_MOMO_HOD_V1", suffix="c")
+    # A prefix match is no longer enough (bridge v7): the legacy MOMO_HOD_V1 is not quoted.
+    insert_accepted_decision(database, con_id=703, symbol="OLDM", strategy="MOMO_HOD_V1", suffix="d")
+    insert_accepted_decision(database, con_id=704, symbol="ORBT", strategy="ORB_V2", suffix="e")
+    insert_accepted_decision(database, con_id=705, symbol="ORBL", strategy="orb_v2", suffix="f")
 
     held = await screener_module.held_instruments(DAY)
-
     assert [(item.symbol, item.con_id, item.primary_exchange, item.source) for item in held] == [
         ("HELD", 700, "NYSE", "ibkr_scan"),
     ]
     assert await screener_module.held_instruments(DAY + timedelta(days=1)) == ()
+
+    # Bridge v7b: a granted identity's held brackets are quoted too; a case variant never is.
+    monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))
+    widened = await screener_module.held_instruments(DAY)
+    assert sorted((item.symbol, item.con_id) for item in widened) == [("HELD", 700), ("ORBT", 704)]
 
 
 # --- the screener service: admission in the idle time, the prior-close re-check ---------------

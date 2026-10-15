@@ -155,7 +155,10 @@ Order sources:
   refuses variants of a sendable identity; the screener's `held_instruments`
   uses `is_sendable_identity`, so held brackets of every sender are quoted for
   the bridge's flatten fallback; MOMO-only prose in five modules updated.
-  Independent re-read: PENDING.
+  Independent re-read (2026-10-15): **GO**, no HIGH or MEDIUM; its LOW
+  test-coverage gap (the held-instruments test now distinguishes the exact
+  gate from the old prefix under a widened tuple) and two prose nits fixed in
+  the following docs/tests commit.
 
 ## Still to do
 
