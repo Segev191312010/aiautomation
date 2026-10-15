@@ -176,6 +176,19 @@ Order sources:
   Deploys only after one observed v7a session (Friday 2026-10-16), planned
   Monday 2026-10-19 (Sunday deploy with the Gateway 2FA login).
 
+- 2026-10-16: v7b.1 (outside the bridge; bridge file and pin unchanged at
+  7d313fd0…). Found while building promotion Stage 1: the repository runner
+  (`RepositoryBackedShadowRunner.open_session`) rebuilt the shadow pipeline
+  field by field and dropped `identity_multiplier`, so every production
+  session sized every identity at ×1 whatever its row said. Under v7a this
+  changed nothing (MOMO_HOD_V2 is ×1); under v7b as reviewed it would have
+  sent ORB_V2 at 4× and VWAP_PB_V2/GAP_GO_V2 at 2× their rows, inside the
+  bridge's 1 %/25 % ceiling. Fix: `ShadowPipeline.with_decision_recorder`
+  copies every constructor argument (a test ties it to the signature) and
+  the runner uses it; a regression test replays the recorded 2026-10-12 MOMO
+  day through the runner at ×0.25 (3726 → 931 shares). Independent review:
+  PENDING; v7b deploys only with this fix and its GO.
+
 ## Still to do
 
 - Supervised first live runs: the first owner order through the bridge (the

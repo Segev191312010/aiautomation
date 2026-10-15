@@ -290,3 +290,53 @@ async def test_a_sendable_identity_without_a_row_blocks_every_setup_once_critica
     assert len(critical) == 1 and "MOMO_HOD_V2" in critical[0].getMessage()
     assert pipeline.identity_multiplier is None
     assert NO_SCALING == Decimal("1")
+
+
+# --- the repository runner keeps the identity factor (found 2026-10-16, before v7b) ---
+
+
+@pytest.mark.anyio
+async def test_the_repository_runner_keeps_the_identity_factor(tmp_path, monkeypatch):
+    """Regression: open_session rebuilt the pipeline without its identity factor, so every
+    production session sized every identity at x1 (ORB_V2 would have sent 4x its row)."""
+    from config import cfg
+    from db.core import init_db
+    from tests.test_setup_persistence import _replay_momo_session
+
+    database = tmp_path / "momo.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    neutral, _ = await _replay_momo_session(database, monkeypatch)
+    base = neutral["BF B"].risk.intent.quantity
+
+    scaled_db = tmp_path / "momo-scaled.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(scaled_db))
+    await init_db()
+    scaled, _ = await _replay_momo_session(scaled_db, monkeypatch, identity_multiplier=Decimal("0.25"))
+    bf_b = scaled["BF B"]
+    assert bf_b.outcome.value == "shadow_accepted"
+    assert bf_b.risk is not None and bf_b.risk.intent is not None
+    assert base > 4
+    assert bf_b.risk.intent.quantity == math.floor(base * Decimal("0.25"))  # 3726 -> 931 on the golden day
+
+
+def test_with_decision_recorder_copies_every_constructor_argument():
+    import inspect
+
+    from trading.orchestration.pipeline import ShadowPipeline
+    from trading.rules.momo import MomoStrategy
+
+    async def other(**_kwargs) -> None:
+        return None
+
+    original = ShadowPipeline(
+        proposal_provider=_Provider(), strategy=MomoStrategy(), decision_recorder=_record_nothing,
+        setup_recorder=_setups, sizing=_Overlay(Decimal("0.5")), identity_multiplier=Decimal("0.25"),
+    )
+    copy = original.with_decision_recorder(other)
+    names = [name for name in inspect.signature(ShadowPipeline.__init__).parameters if name != "self"]
+    for name in names:
+        if name == "decision_recorder":
+            assert getattr(copy, f"_{name}") is other
+        else:
+            assert getattr(copy, f"_{name}") is getattr(original, f"_{name}"), name

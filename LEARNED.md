@@ -44,3 +44,6 @@
 
 ## Read-only SQLite opens in the data directory
 - `mode=ro` is safe on the live WAL database in its writable data directory: SQLite recreates a missing `-shm`. `immutable=1` returns a stale view of a WAL database with an un-checkpointed `-wal` ("no such table" on an existing table): use it only on a checkpointed copy.
+
+## Test through the production path
+- A value threaded through a constructor is only proven when a test drives the path production uses. The identity size factor passed every unit test of `ShadowPipeline` and four reviews, yet `RepositoryBackedShadowRunner.open_session` rebuilt the pipeline without it (found 2026-10-16, before v7b sent anything). Copy objects with a method tied to the constructor's signature, and replay a recorded day through the runner.

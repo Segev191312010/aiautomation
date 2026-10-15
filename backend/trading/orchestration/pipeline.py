@@ -255,6 +255,25 @@ class ShadowPipeline:
     def identity_multiplier(self) -> Decimal | None:
         return self._identity_multiplier
 
+    def with_decision_recorder(self, decision_recorder: DecisionRecorder) -> "ShadowPipeline":
+        """This pipeline with every constructor argument, recording through ``decision_recorder``.
+
+        The repository runner wraps the recorder with its lease heartbeat. It
+        used to rebuild the pipeline field by field and dropped the identity
+        size factor, so every identity was sized x1 whatever its row said; the
+        copy lives here, beside the constructor it must mirror (a test compares
+        it with the constructor's signature).
+        """
+        return ShadowPipeline(
+            proposal_provider=self._proposal_provider,
+            decision_recorder=decision_recorder,
+            strategy=self._strategy,
+            mode=self._mode,
+            setup_recorder=self._setup_recorder,
+            sizing=self._sizing,
+            identity_multiplier=self._identity_multiplier,
+        )
+
     def _engine_size(self, multiplier: Decimal) -> dict[str, Decimal]:
         """The engine's ``size_multiplier`` keyword: identity factor x managed factor.
 
