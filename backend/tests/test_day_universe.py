@@ -1091,12 +1091,13 @@ async def test_held_symbols_follow_the_bridges_exact_sendable_gate(database, mon
     insert_accepted_decision(database, con_id=705, symbol="ORBL", strategy="orb_v2", suffix="f")
 
     held = await screener_module.held_instruments(DAY)
-    assert [(item.symbol, item.con_id, item.primary_exchange, item.source) for item in held] == [
-        ("HELD", 700, "NYSE", "ibkr_scan"),
-    ]
+    expected = [("HELD", 700, "NYSE", "ibkr_scan")]
+    if "ORB_V2" in sendable_identities.SENDABLE_IDENTITIES:  # bridge v7b: granted by exact name
+        expected.append(("ORBT", 704, "NYSE", "ibkr_scan"))
+    assert sorted((item.symbol, item.con_id, item.primary_exchange, item.source) for item in held) == sorted(expected)
     assert await screener_module.held_instruments(DAY + timedelta(days=1)) == ()
 
-    # Bridge v7b: a granted identity's held brackets are quoted too; a case variant never is.
+    # Whatever the shipped tuple, a granted identity's held brackets are quoted; a case variant never is.
     monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))
     widened = await screener_module.held_instruments(DAY)
     assert sorted((item.symbol, item.con_id) for item in widened) == [("HELD", 700), ("ORBT", 704)]

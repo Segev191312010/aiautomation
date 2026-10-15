@@ -120,32 +120,39 @@ def test_the_engine_reproduces_each_recorded_quantity_then_scales_it(identity: s
     multiplier = IDENTITY_SIZE_MULTIPLIER[identity]
     policy = RiskPolicy()
     now = NOW
-    for row in _rows():
+    # One synthetic high-priced, wide-stop setup where the base policy allows three shares:
+    # floor(3 x 0.25) == 0, so the quarter-size identity exercises the scaled-to-zero branch.
+    zero_row = {"symbol": "ZZZZ", "quantity": 3, "entry_limit": "900.00", "stop_price": "880.00",
+                "target_price": "940.00"}
+    zero_seen = False
+    for row in (*_rows(), zero_row):
         setup = _setup(row)
         recorded = int(row["quantity"])  # type: ignore[arg-type]
         unit_risk = setup.entry_limit - setup.stop_price
-        # The base policy's quantity is min(risk budget / unit risk, notional budget / entry);
-        # size the account so the risk leg is binding at exactly ``recorded`` shares.
-        net_liq = (Decimal(recorded) * unit_risk * 100 / policy.max_risk_per_trade_pct).quantize(Decimal("0.01"))
+        # The base policy's quantity is min(risk budget / unit risk, notional budget / entry).
+        # Size the account so whichever leg binds allows exactly ``recorded`` shares.
+        by_risk = Decimal(recorded) * unit_risk * 100 / policy.max_risk_per_trade_pct
+        by_notional = Decimal(recorded) * setup.entry_limit * 100 / policy.max_position_notional_pct
+        net_liq = max(by_risk, by_notional).quantize(Decimal("0.01"))
         portfolio = PortfolioSnapshot(observed_at=now, net_liquidation=net_liq)
         review = _review(setup)
         base = size_and_evaluate_trade(
             policy=policy, portfolio=portfolio, setup=setup, review=review,
             admitted_symbols=frozenset({setup.symbol}), now=now,
         )
-        if not base.approved:
-            # The notional leg binds for this row (a cheap, wide stop): the base quantity is
-            # smaller than the recorded one, still floor(base x m) below.
-            continue
-        assert base.intent is not None
+        assert base.approved and base.intent is not None, (row["symbol"], base.codes)
         base_quantity = base.intent.quantity
+        assert base_quantity == recorded, (row["symbol"], base_quantity, recorded)
         scaled = size_and_evaluate_trade(
             policy=policy, portfolio=portfolio, setup=setup, review=review,
             admitted_symbols=frozenset({setup.symbol}), now=now, size_multiplier=multiplier,
         )
         expected = math.floor(base_quantity * multiplier)
         if expected == 0:
+            zero_seen = True
             assert not scaled.approved and scaled.codes == (SIZE_SCALED_TO_ZERO,)
         else:
             assert scaled.approved and scaled.intent is not None
             assert scaled.intent.quantity == expected == scaled_quantity(base_quantity, multiplier)
+    # The zero branch runs for the quarter-size identity and for no other.
+    assert zero_seen is (multiplier < Decimal("0.5")), identity

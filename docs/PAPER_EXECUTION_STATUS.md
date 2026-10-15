@@ -164,9 +164,15 @@ Order sources:
   allowlist becomes MOMO_HOD_V2, ORB_V2, VWAP_PB_V2, GAP_GO_V2; caps rows
   ORB_V2 (1 position, 1 entry/day, last entry close-30m), VWAP_PB_V2 (1, 2,
   close-30m), GAP_GO_V2 (1, 1, close-30m); size multipliers 0.25 / 0.5 / 0.5;
-  `SENDABLE_KEYS` orb-v2, vwap-v2, gap-v2. `git diff v7a.1..v7b` on the bridge
-  and the trading package is rows, names, the version line and the pin — no
-  logic. Independent execution-safety review of the data diff: PENDING.
+  `SENDABLE_KEYS` orb-v2, vwap-v2, gap-v2. `git diff e5997af..12fc726` (v7a.3 → v7b) on the bridge
+  and the trading package is rows, names, the version line, the pin and the
+  poll-slot table (the three V2 children keep their reviewed slots; the
+  unscheduled V1 slots moved behind them) — no logic. Independent execution-safety review of the data diff (2026-10-15):
+  **GO** — data-only confirmed hunk by hunk, every table equals the owner's
+  decision, 4/4 mutations killed, no HIGH or MEDIUM. All caps full = 2.125 %
+  open risk / 63.75 % notional against the realized-only −2 % stop (worst
+  realized day ≈ 4 %); the owner decides awake whether a later logic commit
+  adds an open-risk term.
   Deploys only after one observed v7a session (Friday 2026-10-16), planned
   Monday 2026-10-19 (Sunday deploy with the Gateway 2FA login).
 
