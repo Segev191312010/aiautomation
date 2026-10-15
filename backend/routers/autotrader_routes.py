@@ -74,8 +74,9 @@ _CURRENT_RELEASE_TRANSITIONS = {
 
 
 def _refuse_reserved_name(spec: StrategySpec) -> None:
-    """MOMO_HOD names reach the PAPER bridge and AP_ names are autopilot-managed:
-    both are made only by reviewed code, never through this API."""
+    """MOMO_HOD names reach the PAPER bridge (bridge v7: exactly the sendable
+    identities) and AP_ names are autopilot-managed: both are made only by
+    reviewed code, never through this API."""
     if not is_api_reserved_name(spec.name):
         return
     log.warning("%s: API refused strategy name %r", RESERVED_STRATEGY_NAME, spec.name)

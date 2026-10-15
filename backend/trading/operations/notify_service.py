@@ -87,7 +87,7 @@ from trading.operations.paths import (
 from trading.operations.schema_alert import schema_alert_text
 from trading.operations.schema_gate import EXIT_SCHEMA_NOT_READY
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
-from trading.sendable_identities import carries_sendable_prefix
+from trading.sendable_identities import is_sendable_identity
 from trading.storage.migrations import SchemaStatus, inspect_schema
 
 if TYPE_CHECKING:
@@ -1037,8 +1037,8 @@ async def load_signal_decisions(session_date: date) -> list[SignalDecision]:
 
 
 def is_real_decision(decision: SignalDecision) -> bool:
-    """A decision the PAPER bridge may send (a MOMO_HOD name): at once, as before."""
-    return carries_sendable_prefix(decision.strategy)
+    """A decision the PAPER bridge may send (exactly a sendable identity): at once, as before."""
+    return is_sendable_identity(decision.strategy)
 
 
 def digest_boundary(now: datetime) -> datetime:

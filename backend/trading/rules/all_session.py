@@ -70,7 +70,7 @@ from trading.rules.vwap_pb import (
     VwapPbStrategy,
     vwap_pb_strategy_spec,
 )
-from trading.sendable_identities import SENDABLE_IDENTITIES, carries_sendable_prefix
+from trading.sendable_identities import carries_sendable_prefix
 
 UTC = timezone.utc
 _REGULAR_OPEN = time(9, 30)
@@ -347,8 +347,12 @@ class AllSessionStrategy:
         *,
         session_close: SessionCloseLookup = xnys_session_close,
     ) -> None:
-        if carries_sendable_prefix(name) or name in SENDABLE_IDENTITIES:
-            raise ValueError(f"{name!r} would be sent by the PAPER bridge; V2 simulations never are")
+        # A V2 simulation never wears MOMO's name: MOMO_HOD* is MOMO's rule set
+        # and its legacy prefix guard. Whether a V2 name may send real PAPER
+        # orders is decided by trading.sendable_identities.SENDABLE_IDENTITIES
+        # and refused at launch by shadow_service.registry_problems, not here.
+        if carries_sendable_prefix(name):
+            raise ValueError(f"{name!r} carries MOMO's name; V2 simulations never do (PAPER bridge rule set)")
         self._name = name
         self._kind = kind
         self._inner = windowed_strategy(kind, ALL_SESSION_WINDOW, session_close=session_close)
@@ -536,14 +540,19 @@ the requested JSON: decision, confidence between 0 and 1, and a short rationale 
 that names the specific values behind your decision."""
 
 
-def _never_sendable(names: Sequence[str]) -> None:
-    """Load-time tripwire: a V2 simulation name the bridge would send for is a bug."""
+def _never_momo_named(names: Sequence[str]) -> None:
+    """Load-time tripwire: an all-session name carrying MOMO's prefix is a bug.
+
+    Until bridge v7 this also refused any name in SENDABLE_IDENTITIES; the owner's
+    grant (2026-10-14/15) makes ORB_V2, VWAP_PB_V2 and GAP_GO_V2 sendable, so the
+    sendable set is now checked against the registry at launch instead.
+    """
     for name in names:
-        if carries_sendable_prefix(name) or name in SENDABLE_IDENTITIES:
-            raise RuntimeError(f"all-session simulation {name!r} carries a sendable name")
+        if carries_sendable_prefix(name):
+            raise RuntimeError(f"all-session simulation {name!r} carries MOMO's name")
 
 
-_never_sendable(ALL_SESSION_STRATEGY_NAMES)
+_never_momo_named(ALL_SESSION_STRATEGY_NAMES)
 
 
 __all__ = [

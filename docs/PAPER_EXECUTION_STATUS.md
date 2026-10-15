@@ -133,6 +133,16 @@ Order sources:
   being replaced at that instant the two fence reads can add about one second
   between the last expiry check and `placeOrder` (vs the 15 s TTL) — re-run
   the expiry check after the fence reads.
+- 2026-10-15: v7a.2 (logic outside the bridge; bridge file and pin unchanged
+  at 9790eb3c…). Found by the v7b data-only build, which could not even import:
+  `trading/rules/all_session.py` refused any all-session name in
+  `SENDABLE_IDENTITIES` at import and in the constructor (a pre-v7 tripwire);
+  both guards now refuse only MOMO's prefix, and whether a V2 name may send is
+  decided by `SENDABLE_IDENTITIES` and the launch registry check. The
+  notifier's real-decision filter (`is_real_decision`) matches the sendable
+  identities exactly instead of the `MOMO_HOD` prefix, so a granted V2
+  identity's real-order lines reach the phone at once and `MOMO_HOD_V1`
+  (shadow-only) goes to the digest. Independent re-read: PENDING.
 
 ## Still to do
 

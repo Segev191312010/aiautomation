@@ -309,7 +309,7 @@ def _approved_risk() -> dict:
 
 async def _seed_day(tmp_path: Path, monkeypatch) -> None:
     await _use_database(tmp_path, monkeypatch)
-    await _seed_run("shadow-momo-2026-10-13-wl", "strategy-momo", "MOMO_HOD_V1")
+    await _seed_run("shadow-momo-2026-10-13-wl", "strategy-momo", "MOMO_HOD_V2")
     await _seed_run("shadow-orb-2026-10-13", "strategy-orb", "ORB_V1")
     momo = {"run_id": "shadow-momo-2026-10-13-wl", "strategy_id": "strategy-momo"}
     orb = {"run_id": "shadow-orb-2026-10-13", "strategy_id": "strategy-orb"}
@@ -343,14 +343,14 @@ async def _seed_day(tmp_path: Path, monkeypatch) -> None:
     )
     # Neither yesterday's run nor a backtest replay of today is news.
     await _seed_run(
-        "shadow-momo-2026-10-12-scan", "strategy-momo", "MOMO_HOD_V1", session_date=date(2026, 10, 12)
+        "shadow-momo-2026-10-12-scan", "strategy-momo", "MOMO_HOD_V2", session_date=date(2026, 10, 12)
     )
     await _add_decision(
         "old-bfb", run_id="shadow-momo-2026-10-12-scan", strategy_id="strategy-momo",
         symbol="OLD", outcome="shadow_accepted", created_at=_et(11, 50) - timedelta(days=1),
         review=_review("PROPOSE", "yesterday"), risk=_approved_risk(),
     )
-    await _seed_run("backtest-momo-2026-10-13", "strategy-momo", "MOMO_HOD_V1", mode="backtest")
+    await _seed_run("backtest-momo-2026-10-13", "strategy-momo", "MOMO_HOD_V2", mode="backtest")
     await _add_decision(
         "bt-replay", run_id="backtest-momo-2026-10-13", strategy_id="strategy-momo",
         symbol="REPLAY", outcome="shadow_accepted", created_at=_et(11, 0),
@@ -403,9 +403,9 @@ async def test_only_todays_live_decisions_with_a_claude_review_are_signals(tmp_p
 
     assert [(d.symbol, d.strategy, d.outcome) for d in decisions] == [
         ("MMED", "ORB_V1", "risk_blocked"),
-        ("BF B", "MOMO_HOD_V1", "shadow_accepted"),
-        ("XYZ", "MOMO_HOD_V1", "ai_blocked"),
-        ("FIGS", "MOMO_HOD_V1", "ai_abstained"),
+        ("BF B", "MOMO_HOD_V2", "shadow_accepted"),
+        ("XYZ", "MOMO_HOD_V2", "ai_blocked"),
+        ("FIGS", "MOMO_HOD_V2", "ai_abstained"),
     ]
 
 
@@ -415,7 +415,7 @@ async def test_decision_messages_read_like_a_trade_ticket(tmp_path, monkeypatch)
     messages = {d.symbol: format_decision(d) for d in await load_signal_decisions(SESSION)}
 
     assert messages["BF B"].splitlines() == [
-        "🔔 MOMO_HOD_V1 · BF B · WOULD BUY",
+        "🔔 MOMO_HOD_V2 · BF B · WOULD BUY",
         "Buy 3741 @ 26.77 · stop 26.69 · target 26.93",
         "Risk $299.28 (0.08/sh) · reward 2.0R · notional $100,146.57",
         "Claude: PROPOSE · confidence 62%",
@@ -423,7 +423,7 @@ async def test_decision_messages_read_like_a_trade_ticket(tmp_path, monkeypatch)
         "11:50:12 ET · decision 65172678",
     ]
     figs = messages["FIGS"].splitlines()
-    assert figs[0] == "🤔 MOMO_HOD_V1 · FIGS · Claude abstained"
+    assert figs[0] == "🤔 MOMO_HOD_V2 · FIGS · Claude abstained"
     assert figs[1] == "Claude: ABSTAIN · confidence 70%"
     assert len(figs[2]) <= 600 and figs[2].endswith("…")
     assert figs[2].startswith("Entry 17.83 sits 0.636 above vwap")
@@ -432,7 +432,7 @@ async def test_decision_messages_read_like_a_trade_ticket(tmp_path, monkeypatch)
     assert mmed[1] == "Risk codes: max_open_positions, symbol_already_active"
     assert mmed[2] == "Claude: PROPOSE · confidence 66%"
     assert messages["XYZ"].splitlines()[:2] == [
-        "🚫 MOMO_HOD_V1 · XYZ · AI blocked",
+        "🚫 MOMO_HOD_V2 · XYZ · AI blocked",
         "Review failed: provider_unavailable",
     ]
     assert "AI review blocked before" not in messages["XYZ"]
@@ -660,7 +660,7 @@ async def test_daily_report_counts_outcomes_trades_ai_cost_and_screener(tmp_path
         "📊 Daily report · Tue 13 Oct 2026",
         "",
         "Decisions by strategy",
-        "• MOMO_HOD_V1 (4): 1 would buy, 1 Claude abstained, 1 AI blocked, 1 rule rejected",
+        "• MOMO_HOD_V2 (4): 1 would buy, 1 Claude abstained, 1 AI blocked, 1 rule rejected",
         "• ORB_V1 (2): 1 risk blocked, 1 data blocked",
         "",
         "Trades (PAPER bridge)",
@@ -781,10 +781,10 @@ async def test_run_notifier_forwards_every_source_once_and_resumes_after_restart
     assert len(digests) == 1 and "ORB_V1:\n• MMED risk blocked" in digests[0]
     assert not any(headline.startswith("🛑 ORB_V1") for headline in headlines)
     for headline in (
-        "🔔 MOMO_HOD_V1 · BF B · WOULD BUY",
-        "🚫 MOMO_HOD_V1 · XYZ · AI blocked",
-        "🤔 MOMO_HOD_V1 · FIGS · Claude abstained",
-        "🤔 MOMO_HOD_V1 · LATE · Claude abstained",
+        "🔔 MOMO_HOD_V2 · BF B · WOULD BUY",
+        "🚫 MOMO_HOD_V2 · XYZ · AI blocked",
+        "🤔 MOMO_HOD_V2 · FIGS · Claude abstained",
+        "🤔 MOMO_HOD_V2 · LATE · Claude abstained",
         "⚙️ momo exited (code 1), restarting in 95 s",
         LOGIN_ALERT_TEXT,
     ):
@@ -838,7 +838,7 @@ async def test_undelivered_decisions_are_offered_again_after_a_cooldown(tmp_path
     sent = telegram.sent()
     assert sent[:3] == [startup_text(SESSION)] * 3
     assert sent.count(startup_text(SESSION)) == 4  # offered again after the cooldown
-    assert len([text for text in sent if text.startswith("🔔 MOMO_HOD_V1 · BF B")]) == 1
+    assert len([text for text in sent if text.startswith("🔔 MOMO_HOD_V2 · BF B")]) == 1
 
 
 @pytest.mark.anyio
@@ -1173,3 +1173,20 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
     # The bridge's own CRITICAL line still reaches the phone, as before.
     assert any(text.startswith("⚠️ CRITICAL TWS did not answer") for text in sent)
     assert state_file(paths, SESSION).exists()
+
+
+def test_real_decisions_are_exactly_the_sendable_identities(monkeypatch):
+    from trading import sendable_identities
+    from trading.operations.notify_service import SignalDecision, is_real_decision
+
+    def decision(strategy):
+        return SignalDecision(decision_id="d1", created_at=None, strategy=strategy, symbol="AAA",
+                              outcome="shadow_accepted", review={}, risk=None)
+
+    assert is_real_decision(decision("MOMO_HOD_V2"))
+    assert not is_real_decision(decision("ORB_V2"))  # v7a: not yet granted
+    assert not is_real_decision(decision("MOMO_HOD_V1"))  # a prefix match is no longer enough
+    assert not is_real_decision(decision("AP_MOMO_HOD_V2"))
+    monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))
+    assert is_real_decision(decision("ORB_V2"))  # v7b: the grant reaches the phone at once
+    assert not is_real_decision(decision("VWAP_PB_V2"))

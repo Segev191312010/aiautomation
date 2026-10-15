@@ -38,6 +38,7 @@ from trading.research.replay import (
     synthetic_quote,
 )
 from trading.rules import all_session
+from trading import sendable_identities
 from trading.rules.all_session import (
     ALL_SESSION_STRATEGY_NAMES,
     ALL_SESSION_WINDOW,
@@ -381,11 +382,16 @@ def test_no_v2_simulation_can_reach_the_paper_bridge():
     assert {name for name in registry_names if carries_sendable_prefix(name)} == {"MOMO_HOD_V2"}
 
 
-def test_a_sendable_name_is_refused_for_a_v2_simulation(monkeypatch):
-    with pytest.raises(ValueError, match="PAPER bridge"):
+def test_a_momo_name_is_refused_for_a_v2_simulation_but_a_granted_v2_name_is_not(monkeypatch):
+    with pytest.raises(ValueError, match="MOMO's name"):
         AllSessionStrategy("MOMO_HOD_V3", "orb")
-    with pytest.raises(RuntimeError, match="sendable name"):
-        all_session._never_sendable(("ORB_V2", " momo_hod_x"))
+    with pytest.raises(RuntimeError, match="MOMO's name"):
+        all_session._never_momo_named(("ORB_V2", " momo_hod_x"))
+    # Bridge v7: the owner may grant a V2 name PAPER authority; that is decided by
+    # SENDABLE_IDENTITIES and checked at launch, never refused at import.
+    monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))
+    all_session._never_momo_named(("ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"))
+    AllSessionStrategy("ORB_V2", "orb")  # constructs: the grant is not an import-time refusal
 
 
 # --- registry, offsets, supervisor ---------------------------------------------------
