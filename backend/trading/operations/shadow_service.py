@@ -152,13 +152,14 @@ MOMO_REVIEW_PROMPT_ID = "momo-review-v2"
 STRATEGIES = {
     "orb": (ORBStrategy, orb_strategy_spec, None),
     "momo": (MomoStrategy, momo_strategy_spec, MOMO_REVIEW_PROMPT_ID),
-    # Shadow strategies: their catalogue names are not MOMO_HOD*, so the paper
-    # bridge records but never sends their decisions.
+    # Shadow strategies: their catalogue names are not sendable identities, so
+    # the paper bridge records but never sends their decisions.
     "vwap": (VwapPbStrategy, vwap_pb_strategy_spec, VWAP_REVIEW_PROMPT_ID),
     "gap": (GapGoStrategy, gap_go_strategy_spec, GAP_REVIEW_PROMPT_ID),
     # All-session simulations (owner decision "Both", 2026-10-13): the V1 rules
-    # with entries 09:35-15:30 ET (trading/rules/all_session.py). Shadow only:
-    # ORB_V2, VWAP_PB_V2 and GAP_GO_V2 do not start with MOMO_HOD.
+    # with entries 09:35-15:30 ET (trading/rules/all_session.py). Sendable only
+    # when ORB_V2, VWAP_PB_V2 and GAP_GO_V2 are in SENDABLE_IDENTITIES (bridge
+    # v7b) and their keys in SENDABLE_KEYS; shadow otherwise.
     "orb-v2": (orb_v2_strategy, orb_v2_strategy_spec, "orb-review-v1"),
     "vwap-v2": (vwap_pb_v2_strategy, vwap_pb_v2_strategy_spec, VWAP_REVIEW_PROMPT_ID),
     "gap-v2": (gap_go_v2_strategy, gap_go_v2_strategy_spec, GAP_REVIEW_V2_PROMPT_ID),

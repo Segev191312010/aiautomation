@@ -148,6 +148,14 @@ Order sources:
   reserved-name check must refuse every sendable identity by exact name (not
   only MOMO's prefix), and the screener's held-instrument filter must use
   exact identities so held V2 brackets keep a flatten quote source.
+- 2026-10-15: v7a.3 (logic outside the bridge; bridge file and pin unchanged
+  at 9790eb3c…): `is_api_reserved_name` refuses every sendable identity by
+  exact name and any case or whitespace variant (the API can no longer create
+  an `ORB_V2`-named draft once ORB_V2 is granted); `require_creatable_name`
+  refuses variants of a sendable identity; the screener's `held_instruments`
+  uses `is_sendable_identity`, so held brackets of every sender are quoted for
+  the bridge's flatten fallback; MOMO-only prose in five modules updated.
+  Independent re-read: PENDING.
 
 ## Still to do
 

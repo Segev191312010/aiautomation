@@ -57,8 +57,9 @@ logger = logging.getLogger("autotrader.shadow.session")
 
 ORB_STRATEGY_NAME = "ORB_V1"
 MOMO_STRATEGY_NAME = "MOMO_HOD_V2"
-# Managed MOMO in shadow. Never sendable: the name does not start with
-# MOMO_HOD, so the pinned bridge records and never sends its decisions. The
+# Managed MOMO in shadow. Never sendable: the name is not a sendable identity
+# (and refuses MOMO's prefix), so the pinned bridge records and never sends
+# its decisions. The
 # real managed identity (MOMO_HOD_AP_V1) is a reviewed phase-3 change.
 AP_MOMO_STRATEGY_NAME = "AP_MOMO_HOD_V1"
 BAR_INTERVAL = timedelta(minutes=5)

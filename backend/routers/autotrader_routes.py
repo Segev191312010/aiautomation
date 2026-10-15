@@ -86,7 +86,7 @@ def _refuse_reserved_name(spec: StrategySpec) -> None:
             "code": RESERVED_STRATEGY_NAME,
             "message": "strategy names starting with "
             + " or ".join(API_RESERVED_NAME_PREFIXES)
-            + " are created by reviewed code only",
+            + ", and the sendable identities, are created by reviewed code only",
         },
     )
 

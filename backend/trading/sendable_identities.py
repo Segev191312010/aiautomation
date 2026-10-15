@@ -6,9 +6,11 @@ exactly one of ``SENDABLE_IDENTITIES`` (bridge v7: ``SENDABLE_STRATEGY_NAMES``,
 pinned equal to this tuple by a test). The bridge cannot be edited without a
 new execution-safety review, so names are also guarded where they are made:
 
-- the repository creates or publishes a ``MOMO_HOD`` name only when it is
-  exactly one of ``SENDABLE_IDENTITIES``;
-- the API creates and publishes no ``MOMO_HOD`` or ``AP_`` name at all;
+- the repository creates or publishes a ``MOMO_HOD`` name, or any case or
+  whitespace variant of a sendable identity, only when it is exactly one of
+  ``SENDABLE_IDENTITIES``;
+- the API creates and publishes no ``MOMO_HOD`` or ``AP_`` name and no
+  sendable identity (or variant of one) at all;
 - a sendable record is reused only while its stored spec is the one the code
   builds (``session_runner.ensure_strategy``).
 
@@ -62,19 +64,34 @@ def carries_sendable_prefix(name: str) -> bool:
     return _normalized(name).startswith(SENDABLE_NAME_PREFIX)
 
 
-def is_api_reserved_name(name: str) -> bool:
-    """Whether ``name`` belongs to code-created identities the API never makes."""
+def _is_sendable_variant(name: str) -> bool:
+    """A case or whitespace variant of a sendable identity (the identity itself included)."""
     normalized = _normalized(name)
-    return any(normalized.startswith(prefix) for prefix in API_RESERVED_NAME_PREFIXES)
+    return any(normalized == _normalized(identity) for identity in SENDABLE_IDENTITIES)
+
+
+def is_api_reserved_name(name: str) -> bool:
+    """Whether ``name`` belongs to code-created identities the API never makes.
+
+    Reserved: the ``MOMO_HOD`` and ``AP_`` prefixes (legacy guards) and, since
+    bridge v7, every sendable identity by exact name and any case or whitespace
+    variant of it — an API-made record named like a sender would otherwise be
+    a second ``ORB_V2`` the launch has to refuse.
+    """
+    normalized = _normalized(name)
+    if any(normalized.startswith(prefix) for prefix in API_RESERVED_NAME_PREFIXES):
+        return True
+    return _is_sendable_variant(name)
 
 
 def require_creatable_name(name: str) -> None:
-    """Refuse a ``MOMO_HOD`` name unless it is exactly a sendable identity.
+    """Refuse a ``MOMO_HOD`` name, or any variant of a sendable identity, unless it
+    is exactly a sendable identity (which only reviewed code creates).
 
     Every caller that reaches this refusal bypassed the API's own check, so it
     is a code path that must not exist: logged CRITICAL with its stack.
     """
-    if carries_sendable_prefix(name) and name not in SENDABLE_IDENTITIES:
+    if (carries_sendable_prefix(name) or _is_sendable_variant(name)) and name not in SENDABLE_IDENTITIES:
         logger.critical(
             "%s: refused to store strategy name %r; sendable identities are %s",
             SENDABLE_NAME_REFUSED,

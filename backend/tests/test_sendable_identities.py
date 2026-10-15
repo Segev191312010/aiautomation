@@ -356,3 +356,21 @@ async def test_ensure_strategy_still_reuses_a_shadow_only_record_by_name(ledger)
     stored = await insert_legacy_shadow_strategy(spec=edited, owner_id="demo")
     reused = await ensure_strategy(owner_id="demo", spec=orb_strategy_spec())
     assert reused.strategy_id == stored.strategy_id
+
+
+def test_every_sendable_identity_and_its_variants_are_reserved_from_the_api(monkeypatch):
+    from trading import sendable_identities
+
+    for name in SENDABLE_IDENTITIES:
+        assert is_api_reserved_name(name) and is_api_reserved_name(name.lower()) and is_api_reserved_name(f" {name} ")
+    assert not is_api_reserved_name("ORB_V9") and not is_api_reserved_name("Draft ORB_V2 copy")
+    # Widening the grant widens the reservation with it (bridge v7b).
+    monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))
+    assert sendable_identities.is_api_reserved_name("orb_v2") and sendable_identities.is_api_reserved_name("ORB_V2")
+    assert not sendable_identities.is_api_reserved_name("VWAP_PB_V2")
+    # The creation guard refuses variants of a sendable identity and keeps the exact name for code.
+    for variant in ("orb_v2", " ORB_V2", "Orb_V2 "):
+        with pytest.raises(SendableIdentityError):
+            sendable_identities.require_creatable_name(variant)
+    sendable_identities.require_creatable_name("ORB_V2")
+    sendable_identities.require_creatable_name("VWAP_PB_V2")  # not granted here: an ordinary shadow name

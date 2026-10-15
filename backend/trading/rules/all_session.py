@@ -15,9 +15,10 @@ start still binds before the window does: ORB's first signal bar ends at
 09:50 (its 09:30-09:45 opening range must be complete) and VWAP_PB's at 09:55
 (its four-bar pullback lookback plus the opening bar).
 
-None of these names can reach the PAPER bridge: none starts with
-``MOMO_HOD`` (checked when this module loads), and ``SENDABLE_IDENTITIES``
-does not list them.
+None of these names carries MOMO's prefix (checked when this module loads).
+Whether one may send real PAPER orders is decided only by
+``trading.sendable_identities.SENDABLE_IDENTITIES`` (bridge v7b grants ORB_V2,
+VWAP_PB_V2 and GAP_GO_V2 at reduced size) and checked at launch.
 
 ``windowed_strategy`` builds the same rules behind any other window; the
 replay's window research uses it to sweep candidate windows rules-only.

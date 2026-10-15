@@ -17,8 +17,9 @@ inside America/New_York windows:
 
 A strategy window ends one minute after that strategy's own entry cutoff, so a
 half day's earlier cutoffs move their windows in (MOMO 12:00, the all-session
-simulations 12:30). The all-session simulations are shadow only (their names
-do not start with MOMO_HOD); each sleeps until its own data is due. The AI day
+simulations 12:30). The all-session simulations send real PAPER orders only
+when their names are sendable identities (bridge v7b); each sleeps until its
+own data is due. The AI day
 manager's children run in shadow whatever the autopilot switch says:
 ``manager`` writes the day plans (Claude and the database only, no TWS client)
 from five minutes before its first slot to ten minutes after its last

@@ -59,7 +59,7 @@ from trading.market.universe import (
     qualify_contract,
 )
 from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession, market_session
-from trading.sendable_identities import carries_sendable_prefix
+from trading.sendable_identities import is_sendable_identity
 
 logger = logging.getLogger("autotrader.shadow.screener")
 
@@ -892,7 +892,7 @@ def _strategy_name(spec_json: object) -> str:
 
 
 async def held_instruments(session_date: date) -> tuple[ScreenerInstrument, ...]:
-    """Contracts the order bridge may hold: the session's sendable accepted decisions.
+    """Contracts the order bridge may hold: the session's accepted decisions of sendable identities.
 
     A superset of the bridge's positions (it may never have sent one), read
     with the bridge's own predicate, so its flatten fallback always finds a
@@ -904,7 +904,7 @@ async def held_instruments(session_date: date) -> tuple[ScreenerInstrument, ...]
             raw_rows = await cursor.fetchall()
     held: dict[int, ScreenerInstrument] = {}
     for con_id, symbol, exchange, spec_json, average in raw_rows:
-        if not carries_sendable_prefix(_strategy_name(spec_json)):
+        if not is_sendable_identity(_strategy_name(spec_json)):  # the bridge's own gate (v7: exact)
             continue
         identifier = int(str(con_id))
         if identifier <= 0 or not 1 <= len(str(symbol or "").strip()) <= 16:
