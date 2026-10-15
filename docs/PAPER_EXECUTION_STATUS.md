@@ -142,7 +142,12 @@ Order sources:
   notifier's real-decision filter (`is_real_decision`) matches the sendable
   identities exactly instead of the `MOMO_HOD` prefix, so a granted V2
   identity's real-order lines reach the phone at once and `MOMO_HOD_V1`
-  (shadow-only) goes to the digest. Independent re-read: PENDING.
+  (shadow-only) goes to the digest. Independent re-read (2026-10-15): **GO**,
+  no authority widened (the dropped guard legs were a no-op at the MOMO-only
+  tuple). Two findings that become MEDIUM at v7b go into v7a.3: the API's
+  reserved-name check must refuse every sendable identity by exact name (not
+  only MOMO's prefix), and the screener's held-instrument filter must use
+  exact identities so held V2 brackets keep a flatten quote source.
 
 ## Still to do
 
