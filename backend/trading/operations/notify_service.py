@@ -7,7 +7,9 @@
      30 minutes (ET :00 and :30), flushed before the daily report;
   b. PAPER bridge order lines (SENT, FILL, EXIT, CLOSED, CANCEL, CANCELLED,
      FLATTEN, FLAT, CRITICAL, and loss-limit or kill-switch skips);
-  c. supervisor child exits;
+  c. supervisor child exits, and the restart cap's suspended, resumed and
+     restart-storm lines (each once per child per half hour; a suspension or
+     resumption that contradicts the last one the phone heard always goes);
   d. competing IBKR logins and lost TWS connections seen in the data logs;
   e. the 16:05 ET daily report, closing with the last market context;
   f. market updates at 09:15, 12:00 and 15:30 ET and market regime changes,
@@ -18,11 +20,15 @@
      timed-out plan, the plan budget spent). While migration 16 is pending
      these are skipped; everything else is unchanged;
   i. an unreachable IB Gateway (live 2026-10-14: off all session, no alert):
-     one "IB Gateway unreachable since HH:MM ET" from the bridge's "TWS did
-     not answer", the screener's "TWS connection failed", three strategy
-     children's handshake failures, or no screener sweep within 20 minutes
-     of SESSION_START; repeated at most every 30 minutes while it persists,
-     and one "reconnected" line when a sweep returns.
+     one "IB Gateway unreachable since HH:MM ET" once the bridge's "TWS did
+     not answer", the screener's "TWS connection failed" and the strategy
+     children's handshake failures make three in a row or a streak two
+     minutes long, or when no screener sweep has come 30 minutes after the
+     screener's 08:00 ET window opened; repeated at most every 30 minutes
+     while no sweep returns, and one "reconnected" line once a sweep has
+     been followed by two minutes without a failure. At most one such pair
+     per half hour (the shared ``trading.operations.hysteresis`` machine);
+     what it holds back is a flap, counted in the next digest.
 
 It only reads the database, the logs, and the bridge state file: nothing here
 can place, modify, or cancel an order. What was delivered, how far each log
@@ -58,6 +64,8 @@ import aiosqlite
 import httpx
 
 from db.core import get_db
+from trading.operations.hysteresis import OPEN as HYSTERESIS_OPEN
+from trading.operations.hysteresis import Event as HysteresisEvent, Hysteresis
 from trading.operations.keychain import (
     TELEGRAM_KEYCHAIN_ACCOUNT,
     TELEGRAM_KEYCHAIN_SERVICE,
@@ -604,6 +612,30 @@ _NO_RESTART = frozenset({"none", "never", "no", "null", "-"})
 _LAUNCH_REFUSED = re.compile(
     r"\bLAUNCH_REFUSED\s+(?P<name>\S+)\s+code=(?P<code>\S+)\s+reason=(?P<reason>\S+)"
 )
+# The supervisor's restart cap (T-5), timestamp-prefixed like CHILD_EXIT:
+#   <ISO UTC> CHILD_SUSPENDED <name> count=<n> window=30m
+#   <ISO UTC> CHILD_RESUMED <name> reason=<port_open|probe_healthy|window_boundary>
+#   <ISO UTC> CHILD_RESTART_STORM <name> count=<n> window=30m
+CHILD_SUSPENDED = "child_suspended"
+CHILD_RESUMED = "child_resumed"
+CHILD_RESTART_STORM = "child_restart_storm"
+_RESTART_CAP_LINES = {
+    CHILD_SUSPENDED: re.compile(
+        r"\bCHILD_SUSPENDED\s+(?P<name>\S+)\s+count=(?P<count>\d+)\s+window=(?P<window>\S+)"
+    ),
+    CHILD_RESUMED: re.compile(r"\bCHILD_RESUMED\s+(?P<name>\S+)\s+reason=(?P<reason>\S+)"),
+    CHILD_RESTART_STORM: re.compile(
+        r"\bCHILD_RESTART_STORM\s+(?P<name>\S+)\s+count=(?P<count>\d+)\s+window=(?P<window>\S+)"
+    ),
+}
+# The two that say what state a child is in (the phone must not lag behind).
+_CHILD_STATES = frozenset({CHILD_SUSPENDED, CHILD_RESUMED})
+# A line that names the event but not in that grammar is still forwarded (raw),
+# never dropped: a format drift must not silence a suspension.
+_RESTART_CAP_TOKENS = {
+    kind: re.compile(rf"\b{kind.upper()}\b(?:\s+(?P<name>[^\s=]+)(?=\s|$))?")
+    for kind in _RESTART_CAP_LINES
+}
 # The phrases IBKR (10197, and 162/165 "different IP address") and our own
 # TWS actor use; a bare "competing" or a number elsewhere in a line is not one.
 _COMPETING_LOGIN = re.compile(
@@ -677,12 +709,49 @@ def _seconds_text(value: str) -> str:
     return format(number.normalize(), "f")
 
 
+def _window_text(value: str) -> str:
+    match = re.fullmatch(r"(\d+)m", value)
+    return f"{match.group(1)} min" if match else value
+
+
+def restart_cap_event(line: str) -> tuple[str, str, str] | None:
+    """``(kind, child, phone text)`` for a restart-cap line, else None."""
+    for kind, token in _RESTART_CAP_TOKENS.items():
+        found = token.search(line)
+        if found is None:
+            continue
+        match = _RESTART_CAP_LINES[kind].search(line)
+        if match is None:
+            name = found.group("name") or "unknown"
+            return kind, name, f"⚠️ supervisor: {_clip(line.strip(), 300)}"
+        name = match.group("name")
+        if kind == CHILD_SUSPENDED:
+            text = (
+                f"⛔ {name} suspended after {match.group('count')} restarts in"
+                f" {_window_text(match.group('window'))} (relaunch probe every 5 min)"
+            )
+        elif kind == CHILD_RESUMED:
+            text = f"✅ {name} resumed ({match.group('reason')})"
+        else:
+            text = (
+                f"⚠️ {name} restart storm: {match.group('count')} in"
+                f" {_window_text(match.group('window'))}"
+                " (positions protected at IB; backoff continues)"
+            )
+        return kind, name, text
+    return None
+
+
 def supervisor_event_text(line: str) -> str | None:
     """``CHILD_EXIT <name> code=<n> restart_in=<x>``; a clean final exit is not news.
 
     ``LAUNCH_REFUSED`` (the supervisor declined to start a child, e.g. a bridge
-    that is not the reviewed one) says why, since no orders follow from it.
+    that is not the reviewed one) says why, since no orders follow from it; the
+    restart cap's lines say what it did (``restart_cap_event``).
     """
+    capped = restart_cap_event(line)
+    if capped is not None:
+        return capped[2]
     refused = _LAUNCH_REFUSED.search(line)
     if refused is not None:
         name = refused.group("name")
@@ -706,7 +775,10 @@ def supervisor_event_text(line: str) -> str | None:
 
 
 def supervisor_child_name(line: str) -> str | None:
-    """The child a ``CHILD_EXIT`` or ``LAUNCH_REFUSED`` line is about."""
+    """The child a ``CHILD_EXIT``, ``LAUNCH_REFUSED`` or restart-cap line is about."""
+    capped = restart_cap_event(line)
+    if capped is not None:
+        return capped[1]
     match = _CHILD_EXIT.search(line) or _LAUNCH_REFUSED.search(line)
     return None if match is None else match.group("name")
 
@@ -751,7 +823,7 @@ def ibkr_alert_text(problem: str, source: str) -> str:
 # 5 minutes ("TWS did not answer"), the screener logged "TWS connection failed"
 # every 70 s with no sweep, every strategy child exit-1-looped, and nothing
 # told the phone why. One alert names it, repeated at most every half hour
-# while it persists, and one line says when a sweep returns.
+# while no sweep returns, and one line says when the sweeps are back for good.
 BROKER_UNREACHABLE = "broker_unreachable"
 BROKER_ALERT_INTERVAL = timedelta(minutes=30)
 # The supervisor's bridge child and the bridge's own "ask again later" exit
@@ -760,13 +832,15 @@ BRIDGE_CHILD_NAME = "bridge"
 BRIDGE_RESTART_CODE = 75
 # The supervisor's SESSION_START (its first child window); pinned by a test.
 SESSION_OPENS = time(7, 55)
-# A healthy screener idles until 08:00 ET, connects, qualifies the universe
-# (~8 minutes) and first sweeps at ~08:10 ET: its first sweep is due within
-# 20 minutes of SESSION_START, not 5 (live 2026-10-13: 08:10 ET).
-FIRST_SWEEP_GRACE = timedelta(minutes=20)
-# Three children's handshake failures (one line each, at their exit) are the
-# Gateway, not one child's bad luck.
-HANDSHAKE_FAILURES_TO_ALERT = 3
+# The screener's WINDOW_OPENS (pinned by a test): it idles until 08:00 ET, then
+# connects and qualifies the whole universe before its first sweep. Live
+# 2026-10-13: qualification 08:00:00-08:08:24 for 503 names, first sweep
+# 08:10:02; a larger universe or IBKR pacing runs past 08:15 (review 904af38
+# F-2), so the first sweep is due 30 minutes after the screener's window opens.
+SCREENER_OPENS = time(8, 0)
+FIRST_SWEEP_GRACE = timedelta(minutes=30)
+# Open/close thresholds and the pair cap are the shared Hysteresis defaults
+# (trading/operations/hysteresis.py, also the overnight watch's): no copy here.
 _SESSION_START = re.compile(r"\bSESSION_START\s+date=(?P<date>\d{4}-\d{2}-\d{2})\b")
 _BRIDGE_UNREACHABLE = re.compile(r"TWS did not answer|Couldn't connect to TWS", re.IGNORECASE)
 _SCREENER_UNREACHABLE = re.compile(r"\bTWS connection failed\b", re.IGNORECASE)
@@ -800,40 +874,76 @@ def _et_hhmm(moment: datetime) -> str:
 class BrokerWatch:
     """The Gateway's reachability as the logs show it; the alert and the recovery line.
 
+    Every failure line (the bridge's refusal, the screener's failed connect, a
+    child's failed handshake) is a failure signal and every screener sweep a
+    success for one shared ``Hysteresis``: the outage opens at the third
+    failure in a row or at a failure two minutes into the streak (a sweep
+    breaks it), and closes once a sweep has been followed by two minutes with
+    no failure; at most one alert/recovery pair per half hour. What it holds
+    back is a flap, reported by ``take_flap_line`` in the next digest
+    (live 2026-10-14: 183 "TWS connection failed" lines; review 904af38 F-1).
+
     In memory only: after a notifier restart during an outage the next
-    evidence line reopens it (the 30-minute cadence lives in the persisted
-    ``alerts``), so "since" is then the restart, not the first failure.
+    evidence reopens it (the 30-minute cadence lives in the persisted
+    ``alerts``), so "since" is then the restart's first failure.
     """
 
     session_date: date
     opened_at: datetime | None = None
     last_sweep_at: datetime | None = None
+    # The first failure of the announced outage; None while none is announced.
     unreachable_since: datetime | None = None
-    handshake_failures: int = 0
     # Who the outage took down: the bridge (its own refusal line) and the
     # children whose log showed the handshake failure. Their exits are the
     # outage, not news of their own; the next alert counts them.
     bridge_refused: bool = False
     handshake_children: set[str] = field(default_factory=set)
     restarting: dict[str, int] = field(default_factory=dict)
+    hysteresis: Hysteresis = field(default_factory=Hysteresis)
+    first_sweep_overdue: bool = False
+    alerted: bool = False
+    swept_since_alert: bool = False
+    flaps_seen: int = 0
+    flaps_reported: int = 0
+    flaps_from: datetime | None = None
 
     @property
     def unreachable(self) -> bool:
+        """An announced outage: the phone is told (or about to be)."""
         return self.unreachable_since is not None
+
+    @property
+    def alert_due(self) -> bool:
+        """The alert, subject to the half-hour cadence: the outage's first, and
+        repeats only while no sweep has come since the last one (a connection
+        that flaps is the digest's flap line, not a repeat)."""
+        return self.unreachable and not (self.alerted and self.swept_since_alert)
+
+    @property
+    def flaps_pending(self) -> bool:
+        return self.hysteresis.flaps > self.flaps_reported
 
     def session_started(self, now: datetime) -> None:
         if self.opened_at is None:
             self.opened_at = now
 
+    def first_sweep_due(self) -> datetime | None:
+        """30 minutes after the screener's window opened (or the session, if later)."""
+        if self.opened_at is None:
+            return None
+        start = max(self.opened_at, market_time(self.session_date, SCREENER_OPENS))
+        return start + FIRST_SWEEP_GRACE
+
     def broker_exit(self, name: str, code: int | None) -> bool:
         """Whether a ``CHILD_EXIT`` is the outage (counted, not forwarded).
 
         Live 2026-10-14: ~12 "<child> exited (code N), restarting" lines an
-        hour and never a plain "Gateway off". The bridge's exit 75 after its
+        hour and never a plain "Gateway off". While the outage is open
+        (announced, or held back as a flap), the bridge's exit 75 after its
         "TWS did not answer", and a child's exit 1 after its handshake
         failure, are folded into the broker alert; any other exit goes through.
         """
-        if not self.unreachable:
+        if not self.hysteresis.is_open:
             return False
         if name == BRIDGE_CHILD_NAME:
             caused = code == BRIDGE_RESTART_CODE and self.bridge_refused
@@ -845,9 +955,11 @@ class BrokerWatch:
 
     def alert_sent(self) -> None:
         self.restarting.clear()
+        self.alerted = True
+        self.swept_since_alert = False
 
     def observe(self, source: str, line: str, now: datetime) -> str | None:
-        """Feed one log line; the recovery text when a sweep ends an outage, else None."""
+        """Feed one log line; the recovery text when it ends the outage, else None."""
         if source == "supervisor":
             started = _SESSION_START.search(line)
             if started is not None and started.group("date") == self.session_date.isoformat():
@@ -857,39 +969,69 @@ class BrokerWatch:
         if evidence is None:
             return None
         if evidence == "sweep":
+            # Market data answered: who the outage took down is forgotten (a
+            # later exit is its own news unless the failure line comes again).
             self.last_sweep_at = now
-            self.handshake_failures = 0
             self.bridge_refused = False
             self.handshake_children.clear()
             self.restarting.clear()
-            since = self.unreachable_since
-            if since is None:
-                return None
-            self.unreachable_since = None
-            return (
-                f"✅ IB Gateway reconnected {_et_hhmm(now)} ET — market data is back"
-                f" (unreachable since {_et_hhmm(since)} ET)"
-            )
+            if self.alerted:
+                self.swept_since_alert = True
+            return self._apply(self.hysteresis.success(now), now)
         if evidence == "bridge_refused":
             self.bridge_refused = True
-        if evidence == "handshake_failed":
+        elif evidence == "handshake_failed":
             self.handshake_children.add(source)
-            self.handshake_failures += 1
-            if self.handshake_failures < HANDSHAKE_FAILURES_TO_ALERT:
-                return None
-        if self.unreachable_since is None:
-            self.unreachable_since = now
-        return None
+        return self._apply(self.hysteresis.failure(now), now)
 
-    def check(self, now: datetime) -> None:
-        """No sweep since the session opened: the Gateway never answered."""
+    def check(self, now: datetime) -> str | None:
+        """Time passing: no first sweep in time (the Gateway never answered), the
+        recovery line two clean minutes after a sweep, or a held-back outage
+        announced once the pair cap allows; the recovery text, else None."""
+        due = self.first_sweep_due()
         if (
-            self.unreachable_since is None
-            and self.opened_at is not None
+            due is not None
+            and not self.first_sweep_overdue
             and self.last_sweep_at is None
-            and now - self.opened_at >= FIRST_SWEEP_GRACE
+            and now >= due
         ):
-            self.unreachable_since = self.opened_at
+            self.first_sweep_overdue = True
+            # No market data since the screener's window opened: failing since then.
+            event = self.hysteresis.failure(now, since=due - FIRST_SWEEP_GRACE)
+            return self._apply(event, now)
+        return self._apply(self.hysteresis.tick(now), now)
+
+    def _apply(self, event: HysteresisEvent | None, now: datetime) -> str | None:
+        flaps = self.hysteresis.flaps
+        if flaps > self.flaps_seen:
+            self.flaps_seen = flaps
+            if self.flaps_from is None:
+                self.flaps_from = now
+            logger.info("%s flap %d held back from the phone", BROKER_UNREACHABLE, flaps)
+        if event is None:
+            return None
+        self.alerted = False
+        self.swept_since_alert = False
+        if event.kind is HYSTERESIS_OPEN:
+            self.unreachable_since = event.since
+            return None
+        self.unreachable_since = None
+        assert event.recovered_at is not None
+        return (
+            f"✅ IB Gateway reconnected {_et_hhmm(event.recovered_at)} ET — market data is back"
+            f" (unreachable since {_et_hhmm(event.since)} ET)"
+        )
+
+    def take_flap_line(self) -> str | None:
+        """The digest's line for the flaps not reported yet (they now count as reported)."""
+        pending = self.hysteresis.flaps - self.flaps_reported
+        if pending <= 0:
+            return None
+        since = self.flaps_from
+        self.flaps_reported = self.hysteresis.flaps
+        self.flaps_from = None
+        start = f" since {_et_hhmm(since)} ET" if since is not None else ""
+        return f"⚡ IB Gateway flapped {pending}×{start} (held back from separate alerts)"
 
     def alert_text(self) -> str:
         assert self.unreachable_since is not None
@@ -1500,6 +1642,9 @@ class _NotifierSession:
         self._digest_members: dict[str, list[str]] = {}
         self._next_manager_poll = float("-inf")
         self._broker = BrokerWatch(session_date)
+        # What the phone last heard per child from the restart cap (suspended or
+        # resumed); rebuilt from the persisted alert times after a restart.
+        self._child_told: dict[str, str] = {}
         # Started after SESSION_START (a restart): the log line is behind the
         # checkpoint, so the session opened no later than now.
         if environment.clock() >= market_time(session_date, SESSION_OPENS):
@@ -1548,11 +1693,7 @@ class _NotifierSession:
             self._next_schema_check = self._environment.monotonic() + SCHEMA_CHECK_SECONDS
             await self._check_schema()
         self._poll_logs()
-        self._broker.check(self._environment.clock())
-        if self._broker.unreachable and self._alert_allowed(BROKER_UNREACHABLE, BROKER_ALERT_INTERVAL):
-            logger.warning("%s: %s", BROKER_UNREACHABLE, self._broker.alert_text())
-            self._send_alert(BROKER_UNREACHABLE, self._broker.alert_text())
-            self._broker.alert_sent()
+        self._follow_broker()
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
         if self._environment.monotonic() >= self._next_decision_poll:
@@ -1614,16 +1755,35 @@ class _NotifierSession:
             and child_exit_code(line) == EXIT_SCHEMA_NOT_READY
         )
 
+    def _follow_broker(self) -> None:
+        recovered = self._broker.check(self._environment.clock())
+        if recovered is not None:
+            self._broker_recovered(recovered)
+        if self._broker.alert_due and self._alert_allowed(BROKER_UNREACHABLE, BROKER_ALERT_INTERVAL):
+            logger.warning("%s: %s", BROKER_UNREACHABLE, self._broker.alert_text())
+            self._send_alert(BROKER_UNREACHABLE, self._broker.alert_text())
+            self._broker.alert_sent()
+
+    def _broker_recovered(self, text: str) -> None:
+        logger.info("%s over: %s", BROKER_UNREACHABLE, text)
+        # Once per announced outage: the hysteresis emits one close per open.
+        self._send_alert("broker_reconnected", text)
+        # The next announced outage alerts at once, not after the last alert's half hour.
+        if self._state.alerts.pop(BROKER_UNREACHABLE, None) is not None:
+            self._state.dirty = True
+
     def _handle_line(self, source: str, line: str) -> None:
         recovered = self._broker.observe(source, line, self._environment.clock())
         if recovered is not None:
-            logger.info("%s over: %s", BROKER_UNREACHABLE, recovered)
-            self._send_alert("broker_reconnected", recovered)
-            # The next outage alerts at once, not after the last alert's half hour.
-            if self._state.alerts.pop(BROKER_UNREACHABLE, None) is not None:
-                self._state.dirty = True
+            self._broker_recovered(recovered)
         if source == "supervisor":
             if self._schema_refusal(line):
+                return
+            capped = restart_cap_event(line)
+            if capped is not None:
+                kind, name, text = capped
+                if self._restart_cap_allowed(kind, name):
+                    self._send_alert(f"{kind}:{name}", text)
                 return
             name = supervisor_child_name(line) or "unknown"
             # An exit the outage caused is the broker alert's (its count), not a line of its own.
@@ -1684,8 +1844,9 @@ class _NotifierSession:
             )
 
     async def _maybe_send_digest(self, *, final: bool = False) -> None:
-        """One digest per ET half hour with the shadow decisions since the last."""
-        if not self._digest:
+        """One digest per ET half hour with the shadow decisions since the last,
+        and a line for the Gateway's flaps since the last (flaps alone send one)."""
+        if not self._digest and not self._broker.flaps_pending:
             return
         now = self._environment.clock()
         # The decisions it carries, not the digest's key, keep a restart from
@@ -1699,10 +1860,13 @@ class _NotifierSession:
             if member not in self._state.delivered and member not in self._in_flight
         ]
         self._digest.clear()
-        if not pending:
+        flap_line = self._broker.take_flap_line()
+        if not pending and flap_line is None:
             return
-        managed = await load_managed_rows(self._session_date)
+        managed = await load_managed_rows(self._session_date) if pending else {}
         text = format_digest([decision for _member, decision in pending], managed, now)
+        if flap_line is not None:
+            text += f"\n{flap_line}"
         members = [member for member, _decision in pending]
         self._digest_members[key] = members
         self._in_flight.update(members)
@@ -1834,6 +1998,32 @@ class _NotifierSession:
         await self._maybe_send_digest(final=True)
         self._send(format_daily_report(report), key="report")
         logger.info("daily report queued for %s", self._session_date.isoformat())
+
+    def _restart_cap_allowed(self, kind: str, name: str) -> bool:
+        """Each restart-cap line once per child per half hour; but a suspension or
+        a resumption that contradicts what the phone last heard about that child
+        always goes, so the phone never shows "resumed" for a suspended child."""
+        key = f"{kind}:{name}"
+        if kind in _CHILD_STATES:
+            told = self._child_told.get(name)
+            if told is None:
+                told = self._persisted_child_state(name)
+            if told != kind:
+                self._child_told[name] = kind
+                self._state.alerts[key] = self._environment.clock().isoformat()
+                self._state.dirty = True
+                return True
+        return self._alert_allowed(key, CHILD_EXIT_ALERT_INTERVAL)
+
+    def _persisted_child_state(self, name: str) -> str | None:
+        """The later of the persisted suspended/resumed alert times (a restart)."""
+        suspended = _parse_time(self._state.alerts.get(f"{CHILD_SUSPENDED}:{name}"))
+        resumed = _parse_time(self._state.alerts.get(f"{CHILD_RESUMED}:{name}"))
+        if suspended is not None and (resumed is None or suspended > resumed):
+            return CHILD_SUSPENDED
+        if resumed is not None and (suspended is None or resumed > suspended):
+            return CHILD_RESUMED
+        return None
 
     def _alert_allowed(self, key: str, interval: timedelta = IBKR_ALERT_INTERVAL) -> bool:
         now = self._environment.clock()

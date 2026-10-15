@@ -10,6 +10,7 @@ import io
 import json
 import logging
 from pathlib import Path
+import re
 import stat
 from types import SimpleNamespace
 
@@ -1004,7 +1005,8 @@ _SWEEP_LINE = "2026-10-13 15:10:02,263 INFO sweep 2026-10-13: qualified=396 quot
 
 
 def test_broker_evidence_classifies_the_live_lines():
-    from trading.operations.notify_service import SESSION_OPENS, broker_evidence
+    from trading.operations.notify_service import SCREENER_OPENS, SESSION_OPENS, broker_evidence
+    from trading.operations.screener_service import WINDOW_OPENS
     from trading.operations.supervisor import SCREENER_WINDOW
 
     assert broker_evidence("screener", _SCREENER_FAILED) == "screener_failed"
@@ -1018,11 +1020,14 @@ def test_broker_evidence_classifies_the_live_lines():
     assert broker_evidence("orb-v2", _CHILD_TRACEBACK) is None
     assert broker_evidence("momo", "TWS connection lost during bars") is None
     assert broker_evidence("supervisor", "2026-10-14T15:03:03+00:00 CHILD_EXIT orb-v2 code=1 restart_in=300") is None
-    # The session opens with the supervisor's first child window.
+    # The session opens with the supervisor's first child window; the screener
+    # itself connects at its own window open, which the first-sweep grace counts from.
     assert SESSION_OPENS == SCREENER_WINDOW[0]
+    assert SCREENER_OPENS == WINDOW_OPENS
 
 
 def test_broker_watch_thresholds_grace_and_recovery():
+    from trading.operations.hysteresis import State
     from trading.operations.notify_service import FIRST_SWEEP_GRACE, BrokerWatch
 
     watch = BrokerWatch(SESSION)
@@ -1037,25 +1042,33 @@ def test_broker_watch_thresholds_grace_and_recovery():
         assert watch.observe(name, _CHILD_FAILED.replace("orb-v2", name), at) is None
     assert not watch.unreachable
     assert watch.observe("vwap-v2", _CHILD_FAILED.replace("orb-v2", "vwap-v2"), _et(8, 1, 9)) is None
-    assert watch.unreachable_since == _et(8, 1, 9)
+    # Since the streak's first failure (the hysteresis opens at the third).
+    assert watch.unreachable_since == _et(8, 1)
     assert watch.alert_text() == "⛔ IB Gateway unreachable since 08:01 ET — log in; the bot has no market data"
-    # More evidence keeps the first time; a sweep ends it with one line and resets the count.
+    # More evidence keeps the first time; a sweep followed by two clean minutes
+    # ends it with one line and resets the streak.
     watch.observe("bridge", _BRIDGE_REFUSED, _et(8, 6))
-    assert watch.unreachable_since == _et(8, 1, 9)
-    assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) == (
+    assert watch.unreachable_since == _et(8, 1)
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) is None
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 34)) is None
+    assert watch.check(_et(8, 35) - timedelta(seconds=1)) is None and watch.unreachable
+    assert watch.check(_et(8, 35)) == (
         "✅ IB Gateway reconnected 08:33 ET — market data is back (unreachable since 08:01 ET)"
     )
-    assert not watch.unreachable and watch.handshake_failures == 0
-    assert watch.observe("screener", _SWEEP_LINE, _et(8, 34)) is None
+    assert not watch.unreachable and watch.hysteresis.state is State.CLEAR
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 36)) is None
+    assert watch.check(_et(8, 40)) is None
 
-    # No sweep by the first-sweep deadline: unreachable since the session opened.
+    # No sweep 30 minutes after the screener's 08:00 window opened (not 20 from
+    # 07:55, review 904af38 F-2): unreachable since the window opened.
+    assert FIRST_SWEEP_GRACE == timedelta(minutes=30)
     silent = BrokerWatch(SESSION)
     silent.session_started(_et(7, 55))
-    silent.check(_et(7, 55) + FIRST_SWEEP_GRACE - timedelta(seconds=1))
+    silent.check(_et(8, 0) + FIRST_SWEEP_GRACE - timedelta(seconds=1))
     assert not silent.unreachable
-    silent.check(_et(7, 55) + FIRST_SWEEP_GRACE)
-    assert silent.unreachable_since == _et(7, 55)
-    assert "since 07:55 ET" in silent.alert_text()
+    silent.check(_et(8, 0) + FIRST_SWEEP_GRACE)
+    assert silent.unreachable_since == _et(8, 0)
+    assert "since 08:00 ET" in silent.alert_text()
     # A healthy day's first sweep at 08:10 ET keeps it quiet for good.
     healthy = BrokerWatch(SESSION)
     healthy.session_started(_et(7, 55))
@@ -1097,9 +1110,11 @@ def test_broker_watch_folds_the_outages_child_exits_into_its_alert():
     assert watch.restarting == {} and "restarting" not in watch.alert_text()
     assert watch.broker_exit("orb-v2", 1)
     assert watch.alert_text().endswith("(1 child restarting)")
-    # The sweep ends the outage and forgets who it took down.
-    assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) is not None
+    # The sweep forgets who the outage took down; two clean minutes end it.
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) is None
     assert not watch.bridge_refused and not watch.handshake_children and not watch.restarting
+    assert not watch.broker_exit("orb-v2", 1)
+    assert watch.check(_et(8, 35)) is not None
     assert not watch.broker_exit("orb-v2", 1)
 
 
@@ -1128,8 +1143,9 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
 
     clock = FakeTime(_et(7, 55))
     clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
-    clock.at(_et(8, 0, 10), _append(logs / "screener.log", _SCREENER_FAILED))
-    clock.at(_et(8, 1, 20), _append(logs / "screener.log", _SCREENER_FAILED))
+    # The screener's reconnect backoff (5, 10, 20, 40 s after a ~10 s handshake timeout).
+    for at in (_et(8, 0, 10), _et(8, 0, 25), _et(8, 0, 45), _et(8, 1, 20)):
+        clock.at(at, _append(logs / "screener.log", _SCREENER_FAILED))
     clock.at(_et(8, 6, 57), _append(logs / "bridge.log", _BRIDGE_502, _BRIDGE_REFUSED))
     clock.at(_et(8, 7, 0), _append(logs / "supervisor.log", "2026-10-13T12:07:00+00:00 CHILD_EXIT bridge code=75 restart_in=300"))
     for name, at in (("orb-v2", _et(8, 8)), ("gap-v2", _et(8, 8, 2)), ("vwap-v2", _et(8, 8, 4))):
@@ -1151,8 +1167,8 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
     sent = telegram.sent()
     unreachable = [text for text in sent if text.startswith("⛔ IB Gateway unreachable")]
     reconnected = [text for text in sent if text.startswith("✅ IB Gateway reconnected")]
-    # One alert at the first evidence, one repeat after the half hour that counts
-    # the children the outage keeps restarting, one recovery line.
+    # One alert at the third failure in a row, one repeat after the half hour that
+    # counts the children the outage keeps restarting, one recovery line.
     assert unreachable == [
         "⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data",
         "⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"
@@ -1173,6 +1189,268 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
     # The bridge's own CRITICAL line still reaches the phone, as before.
     assert any(text.startswith("⚠️ CRITICAL TWS did not answer") for text in sent)
     assert state_file(paths, SESSION).exists()
+
+
+class TimedTelegram(FakeTelegram):
+    """Also records the simulated time each phone message went out."""
+
+    def __init__(self, clock: FakeTime) -> None:
+        super().__init__()
+        self.clock = clock
+        self.sent_at: list[tuple[datetime, str]] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sendMessage"):
+            self.sent_at.append((self.clock.now, json.loads(request.content)["text"]))
+        return super().handler(request)
+
+
+def _queued_alerts(caplog) -> list[str]:
+    return [
+        record.getMessage().removeprefix("alert queued: ")
+        for record in caplog.records
+        if record.getMessage().startswith("alert queued: ")
+    ]
+
+
+async def _gateway_logs(tmp_path: Path, monkeypatch, caplog, *, until) -> UserPaths:
+    from trading.operations import notify_service
+
+    for name in ("autotrader.shadow", "autotrader.shadow.notify"):
+        monkeypatch.setattr(logging.getLogger(name), "propagate", True)
+    caplog.set_level(logging.INFO, logger="autotrader.shadow.notify")
+    await _use_database(tmp_path, monkeypatch)
+    paths = UserPaths(home=tmp_path / "home")
+    save_chat_id(telegram_config_file(paths), CHAT_ID)
+    logs = paths.log_directory
+    logs.mkdir(parents=True, exist_ok=True)
+    for name in ("bridge.log", "screener.log", "supervisor.log", "orb-v2.log", "gap-v2.log", "momo.log"):
+        (logs / name).write_text("")
+    monkeypatch.setattr(notify_service, "SESSION_END", until)
+    return paths
+
+
+_FLAP_LINE = re.compile(r"^⚡ IB Gateway flapped (?P<count>\d+)× since \d\d:\d\d ET \(held back from separate alerts\)$")
+
+
+@pytest.mark.anyio
+async def test_a_flapping_gateway_sends_one_pair_and_a_flap_count_in_the_digest(
+    tmp_path, monkeypatch, caplog
+):
+    """Review 904af38 F-1: failure/sweep alternating every 70 s for an hour sent ~50 messages."""
+    from datetime import time
+
+    # Cut before 09:20, when the (planless) day manager's own outage alert is due.
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(9, 15))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(paths.log_directory / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    # A genuine outage at the window open (the screener's 5/10 s reconnect backoff)...
+    for at in (_et(8, 0, 10), _et(8, 0, 25), _et(8, 0, 45)):
+        clock.at(at, _append(screener, _SCREENER_FAILED))
+    # ...then a sweep and a failure alternating every 70 s from 08:10 for an hour,
+    # ending on a sweep.
+    sweep_at, flaps = _et(8, 10), 0
+    while sweep_at + timedelta(seconds=70) <= _et(9, 10):
+        clock.at(sweep_at, _append(screener, _SWEEP_LINE))
+        clock.at(sweep_at + timedelta(seconds=70), _append(screener, _SCREENER_FAILED))
+        flaps += 1
+        sweep_at += timedelta(seconds=140)
+    clock.at(sweep_at, _append(screener, _SWEEP_LINE))
+    last_sweep = sweep_at
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    sent = telegram.sent()
+    unreachable = [text for text in sent if text.startswith("⛔ IB Gateway unreachable")]
+    reconnected = [text for text in sent if text.startswith("✅ IB Gateway reconnected")]
+    # Exactly one pair: no repeat while sweeps keep coming, no pair per blip.
+    assert unreachable == ["⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"]
+    assert reconnected == [
+        f"✅ IB Gateway reconnected {last_sweep.astimezone(MARKET_TIMEZONE):%H:%M} ET — market data is back"
+        " (unreachable since 08:00 ET)"
+    ]
+    [(closed_at, _text)] = [(at, text) for at, text in telegram.sent_at if text in reconnected]
+    assert last_sweep + timedelta(minutes=2) <= closed_at < last_sweep + timedelta(minutes=2, seconds=5)
+    assert _queued_alerts(caplog) == ["broker_unreachable", "broker_reconnected"]
+    # The flaps reach the phone only as digest lines, and every one is counted.
+    digests = [text for text in sent if text.startswith("🗂 Shadow digest")]
+    counted = [
+        int(match.group("count"))
+        for digest in digests
+        for match in map(_FLAP_LINE.match, digest.splitlines()[1:])
+        if match is not None
+    ]
+    assert flaps > 20 and sum(counted) == flaps and len(counted) == len(digests) <= 5
+    assert sent[0] == startup_text(SESSION)
+    assert all(text.startswith(("⛔ IB Gateway", "✅ IB Gateway", "🗂 Shadow digest")) for text in sent[1:])
+
+
+@pytest.mark.anyio
+async def test_a_slow_qualification_until_0828_raises_no_false_alert(tmp_path, monkeypatch, caplog):
+    """Review 904af38 F-2: a first sweep after 08:15 ET alerted "unreachable since 07:55"."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 45))
+    logs = paths.log_directory
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    # One transient connect failure, then an 800-name qualification until 08:28.
+    clock.at(_et(8, 0, 10), _append(logs / "screener.log", _SCREENER_FAILED))
+    clock.at(_et(8, 0, 15), _append(logs / "screener.log", "2026-10-13 12:00:15,002 INFO screener connected to TWS"))
+    clock.at(_et(8, 28), _append(
+        logs / "screener.log",
+        "2026-10-13 12:28:00,410 INFO universe qualified for 2026-10-13: 803 qualified, 0 transient errors",
+    ))
+    clock.at(_et(8, 29, 40), _append(logs / "screener.log", _SWEEP_LINE))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert telegram.sent() == [startup_text(SESSION)]
+    assert _queued_alerts(caplog) == []
+
+
+@pytest.mark.anyio
+async def test_a_genuine_outage_alerts_within_two_minutes_and_folds_its_exits(tmp_path, monkeypatch, caplog):
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(11, 40))
+    logs = paths.log_directory
+    supervisor_log = logs / "supervisor.log"
+    clock = FakeTime(_et(10, 58))
+    clock.at(_et(10, 59), _append(logs / "screener.log", _SWEEP_LINE))
+    # The Gateway goes away at 11:00: the screener's reconnect backoff, then every 70 s.
+    failures = [_et(11, 0, 10), _et(11, 0, 25), _et(11, 0, 45), _et(11, 1, 15), _et(11, 2, 5)]
+    failures += [_et(11, 2, 5) + timedelta(seconds=70 * n) for n in range(1, 28)]
+    for at in failures:
+        clock.at(at, _append(logs / "screener.log", _SCREENER_FAILED))
+    for at in (_et(11, 1), _et(11, 11)):
+        clock.at(at, _append(logs / "bridge.log", _BRIDGE_502, _BRIDGE_REFUSED))
+        clock.at(at + timedelta(seconds=5), _append(
+            supervisor_log, "2026-10-13T15:01:05+00:00 CHILD_EXIT bridge code=75 restart_in=300"
+        ))
+    for name, at in (("orb-v2", _et(11, 2)), ("gap-v2", _et(11, 2, 3)), ("orb-v2", _et(11, 7)), ("gap-v2", _et(11, 7, 3))):
+        clock.at(at, _append(logs / f"{name}.log", _CHILD_TRACEBACK, _CHILD_FAILED.replace("orb-v2", name)))
+        clock.at(at + timedelta(seconds=10), _append(
+            supervisor_log, f"2026-10-13T15:02:10+00:00 CHILD_EXIT {name} code=1 restart_in=300"
+        ))
+    # Not the outage's (no handshake line in momo.log): still news.
+    clock.at(_et(11, 4), _append(supervisor_log, "2026-10-13T15:04:00+00:00 CHILD_EXIT momo code=1 restart_in=300"))
+    clock.at(_et(11, 35), _append(logs / "screener.log", _SWEEP_LINE))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    alerts = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+    assert [text for _at, text in alerts] == [
+        "⛔ IB Gateway unreachable since 11:00 ET — log in; the bot has no market data",
+        "⛔ IB Gateway unreachable since 11:00 ET — log in; the bot has no market data"
+        " (3 children restarting)",
+        "✅ IB Gateway reconnected 11:35 ET — market data is back (unreachable since 11:00 ET)",
+    ]
+    assert alerts[0][0] - failures[0] <= timedelta(minutes=2)
+    assert alerts[1][0] - alerts[0][0] >= timedelta(minutes=30)
+    assert alerts[2][0] >= _et(11, 37)
+    exits = [text for text in telegram.sent() if text.startswith("⚙️")]
+    assert exits == ["⚙️ momo exited (code 1), restarting in 300 s"]
+    assert _queued_alerts(caplog) == [
+        "broker_unreachable", "child_exit:momo", "broker_unreachable", "broker_reconnected",
+    ]
+
+
+def test_restart_cap_lines_read_as_phone_messages():
+    from trading.operations.notify_service import restart_cap_event, supervisor_child_name
+
+    suspended = "2026-10-20T14:00:05+00:00 CHILD_SUSPENDED momo count=6 window=30m"
+    resumed = "2026-10-20T14:05:00+00:00 CHILD_RESUMED momo reason=port_open"
+    storm = "2026-10-20T14:03:00+00:00 CHILD_RESTART_STORM bridge count=6 window=30m"
+    assert supervisor_event_text(suspended) == (
+        "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)"
+    )
+    assert supervisor_event_text(resumed) == "✅ momo resumed (port_open)"
+    for reason in ("probe_healthy", "window_boundary"):
+        assert supervisor_event_text(resumed.replace("port_open", reason)) == f"✅ momo resumed ({reason})"
+    assert supervisor_event_text(storm) == (
+        "⚠️ bridge restart storm: 6 in 30 min (positions protected at IB; backoff continues)"
+    )
+    assert [restart_cap_event(line)[:2] for line in (suspended, resumed, storm)] == [
+        ("child_suspended", "momo"), ("child_resumed", "momo"), ("child_restart_storm", "bridge"),
+    ]
+    assert [supervisor_child_name(line) for line in (suspended, resumed, storm)] == ["momo", "momo", "bridge"]
+    # A drifted format is forwarded raw, never dropped; other lines are not these.
+    drifted = "2026-10-20T14:00:05+00:00 CHILD_SUSPENDED orb-v2 restarts=6"
+    assert restart_cap_event(drifted) == ("child_suspended", "orb-v2", f"⚠️ supervisor: {drifted}")
+    assert restart_cap_event("2026-10-20T14:00:05+00:00 CHILD_EXIT momo code=1 restart_in=95") is None
+    assert restart_cap_event("2026-10-20T14:00:05+00:00 CHILD_START momo pid=12") is None
+
+
+@pytest.mark.anyio
+async def test_restart_cap_lines_reach_the_phone_once_per_child_per_half_hour(tmp_path, monkeypatch, caplog):
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(10, 45))
+    supervisor_log = paths.log_directory / "supervisor.log"
+
+    def line(at: datetime, event: str) -> None:
+        clock.at(at, _append(supervisor_log, f"{at.isoformat(timespec='seconds')} {event}"))
+
+    clock = FakeTime(_et(10, 0))
+    # The Gateway is fine: its sweeps keep the broker watch quiet.
+    for minute in (0, 15, 30):
+        clock.at(_et(10, minute, 30), _append(paths.log_directory / "screener.log", _SWEEP_LINE))
+    line(_et(10, 0, 1), "CHILD_EXIT momo code=1 restart_in=300")
+    line(_et(10, 0, 5), "CHILD_SUSPENDED momo count=6 window=30m")
+    line(_et(10, 1), "CHILD_SUSPENDED momo count=6 window=30m")  # same news: held back
+    line(_et(10, 2), "CHILD_SUSPENDED orb-v2 count=6 window=30m")  # another child
+    line(_et(10, 3), "CHILD_RESTART_STORM bridge count=6 window=30m")
+    line(_et(10, 5), "CHILD_RESUMED momo reason=port_open")  # contradicts: goes at once
+    line(_et(10, 6), "CHILD_RESUMED momo reason=probe_healthy")  # same news: held back
+    line(_et(10, 7), "CHILD_SUSPENDED momo count=7 window=30m")  # contradicts: goes
+    line(_et(10, 20), "CHILD_RESTART_STORM bridge count=9 window=30m")  # held back
+    line(_et(10, 33, 30), "CHILD_RESTART_STORM bridge count=12 window=30m")  # half an hour later
+    line(_et(10, 40), "CHILD_RESUMED momo reason=window_boundary")
+    line(_et(10, 41), "CHILD_SUSPENDED momo count=6 window=30m")
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    def phone(fake: FakeTelegram) -> list[str]:
+        # The planless day manager's own outage alert (after 09:20) is not under test.
+        return [text for text in fake.sent() if not text.startswith("⚠️ AI day manager")]
+
+    assert phone(telegram)[1:] == [
+        "⚙️ momo exited (code 1), restarting in 300 s",
+        "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
+        "⛔ orb-v2 suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
+        "⚠️ bridge restart storm: 6 in 30 min (positions protected at IB; backoff continues)",
+        "✅ momo resumed (port_open)",
+        "⛔ momo suspended after 7 restarts in 30 min (relaunch probe every 5 min)",
+        "⚠️ bridge restart storm: 12 in 30 min (positions protected at IB; backoff continues)",
+        "✅ momo resumed (window_boundary)",
+        "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
+    ]
+    assert _queued_alerts(caplog) == [
+        "child_exit:momo", "child_suspended:momo", "child_suspended:orb-v2", "child_restart_storm:bridge",
+        "child_resumed:momo", "child_suspended:momo", "child_restart_storm:bridge", "child_resumed:momo",
+        "child_suspended:momo",
+    ]
+
+    # A restart keeps what the phone last heard: the same news is still held back,
+    # the contradicting one still goes.
+    caplog.clear()
+    clock = FakeTime(_et(10, 46))
+    clock.at(_et(10, 46, 30), _append(paths.log_directory / "screener.log", _SWEEP_LINE))
+    line(_et(10, 47), "CHILD_SUSPENDED momo count=6 window=30m")
+    line(_et(10, 48), "CHILD_RESUMED momo reason=port_open")
+    restarted = FakeTelegram()
+    from trading.operations import notify_service
+
+    monkeypatch.setattr(notify_service, "SESSION_END", time(10, 50))
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, clock)) == 0
+    assert phone(restarted) == ["✅ momo resumed (port_open)"]
+    assert _queued_alerts(caplog) == ["child_resumed:momo"]
 
 
 def test_real_decisions_are_exactly_the_sendable_identities(monkeypatch):
