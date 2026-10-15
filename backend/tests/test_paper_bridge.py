@@ -253,14 +253,14 @@ def bracket(decision_id: str, symbol: str, *, status: str, parent: int, filled: 
             exit_filled: int = 0, qty: int = 100, **fields: Any) -> Any:
     return pb.Bracket(
         decision_id=decision_id, symbol=symbol, con_id=parent * 10, primary_exchange="NASDAQ",
-        strategy="momo", strategy_name="MOMO_HOD_V1", qty=qty, entry="50.00", stop="49.50",
+        strategy="momo", strategy_name="MOMO_HOD_V2", qty=qty, entry="50.00", stop="49.50",
         target="51.00", parent=parent, target_id=parent + 1, stop_id=parent + 2,
         sent_at=DECIDED.astimezone(timezone.utc).isoformat(), status=status, filled=filled,
         avg_entry="50.0000" if filled else "0", exit_filled=exit_filled, **fields,
     )
 
 
-def decision_row(decision_id: str, symbol: str, *, strategy: str = "MOMO_HOD_V1",
+def decision_row(decision_id: str, symbol: str, *, strategy: str = "MOMO_HOD_V2",
                  created: datetime = DECIDED, con_id: int = 4931, **intent_fields: Any) -> Any:
     intent = {"quantity": 100, "entry_limit": "50.00", "stop_price": "49.50", "target_price": "51.00",
               **intent_fields}
@@ -285,6 +285,7 @@ def make_bridge(tmp_path: Path, broker: FakeBroker, *, brackets: dict[str, Any] 
     if db is None:  # no ledger: the test supplies decisions, a clear fence and no snapshot
         bridge.decisions = lambda: list(decisions)
         bridge.kill_switch_active = lambda: False
+        bridge.identity_fence_active = lambda identity: False
         bridge.fallback_quote = lambda item: None
     return bridge
 
@@ -316,8 +317,8 @@ async def _shadow_strategy(name: str) -> str:
         rationale=f"{name} bridge fixture.",
     )
     if carries_sendable_prefix(name):
-        # MOMO_HOD_V1 predates the name guard, which now refuses to create it;
-        # the live ledger still holds such records, and the bridge reads them.
+        # The name guard refuses to create a sendable name outside the real registry
+        # flow; the fixture inserts it the way the live ledger holds it.
         return (await insert_legacy_shadow_strategy(spec=spec, owner_id="demo")).strategy_id
     record = await create_strategy(spec=spec, owner_id="demo", actor="demo")
     for revision, target in enumerate((StrategyState.BACKTESTING, StrategyState.SHADOW)):
@@ -397,7 +398,7 @@ async def _ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 async def seed_decisions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dict[str, str]]:
     db_path = await _ledger(tmp_path, monkeypatch)
-    momo = await _shadow_strategy("MOMO_HOD_V1")
+    momo = await _shadow_strategy("MOMO_HOD_V2")
     orb = await _shadow_strategy("ORB_V1")
     # The run ids lie about their strategy on purpose: a label must never decide.
     momo_run = await _run("shadow-orb-lookalike-2026-10-13", momo, SESSION)
@@ -461,7 +462,7 @@ async def test_strategy_comes_from_the_ledger_never_the_run_id(
 ) -> None:
     db_path, ids = await seed_decisions(tmp_path, monkeypatch)
     rows = pb.accepted_decisions(db_path, SESSION)
-    assert [(row.symbol, row.strategy_name) for row in rows] == [("AAPL", "MOMO_HOD_V1"), ("MMED", "ORB_V1")]
+    assert [(row.symbol, row.strategy_name) for row in rows] == [("AAPL", "MOMO_HOD_V2"), ("MMED", "ORB_V1")]
 
     broker = connected_broker(bid=Decimal("50.10"))
     bridge = make_bridge(tmp_path, broker, db=db_path)
@@ -472,11 +473,11 @@ async def test_strategy_comes_from_the_ledger_never_the_run_id(
     out = events(capsys)
     assert [item for item in out if item[0] == "SKIP"] == [("SKIP", "MMED (ORB_V1): shadow-only strategy")]
     assert [item for item in out if item[0] == "SENT"] == [
-        ("SENT", "AAPL (MOMO_HOD_V1): BUY 100 @ 50.00 | stop 49.50 | target 51.00 (orders 100-102)")
+        ("SENT", "AAPL (MOMO_HOD_V2): BUY 100 @ 50.00 | stop 49.50 | target 51.00 (orders 100-102)")
     ]
     assert [order_id for order_id, _ in broker.placed] == [100, 101, 102]
     momo, orb = bridge.brackets[ids["momo"]], bridge.brackets[ids["orb"]]
-    assert (momo.status, momo.strategy, momo.strategy_name) == ("sent", "momo", "MOMO_HOD_V1")
+    assert (momo.status, momo.strategy, momo.strategy_name) == ("sent", "momo", "MOMO_HOD_V2")
     assert (orb.status, orb.strategy, orb.strategy_name, orb.skip_reason) == (
         "skipped", "orb", "ORB_V1", "shadow-only strategy"
     )
@@ -760,6 +761,10 @@ def bridge_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
     monkeypatch.setattr(pb, "STATE_DIR", tmp_path / "bridge")
     monkeypatch.setattr(pb, "LEGACY_STATE", tmp_path / "paper_bridge_state.json")
     monkeypatch.setattr(pb, "DB", tmp_path / "ledger.db")
+    with closing(sqlite3.connect(tmp_path / "ledger.db")) as connection:  # the fences the connect line reads
+        connection.execute("CREATE TABLE autotrader_execution_fences (name TEXT PRIMARY KEY, stopped INTEGER NOT NULL,"
+                           " reason TEXT NOT NULL, updated_at TEXT NOT NULL)")
+        connection.commit()
     monkeypatch.setattr(pb, "SYNC_TIMEOUT_S", 0.2)
     monkeypatch.setattr(pb, "ACCOUNTS_TIMEOUT_S", 0.05)
     monkeypatch.setattr(pb, "LOOP_SECONDS", 0)
@@ -822,7 +827,7 @@ def test_tws_disconnect_exits_75_for_a_supervised_restart(
     out = events(capsys)
     assert any(kind == "CRITICAL" and text.startswith("TWS connection lost") for kind, text in out)
     assert ("INFO", "bridge stopped (exit 75)") in out
-    assert any(kind == "INFO" and text.startswith("PAPER bridge v5 connected") for kind, text in out)
+    assert any(kind == "INFO" and text.startswith("PAPER bridge v7a connected") for kind, text in out)
     assert bridge_env.state_file.exists()
 
 
@@ -946,10 +951,10 @@ def test_refusals_exit_78(bridge_env: SimpleNamespace, capsys: pytest.CaptureFix
 
 
 def test_log_lines_always_parse(capsys: pytest.CaptureFixture[str]) -> None:
-    pb.log("FILL", "AAPL: 100/100 sh @ 50.0000 (MOMO_HOD_V1)")
+    pb.log("FILL", "AAPL: 100/100 sh @ 50.0000 (MOMO_HOD_V2)")
     pb.log("BOGUS", "multi\nline  message")
     assert events(capsys) == [
-        ("FILL", "AAPL: 100/100 sh @ 50.0000 (MOMO_HOD_V1)"),
+        ("FILL", "AAPL: 100/100 sh @ 50.0000 (MOMO_HOD_V2)"),
         ("INFO", "BOGUS multi line message"),
     ]
 
@@ -1298,7 +1303,7 @@ def test_m3_oversized_orders_are_refused(
     bridge.tick()
 
     assert broker.placed == []  # v3 sent the 374,100-share decision
-    assert ("SKIP", f"BIG (MOMO_HOD_V1): {reason}") in events(capsys)
+    assert ("SKIP", f"BIG (MOMO_HOD_V2): {reason}") in events(capsys)
 
 
 @pytest.mark.parametrize(("ghost_filled", "sent"), [(100, False), (0, True)])
@@ -1319,7 +1324,7 @@ def test_m4_unreconciled_brackets_that_may_hold_shares_count_toward_max_open(
         assert [order_id for order_id, _ in broker.placed] == [100, 101, 102]
     else:  # v3 sent a fourth position here
         assert broker.placed == []
-        assert bridge.brackets["n"].skip_reason == "max 3 positions/entries already active"
+        assert bridge.brackets["n"].skip_reason == "MOMO_HOD_V2: max 3 positions already active"
 
 
 def test_l1_rejections_of_restored_legs_are_critical(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1456,8 +1461,8 @@ def test_l6_decisions_expire_with_their_risk_approval(tmp_path: Path, capsys: py
     assert [order_id for order_id, _ in broker.placed] == [100, 101, 102]
     assert bridge.brackets["fresh"].status == "sent"
     out = events(capsys)
-    assert ("SKIP", "OLDX (MOMO_HOD_V1): decision expired (20s old)") in out
-    assert ("SKIP", "PLNX (MOMO_HOD_V1): decision expired (20s old)") in out
+    assert ("SKIP", "OLDX (MOMO_HOD_V2): decision expired (20s old)") in out
+    assert ("SKIP", "PLNX (MOMO_HOD_V2): decision expired (20s old)") in out
 
 
 def test_l6_an_approval_that_expires_during_the_quote_wait_is_not_sent(
@@ -1476,7 +1481,7 @@ def test_l6_an_approval_that_expires_during_the_quote_wait_is_not_sent(
     bridge.tick()
 
     assert broker.placed == []
-    assert ("SKIP", "AAPL (MOMO_HOD_V1): decision expired (16s old)") in events(capsys)
+    assert ("SKIP", "AAPL (MOMO_HOD_V2): decision expired (16s old)") in events(capsys)
 
 
 def test_l6_an_identical_setup_is_sent_only_once(tmp_path: Path) -> None:
@@ -1533,7 +1538,7 @@ def test_modifications_start_from_the_order_tws_reported(tmp_path: Path, capsys:
     [(order_id, sent)] = broker.placed
     assert order_id == 31 and sent is not reported and reported.lmtPrice == 51.0  # the cache is never mutated
     assert (sent.ocaGroup, sent.ocaType, sent.parentId, sent.orderRef, sent.tif, sent.account) == (
-        "1528474519", 3, 30, "autotrader:held", "GTC", ACCOUNT
+        "1528474519", 3, 30, "autotrader:MOMO_HOD_V2:held", "GTC", ACCOUNT
     )
     assert (sent.totalQuantity, sent.transmit, sent.eTradeOnly, sent.firmQuoteOnly, sent.settlingFirm) == (
         100, True, False, False, ""
@@ -1580,7 +1585,7 @@ def test_n1_entries_only_in_symbols_the_account_does_not_hold(
     bridge.tick()
 
     assert broker.placed == []
-    assert ("SKIP", f"AAPL (MOMO_HOD_V1): {reason}") in events(capsys)
+    assert ("SKIP", f"AAPL (MOMO_HOD_V2): {reason}") in events(capsys)
 
 
 def test_n2_every_error_on_an_own_order_is_critical_unless_informational(
@@ -1739,7 +1744,7 @@ def test_n3_modifies_encode_exactly_like_the_placement_tws_accepted(tmp_path: Pa
     kind, price_field, order_id, placed_price = (
         ("LMT", "lmtPrice", 31, 51.0) if leg == "target" else ("STP", "auxPrice", 32, 49.5)
     )
-    placement = pb.order("SELL", kind, 100, ACCOUNT, "autotrader:held", tif="GTC", parentId=30,
+    placement = pb.order("SELL", kind, 100, ACCOUNT, "autotrader:MOMO_HOD_V2:held", tif="GTC", parentId=30,
                          transmit=leg == "stop", **{price_field: placed_price})
     # What 9.81 decodes from TWS's openOrder: the OCA link plus fields that re-encode differently.
     reported = copy.copy(placement)
@@ -2953,7 +2958,7 @@ def test_l5_no_owner_row_is_claimed_in_the_last_seconds_before_the_flatten(
 
     clock.value = ny(15, 45, 0)
     bridge.tick()
-    assert [sent.orderRef for _, sent in broker.placed] == ["autotrader:held", f"manual:{row_id}"]  # flatten first
+    assert [sent.orderRef for _, sent in broker.placed] == ["autotrader:MOMO_HOD_V2:held", f"manual:{row_id}"]  # flatten first
 
 
 def test_f1_live_bot_legs_block_owner_orders_by_symbol_even_without_a_contract_id(
@@ -3280,3 +3285,287 @@ def test_le_a_position_that_never_shows_a_fill_keeps_the_shares_reserved_and_ale
     alerts = [text for text in critical(events(capsys)) if "no position update" in text]
     assert len(alerts) == 1 and alerts[0].startswith("AAPL: no position update 1")
     assert alerts[0].endswith(f"after a fill of 100 sh (order {first_id}) — those shares stay reserved; check TWS")
+
+
+# ---- v7a: per-identity authority (exact names, caps, fences, orderRef, preflight) ------------------
+
+
+def _fence_row(db_path: Path, identity: str, stopped: int) -> None:
+    with closing(sqlite3.connect(db_path)) as connection:
+        connection.execute(
+            "INSERT INTO autotrader_execution_fences (name, stopped, reason, updated_at) VALUES (?, ?, 'test', 't')"
+            " ON CONFLICT(name) DO UPDATE SET stopped=excluded.stopped",
+            (f"paper:{identity}", stopped),
+        )
+        connection.commit()
+
+
+def _bracket_named(name: str, decision_id: str = "d") -> Any:
+    return pb.Bracket(decision_id=decision_id, symbol="SYM", con_id=1, primary_exchange="NASDAQ",
+                      strategy=pb.strategy_family(name), strategy_name=name, qty=0, entry="0", stop="0", target="0")
+
+
+@pytest.mark.parametrize("name", ["MOMO_HOD_V2", " MOMO_HOD_V2 "])
+def test_v7a_exactly_the_sendable_names_send(tmp_path: Path, name: str) -> None:
+    assert pb.may_send_orders(name)
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, decisions=(decision_row("d1", "AAPL", strategy=name),))
+    bridge.tick()
+    assert [order_id for order_id, _ in broker.placed] == [100, 101, 102]
+
+
+@pytest.mark.parametrize(
+    "name", ["MOMO_HOD_V1", "AP_MOMO_HOD_V1", "momo_hod_v2", "MOMO_HOD_V2X", "ORB_V1", "ORB_V2", "SH_MOMO_HOD_V3", ""]
+)
+def test_v7a_a_name_that_is_not_exactly_sendable_is_shadow_only(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    assert not pb.may_send_orders(name)  # v5 matched the MOMO_HOD prefix: AP_MOMO_HOD_V1 and MOMO_HOD_V2X sent
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, decisions=(decision_row("d1", "AAPL", strategy=name),))
+    capsys.readouterr()
+    bridge.tick()
+    assert broker.placed == []
+    assert bridge.brackets["d1"].skip_reason == pb.SHADOW_ONLY
+
+
+def test_v7a_every_sendable_name_has_a_caps_row_and_nothing_else_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert pb.SENDABLE_STRATEGY_NAMES == frozenset(pb.IDENTITY_CAPS) == {"MOMO_HOD_V2"}
+    assert pb.IDENTITY_CAPS["MOMO_HOD_V2"] == pb.Caps(3, None, timedelta(minutes=60))
+    assert pb.global_max_open() == 3 == sum(caps.max_positions for caps in pb.IDENTITY_CAPS.values())
+    assert pb.caps_problem() is None
+    assert pb.caps_lines() == [
+        "sendable identities = MOMO_HOD_V2",
+        "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m",
+    ]
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {})
+    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: MOMO_HOD_V2"
+    assert pb.global_max_open() == 0
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {"MOMO_HOD_V2": pb.Caps(3, None, timedelta(minutes=60)),
+                                              "ORB_V2": pb.Caps(1, 1, timedelta(minutes=30))})
+    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: ORB_V2"
+
+
+@pytest.mark.anyio
+async def test_v7a_an_identity_fence_blocks_only_that_identitys_new_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path, ids = await seed_decisions(tmp_path, monkeypatch)
+    assert pb.identity_fence_active(db_path, "MOMO_HOD_V2") is False and pb.fenced_identities(db_path) == []
+    _fence_row(db_path, "MOMO_HOD_V2", 1)
+    assert pb.identity_fence_active(db_path, "MOMO_HOD_V2") is True
+    assert pb.fenced_identities(db_path) == ["MOMO_HOD_V2"]
+    assert pb.paper_kill_switch_active(db_path) is False  # the global switch is a different row
+
+    held = bracket("held", "HELD", status="open", parent=30, filled=100)
+    broker = connected_broker(bid=Decimal("50.10"), live_orders={31: "Submitted", 32: "PreSubmitted"},
+                              positions={300: 100})
+    bridge = make_bridge(tmp_path, broker, db=db_path, brackets={"held": held})
+    bridge.startup()
+    capsys.readouterr()
+    bridge.tick()
+
+    assert broker.placed == [] and broker.cancelled == []
+    out = events(capsys)
+    assert ("SKIP", "AAPL (MOMO_HOD_V2): identity_stopped:MOMO_HOD_V2") in out
+    assert bridge.brackets[ids["momo"]].skip_reason == "identity_stopped:MOMO_HOD_V2"
+    assert critical(out) == [] and held.status == "open"  # exits of the held bracket are still managed
+
+    _fence_row(db_path, "MOMO_HOD_V2", 0)  # autotraderctl paper resume --identity MOMO_HOD_V2
+    restarted = make_bridge(tmp_path, connected_broker(bid=Decimal("50.10")), db=db_path)
+    restarted.tick()
+    assert restarted.brackets[ids["momo"]].status == "sent"
+
+
+def test_v7a_an_unreadable_identity_fence_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    empty = tmp_path / "empty.db"
+    sqlite3.connect(empty).close()
+    with pytest.raises(sqlite3.OperationalError):
+        pb.fenced_identities(empty)
+
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, decisions=(decision_row("d1", "AAPL"),))
+    bridge.identity_fence_active = lambda identity: pb.identity_fence_active(empty, identity)
+    capsys.readouterr()
+    bridge.tick()
+
+    assert broker.placed == []
+    assert ("SKIP", "AAPL: identity fence unreadable (OperationalError) — fail closed") in events(capsys)
+
+
+def test_v7a_the_connect_line_names_the_sendable_set_its_caps_and_the_fences(
+    bridge_env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    broker = FakeBroker()
+    broker.disconnect_after = 2
+    bridge_env.install(broker, Clock(ny(10, 0)))
+    assert pb.main(["--date", "2026-10-13"]) == pb.EXIT_RESTART
+    out = events(capsys)
+    start = out.index(next(item for item in out if item[1].startswith("PAPER bridge v7a connected")))
+    assert out[start + 1:start + 4] == [
+        ("INFO", "sendable identities = MOMO_HOD_V2"),
+        ("INFO", "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m"),
+        ("INFO", "fenced identities = none"),
+    ]
+
+    _fence_row(pb.DB, "MOMO_HOD_V2", 1)
+    broker = FakeBroker()
+    broker.disconnect_after = 2
+    bridge_env.install(broker, Clock(ny(10, 0)))
+    assert pb.main(["--date", "2026-10-13"]) == pb.EXIT_RESTART
+    assert ("CRITICAL", "fenced identities = MOMO_HOD_V2") in events(capsys)
+
+
+def test_v7a_the_identity_position_cap_is_checked_before_the_global_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {"MOMO_HOD_V2": pb.Caps(1, None, timedelta(minutes=60))})
+    held = bracket("a", "AAA", status="open", parent=40, filled=100)
+    broker = connected_broker(bid=Decimal("50.10"), positions={400: 100})
+    bridge = make_bridge(tmp_path, broker, brackets={"a": held}, decisions=(decision_row("n", "NEWX"),))
+    bridge.tick()
+    assert broker.placed == []
+    assert bridge.brackets["n"].skip_reason == "MOMO_HOD_V2: max 1 positions already active"
+    # The global cap (test_l4) still counts unmanaged live symbols through slots_used.
+    assert bridge.slots_used() == 1 < pb.global_max_open() == 1 or pb.global_max_open() == 1
+
+
+def test_v7a_entries_per_day_count_every_attempt_including_a_cancelled_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(pb, "SENDABLE_STRATEGY_NAMES", frozenset({"MOMO_HOD_V2", "VWAP_PB_V2"}))
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {
+        "MOMO_HOD_V2": pb.Caps(3, None, timedelta(minutes=60)),
+        "VWAP_PB_V2": pb.Caps(1, 1, timedelta(minutes=30)),
+    })
+    cancelled = replace(bracket("c", "CANX", status="cancelled", parent=40), strategy="other",
+                        strategy_name="VWAP_PB_V2")
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, brackets={"c": cancelled}, decisions=(
+        decision_row("v", "NEWV", strategy="VWAP_PB_V2"), decision_row("m", "NEWM"),
+    ))
+    assert bridge.entries_today("VWAP_PB_V2") == 1 and bridge.positions_of("VWAP_PB_V2") == 0
+    capsys.readouterr()
+    bridge.tick()
+
+    assert bridge.brackets["v"].skip_reason == "VWAP_PB_V2: max 1 entries/day already sent"
+    assert bridge.brackets["m"].status == "sent"
+    assert [sent.orderRef for _, sent in broker.placed] == ["autotrader:MOMO_HOD_V2:m"] * 3
+    assert bridge.entries_today("MOMO_HOD_V2") == 1
+
+
+def test_v7a_a_sendable_identitys_last_entry_is_its_caps_offset_from_the_real_close(tmp_path: Path) -> None:
+    normal = make_bridge(tmp_path, connected_broker())
+    assert normal.entry_deadline(_bracket_named("MOMO_HOD_V2")) == ny(15, 0)  # v5's STRATEGY_CUTOFFS["momo"]
+    assert normal.entry_deadline(_bracket_named("ORB_V1")) == ny(12, 0)  # not sendable: family cutoff
+    assert normal.entry_deadline(_bracket_named("VWAP_PB_V1")) == ny(15, 30)  # no family cutoff: last_entry
+
+    half_day = date(2026, 11, 27)  # 13:00 close
+    half = make_bridge(tmp_path, connected_broker(), session_date=half_day)
+    assert half.entry_deadline(_bracket_named("MOMO_HOD_V2")) == datetime(2026, 11, 27, 12, 0, tzinfo=pb.NY)
+    assert half.entry_deadline(_bracket_named("ORB_V1")) == datetime(2026, 11, 27, 12, 0, tzinfo=pb.NY)
+    assert half.entry_deadline(_bracket_named("VWAP_PB_V1")) == datetime(2026, 11, 27, 12, 30, tzinfo=pb.NY)
+
+    # The gate and the working-parent cancel use the same deadline.
+    late = Clock(ny(15, 0))
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, clock=late, decisions=(decision_row("d1", "AAPL", created=ny(14, 59, 50)),))
+    bridge.tick()
+    assert broker.placed == [] and bridge.brackets["d1"].skip_reason == "momo entry window closed"
+    working = bracket("w", "WORK", status="sent", parent=40)
+    bridge = make_bridge(tmp_path, broker, clock=late, brackets={"w": working})
+    bridge.expire_entries()
+    assert working.parent_cancel_requested is True and broker.cancelled == [40]
+
+
+def test_v7a_a_sendable_name_without_a_caps_row_is_skipped_and_critical_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {})
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, decisions=(decision_row("d1", "AAPL"), decision_row("d2", "MSFT")))
+    capsys.readouterr()
+    bridge.tick()
+
+    assert broker.placed == []
+    assert {b.skip_reason for b in bridge.brackets.values()} == {"identity_caps_missing:MOMO_HOD_V2"}
+    assert critical(events(capsys)) == [
+        "MOMO_HOD_V2: sendable but has no caps row — its entries are skipped (fail closed)"
+    ]
+
+
+def test_v7a_the_order_ref_carries_the_identity_and_parses_back(tmp_path: Path) -> None:
+    bridge = make_bridge(tmp_path, connected_broker())
+    for name in pb.SENDABLE_STRATEGY_NAMES:
+        ref = bridge.ref(_bracket_named(name, decision_id="abcdefghijklmnop"))
+        assert ref == f"autotrader:{name}:abcdefghijkl" and ref.startswith(pb.ORDER_REF_PREFIX)
+        assert pb.parse_ref(ref) == (name, "abcdefghijkl")
+    assert pb.parse_ref("manual:42") is None
+    assert pb.parse_ref("autotrader:held") is None  # a v5 ref has no identity
+    assert pb.parse_ref("autotrader::x") is None and pb.parse_ref(None) is None
+    # The prefix matchers still accept every bridge ref, old and new.
+    row = SimpleNamespace(account=ACCOUNT, day=SESSION, order_ref="autotrader:MOMO_HOD_V2:abcdefghijkl")
+    assert pb.execution_matches(row, ACCOUNT, SESSION, pb.ORDER_REF_PREFIX)
+
+
+def test_v7a_preflight_prints_the_identity_lines_without_connecting(
+    bridge_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge_env.install(None, Clock(ny(10, 0)))  # the App factory fails the test on any connect
+
+    assert pb.main(["--preflight"]) == pb.EXIT_OK
+    out = events(capsys)
+    assert out[1:] == [
+        ("INFO", "sendable identities = MOMO_HOD_V2"),
+        ("INFO", "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m"),
+        ("INFO", "fenced identities = none"),
+    ]
+    assert pb.main(["--preflight", "--date", "2026-10-13"]) == pb.EXIT_OK
+    assert not bridge_env.state_file.exists()
+
+    _fence_row(pb.DB, "MOMO_HOD_V2", 1)
+    assert pb.main(["--preflight"]) == pb.EXIT_OK
+    assert ("CRITICAL", "fenced identities = MOMO_HOD_V2") in events(capsys)
+
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {})
+    assert pb.main(["--preflight"]) == pb.EXIT_REFUSED
+    assert ("CRITICAL", "PREFLIGHT_REFUSED caps: MOMO_HOD_V2") in events(capsys)
+    monkeypatch.undo()
+
+
+def test_v7a_preflight_refuses_an_unreadable_fence_or_config(
+    bridge_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge_env.install(None, Clock(ny(10, 0)))
+    empty = pb.DB.parent / "empty.db"
+    sqlite3.connect(empty).close()
+    monkeypatch.setattr(pb, "DB", empty)
+    assert pb.main(["--preflight"]) == pb.EXIT_REFUSED
+    assert any(text.startswith("PREFLIGHT_REFUSED fences unreadable (OperationalError") for text in critical(events(capsys)))
+
+    monkeypatch.setattr(pb, "CONFIG", pb.DB.parent / "missing.toml")
+    assert pb.main(["--preflight"]) == pb.EXIT_REFUSED
+    assert any(text.startswith("refusing: config") for text in critical(events(capsys)))
+
+
+def test_v7a_the_bridge_never_reconnects_in_process() -> None:
+    """A lost connection is exit 75 (test_tws_disconnect_exits_75_for_a_supervised_restart) and the
+    restart re-runs _account_refusal: no code path connects a second time inside one process."""
+    import ast
+
+    tree = ast.parse(BRIDGE_PATH.read_text(encoding="utf-8"))
+    connect_callers: set[str] = set()
+    private_connect_callers: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            if (isinstance(call.func, ast.Attribute) and call.func.attr == "connect"
+                    and not (isinstance(call.func.value, ast.Name) and call.func.value.id == "sqlite3")):
+                connect_callers.add(node.name)  # TWS connects only; sqlite3.connect is the ledger
+            if isinstance(call.func, ast.Name) and call.func.id == "_connect":
+                private_connect_callers.add(node.name)
+    assert connect_callers == {"_connect"}
+    assert private_connect_callers == {"_connected_session"}

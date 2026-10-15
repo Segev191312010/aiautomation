@@ -26,7 +26,7 @@ from trading.contracts import (
 )
 from trading.engine import AutotraderEngine
 from trading.intelligence.provider import TradeProposalProvider
-from trading.risk.engine import SIZE_SCALED_TO_ZERO
+from trading.risk.engine import IDENTITY_SIZING_MISSING, SIZE_SCALED_TO_ZERO, require_size_multiplier
 from trading.rules.orb import NO_SIGNAL_YET, QUOTE_REQUIRED
 from trading.rules.strategy import (
     ORBStrategy,
@@ -205,15 +205,26 @@ class ShadowPipeline:
         mode: EngineMode = EngineMode.SHADOW,
         setup_recorder: SetupRecorder = record_formed_setup,
         sizing: ManagedSizing | None = None,
+        identity_multiplier: Decimal | None = NO_SCALING,
     ) -> None:
+        """``identity_multiplier`` is the sendable identity's fixed size factor
+        (``trading.risk.identity_sizing``), a Decimal in (0, 1]; ``None`` means a
+        sendable identity with no row, and every setup is then blocked with
+        ``identity_sizing_missing`` (never sized at 1 by default)."""
         if not isinstance(strategy, StrategyEvaluator):
             raise TypeError("strategy must implement StrategyEvaluator")
+        if identity_multiplier is not None:
+            if not isinstance(identity_multiplier, Decimal):
+                raise TypeError("identity_multiplier must be a Decimal in (0, 1] or None")
+            identity_multiplier = require_size_multiplier(identity_multiplier)
         self._proposal_provider = proposal_provider
         self._decision_recorder = decision_recorder
         self._strategy = strategy
         self._mode = mode
         self._setup_recorder = setup_recorder
         self._sizing = sizing
+        self._identity_multiplier = identity_multiplier
+        self._identity_missing_reported = False
 
         async def defer_recording(**_: object) -> None:
             return None
@@ -239,6 +250,34 @@ class ShadowPipeline:
     @property
     def sizing(self) -> ManagedSizing | None:
         return self._sizing
+
+    @property
+    def identity_multiplier(self) -> Decimal | None:
+        return self._identity_multiplier
+
+    def _engine_size(self, multiplier: Decimal) -> dict[str, Decimal]:
+        """The engine's ``size_multiplier`` keyword: identity factor x managed factor.
+
+        An unmanaged pipeline with the neutral identity factor calls the engine
+        exactly as before the manager and the identities existed (no keyword at
+        all); every other case passes one Decimal product in [0, 1].
+        """
+        identity = self._identity_multiplier
+        assert identity is not None  # the None case never reaches the engine
+        if self._sizing is None:
+            return {} if identity == NO_SCALING else {"size_multiplier": identity}
+        return {"size_multiplier": identity * multiplier}
+
+    def _report_identity_missing(self, *, strategy: StrategyRecord, setup: RuleSetup) -> None:
+        if self._identity_missing_reported:
+            return
+        self._identity_missing_reported = True
+        logger.critical(
+            "%s: %s has no fixed size multiplier; every setup of this run is blocked (setup %s)",
+            IDENTITY_SIZING_MISSING,
+            strategy.spec.name,
+            setup.fingerprint(),
+        )
 
     async def run(
         self,
@@ -388,10 +427,27 @@ class ShadowPipeline:
             review = _blocked_review(setup=setup, reason=reason)
 
         multiplier = await self._managed_multiplier(setup=setup, review=review)
-        # Unmanaged runs call the engine exactly as before the manager existed.
-        managed_size = {} if self._sizing is None else {"size_multiplier": multiplier}
         try:
-            if multiplier == 0:
+            if self._identity_multiplier is None:
+                # A sendable identity without a size row: blocked, never sized at 1.
+                self._report_identity_missing(strategy=strategy, setup=setup)
+                decision = self._terminal_decision(
+                    run_id=run_id,
+                    strategy=strategy,
+                    candidate=item.candidate,
+                    key=key,
+                    outcome=DecisionOutcome.RISK_BLOCKED,
+                    setup=setup,
+                    review=review,
+                    risk=_blocked_risk(
+                        setup=setup,
+                        review=review,
+                        policy=policy,
+                        portfolio=portfolio,
+                        code=IDENTITY_SIZING_MISSING,
+                    ),
+                )
+            elif multiplier == 0:
                 # The manager's steps skip this setup: a deterministic risk
                 # block, never a resize upward.
                 decision = self._terminal_decision(
@@ -419,7 +475,7 @@ class ShadowPipeline:
                     portfolio=portfolio,
                     policy=policy,
                     admitted_symbols=admitted_symbols,
-                    **managed_size,
+                    **self._engine_size(multiplier),
                 )
         except Exception:
             if review.decision != "PROPOSE":
@@ -450,7 +506,7 @@ class ShadowPipeline:
                     risk=risk,
                 )
         else:
-            if multiplier != 0:
+            if multiplier != 0 and self._identity_multiplier is not None:
                 decision = Decision.model_validate(
                     {
                         **decision.model_dump(mode="json"),

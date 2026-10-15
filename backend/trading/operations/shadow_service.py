@@ -96,7 +96,8 @@ from trading.scheduler.sessions import (
     market_session,
     next_market_session,
 )
-from trading.sendable_identities import SENDABLE_IDENTITIES
+from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, identity_multiplier
+from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 
 if TYPE_CHECKING:
     from trading.manager.managed import ManagedStrategy
@@ -165,6 +166,57 @@ STRATEGIES = {
     # prompt for its neutral reviews. Never sendable (see AP_MOMO_STRATEGY_NAME).
     "momo-ap": (MomoStrategy, ap_momo_strategy_spec, MOMO_REVIEW_PROMPT_ID),
 }
+# Registry keys whose spec name is a sendable identity: the children that send
+# real PAPER orders through the bridge. Every other key's name must stay out
+# of SENDABLE_IDENTITIES (registry_problems refuses the launch otherwise).
+SENDABLE_KEYS = frozenset({"momo"})
+
+
+def registered_spec_names(
+    strategies: Mapping[str, tuple[object, Callable[[], object], object]] = STRATEGIES,
+) -> dict[str, str]:
+    """Registry key -> the catalogue name its spec factory builds."""
+    return {key: str(factory().name) for key, (_evaluator, factory, _prompt) in strategies.items()}
+
+
+def registry_problems(
+    *,
+    sendable: tuple[str, ...] = SENDABLE_IDENTITIES,
+    multipliers: Mapping[str, Decimal] = IDENTITY_SIZE_MULTIPLIER,
+    strategies: Mapping[str, tuple[object, Callable[[], object], object]] = STRATEGIES,
+    sendable_keys: frozenset[str] = SENDABLE_KEYS,
+) -> list[str]:
+    """Every way the registry, the sendable tuple and the size table disagree.
+
+    Empty when: spec names are unique; exactly the ``sendable_keys`` carry a
+    sendable name; every sendable name has a size row and every size row is a
+    sendable name; every sendable name is registered. Each problem is one
+    token without spaces, so a ``LAUNCH_REFUSED ... reason=<token>`` line
+    reaches the phone intact. The supervisor refuses to launch on any of them.
+    """
+    names = registered_spec_names(strategies)
+    problems: list[str] = []
+    seen: dict[str, str] = {}
+    for key, name in names.items():
+        if name in seen:
+            problems.append(f"duplicate_spec_name={name}:{seen[name]}+{key}")
+        seen.setdefault(name, key)
+    for key, name in names.items():
+        if name in sendable and key not in sendable_keys:
+            problems.append(f"sendable_name_under_unlisted_key={key}:{name}")
+        if key in sendable_keys and name not in sendable:
+            problems.append(f"sendable_key_without_sendable_name={key}:{name}")
+    for name in sendable:
+        if name not in multipliers:
+            problems.append(f"sendable_without_size_multiplier={name}")
+        if name not in names.values():
+            problems.append(f"sendable_not_registered={name}")
+    for name in multipliers:
+        if name not in sendable:
+            problems.append(f"size_multiplier_not_sendable={name}")
+    return problems
+
+
 # Each registry entry's family: the key every "momo"-style check reads
 # (risk_off gate, market context, MomoConfig fingerprint), so managed MOMO
 # keeps MOMO's gates. An entry not listed is its own family.
@@ -501,7 +553,11 @@ async def run_shadow_session(
     schedule = poll_schedule(strategy_name, universe)
     prompt_id = strategy_prompt or config.prompt_id
     system_prompt = review_prompt_for(prompt_id, strategy_kind=evaluator.strategy_kind)
-    strategy = await ensure_strategy(owner_id=owner_id, spec=spec_factory())
+    spec = spec_factory()
+    strategy = await ensure_strategy(owner_id=owner_id, spec=spec)
+    # The identity's fixed size factor, from the catalogue name this run
+    # registers; None (a sendable name with no row) blocks every setup.
+    size_factor = identity_multiplier(spec.name, sendable=is_sendable_identity(spec.name))
     policy = RiskPolicy()
     run_id = f"shadow-{strategy.strategy_id[:8]}-{session.session_date.isoformat()}"
     if run_label:
@@ -622,7 +678,10 @@ async def run_shadow_session(
             read_account=actor.account_snapshot,
             runner=RepositoryBackedShadowRunner(
                 pipeline=ShadowPipeline(
-                    proposal_provider=review_provider, strategy=evaluator, sizing=controller
+                    proposal_provider=review_provider,
+                    strategy=evaluator,
+                    sizing=controller,
+                    identity_multiplier=size_factor,
                 ),
                 clock=clock,
             ),
@@ -817,6 +876,7 @@ async def _sleep_until(moment: datetime, *, clock: Clock, sleep: Sleeper) -> Non
 __all__ = [
     "DYNAMIC_UNIVERSES",
     "IBKR_API_VOLUME_MULTIPLIER",
+    "MANAGED_BAR_MAX_AGE",
     "MANAGED_STRATEGIES",
     "MARKET_AWARE_FAMILIES",
     "MARKET_AWARE_STRATEGIES",
@@ -824,21 +884,23 @@ __all__ = [
     "MARKET_REGIME_RULE",
     "MIN_POLL_SEPARATION",
     "MOMO_REVIEW_PROMPT_ID",
+    "SENDABLE_KEYS",
     "STRATEGIES",
     "STRATEGY_FAMILIES",
     "STRATEGY_POLL_OFFSETS",
     "STRATEGY_USES_BAR_CACHE",
     "UNIVERSES",
-    "MANAGED_BAR_MAX_AGE",
     "WATCHLIST_BAR_MAX_AGE",
     "bar_cache_active",
     "bar_freshness_limit",
     "fresh_run_label",
     "idle_until_cutoff",
     "market_context_provider",
+    "policy_fingerprints",
     "poll_offset_problems",
     "poll_schedule",
-    "policy_fingerprints",
+    "registered_spec_names",
+    "registry_problems",
     "risk_off_entry_gate",
     "run_shadow_day",
     "run_shadow_session",

@@ -132,12 +132,25 @@ BRIDGE_FINISH_BEFORE_CLOSE = timedelta(minutes=5)
 # unusable config or state). Logged with restart_in=none so the phone alerts.
 BRIDGE_REFUSED_CODE = 78
 BRIDGE_CHILD = "bridge"
+# The registry preflight: the strategy registry, the sendable tuple and the
+# identity size table must agree (shadow_service.registry_problems) or nothing
+# launches. Logged as LAUNCH_REFUSED registry code=78 reason=<token>, the
+# same line the notifier forwards for an unreviewed bridge.
+REGISTRY_CHILD = "registry"
+# Children run with the supervisor's environment plus these; the dry run's
+# bridge preflight uses exactly the same environment, interpreter and cwd.
+CHILD_ENVIRONMENT_EXTRA = {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+BRIDGE_PREFLIGHT_FLAG = "--preflight"
+BRIDGE_PREFLIGHT_TIMEOUT_S = 60.0
+# The bridge writes notifier event lines, ``HH:MM:SS ET  <KIND> <text>``; the
+# dry run relays the KIND and text and drops the clock, which is not the session's.
+_BRIDGE_EVENT_CLOCK = re.compile(r"^\d{2}:\d{2}:\d{2} ET  (?=[A-Z]+ )")
 # The bridge file the last independent execution-safety review passed (GO).
 # The supervisor launches no other bridge: an edited, unreviewed bridge is
 # refused (exit 78, phone alert) instead of sending orders unattended. Change
 # this only in the commit that records that review in
 # docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
-REVIEWED_BRIDGE_SHA256 = "7ad34b5824602f725fd04ca8631122b95ad2c86dadf8e2b224cd1942d171022a"
+REVIEWED_BRIDGE_SHA256 = "a63982cc01c36ffcb7d1b7877dfdec4b0b2c7371911d5909e5f36893cbbfb440"
 # The all-session simulations (orb-v2, gap-v2, vwap-v2) replace ORB_V1,
 # GAP_GO_V1 and VWAP_PB_V1 here (owner decision "Both", 2026-10-13); the V1
 # strategies stay registered for the CLI and the replay but are not scheduled.
@@ -919,8 +932,7 @@ class SubprocessLauncher:
     ) -> None:
         self._log_directory = log_directory
         self._cwd = cwd
-        self._environment = dict(os.environ if environment is None else environment)
-        self._environment.update({"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
+        self._environment = child_environment(environment)
         self._clock = clock
         self._pinned = dict(pinned or {})
 
@@ -1016,6 +1028,91 @@ def single_instance(
         yield
     finally:
         os.close(descriptor)
+
+
+def child_environment(environment: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment every child (and the bridge preflight) runs with."""
+    result = dict(os.environ if environment is None else environment)
+    result.update(CHILD_ENVIRONMENT_EXTRA)
+    return result
+
+
+def registry_refusals() -> list[str]:
+    """``shadow_service.registry_problems()``, imported on use (the TWS and Claude stack)."""
+    from trading.operations.shadow_service import registry_problems
+
+    return registry_problems()
+
+
+def registry_lines(problems: Sequence[str]) -> tuple[str, ...]:
+    """Dry-run lines for the registry preflight; loud when the launch would be refused."""
+    if not problems:
+        return ("registry     sendable identities, size table and strategy registry agree",)
+    return tuple(
+        f"!!! LAUNCH_REFUSED {REGISTRY_CHILD} code={BRIDGE_REFUSED_CODE} reason={problem}"
+        for problem in problems
+    ) + ("!!! the supervisor will not start: fix the registry (nothing launches)",)
+
+
+def bridge_preflight_argv(
+    session_date: date, *, python: Path = VENV_PYTHON, backend: Path = BACKEND_DIR
+) -> tuple[str, ...]:
+    """The bridge's real launch argv plus ``--preflight``: same interpreter, same script."""
+    bridge = backend / "scripts_local" / "paper_bridge.py"
+    return (str(python), str(bridge), "--date", session_date.isoformat(), BRIDGE_PREFLIGHT_FLAG)
+
+
+def run_bridge_preflight(
+    session_date: date, *, python: Path = VENV_PYTHON, backend: Path = BACKEND_DIR
+) -> tuple[int, str]:
+    """Run the bridge's own ``--preflight`` (no TWS) the way the supervisor would launch it.
+
+    Returns ``(exit code, stdout)``; the lines are relayed verbatim by the dry
+    run and a non-zero exit fails it. Env, interpreter and cwd are the launch's.
+    """
+    argv = bridge_preflight_argv(session_date, python=python, backend=backend)
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(backend),
+            env=child_environment(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=BRIDGE_PREFLIGHT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, f"bridge preflight could not run ({type(exc).__name__}: {exc})\n"
+    output = completed.stdout
+    if completed.returncode != 0 and completed.stderr.strip():
+        output += completed.stderr
+    return completed.returncode, output
+
+
+BridgePreflight = Callable[..., tuple[int, str]]
+
+
+def bridge_preflight_lines(
+    session_date: date,
+    *,
+    python: Path = VENV_PYTHON,
+    backend: Path = BACKEND_DIR,
+    preflight: BridgePreflight | None = None,
+) -> tuple[str, ...]:
+    """The bridge preflight's output as dry-run lines, ``!!!`` on a non-zero exit."""
+    runner = run_bridge_preflight if preflight is None else preflight
+    code, output = runner(session_date, python=python, backend=backend)
+    lines = tuple(
+        f"bridge       {_BRIDGE_EVENT_CLOCK.sub('', line, count=1)}"
+        for line in output.splitlines()
+        if line.strip()
+    )
+    if code == 0:
+        return lines
+    return lines + (
+        f"!!! BRIDGE PREFLIGHT FAILED (exit {code}): the bridge would refuse to start at"
+        f" {_local(datetime.combine(session_date, BRIDGE_START, tzinfo=MARKET_TIMEZONE))} ET",
+    )
 
 
 def missing_entry_points(*, python: Path = VENV_PYTHON, backend: Path = BACKEND_DIR) -> list[Path]:
@@ -1127,6 +1224,19 @@ def run_supervisor(
                 echo=sys.stdout if echo is None else echo,
             )
             try:
+                problems = registry_refusals()
+                for problem in problems:
+                    log(
+                        f"{iso_utc(_utc_now())} LAUNCH_REFUSED {REGISTRY_CHILD}"
+                        f" code={BRIDGE_REFUSED_CODE} reason={problem}"
+                    )
+                if problems:
+                    print(
+                        "error: the strategy registry, the sendable identities and the size table"
+                        " disagree; nothing was launched (supervisor.log)",
+                        file=sys.stderr,
+                    )
+                    return BRIDGE_REFUSED_CODE
                 for path in missing_entry_points(python=python, backend=backend):
                     log(f"{iso_utc(_utc_now())} PREFLIGHT_WARNING missing={path}")
                 for pid, command in unsupervised():
@@ -1263,13 +1373,21 @@ def dry_run_report(
     backend: Path = BACKEND_DIR,
     unsupervised: Callable[[], list[tuple[int, str]]] = unsupervised_children,
     database: str | Path | None = None,
+    registry: Callable[[], Sequence[str]] | None = None,
+    preflight: BridgePreflight | None = None,
 ) -> str:
-    """The planned child timeline for one session, simulated; launches and writes nothing."""
+    """The planned child timeline for one session, simulated; launches and writes nothing.
+
+    The bridge's own ``--preflight`` is the one subprocess it runs (read-only,
+    no TWS), after the pin check, with the launch's interpreter, env and cwd.
+    """
     if database is None:
         from config import cfg
 
         database = cfg.DB_PATH
     schema = schema_lines(database)
+    registry_problems = tuple((registry_refusals if registry is None else registry)())
+    registry_report = registry_lines(registry_problems)
     current = now or _utc_now()
     planner = partial(plan_session, python=python, backend=backend)
     if session_date is None:
@@ -1290,6 +1408,7 @@ def dry_run_report(
     lines = [
         "DRY RUN: nothing is launched and no log is written.",
         *(line for line in schema if line.startswith("!!!")),
+        *(line for line in registry_report if line.startswith("!!!")),
         f"session      {session.session_date.isoformat()} ({session.session_date:%a}), "
         f"XNYS {_local(session.opens_at)}-{_local(session.closes_at)} ET"
         + (" (half day)" if session.half_day else ""),
@@ -1325,7 +1444,16 @@ def dry_run_report(
         lines.append(f"{_local(moment, '%H:%M:%S')}  {line.split(' ', 1)[1]}")
     for path in missing_entry_points(python=python, backend=backend):
         lines.append(f"WARNING: missing {path}")
-    lines.append(bridge_review_line(backend))
+    review = bridge_review_line(backend)
+    lines.append(review)
+    if review.startswith("bridge       reviewed"):
+        # Only the reviewed bridge is asked; an unreviewed one is refused anyway.
+        lines.extend(
+            bridge_preflight_lines(
+                session.session_date, python=python, backend=backend, preflight=preflight
+            )
+        )
+    lines.extend(registry_report)
     lines.extend(schema)
     for pid, command in unsupervised():
         lines.append(f"WARNING: running outside the supervisor (kill {pid} before `run`): {command}")
@@ -1337,6 +1465,8 @@ __all__ = [
     "AlreadyRunning",
     "AlwaysOnPlan",
     "BRIDGE_CHILD",
+    "BRIDGE_PREFLIGHT_FLAG",
+    "REGISTRY_CHILD",
     "ChildPlan",
     "ChildProcess",
     "LaunchRefused",
@@ -1356,7 +1486,10 @@ __all__ = [
     "TERMINATE_GRACE",
     "VENV_PYTHON",
     "always_on_plans",
+    "bridge_preflight_argv",
+    "bridge_preflight_lines",
     "bridge_review_line",
+    "child_environment",
     "child_exit_line",
     "child_start_line",
     "dry_run_report",
@@ -1365,6 +1498,9 @@ __all__ = [
     "missing_entry_points",
     "open_private_append",
     "plan_session",
+    "registry_lines",
+    "registry_refusals",
+    "run_bridge_preflight",
     "run_supervisor",
     "schema_lines",
     "simulate_session",

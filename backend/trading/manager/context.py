@@ -39,8 +39,8 @@ from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
 
 logger = logging.getLogger("autotrader.shadow.manager.context")
 
-# The pinned bridge's MAX_OPEN (moderate pilot); a test reads the bridge's
-# source to keep the two equal.
+# MOMO_HOD_V2's position cap in the pinned bridge (IDENTITY_CAPS, bridge v7a);
+# a test loads the bridge to keep the two equal.
 BRIDGE_MAX_OPEN = 3
 BRIDGE_ACTIVE_STATUSES = frozenset({"pending", "sent", "open", "needs_attention"})
 DAILY_LOSS_SKIP = "daily loss limit reached"

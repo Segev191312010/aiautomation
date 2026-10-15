@@ -61,6 +61,16 @@ def _two_strategy_schedule(request, monkeypatch):
 ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
 TUESDAY = date(2026, 10, 13)
+# The bridge's own --preflight, as the dry run relays it: tests never run the real one.
+_PREFLIGHT_LINES = (
+    "09:00:00 ET  INFO sendable identities = MOMO_HOD_V2\n"
+    "09:00:00 ET  INFO caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m\n"
+    "09:00:00 ET  INFO fenced identities = none\n"
+)
+
+
+def _PREFLIGHT_OK(session_date, *, python, backend):
+    return 0, _PREFLIGHT_LINES
 PYTHON = Path("/repo/backend/.venv/bin/python")
 BACKEND = Path("/repo/backend")
 CHILD_START = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00 CHILD_START [a-z]+ pid=\d+$")
@@ -910,6 +920,7 @@ def test_dry_run_simulates_the_day_and_writes_nothing(tmp_path):
         now=et(date(2026, 10, 12), 22, 0),
         user_paths=paths,
         unsupervised=lambda: [(24401, ".venv/bin/python -u autotraderctl.py screener run")],
+        preflight=_PREFLIGHT_OK,
     )
 
     for expected in (
@@ -940,6 +951,7 @@ def test_dry_run_warns_about_strays_but_not_the_running_supervisors_children(tmp
         now=et(date(2026, 10, 12), 22, 0),
         user_paths=UserPaths(home=tmp_path),
         unsupervised=lambda: supervisor_module.unsupervised_children(lambda: table),
+        preflight=_PREFLIGHT_OK,
     )
 
     assert "WARNING: running outside the supervisor (kill 600 before `run`)" in report
@@ -947,7 +959,7 @@ def test_dry_run_warns_about_strays_but_not_the_running_supervisors_children(tmp
 
 
 def test_dry_run_clock_start_skips_windows_that_closed():
-    report = dry_run_report(session_date=TUESDAY, clock_start=time(12, 30), unsupervised=list)
+    report = dry_run_report(session_date=TUESDAY, clock_start=time(12, 30), unsupervised=list, preflight=_PREFLIGHT_OK)
 
     assert "12:30:00  CHILD_START momo" in report
     assert "CHILD_START orb" not in report
@@ -1008,6 +1020,7 @@ def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsy
     from trading import cli
 
     monkeypatch.setattr(supervisor_module, "run_supervisor", lambda **_kwargs: pytest.fail("ran"))
+    monkeypatch.setattr(supervisor_module, "run_bridge_preflight", _PREFLIGHT_OK)
 
     # A fixed simulated clock: on the session's own date the default clock
     # start is "now", which would make this test depend on the time of day.
@@ -1275,7 +1288,7 @@ def test_run_supervisor_registers_the_always_on_children(tmp_path, monkeypatch):
 
 
 def test_dry_run_lists_the_always_on_child():
-    report = dry_run_report(session_date=TUESDAY, unsupervised=list)
+    report = dry_run_report(session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK)
 
     assert "telegram  always-on" in report
     assert "backend/autotraderctl.py telegram run" in report
@@ -1546,3 +1559,159 @@ def test_dry_run_shows_the_learning_loop():
         "18:30:00  SESSION_END date=2026-10-13",
     ):
         assert expected in report
+
+
+# --- bridge v7: the registry preflight and the bridge's own --preflight ------------------
+
+
+def test_the_launcher_environment_is_the_child_environment(tmp_path):
+    launcher = SubprocessLauncher(tmp_path / "logs", cwd=tmp_path)
+    assert launcher._environment == supervisor_module.child_environment()
+    assert launcher._environment["PYTHONUNBUFFERED"] == "1"
+    assert launcher._environment["PYTHONIOENCODING"] == "utf-8"
+    custom = SubprocessLauncher(tmp_path / "logs", cwd=tmp_path, environment={"HOME": "/x"})
+    assert custom._environment == {"HOME": "/x", "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+
+
+def test_bridge_preflight_argv_is_the_launch_argv_plus_the_flag():
+    session = market_session(TUESDAY)
+    bridge = next(plan for plan in plan_session(session) if plan.name == "bridge")
+    assert supervisor_module.bridge_preflight_argv(TUESDAY) == (*bridge.argv, "--preflight")
+    assert supervisor_module.bridge_preflight_argv(TUESDAY)[-1] == supervisor_module.BRIDGE_PREFLIGHT_FLAG
+
+
+def test_the_registry_preflight_is_the_shadow_services_check(monkeypatch):
+    from trading.operations import shadow_service
+
+    assert supervisor_module.registry_refusals() == shadow_service.registry_problems() == []
+    monkeypatch.setattr(shadow_service, "registry_problems", lambda: ["duplicate_spec_name=X:a+b"])
+    assert supervisor_module.registry_refusals() == ["duplicate_spec_name=X:a+b"]
+
+
+def test_run_supervisor_refuses_a_broken_registry_before_anything_launches(tmp_path, monkeypatch):
+    from trading.operations.notify_service import supervisor_event_text
+
+    monkeypatch.setattr(supervisor_module, "registry_refusals", lambda: ["sendable_without_size_multiplier=ORB_V2"])
+    monkeypatch.setattr(supervisor_module, "Supervisor", lambda **_kwargs: pytest.fail("constructed"))
+    paths = UserPaths(home=tmp_path)
+    echo = io.StringIO()
+
+    assert supervisor_module.run_supervisor(user_paths=paths, echo=echo, unsupervised=list) == 78
+
+    line = next(
+        line for line in (paths.log_directory / "supervisor.log").read_text().splitlines()
+        if "LAUNCH_REFUSED" in line
+    )
+    assert line.endswith("LAUNCH_REFUSED registry code=78 reason=sendable_without_size_multiplier=ORB_V2")
+    assert line in echo.getvalue()
+    # The notifier forwards it to the phone like an unreviewed bridge.
+    assert supervisor_event_text(line) == (
+        "⛔ registry NOT started: sendable_without_size_multiplier=ORB_V2 (supervisor.log)"
+    )
+    assert not any(path.name != "supervisor.log" for path in paths.log_directory.iterdir())
+
+
+def test_dry_run_reports_registry_problems_loudly_and_a_clean_registry_quietly(tmp_path):
+    paths = UserPaths(home=tmp_path)
+    report = dry_run_report(
+        session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), user_paths=paths, unsupervised=list,
+        registry=lambda: ["duplicate_spec_name=MOMO_HOD_V2:momo+momo-v3"], preflight=_PREFLIGHT_OK,
+    )
+    refused = "!!! LAUNCH_REFUSED registry code=78 reason=duplicate_spec_name=MOMO_HOD_V2:momo+momo-v3"
+    lines = report.splitlines()
+    assert lines.index(refused) < lines.index(next(line for line in lines if line.startswith("session")))
+    assert lines.count(refused) == 2 and "!!! the supervisor will not start" in report
+    assert "registry     sendable identities" not in report
+
+    clean = dry_run_report(
+        session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), user_paths=paths, unsupervised=list,
+        registry=list, preflight=_PREFLIGHT_OK,
+    )
+    assert "registry     sendable identities, size table and strategy registry agree" in clean
+    assert "LAUNCH_REFUSED" not in clean and "will not start" not in clean
+
+
+def _fake_backend(tmp_path: Path, body: str) -> Path:
+    backend = tmp_path / "backend"
+    (backend / "scripts_local").mkdir(parents=True)
+    (backend / "scripts_local" / "paper_bridge.py").write_text(body, encoding="utf-8")
+    (backend / "autotraderctl.py").write_text("", encoding="utf-8")
+    return backend
+
+
+_PREFLIGHT_SCRIPT = """\
+import os, sys
+print("09:25:00 ET  INFO sendable identities = MOMO_HOD_V2")
+print("09:25:00 ET  INFO caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m")
+print("09:25:00 ET  INFO fenced identities = none")
+if os.environ.get("FAKE_PREFLIGHT_EXIT", "0") != "0":
+    print("09:25:00 ET  CRITICAL PREFLIGHT_REFUSED caps: ORB_V2")
+print("argv " + " ".join(sys.argv[1:]))
+print("cwd " + os.getcwd())
+print("env PYTHONUNBUFFERED=" + os.environ.get("PYTHONUNBUFFERED", "unset"))
+sys.exit(int(os.environ.get("FAKE_PREFLIGHT_EXIT", "0")))
+"""
+
+
+def test_dry_run_runs_the_reviewed_bridges_preflight_with_the_launch_argv_env_and_cwd(tmp_path, monkeypatch):
+    backend = _fake_backend(tmp_path, _PREFLIGHT_SCRIPT)
+    script = backend / "scripts_local" / "paper_bridge.py"
+    monkeypatch.setattr(supervisor_module, "REVIEWED_BRIDGE_SHA256", supervisor_module.file_sha256(script))
+    monkeypatch.delenv("FAKE_PREFLIGHT_EXIT", raising=False)
+
+    report = dry_run_report(
+        session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), user_paths=UserPaths(home=tmp_path / "home"),
+        unsupervised=list, registry=list, python=Path(sys.executable), backend=backend,
+    )
+
+    lines = report.splitlines()
+    review = lines.index(f"bridge       reviewed (sha256 {supervisor_module.REVIEWED_BRIDGE_SHA256[:12]})")
+    # The bridge's event clock is dropped; the KIND and text are relayed verbatim.
+    assert lines[review + 1 : review + 4] == [
+        "bridge       INFO sendable identities = MOMO_HOD_V2",
+        "bridge       INFO caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m",
+        "bridge       INFO fenced identities = none",
+    ]
+    assert "bridge       argv --date 2026-10-13 --preflight" in lines
+    assert f"bridge       cwd {backend.resolve()}" in lines or f"bridge       cwd {backend}" in lines
+    assert "bridge       env PYTHONUNBUFFERED=1" in lines
+    assert "BRIDGE PREFLIGHT FAILED" not in report and "LAUNCH_REFUSED" not in report
+
+
+def test_dry_run_fails_when_the_bridge_preflight_exits_non_zero(tmp_path, monkeypatch):
+    backend = _fake_backend(tmp_path, _PREFLIGHT_SCRIPT)
+    script = backend / "scripts_local" / "paper_bridge.py"
+    monkeypatch.setattr(supervisor_module, "REVIEWED_BRIDGE_SHA256", supervisor_module.file_sha256(script))
+    monkeypatch.setenv("FAKE_PREFLIGHT_EXIT", "78")
+
+    report = dry_run_report(
+        session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), user_paths=UserPaths(home=tmp_path / "home"),
+        unsupervised=list, registry=list, python=Path(sys.executable), backend=backend,
+    )
+
+    assert "bridge       INFO sendable identities = MOMO_HOD_V2" in report  # relayed even on failure
+    assert "bridge       CRITICAL PREFLIGHT_REFUSED caps: ORB_V2" in report
+    assert "!!! BRIDGE PREFLIGHT FAILED (exit 78): the bridge would refuse to start at 09:25 ET" in report
+
+
+def test_an_unreviewed_bridge_is_never_asked_to_preflight(tmp_path, monkeypatch):
+    backend = _fake_backend(tmp_path, _PREFLIGHT_SCRIPT)
+    monkeypatch.setattr(supervisor_module, "REVIEWED_BRIDGE_SHA256", "f" * 64)
+
+    def never(*_args, **_kwargs):
+        pytest.fail("the unreviewed bridge was run")
+
+    report = dry_run_report(
+        session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), user_paths=UserPaths(home=tmp_path / "home"),
+        unsupervised=list, registry=list, python=Path(sys.executable), backend=backend, preflight=never,
+    )
+    assert "WARNING: bridge sha256" in report and "sendable identities = MOMO_HOD_V2" not in report
+
+
+def test_a_bridge_preflight_that_cannot_run_is_a_failed_dry_run(tmp_path):
+    backend = tmp_path / "backend"  # no scripts_local at all
+    backend.mkdir()
+    code, output = supervisor_module.run_bridge_preflight(TUESDAY, python=Path(sys.executable), backend=backend)
+    assert code != 0 and output
+    lines = supervisor_module.bridge_preflight_lines(TUESDAY, python=Path(sys.executable), backend=backend)
+    assert lines[-1].startswith(f"!!! BRIDGE PREFLIGHT FAILED (exit {code})")

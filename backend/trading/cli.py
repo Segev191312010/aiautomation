@@ -22,6 +22,7 @@ from trading.operations.schema_gate import (
     refusal_exit,
     require_current_schema,
 )
+from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import SQLitePaperKillStore
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_STOP_REASON = "operator stop via autotraderctl"
+_DEFAULT_RESUME_REASON = "operator resume via autotraderctl"
 # Mirrors trading.operations.shadow_service.STRATEGIES / UNIVERSES (a test pins
 # them); kept literal so parsing never imports the TWS and Claude stack.
 _STRATEGY_CHOICES = ("orb", "momo", "vwap", "gap", "orb-v2", "vwap-v2", "gap-v2", "momo-ap")
@@ -85,11 +87,27 @@ def _parser() -> argparse.ArgumentParser:
     paper.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
     actions = paper.add_subparsers(dest="action", required=True)
 
-    stop = actions.add_parser("stop", help="permanently stop new PAPER entries")
+    stop = actions.add_parser(
+        "stop",
+        help="stop new PAPER entries: globally (permanent), or one sendable identity's with --identity",
+    )
     stop.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
     stop.add_argument("--reason", default=_DEFAULT_STOP_REASON)
+    stop.add_argument(
+        "--identity",
+        default=None,
+        metavar="IDENTITY",
+        help="fence only this sendable identity's new entries (e.g. ORB_V2); omitted = the global stop",
+    )
 
-    status = actions.add_parser("status", help="show the PAPER kill-switch state")
+    resume = actions.add_parser(
+        "resume", help="lift one sendable identity's fence (--identity required; the global stop has no resume)"
+    )
+    resume.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    resume.add_argument("--reason", default=_DEFAULT_RESUME_REASON)
+    resume.add_argument("--identity", default=None, metavar="IDENTITY")
+
+    status = actions.add_parser("status", help="show the PAPER kill-switch state and every identity fence")
     status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
 
     shadow = domains.add_parser("shadow", help="real-data shadow sessions (no orders)")
@@ -388,12 +406,38 @@ async def _execute(arguments: argparse.Namespace) -> int:
             )
             return 1
         kill_store = SQLitePaperKillStore()
+        identity = getattr(arguments, "identity", None)
+        if identity is not None:
+            identity = identity.strip()
+            if identity not in SENDABLE_IDENTITIES:
+                print(
+                    f"error: {identity!r} is not a sendable identity; choose one of"
+                    f" {', '.join(SENDABLE_IDENTITIES)}",
+                    file=sys.stderr,
+                )
+                return 2
         if arguments.action == "stop":
-            await kill_store.stop(reason=arguments.reason)
-            print("PAPER kill switch: ACTIVE")
+            await kill_store.stop(reason=arguments.reason, identity=identity)
+            if identity is None:
+                print("PAPER kill switch: ACTIVE")
+            else:
+                print(f"PAPER identity fence {identity}: STOPPED")
+            return 0
+        if arguments.action == "resume":
+            if identity is None:
+                print(
+                    "error: resume needs --identity <IDENTITY>; the global PAPER stop is never resumed",
+                    file=sys.stderr,
+                )
+                return 2
+            await kill_store.resume(reason=arguments.reason, identity=identity)
+            print(f"PAPER identity fence {identity}: RESUMED")
             return 0
         stopped = await kill_store.is_stopped()
         print(f"PAPER kill switch: {'ACTIVE' if stopped else 'INACTIVE'}")
+        for name, fenced, reason, _updated in await kill_store.identity_rows():
+            state = f"STOPPED ({reason})" if fenced else "RESUMED"
+            print(f"identity {name}: {state}")
         return 0
     except (OSError, ValueError, RuntimeError, aiosqlite.Error):
         print("error: PAPER control command could not be completed", file=sys.stderr)

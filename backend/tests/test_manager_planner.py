@@ -448,8 +448,19 @@ def test_the_bridge_slot_count_is_the_pinned_bridges():
     from pathlib import Path
     import re
 
-    source = (Path(__file__).parents[1] / "scripts_local" / "paper_bridge.py").read_text(encoding="utf-8")
-    assert int(re.search(r"^MAX_OPEN\s*=\s*(\d+)", source, re.MULTILINE).group(1)) == BRIDGE_MAX_OPEN
+    import importlib.util
+    import sys
+
+    # The manager narrows MOMO_HOD_V2, so its slot count is that identity's own
+    # position cap in the pinned bridge (bridge v7a: IDENTITY_CAPS), not the
+    # bridge-wide total, which is the sum over every sendable identity.
+    path = Path(__file__).parents[1] / "scripts_local" / "paper_bridge.py"
+    spec = importlib.util.spec_from_file_location("paper_bridge_for_manager_test", path)
+    bridge = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bridge
+    spec.loader.exec_module(bridge)
+    assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
+    assert re.search(r"^MAX_OPEN\s*=", (path.read_text(encoding="utf-8")), re.MULTILINE) is None
     assert bridge_summary((), "bridge state unreadable (OSError)") == {
         "available": False, "problem": "bridge state unreadable (OSError)",
     }

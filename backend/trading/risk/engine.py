@@ -36,6 +36,9 @@ NO_SCALING = Decimal("1")
 # The policy approved the setup, but the manager's steps leave less than one
 # share: the setup is skipped (narrowing), never rounded up.
 SIZE_SCALED_TO_ZERO = "size_scaled_to_zero"
+# A sendable identity has no fixed size multiplier (trading.risk.identity_sizing):
+# the setup is blocked, never sized at 1 by default.
+IDENTITY_SIZING_MISSING = "identity_sizing_missing"
 
 
 def require_size_multiplier(value: object) -> Decimal:

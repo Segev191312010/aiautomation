@@ -1,4 +1,5 @@
-"""TEMPORARY supervised PAPER bridge v5 (owner request 2026-10-12; C1.1 hardening + GO fixes).
+"""TEMPORARY supervised PAPER bridge v7a (owner request 2026-10-12; v5 = C1.1 hardening + GO fixes;
+v7a = per-identity authority: exact-match allowlist, identity fence, caps, orderRef identity).
 
 Consumes accepted decisions of ONE New York session from the shadow ledger and
 manages each as an IBKR native bracket on the PAPER account until the session
@@ -14,7 +15,7 @@ alerts 12:46/12:50/12:58, stop 12:55).
 Lifecycle per bracket: sent -> (open | cancelled) -> closed by target, stop, or
 the 15:45 flatten; needs_attention when startup reconciliation cannot find it
 at IBKR or its exit fills exceed its entry fills (never re-sent, never managed,
-counted toward MAX_OPEN while it may hold shares). Fills come from execDetails
+counted toward the position caps while it may hold shares). Fills come from execDetails
 of this session, account and order-ref prefix (deduplicated by execId; a
 corrected execution replaces the one it corrects) and never decrease, so a
 restart can rebuild them with reqExecutions.
@@ -22,6 +23,12 @@ restart can rebuild them with reqExecutions.
 Usage (backend venv; the supervisor always passes the session date):
 
   backend/.venv/bin/python backend/scripts_local/paper_bridge.py --date YYYY-MM-DD
+  backend/.venv/bin/python backend/scripts_local/paper_bridge.py --preflight
+
+--preflight never connects to TWS: it checks the config, prints the sendable
+identities, their caps rows and the fenced identities from this file's own
+code, and exits 78 when a sendable identity has no caps row or the fence is
+unreadable. The supervisor's dry run relays its lines.
 
 State: ~/.local/share/autotrader-v1/bridge/<date>.json (directory 0700, file
 0600, atomic replace), mirrored to ~/.local/share/autotrader-v1/
@@ -41,14 +48,24 @@ the notifier parses that format. Tracebacks go to stderr only.
 Safety rules (all enforced here because the shadow pipeline sizes per run):
 - Refuses to start unless every managed account starts with "DU" and the
   configured paper account is among them; order client ID only.
-- Only strategies whose ledger name starts with MOMO_HOD may send orders. The
+- Only a strategy whose ledger name is exactly one of SENDABLE_STRATEGY_NAMES
+  may send orders (no prefix: a prefix once gave ORB_V2 ORB_V1's cutoff). The
   name comes from the strategy version of the decision's run, never the run id.
-- The PAPER kill fence is checked before every entry; unreadable means stopped.
-- At most MAX_OPEN brackets working, open, or unreconciled with shares across
-  ALL strategies, plus one slot per symbol with a live client order the bridge
-  does not manage; one bracket per symbol; no new entries after this date's
-  realized loss reaches 2% of net liq. A single order may not exceed 25% of
-  net liq in notional or 1% of net liq in risk (entry - stop).
+  A sendable name without an IDENTITY_CAPS row is skipped (fail closed).
+- The PAPER kill fence (name 'paper') and the identity's own fence (name
+  'paper:<IDENTITY>') are checked before every entry; unreadable means stopped.
+  An identity fence blocks only that identity's new entries; exits, the
+  flatten and owner orders are unaffected.
+- Per identity: at most max_positions brackets working, open, or unreconciled
+  with shares, at most max_entries_per_day entries sent (whatever became of
+  them), and no entry after the session close minus last_entry_before_close.
+  Across ALL identities at most sum(max_positions) brackets plus one slot per
+  symbol with a live client order the bridge does not manage; one bracket per
+  symbol; no new entries after this date's realized loss reaches 2% of net
+  liq. A single order may not exceed 25% of net liq in notional or 1% of net
+  liq in risk (entry - stop).
+- Every order carries orderRef autotrader:<IDENTITY>:<decision id prefix>, so
+  IBKR reports attribute fills per identity; parse_ref reads it back.
 - A new entry needs an account position in its contract that is known and
   zero: the exit caps read the whole account position, so the bot only trades
   symbols it alone holds and a bracket can never sell the owner's shares.
@@ -97,7 +114,7 @@ not manage today counts as a bot symbol: owner sells are refused there. A
 /close of a bot symbol reprices that bracket's target instead; /closeall does
 that for every bracket and sells each unreserved US-stock long at market. A
 row still sending at a restart that IBKR does not know becomes unknown and is
-never resent. Manual orders never count toward MAX_OPEN, are never flattened at
+never resent. Manual orders never count toward the position caps, are never flattened at
 the close, keep bot entries off their symbol, and log KIND MANUAL only.
 
 Stage C2 replaces this script with the reviewed execution engine.
@@ -134,7 +151,7 @@ from ibapi.execution import ExecutionFilter
 from ibapi.order import Order
 from ibapi.wrapper import EWrapper
 
-BRIDGE_VERSION = "v5"
+BRIDGE_VERSION = "v7a"
 STATE_SCHEMA = "paper-bridge-state.v5"
 NY = ZoneInfo("America/New_York")
 DATA_DIR = Path.home() / ".local/share/autotrader-v1"
@@ -157,7 +174,6 @@ EVENT_KINDS = frozenset({
 
 DEFAULT_DECISION_TTL_S = 15  # trading/risk/engine.py: a risk approval lives 15 s
 MAX_DECISION_AGE_S = 60  # backstop even when an intent claims a longer expiry
-MAX_OPEN = 3
 MAX_DAILY_LOSS_PCT = Decimal("2")
 MAX_ORDER_NOTIONAL_PCT = Decimal("25")
 MAX_ORDER_RISK_PCT = Decimal("1")
@@ -170,10 +186,32 @@ FLATTEN_ALERT_BEFORE_CLOSE = timedelta(minutes=14)  # 15:46
 VERIFY_BEFORE_CLOSE = timedelta(minutes=10)  # 15:50
 STOP_BEFORE_CLOSE = timedelta(minutes=5)  # 15:55
 FINAL_ALERT_BEFORE_CLOSE = timedelta(minutes=2)  # 15:58
-ORDER_STRATEGY_PREFIX = "MOMO_HOD"
 ORDER_REF_PREFIX = "autotrader:"
 MANUAL_REF_PREFIX = "manual:"  # owner orders (trading/execution/manual_orders.py)
+# Family cutoffs of names that are NOT sendable (legacy brackets, the state of a
+# past bridge); a sendable identity's last entry comes from its caps row only.
 STRATEGY_CUTOFFS = {"momo": clock_time(15, 0), "orb": clock_time(12, 0)}
+
+
+@dataclass(frozen=True)
+class Caps:
+    """One identity's entry limits; its last entry is the session close minus the offset."""
+
+    max_positions: int
+    max_entries_per_day: int | None
+    last_entry_before_close: timedelta
+
+
+# Exactly the ledger names the owner granted PAPER order authority
+# (trading/sendable_identities.py SENDABLE_IDENTITIES; a test pins the two
+# equal). Membership is exact and case-sensitive: a prefix would also match
+# names nobody granted. Every sendable name needs a caps row; --preflight and
+# a test refuse a mismatch, and the gate skips an uncapped name (fail closed).
+SENDABLE_STRATEGY_NAMES = frozenset({"MOMO_HOD_V2"})
+IDENTITY_CAPS: dict[str, Caps] = {
+    "MOMO_HOD_V2": Caps(max_positions=3, max_entries_per_day=None,
+                        last_entry_before_close=timedelta(minutes=60)),  # 15:00 on a full day
+}
 SHADOW_ONLY = "shadow-only strategy"
 TICK = Decimal("0.01")
 FLATTEN_DISCOUNT = Decimal("0.995")
@@ -265,8 +303,38 @@ def strategy_family(name: str) -> str:
 
 
 def may_send_orders(strategy_name: str) -> bool:
-    # ORB keeps the 1x ATR stop that failed live, so it stays shadow-only.
-    return strategy_name.startswith(ORDER_STRATEGY_PREFIX)
+    return strategy_name.strip() in SENDABLE_STRATEGY_NAMES
+
+
+def global_max_open() -> int:
+    """Brackets that may hold shares across every identity, plus unmanaged live symbols."""
+    return sum(caps.max_positions for caps in IDENTITY_CAPS.values())
+
+
+def caps_problem() -> str | None:
+    """The sendable names without a caps row and the caps rows nobody may send for."""
+    mismatch = sorted(SENDABLE_STRATEGY_NAMES ^ set(IDENTITY_CAPS))
+    return None if not mismatch else f"PREFLIGHT_REFUSED caps: {', '.join(mismatch)}"
+
+
+def caps_lines() -> list[str]:
+    """What the connect line and --preflight print: the sendable set and each caps row."""
+    lines = [f"sendable identities = {', '.join(sorted(SENDABLE_STRATEGY_NAMES)) or 'none'}"]
+    for name, caps in sorted(IDENTITY_CAPS.items()):
+        entries = "none" if caps.max_entries_per_day is None else str(caps.max_entries_per_day)
+        minutes = int(caps.last_entry_before_close.total_seconds() // 60)
+        lines.append(f"caps {name} positions={caps.max_positions} entries/day={entries} last_entry=close-{minutes}m")
+    return lines
+
+
+def parse_ref(ref: object) -> tuple[str, str] | None:
+    """(identity, decision id prefix) of a bridge orderRef; None for any other ref."""
+    if not isinstance(ref, str) or not ref.startswith(ORDER_REF_PREFIX):
+        return None
+    identity, separator, decision = ref[len(ORDER_REF_PREFIX):].partition(":")
+    if not separator or not identity or not decision:
+        return None
+    return identity, decision
 
 
 def backend_modules() -> None:
@@ -717,6 +785,8 @@ DECISIONS_SQL = """
 """
 # Same predicate as trading/storage/runtime_fence.py SQLitePaperKillStore.is_stopped.
 KILL_FENCE_SQL = "SELECT stopped FROM autotrader_execution_fences WHERE name='paper'"
+# One row per identity, name 'paper:<IDENTITY>' (autotraderctl paper stop/resume --identity).
+IDENTITY_FENCE_SQL = "SELECT stopped FROM autotrader_execution_fences WHERE name=?"
 SNAPSHOT_SQL = """
     SELECT observed_at, payload_json FROM autotrader_screener_snapshots
     WHERE session_date = ? ORDER BY observed_at DESC, id DESC LIMIT ?
@@ -751,6 +821,22 @@ def paper_kill_switch_active(db: Path) -> bool:
     with closing(_read_only(db)) as connection:
         row = connection.execute(KILL_FENCE_SQL).fetchone()
     return bool(row and int(row[0]))
+
+
+def identity_fence_active(db: Path, identity: str) -> bool:
+    with closing(_read_only(db)) as connection:
+        row = connection.execute(IDENTITY_FENCE_SQL, (f"paper:{identity}",)).fetchone()
+    return bool(row and int(row[0]))
+
+
+def fenced_identities(db: Path) -> list[str]:
+    """The sendable identities whose own fence is stopped (raises when the fence is unreadable)."""
+    return sorted(name for name in SENDABLE_STRATEGY_NAMES if identity_fence_active(db, name))
+
+
+def log_fenced_identities(db: Path) -> None:
+    fenced = fenced_identities(db)
+    log("INFO" if not fenced else "CRITICAL", f"fenced identities = {', '.join(fenced) or 'none'}")
 
 
 def screener_quote(db: Path, session_date: date, symbol: str, con_id: int) -> SnapshotQuote | None:
@@ -1091,6 +1177,9 @@ class Bridge:
             lambda: accepted_decisions(self.db, self.session_date)
         )
         self.kill_switch_active: Callable[[], bool] = lambda: paper_kill_switch_active(self.db)
+        self.identity_fence_active: Callable[[str], bool] = (
+            lambda identity: identity_fence_active(self.db, identity)
+        )
         self.fallback_quote: Callable[[Bracket], SnapshotQuote | None] = (
             lambda bracket: screener_quote(self.db, self.session_date, bracket.symbol, bracket.con_id)
         )
@@ -1119,11 +1208,23 @@ class Bridge:
     def past(self, moment: datetime) -> bool:
         return self.now() >= moment
 
-    def entry_deadline(self, family: str) -> datetime:
-        """A strategy's last entry moment; never later than 30 min before the real close."""
-        cutoff = STRATEGY_CUTOFFS.get(family)
+    def entry_deadline(self, bracket: Bracket) -> datetime:
+        """The bracket's last entry moment: a sendable identity's caps row (an offset from the
+        real close), else its family cutoff, never later than 30 min before the close."""
+        caps = IDENTITY_CAPS.get(bracket.strategy_name.strip()) if may_send_orders(bracket.strategy_name) else None
+        if caps is not None:  # the row decides, but never later than the session's own last entry
+            return min(self.times.last_entry, self.times.closes_at - caps.last_entry_before_close)
+        cutoff = STRATEGY_CUTOFFS.get(bracket.strategy)
         last = self.times.last_entry
         return last if cutoff is None else min(last, datetime.combine(self.session_date, cutoff, tzinfo=NY))
+
+    def positions_of(self, identity: str) -> int:
+        return sum(1 for b in self.brackets.values()
+                   if b.strategy_name.strip() == identity and self.holds_or_may_hold(b))
+
+    def entries_today(self, identity: str) -> int:
+        """Entries this session sent for the identity, whatever became of them: an attempt is an attempt."""
+        return sum(1 for b in self.brackets.values() if b.strategy_name.strip() == identity and b.parent is not None)
 
     def attach_manual_desk(self, desk: "ManualDesk") -> None:
         """Owner orders become a second intake, isolated like the first (never ahead of the flatten)."""
@@ -1131,7 +1232,7 @@ class Bridge:
         self.intakes.append(("manual order", desk.tick))
 
     def ref(self, bracket: Bracket) -> str:
-        return f"{ORDER_REF_PREFIX}{bracket.decision_id[:12]}"
+        return f"{ORDER_REF_PREFIX}{bracket.strategy_name.strip()}:{bracket.decision_id[:12]}"
 
     def active(self) -> list[Bracket]:
         return [b for b in self.brackets.values() if b.active]
@@ -1383,6 +1484,12 @@ class Bridge:
             intent, intent_problem = None, f"decision unreadable ({type(exc).__name__})"
         if not may_send_orders(row.strategy_name):
             return intent, SHADOW_ONLY
+        identity = row.strategy_name.strip()
+        caps = IDENTITY_CAPS.get(identity)
+        if caps is None:  # granted but unlimited is never sent at the global limits
+            self.alert_once(("identity_caps_missing", identity),
+                            f"{identity}: sendable but has no caps row — its entries are skipped (fail closed)")
+            return intent, f"identity_caps_missing:{identity}"
         if intent is None or intent_problem:
             return intent, intent_problem or "no trade intent"
         expired = self._expiry_problem(intent, row)
@@ -1391,7 +1498,7 @@ class Bridge:
         now = self.now()
         if now >= self.times.last_entry:
             return intent, f"after {self.times.last_entry:%H:%M} — no new entries"
-        if now >= self.entry_deadline(bracket.strategy):
+        if now >= self.entry_deadline(bracket):
             return intent, f"{bracket.strategy} entry window closed"
         if intent.setup_fingerprint:
             for other in self.brackets.values():
@@ -1400,8 +1507,12 @@ class Bridge:
         symbol_problem = self.symbol_problem(bracket.symbol, bracket.con_id)
         if symbol_problem:
             return intent, symbol_problem
-        if self.slots_used() >= MAX_OPEN:
-            return intent, f"max {MAX_OPEN} positions/entries already active"
+        if self.positions_of(identity) >= caps.max_positions:
+            return intent, f"{identity}: max {caps.max_positions} positions already active"
+        if self.slots_used() >= global_max_open():
+            return intent, f"max {global_max_open()} positions/entries already active"
+        if caps.max_entries_per_day is not None and self.entries_today(identity) >= caps.max_entries_per_day:
+            return intent, f"{identity}: max {caps.max_entries_per_day} entries/day already sent"
         net_liq = self.net_liq
         if net_liq is None:
             return intent, "net liquidation unknown"
@@ -1451,6 +1562,16 @@ class Bridge:
         if stopped:
             self._skip(bracket, "kill switch active", with_strategy=False)
             return
+        identity = bracket.strategy_name.strip()
+        try:
+            identity_stopped = self.identity_fence_active(identity)
+        except Exception as exc:
+            self._skip(bracket, f"identity fence unreadable ({type(exc).__name__}) — fail closed",
+                       with_strategy=False)
+            return
+        if identity_stopped:
+            self._skip(bracket, f"identity_stopped:{identity}")
+            return
         self.submit(bracket)
 
     def submit(self, bracket: Bracket) -> None:
@@ -1491,7 +1612,7 @@ class Bridge:
                 continue
             sent = parse_time(bracket.sent_at)
             expired = sent is None or now - sent >= ENTRY_TTL
-            closed_window = now >= self.entry_deadline(bracket.strategy)
+            closed_window = now >= self.entry_deadline(bracket)
             if expired or closed_window:
                 self.app.cancelOrder(bracket.parent)
                 bracket.parent_cancel_requested = True
@@ -2086,7 +2207,7 @@ class ManualDesk:
     cancel, then claim at most one queued row, re-validate it against live
     facts right before placeOrder and send it. A row is claimed (sending)
     before anything leaves, so a crash can never resend it. Manual orders
-    never count toward MAX_OPEN and are never flattened at the close; a
+    never count toward the position caps and are never flattened at the close; a
     /close of a bot symbol reprices that bracket's own target instead of
     sending a second sell. Every working sell on a contract, from any client
     and the bot's own legs included, reserves the shares it can still sell.
@@ -2891,7 +3012,32 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--date", type=_session_date_arg, default=None,
         help="New York session date YYYY-MM-DD (default: today in New York)",
     )
+    parser.add_argument(
+        "--preflight", action="store_true",
+        help="print the sendable identities, caps rows and fenced identities without connecting; exit 78 on a problem",
+    )
     return parser.parse_args(argv)
+
+
+def preflight() -> int:
+    """The dry run's view of this file: config, sendable set, caps rows, fences. No TWS, no state."""
+    try:
+        load_config(CONFIG)
+    except (OSError, KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        log("CRITICAL", f"refusing: config {CONFIG} unusable ({type(exc).__name__}: {exc})")
+        return EXIT_REFUSED
+    for line in caps_lines():
+        log("INFO", line)
+    try:
+        log_fenced_identities(DB)
+    except Exception as exc:
+        log("CRITICAL", f"PREFLIGHT_REFUSED fences unreadable ({type(exc).__name__}: {exc})")
+        return EXIT_REFUSED
+    problem = caps_problem()
+    if problem:
+        log("CRITICAL", problem)
+        return EXIT_REFUSED
+    return EXIT_OK
 
 
 def load_config(path: Path) -> tuple[str, int]:
@@ -2969,6 +3115,15 @@ def _connected_session(
     times = times if times is not None else session_times(session_date)
     log("INFO", f"PAPER bridge {BRIDGE_VERSION} connected (all accounts paper). Managing brackets for"
         f" {session_date} until {times.stop:%H:%M} ET.")
+    for line in caps_lines():
+        log("INFO", line)
+    problem = caps_problem()
+    if problem:
+        log("CRITICAL", problem)  # the gate skips the uncapped name; the session still manages exits
+    try:
+        log_fenced_identities(DB)
+    except Exception as exc:
+        log("CRITICAL", f"identity fences unreadable ({type(exc).__name__}: {exc}) — every entry will be skipped")
     bridge = Bridge(app, account, session_date=session_date, store=store, brackets=brackets, db=DB,
                     clock=now_ny, stop_event=STOP, times=times)
     desk = manual_desk(bridge)
@@ -2995,6 +3150,8 @@ def main(argv: list[str] | None = None) -> int:
     STOP.clear()
     args = parse_args(argv)
     log("INFO", f"bridge sha256={bridge_sha256()}")
+    if args.preflight:
+        return preflight()
     now = now_ny().astimezone(NY)
     today = now.date()
     session_date: date = args.date or today

@@ -1,10 +1,10 @@
 """Strategy names the PAPER order bridge sends for, guarded where names are made.
 
-The pinned bridge (``scripts_local/paper_bridge.py``) sends every
-``shadow_accepted`` decision whose stored strategy name, stripped, starts with
-``MOMO_HOD``. That prefix is wider than the owner's grant, and the bridge
-cannot be edited without a new execution-safety review, so names are guarded
-where they are made:
+The pinned bridge (``scripts_local/paper_bridge.py``) sends a
+``shadow_accepted`` decision only when its stored strategy name, stripped, is
+exactly one of ``SENDABLE_IDENTITIES`` (bridge v7: ``SENDABLE_STRATEGY_NAMES``,
+pinned equal to this tuple by a test). The bridge cannot be edited without a
+new execution-safety review, so names are also guarded where they are made:
 
 - the repository creates or publishes a ``MOMO_HOD`` name only when it is
   exactly one of ``SENDABLE_IDENTITIES``;
@@ -20,7 +20,8 @@ import logging
 
 logger = logging.getLogger("autotrader.shadow.authority")
 
-# The bridge's ORDER_STRATEGY_PREFIX; a test pins the two to the same text.
+# The legacy MOMO guard: any MOMO_HOD* name outside the tuple is refused at
+# creation (the live ledger holds pre-guard MOMO_HOD_V1 records).
 SENDABLE_NAME_PREFIX = "MOMO_HOD"
 SENDABLE_IDENTITIES: tuple[str, ...] = ("MOMO_HOD_V2",)
 # Only code creates these: sendable identities and autopilot-managed ones.
@@ -44,6 +45,16 @@ def _normalized(name: str) -> str:
     # The bridge strips the stored name and then matches case-sensitively;
     # upper() keeps every check here at least as wide as the bridge's.
     return name.strip().upper()
+
+
+def is_sendable_identity(name: str) -> bool:
+    """Exactly one of ``SENDABLE_IDENTITIES`` once stripped; case-sensitive.
+
+    The bridge's own gate (``name.strip() in SENDABLE_STRATEGY_NAMES``), so a
+    case variant or a longer name is never sendable: ``"orb_v2"`` and
+    ``"ORB_V2_X"`` are shadow names.
+    """
+    return isinstance(name, str) and name.strip() in SENDABLE_IDENTITIES
 
 
 def carries_sendable_prefix(name: str) -> bool:
@@ -87,5 +98,6 @@ __all__ = [
     "SendableIdentityError",
     "carries_sendable_prefix",
     "is_api_reserved_name",
+    "is_sendable_identity",
     "require_creatable_name",
 ]

@@ -1,9 +1,12 @@
 """Names the PAPER bridge would send for exist only as reviewed sendable identities.
 
-The pinned bridge sends every shadow_accepted decision whose stored strategy
-name, stripped, starts with MOMO_HOD. These tests hold the creation side to it:
-the repository, the reuse path in ensure_strategy, and (in
-test_autotrader_routes) the API.
+The pinned bridge (v7) sends a shadow_accepted decision only when its stored
+strategy name, stripped, is exactly one of SENDABLE_STRATEGY_NAMES, pinned
+equal to SENDABLE_IDENTITIES here. These tests hold the creation side to it
+(the repository, the reuse path in ensure_strategy, and, in
+test_autotrader_routes, the API) and the registry to it: every registered spec
+name is sendable iff its key is a sendable key, names are unique, and every
+sendable name has exactly one size row (registry_problems, the launch preflight).
 """
 from __future__ import annotations
 
@@ -18,8 +21,14 @@ import pytest
 from tests.fakes.legacy_strategies import insert_legacy_shadow_strategy
 from tests.test_paper_bridge import pb as bridge
 from trading.contracts import FixedUniverse, RuleCondition, StrategySpec
-from trading.operations.shadow_service import STRATEGIES
+from trading.operations.shadow_service import (
+    SENDABLE_KEYS,
+    STRATEGIES,
+    registered_spec_names,
+    registry_problems,
+)
 from trading.orchestration.session_runner import ensure_strategy, momo_strategy_spec, orb_strategy_spec
+from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
 from trading.sendable_identities import (
     API_RESERVED_NAME_PREFIXES,
     RESERVED_STRATEGY_NAME,
@@ -30,6 +39,8 @@ from trading.sendable_identities import (
     SendableIdentityError,
     carries_sendable_prefix,
     is_api_reserved_name,
+    is_sendable_identity,
+    require_creatable_name,
 )
 from trading.storage.repository import (
     create_strategy,
@@ -111,21 +122,112 @@ def test_sendable_identities_are_pinned_exactly():
     )
 
 
-def test_the_guard_prefix_is_the_pinned_bridge_prefix():
-    assert SENDABLE_NAME_PREFIX == bridge.ORDER_STRATEGY_PREFIX == "MOMO_HOD"
-    for name in (*SENDABLE_IDENTITIES, *UNLISTED_PREFIXED_NAMES, "ORB_V1", "AP_MOMO_HOD_V1", "X MOMO_HOD"):
+def test_the_bridge_gate_is_the_pinned_tuple_exactly():
+    # The bridge keeps its own frozenset (it imports nothing from the trading
+    # package); this pin is what keeps the two equal.
+    assert bridge.SENDABLE_STRATEGY_NAMES == frozenset(SENDABLE_IDENTITIES)
+    assert not hasattr(bridge, "ORDER_STRATEGY_PREFIX")  # the prefix gate is gone
+    assert SENDABLE_NAME_PREFIX == "MOMO_HOD"  # the legacy creation guard only
+    for name in (*SENDABLE_IDENTITIES, *UNLISTED_PREFIXED_NAMES, "ORB_V1", "AP_MOMO_HOD_V1",
+                 "X MOMO_HOD", "MOMO_HOD_V2_X", "SH_MOMO_HOD_V3"):
         stored = bridge.strategy_name_from_spec(json.dumps({"name": name}))
+        # The bridge and the guard agree on every name, stripped and exact.
+        assert bridge.may_send_orders(stored) is is_sendable_identity(name), name
         if bridge.may_send_orders(stored):
-            # Whatever the bridge would send, the guard sees as sendable-named.
             assert carries_sendable_prefix(name), name
     assert not carries_sendable_prefix("AP_MOMO_HOD_V1")
     assert not bridge.may_send_orders(bridge.strategy_name_from_spec(json.dumps({"name": "AP_MOMO_HOD_V1"})))
+
+
+@pytest.mark.parametrize(
+    ("name", "sendable"),
+    [
+        ("MOMO_HOD_V2", True),
+        (" MOMO_HOD_V2\n", True),
+        ("momo_hod_v2", False),
+        ("MOMO_HOD_V2_X", False),
+        ("MOMO_HOD_V1", False),
+        ("AP_MOMO_HOD_V1", False),
+        ("ORB_V2", False),
+        ("SH_MOMO_HOD_V3", False),
+        ("", False),
+    ],
+)
+def test_is_sendable_identity_is_strip_exact_case_sensitive(name, sendable):
+    assert is_sendable_identity(name) is sendable
 
 
 def test_only_the_registry_strategy_with_a_sendable_name_carries_the_prefix():
     names = {factory().name for _evaluator, factory, _prompt in STRATEGIES.values()}
     assert {name for name in names if carries_sendable_prefix(name)} == set(SENDABLE_IDENTITIES)
     assert momo_strategy_spec().name in SENDABLE_IDENTITIES
+
+
+# --------------------------------------------------------------------------
+# 1b. The registry, the tuple and the size table agree (the launch preflight)
+# --------------------------------------------------------------------------
+
+
+def test_sendable_keys_are_pinned_and_registered():
+    assert SENDABLE_KEYS == frozenset({"momo"})
+    assert SENDABLE_KEYS <= set(STRATEGIES)
+
+
+@pytest.mark.parametrize("key", sorted(STRATEGIES))
+def test_every_registered_name_is_sendable_iff_its_key_is_a_sendable_key(key):
+    name = registered_spec_names()[key]
+    assert is_sendable_identity(name) is (key in SENDABLE_KEYS), (key, name)
+    assert bridge.may_send_orders(bridge.strategy_name_from_spec(json.dumps({"name": name}))) is (
+        key in SENDABLE_KEYS
+    )
+
+
+def test_registered_spec_names_are_unique_and_the_registry_is_clean():
+    names = registered_spec_names()
+    assert len(set(names.values())) == len(names)
+    assert registry_problems() == []
+    # The three sets the preflight holds equal.
+    assert set(IDENTITY_SIZE_MULTIPLIER) == set(SENDABLE_IDENTITIES)
+    assert set(SENDABLE_IDENTITIES) <= set(names.values())
+
+
+def _registry_with(extra: dict[str, str]):
+    """A synthetic registry: every real entry plus ``key -> name`` factories."""
+    registry = dict(STRATEGIES)
+    for key, name in extra.items():
+        registry[key] = (object, (lambda name=name: _spec(name)), None)
+    return registry
+
+
+def test_a_v3_variant_that_reuses_the_v2_name_is_refused_at_preflight():
+    problems = registry_problems(strategies=_registry_with({"momo-v3": "MOMO_HOD_V2"}))
+    assert problems == [
+        "duplicate_spec_name=MOMO_HOD_V2:momo+momo-v3",
+        "sendable_name_under_unlisted_key=momo-v3:MOMO_HOD_V2",
+    ]
+    assert all(" " not in problem for problem in problems)  # one token: the phone line survives
+
+
+def test_a_shadow_v3_name_is_creatable_and_never_sendable():
+    require_creatable_name("SH_MOMO_HOD_V3")  # not a MOMO_HOD* name: no guard refusal
+    assert not is_sendable_identity("SH_MOMO_HOD_V3")
+    assert registry_problems(strategies=_registry_with({"momo-v3": "SH_MOMO_HOD_V3"})) == []
+    with pytest.raises(SendableIdentityError):
+        require_creatable_name("MOMO_HOD_V3")  # a sendable-looking name needs the tuple
+
+
+def test_registry_problems_catch_every_disagreement():
+    # A sendable name with no size row, a size row that is not sendable.
+    assert registry_problems(multipliers={}) == ["sendable_without_size_multiplier=MOMO_HOD_V2"]
+    assert registry_problems(multipliers={"MOMO_HOD_V2": IDENTITY_SIZE_MULTIPLIER["MOMO_HOD_V2"], "ORB_V2": 1}) == [
+        "size_multiplier_not_sendable=ORB_V2"
+    ]
+    # A sendable name the registry does not build.
+    assert registry_problems(sendable=("MOMO_HOD_V2", "ORB_V9"), multipliers={"MOMO_HOD_V2": 1, "ORB_V9": 1}) == [
+        "sendable_not_registered=ORB_V9"
+    ]
+    # A sendable key whose name is not sendable (the tuple shrank without the registry).
+    assert registry_problems(sendable=(), multipliers={}) == ["sendable_key_without_sendable_name=momo:MOMO_HOD_V2"]
 
 
 def test_momo_hod_v2_canonical_spec_hash_is_pinned():

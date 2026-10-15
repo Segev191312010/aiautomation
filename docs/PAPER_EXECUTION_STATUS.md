@@ -1,6 +1,6 @@
 # PAPER execution status
 
-Working engineering note (updated 2026-10-13). It records how PAPER orders are
+Working engineering note (updated 2026-10-15, bridge v7a). It records how PAPER orders are
 sent today and what still stands between this and the execution engine that is
 to replace the bridge. It is not evidence for real-money authority; LIVE has no
 V1 path.
@@ -20,8 +20,14 @@ review, and the commit that records that review below also moves the pin; a
 test ties the pin to the file.
 
 Order sources:
-- **Bot decisions** — accepted decisions of strategies whose catalogue name
-  starts with `MOMO_HOD`. Other strategies are recorded but never sent.
+- **Bot decisions** — accepted decisions of strategies whose catalogue name is
+  exactly one of the sendable identities (`SENDABLE_STRATEGY_NAMES` in the
+  bridge, pinned by a test to `trading.sendable_identities.SENDABLE_IDENTITIES`;
+  v7a: `MOMO_HOD_V2` only). Other strategies are recorded but never sent. Every
+  sendable identity has a caps row (`IDENTITY_CAPS`: max positions, max entries
+  per day, last entry as an offset from the session close) and a fixed size
+  multiplier (`trading.risk.identity_sizing`, applied upstream in the shadow
+  pipeline). A sendable name without a row is skipped, never sent at defaults.
 - **Owner manual orders** — rows queued in `autotrader_manual_orders`
   (migration 12) by the Telegram assistant after the deterministic parser and
   validator accept them. The bridge claims a row atomically, re-validates it
@@ -33,9 +39,20 @@ Order sources:
   and on every restart; orders carry the account explicitly.
 - Bot entries are native brackets (parent DAY limit, GTC target, GTC stop).
   State is persisted before any order is sent; a crash never resends.
-- At most three bot positions across strategies, one per symbol, only in
-  symbols the account does not already hold; per-order caps of 25% notional
-  and 1% risk; a 2% daily-loss stop; the kill switch blocks new entries.
+- Per identity at most `max_positions` bot positions and `max_entries_per_day`
+  entries (every attempt counts); across all identities at most the sum of
+  `max_positions` (v7a: 3), one per symbol, only in symbols the account does
+  not already hold; per-order caps of 25% notional and 1% risk; a 2% daily-loss
+  stop. The global kill switch (`paper`) and the identity's own fence
+  (`paper:<IDENTITY>`, `autotraderctl paper stop|resume --identity`) block new
+  entries; an unreadable fence fails closed. Both are read right before every
+  entry.
+- Every order carries `orderRef autotrader:<IDENTITY>:<decision id prefix>`
+  so IBKR reports attribute fills per identity.
+- Before any launch the supervisor refuses (exit 78, phone line) if the
+  strategy registry, the sendable tuple and the size table disagree; the dry
+  run also runs the bridge's own `--preflight` (config, caps rows, fences)
+  with the launch's interpreter, environment and cwd.
 - Exit quantities come from one locked fill snapshot and are capped by the
   account position; exits never exceed fills.
 - The session-end flatten reprices the existing target order once (15 minutes
@@ -80,6 +97,15 @@ Order sources:
   early-release window on two-execution sells, slow L-a queries can delay a
   loop by up to 20 s, a few-second startup window, and two untested guards
   (startup replay exclusion, the SLD path).
+- 2026-10-15: bridge v7a (per-identity authority: exact-match allowlist,
+  identity fence rows, caps and last-entry rows, orderRef identity,
+  `--preflight`), sha256
+  a63982cc01c36ffcb7d1b7877dfdec4b0b2c7371911d5909e5f36893cbbfb440. Values
+  reproduce v5's behaviour for `MOMO_HOD_V2` on normal days (one known change:
+  on a 13:00 close its last entry is 12:00, not 12:30). Independent
+  execution-safety review: PENDING — the pin is moved on this branch so the
+  branch is self-consistent; it is not deployed until the review records GO
+  here.
 
 ## Still to do
 
