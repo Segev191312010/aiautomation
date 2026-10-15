@@ -133,8 +133,11 @@ def test_the_bridge_gate_is_the_pinned_tuple_exactly():
         stored = bridge.strategy_name_from_spec(json.dumps({"name": name}))
         # The bridge and the guard agree on every name, stripped and exact.
         assert bridge.may_send_orders(stored) is is_sendable_identity(name), name
-        if bridge.may_send_orders(stored):
-            assert carries_sendable_prefix(name), name
+        # MOMO's prefix guard is narrower than the grant since bridge v7b: a
+        # sendable V2 name never carries it, and a prefixed name only sends
+        # when it is exactly MOMO_HOD_V2.
+        if carries_sendable_prefix(name):
+            assert bridge.may_send_orders(stored) is (name.strip() == "MOMO_HOD_V2"), name
     assert not carries_sendable_prefix("AP_MOMO_HOD_V1")
     assert not bridge.may_send_orders(bridge.strategy_name_from_spec(json.dumps({"name": "AP_MOMO_HOD_V1"})))
 
@@ -148,7 +151,7 @@ def test_the_bridge_gate_is_the_pinned_tuple_exactly():
         ("MOMO_HOD_V2_X", False),
         ("MOMO_HOD_V1", False),
         ("AP_MOMO_HOD_V1", False),
-        ("ORB_V2", False),
+        ("ORB_V9", False),
         ("SH_MOMO_HOD_V3", False),
         ("", False),
     ],
@@ -159,8 +162,11 @@ def test_is_sendable_identity_is_strip_exact_case_sensitive(name, sendable):
 
 def test_only_the_registry_strategy_with_a_sendable_name_carries_the_prefix():
     names = {factory().name for _evaluator, factory, _prompt in STRATEGIES.values()}
-    assert {name for name in names if carries_sendable_prefix(name)} == set(SENDABLE_IDENTITIES)
+    # MOMO's prefix guard covers exactly MOMO_HOD_V2; the other sendable
+    # identities are granted by exact name and every one of them is registered.
+    assert {name for name in names if carries_sendable_prefix(name)} == {"MOMO_HOD_V2"}
     assert momo_strategy_spec().name in SENDABLE_IDENTITIES
+    assert set(SENDABLE_IDENTITIES) <= names
 
 
 # --------------------------------------------------------------------------
@@ -218,16 +224,20 @@ def test_a_shadow_v3_name_is_creatable_and_never_sendable():
 
 def test_registry_problems_catch_every_disagreement():
     # A sendable name with no size row, a size row that is not sendable.
-    assert registry_problems(multipliers={}) == ["sendable_without_size_multiplier=MOMO_HOD_V2"]
-    assert registry_problems(multipliers={"MOMO_HOD_V2": IDENTITY_SIZE_MULTIPLIER["MOMO_HOD_V2"], "ORB_V2": 1}) == [
-        "size_multiplier_not_sendable=ORB_V2"
+    assert sorted(registry_problems(multipliers={})) == sorted(
+        f"sendable_without_size_multiplier={name}" for name in SENDABLE_IDENTITIES
+    )
+    assert registry_problems(multipliers={**IDENTITY_SIZE_MULTIPLIER, "ORB_V9": 1}) == [
+        "size_multiplier_not_sendable=ORB_V9"
     ]
     # A sendable name the registry does not build.
-    assert registry_problems(sendable=("MOMO_HOD_V2", "ORB_V9"), multipliers={"MOMO_HOD_V2": 1, "ORB_V9": 1}) == [
-        "sendable_not_registered=ORB_V9"
-    ]
+    assert registry_problems(
+        sendable=(*SENDABLE_IDENTITIES, "ORB_V9"), multipliers={**IDENTITY_SIZE_MULTIPLIER, "ORB_V9": 1}
+    ) == ["sendable_not_registered=ORB_V9"]
     # A sendable key whose name is not sendable (the tuple shrank without the registry).
-    assert registry_problems(sendable=(), multipliers={}) == ["sendable_key_without_sendable_name=momo:MOMO_HOD_V2"]
+    assert sorted(registry_problems(sendable=(), multipliers={})) == sorted(
+        f"sendable_key_without_sendable_name={key}:{STRATEGIES[key][1]().name}" for key in SENDABLE_KEYS
+    )
 
 
 def test_momo_hod_v2_canonical_spec_hash_is_pinned():

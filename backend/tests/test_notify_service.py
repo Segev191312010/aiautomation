@@ -1184,7 +1184,9 @@ def test_real_decisions_are_exactly_the_sendable_identities(monkeypatch):
                               outcome="shadow_accepted", review={}, risk=None)
 
     assert is_real_decision(decision("MOMO_HOD_V2"))
-    assert not is_real_decision(decision("ORB_V2"))  # v7a: not yet granted
+    # Exactly the grant, whichever version of the tuple ships (v7a: MOMO only; v7b: four).
+    assert is_real_decision(decision("ORB_V2")) is ("ORB_V2" in sendable_identities.SENDABLE_IDENTITIES)
+    assert not is_real_decision(decision("ORB_V9"))
     assert not is_real_decision(decision("MOMO_HOD_V1"))  # a prefix match is no longer enough
     assert not is_real_decision(decision("AP_MOMO_HOD_V2"))
     monkeypatch.setattr(sendable_identities, "SENDABLE_IDENTITIES", ("MOMO_HOD_V2", "ORB_V2"))

@@ -97,9 +97,12 @@ def test_the_notifier_follows_every_supervised_strategy_childs_log(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_the_v2_simulations_reviewed_decisions_go_to_the_digest(tmp_path, monkeypatch):
+async def test_the_sendable_v2_identities_reviewed_decisions_go_at_once_and_the_v1s_to_the_digest(tmp_path, monkeypatch):
+    # Bridge v7b: ORB_V2, VWAP_PB_V2 and GAP_GO_V2 send real orders, so their
+    # reviewed decisions reach the phone at once like MOMO's; the shadow-only
+    # V1 strategies still wait for the half-hour digest.
     await _use_database(tmp_path, monkeypatch)
-    for name in ("ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"):
+    for name in ("ORB_V2", "VWAP_PB_V2", "GAP_GO_V2", "ORB_V1", "VWAP_PB_V1", "GAP_GO_V1"):
         await _seed_run(f"run-{name}", f"strategy-{name}", name)
         await _add_decision(f"d-{name}", run_id=f"run-{name}", strategy_id=f"strategy-{name}",
                             symbol="AAPL", outcome="ai_abstained", created_at=_et(13, 5),
@@ -109,9 +112,14 @@ async def test_the_v2_simulations_reviewed_decisions_go_to_the_digest(tmp_path, 
 
     await _cycle(session)
 
-    [digest] = notifier.texts
+    at_once = [text for text in notifier.texts if not text.startswith("🗂")]
+    digests = [text for text in notifier.texts if text.startswith("🗂")]
+    assert sorted(text.splitlines()[0] for text in at_once) == sorted(
+        f"🤔 {name} · AAPL · Claude abstained" for name in ("ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")
+    )
+    [digest] = digests
     assert digest.startswith("🗂 Shadow digest 13:06 ET · 3 decisions (no orders)")
-    for name in ("GAP_GO_V2", "ORB_V2", "VWAP_PB_V2"):
+    for name in ("GAP_GO_V1", "ORB_V1", "VWAP_PB_V1"):
         assert f"{name}:\n• AAPL Claude abstained" in digest
 
 

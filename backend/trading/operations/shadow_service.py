@@ -261,21 +261,23 @@ MANAGED_BAR_MAX_AGE = timedelta(seconds=280)
 # 15 s by any client of the same TWS (a pacing violation), and children that
 # share symbols send identical bar requests. Their polls stay this far apart.
 MIN_POLL_SEPARATION = timedelta(seconds=15)
-# Strategy -> poll delay after every bar close. Real MOMO polls first, so its
-# requests lead every bar and a collision normally costs a shadow child's later
-# request; VWAP reads MOMO's own hot list and polls last, furthest behind it.
-# Each delay also gives IBKR time to finalize the closed bar.
+# Strategy -> poll delay after every bar close. Every sendable child polls
+# before every shadow child (poll_offset_problems refuses anything else), so a
+# pacing collision costs a shadow child's later request, never a real order's.
+# Real MOMO polls first; the sendable all-session children (bridge v7b) keep
+# the reviewed slots they have polled in since 2026-10-13 (VWAP_PB_V2 reads
+# MOMO's own hot list and polls last of the senders, after MOMO's whole pass
+# at live request rates); the V1 strategies, registered for the CLI and the
+# replay but not scheduled, moved behind them. Each delay also gives IBKR
+# time to finalize the closed bar.
 STRATEGY_POLL_OFFSETS = {
     "momo": timedelta(seconds=15),
-    "orb": timedelta(seconds=30),
-    "gap": timedelta(seconds=45),
-    "vwap": timedelta(seconds=60),
-    # The all-session simulations keep slots of their own behind every V1
-    # slot, in the V1 order: VWAP_PB_V2 reads MOMO's hot list and polls last
-    # of them.
     "orb-v2": timedelta(seconds=75),
     "gap-v2": timedelta(seconds=90),
     "vwap-v2": timedelta(seconds=105),
+    "orb": timedelta(seconds=120),
+    "gap": timedelta(seconds=135),
+    "vwap": timedelta(seconds=150),
     # Managed MOMO reads MOMO's own hot list, after every other child and
     # after VWAP_PB_V2's own pass (+105 s, up to 45 names): an identical
     # request within 15 s of another child's is refused by IBKR. Its 280 s

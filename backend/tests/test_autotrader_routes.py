@@ -3,6 +3,8 @@ from __future__ import annotations
 from httpx import ASGITransport, AsyncClient
 import pytest
 
+from trading.sendable_identities import SENDABLE_IDENTITIES
+
 
 def _strategy_payload() -> dict:
     return {
@@ -37,7 +39,7 @@ async def test_autotrader_routes_are_draft_and_shadow_only(tmp_path, monkeypatch
         # are sent for the sendable identities, and the status says so.
         assert status.json()["execution_enabled"] is True
         assert status.json()["paper_order_sender"] == "paper_bridge (pinned)"
-        assert status.json()["sendable_identities"] == ["MOMO_HOD_V2"]
+        assert status.json()["sendable_identities"] == list(SENDABLE_IDENTITIES)
         assert status.json()["paper_authority"] == "paper_bridge_pinned"
         assert status.json()["live_authority"] == "unsupported"
         assert status.json()["enabled_modes"] == ["backtest", "shadow"]
@@ -223,7 +225,7 @@ def test_engine_status_is_truthful_about_the_bridge_on_disk(tmp_path):
     assert pinned["execution_enabled"] is True
     assert pinned["paper_order_sender"] == "paper_bridge (pinned)"
     assert pinned["paper_bridge_sha256"] == REVIEWED_BRIDGE_SHA256
-    assert pinned["sendable_identities"] == list(SENDABLE_IDENTITIES) == ["MOMO_HOD_V2"]
+    assert pinned["sendable_identities"] == list(SENDABLE_IDENTITIES) == list(SENDABLE_IDENTITIES)
     assert "reason" not in pinned
 
     # No bridge file: the supervisor would refuse to start it, so nothing sends.

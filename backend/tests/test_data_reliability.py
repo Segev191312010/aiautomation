@@ -112,14 +112,17 @@ def _log_lines(name: str) -> Iterator[list[str]]:
 
 
 def test_poll_offsets_are_pinned_per_registry_strategy_and_fifteen_seconds_apart():
+    # Bridge v7b: every sendable child (momo and the three V2s) polls before
+    # every shadow child; the V2 slots are the reviewed ones, the unscheduled
+    # V1 slots moved behind them.
     assert STRATEGY_POLL_OFFSETS == {
         "momo": timedelta(seconds=15),
-        "orb": timedelta(seconds=30),
-        "gap": timedelta(seconds=45),
-        "vwap": timedelta(seconds=60),
         "orb-v2": timedelta(seconds=75),
         "gap-v2": timedelta(seconds=90),
         "vwap-v2": timedelta(seconds=105),
+        "orb": timedelta(seconds=120),
+        "gap": timedelta(seconds=135),
+        "vwap": timedelta(seconds=150),
         "momo-ap": timedelta(seconds=165),
     }
     assert set(STRATEGY_POLL_OFFSETS) == set(STRATEGIES)

@@ -367,19 +367,24 @@ def test_golden_orb_replay_trades_are_v1s_inside_the_v1_window(tmp_path):
 # --- never sendable -------------------------------------------------------------
 
 
-def test_no_v2_simulation_can_reach_the_paper_bridge():
-    assert SENDABLE_IDENTITIES == ("MOMO_HOD_V2",)
+def test_v2_simulations_never_wear_momos_name_and_send_exactly_as_granted():
+    # Bridge v7b (owner decision 2026-10-14/15): the three V2 simulations are
+    # sendable identities, at reduced size, by exact name; they never carry
+    # MOMO's prefix, and the bridge's own gate agrees with the tuple.
+    assert SENDABLE_IDENTITIES == ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")
     names = {key: STRATEGIES[key][1]().name for key in V2_KEYS}
     assert names == {"orb-v2": "ORB_V2", "vwap-v2": "VWAP_PB_V2", "gap-v2": "GAP_GO_V2"}
     assert tuple(names.values()) == ALL_SESSION_STRATEGY_NAMES
     for name in names.values():
         assert not name.upper().startswith("MOMO_HOD")
-        assert not carries_sendable_prefix(name) and name not in SENDABLE_IDENTITIES
+        assert not carries_sendable_prefix(name) and name in SENDABLE_IDENTITIES
         stored = bridge.strategy_name_from_spec(json.dumps({"name": name}))
-        assert not bridge.may_send_orders(stored)
-    # Every registry name except the one sendable identity is shadow only.
+        assert bridge.may_send_orders(stored)
+        assert not bridge.may_send_orders(stored.lower()) and not bridge.may_send_orders(stored + "X")
+    # The V1 all-session strategies and the managed/research names stay shadow only.
     registry_names = {factory().name for _evaluator, factory, _prompt in STRATEGIES.values()}
     assert {name for name in registry_names if carries_sendable_prefix(name)} == {"MOMO_HOD_V2"}
+    assert registry_names - set(SENDABLE_IDENTITIES) == {"ORB_V1", "VWAP_PB_V1", "GAP_GO_V1", "AP_MOMO_HOD_V1"}
 
 
 def test_a_momo_name_is_refused_for_a_v2_simulation_but_a_granted_v2_name_is_not(monkeypatch):
@@ -398,6 +403,8 @@ def test_a_momo_name_is_refused_for_a_v2_simulation_but_a_granted_v2_name_is_not
 
 
 def test_v2_simulations_poll_in_slots_of_their_own():
+    # The V2 slots are the reviewed ones (collision model, test_managed_momo); since
+    # bridge v7b they are senders, so the unscheduled V1 slots sit behind them.
     assert {key: STRATEGY_POLL_OFFSETS[key] for key in V2_KEYS} == {
         "orb-v2": timedelta(seconds=75),
         "gap-v2": timedelta(seconds=90),
@@ -412,6 +419,9 @@ def test_v2_simulations_poll_in_slots_of_their_own():
     # A V2 slot colliding with any other trips the offset check.
     broken = {**STRATEGY_POLL_OFFSETS, "gap-v2": timedelta(seconds=80)}
     assert "orb-v2 and gap-v2 poll 0:00:05 apart" in poll_offset_problems(broken)
+    # A sendable child polling behind a shadow child trips it too.
+    late = {**STRATEGY_POLL_OFFSETS, "vwap-v2": timedelta(seconds=140)}
+    assert "every sendable strategy must poll before every shadow strategy" in poll_offset_problems(late)
 
 
 def test_v2_simulations_replace_v1_in_the_supervisor_with_the_v1_client_ids():

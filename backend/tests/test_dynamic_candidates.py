@@ -32,7 +32,7 @@ from trading.orchestration import (
     ShadowPipeline,
     ShadowPersistenceConflictError,
 )
-from trading.operations.shadow_service import poll_schedule
+from trading.operations.shadow_service import PollSchedule, WATCHLIST_BAR_MAX_AGE
 from trading.orchestration.persistence import MAX_CANDIDATE_RANK
 from trading.orchestration.session_runner import ShadowSessionRunner, ensure_orb_strategy
 from trading.orchestration.watchlist_source import HotListUnavailable
@@ -42,8 +42,11 @@ from trading.storage.repository import list_decisions
 ET = ZoneInfo("America/New_York")
 SESSION = date(2026, 8, 27)
 HASH = "d" * 64
-# ORB's rules on the dynamic hot list: its production slot, 30 s after each close.
-SCHEDULE = poll_schedule("orb", "watchlist")
+# ORB's rules on the dynamic hot list, polled 30 s after each close.
+# A fixed 30 s slot under the watchlist freshness limit: these tests are about
+# candidate refresh and restart, not about which registry slot a strategy owns
+# (the slot table moved the unscheduled V1 strategies behind the senders in v7b).
+SCHEDULE = PollSchedule(offset=timedelta(seconds=30), bar_max_age=WATCHLIST_BAR_MAX_AGE)
 
 
 def et(hour: int, minute: int = 0, second: int = 0) -> datetime:
