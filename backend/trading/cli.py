@@ -343,6 +343,41 @@ def _parser() -> argparse.ArgumentParser:
     )
     database_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
 
+    deploy = domains.add_parser(
+        "deploy", help="deploy pre-checks (runbook 6.2 STEP 0); read-only, applies nothing"
+    )
+    deploy_actions = deploy.add_subparsers(dest="action", required=True)
+    deploy_check = deploy_actions.add_parser(
+        "check",
+        help=(
+            "read-only: verdict, tree_clean, parent, files, schema, fence, clock, window, pin"
+            " (exit 78 when any refuses); no merge, no launchctl, no writes"
+        ),
+    )
+    deploy_check.add_argument("--candidate", required=True, metavar="REF", help="branch or sha to deploy")
+    deploy_check.add_argument(
+        "--scope", default=None, metavar="A,B", help="the verdict line's scope= must list these slices"
+    )
+    deploy_check.add_argument(
+        "--ledger",
+        default=None,
+        metavar="GLOB",
+        help="ledgers on the candidate to search (default: every docs/reviews/*ledger*.md)",
+    )
+    deploy_check.add_argument(
+        "--repo", type=Path, default=None, help="the checkout to deploy into (default: this code's)"
+    )
+    deploy_check.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    deploy_check.add_argument(
+        "--expect-parent", default=None, metavar="SHA", help="the repo's HEAD must be this commit"
+    )
+    deploy_check.add_argument(
+        "--now", default=None, metavar="ISO", help="check the window at this instant (with its UTC offset)"
+    )
+    deploy_check.add_argument(
+        "--skip-clock", action="store_true", help="no sntp query (the clock check warns instead)"
+    )
+
     supervise = domains.add_parser(
         "run",
         help="supervise each trading day's screener, bridge, strategies and notifier (foreground)",
@@ -883,6 +918,34 @@ def _database_command(arguments: argparse.Namespace) -> int:
     return db_admin.run_migrate(database, allow_during_session=arguments.during_session)
 
 
+def _deploy_command(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """``deploy check``: runbook 6.2 STEP 0, read-only; exit 0, or 78 on any refusal."""
+    from trading.operations import deploy_check
+
+    try:
+        candidate = deploy_check.validate_ref(arguments.candidate, option="--candidate")
+        expect_parent = (
+            None
+            if arguments.expect_parent is None
+            else deploy_check.validate_ref(arguments.expect_parent, option="--expect-parent")
+        )
+        now = None if arguments.now is None else deploy_check.parse_now(arguments.now)
+    except ValueError as exc:
+        parser.error(str(exc))
+    requested_db_path = getattr(arguments, "db_path", None)
+    request = deploy_check.DeployCheckRequest(
+        candidate=candidate,
+        repo=(arguments.repo or deploy_check.REPO_ROOT).expanduser(),
+        db_path=(requested_db_path or Path(cfg.DB_PATH)).expanduser(),
+        scope=deploy_check.parse_scope(arguments.scope),
+        ledger_glob=arguments.ledger or deploy_check.DEFAULT_LEDGER_GLOB,
+        expect_parent=expect_parent,
+        now=now,
+        skip_clock=arguments.skip_clock,
+    )
+    return deploy_check.run_deploy_check(request)
+
+
 def _supervise_command(arguments: argparse.Namespace) -> int:
     """``autotraderctl run``: the foreground supervisor, or its simulated timeline."""
     from trading.operations import supervisor
@@ -911,6 +974,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if getattr(arguments, "db_path", None) is not None:
             parser.error("--db-path does not apply to run; its children use the canonical database")
         return _supervise_command(arguments)
+    if arguments.domain == "deploy":
+        return _deploy_command(arguments, parser)
     if arguments.domain == "db":
         return _database_command(arguments)
     if arguments.domain == "manager":

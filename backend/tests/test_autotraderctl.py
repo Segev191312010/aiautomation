@@ -172,3 +172,39 @@ def test_paper_identity_commands_refuse_names_that_are_not_sendable(tmp_path, ca
     assert "is not a sendable identity" in capsys.readouterr().err
     with sqlite3.connect(database_path) as database:
         assert database.execute("SELECT count(*) FROM autotrader_execution_fences").fetchone() == (0,)
+
+
+def test_deploy_exposes_only_the_read_only_check(capsys):
+    from pathlib import Path
+
+    from trading.cli import _parser
+
+    arguments = _parser().parse_args(
+        [
+            "deploy", "check", "--candidate", "bridge-v7b", "--scope", "A6,A7",
+            "--ledger", "docs/reviews/*ledger*.md", "--repo", "/repo", "--db-path", "/x.db",
+            "--expect-parent", "88b963d", "--now", "2026-10-19T02:00:00+03:00", "--skip-clock",
+        ]
+    )
+    assert (arguments.domain, arguments.action, arguments.candidate, arguments.scope) == (
+        "deploy", "check", "bridge-v7b", "A6,A7",
+    )
+    assert (arguments.ledger, arguments.repo, arguments.db_path) == (
+        "docs/reviews/*ledger*.md", Path("/repo"), Path("/x.db"),
+    )
+    assert (arguments.expect_parent, arguments.now, arguments.skip_clock) == (
+        "88b963d", "2026-10-19T02:00:00+03:00", True,
+    )
+    defaults = _parser().parse_args(["deploy", "check", "--candidate", "c"])
+    assert (defaults.scope, defaults.ledger, defaults.repo, defaults.expect_parent, defaults.now) == (
+        None, None, None, None, None,
+    )
+    assert defaults.skip_clock is False and not hasattr(defaults, "db_path")
+
+    # The write half is a separate, reviewed ticket: no apply, merge or launchctl here.
+    for action in (["apply"], ["merge"], ["check"]):
+        with pytest.raises(SystemExit) as error:
+            main(["deploy", *action])
+        assert error.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice: 'apply'" in err and "--candidate" in err
