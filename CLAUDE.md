@@ -9,3 +9,5 @@ Before editing:
 3. Use `SOUL.md` for supplemental style guidance.
 
 Do not infer PAPER/LIVE authority from historical code or operator settings. Authority requires current code and evidence.
+
+Operating contract and playbooks: `docs/OPERATOR_PROMPT.md` (`AGENTS.md` wins on conflict).
