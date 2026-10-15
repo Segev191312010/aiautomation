@@ -741,11 +741,26 @@ def child_starts_on(lines: Sequence[str], day: date) -> dict[str, int]:
     return counts
 
 
-def restarts_text(counts: Mapping[str, int], *, partial: bool = False) -> str:
-    if not counts:
-        return "none"
-    text = " ".join(f"{name}={counts[name]}" for name in sorted(counts))
-    return f"{text} (at least: older lines are past the log tail)" if partial else text
+RESTARTS_MEANING = "starts after each child's first today"
+
+
+def restarts_text(starts: Mapping[str, int], *, partial: bool = False) -> str:
+    """Restarts per child: its ``CHILD_START`` lines today minus its first start.
+    A child started once has not restarted (the line used to show it as 1;
+    review P1-A F-11); the text says what is counted."""
+    if not starts:
+        return "none (no child started today)"
+    restarted = {name: count - 1 for name, count in starts.items() if count > 1}
+    if restarted:
+        text = " ".join(f"{name}={restarted[name]}" for name in sorted(restarted))
+        meaning = RESTARTS_MEANING
+    else:
+        once = len(starts)
+        text = "none"
+        meaning = f"{once} {'child' if once == 1 else 'children'} started once today"
+    if partial:
+        meaning += "; at least: older lines are past the log tail"
+    return f"{text} ({meaning})"
 
 
 def _first_line_day(lines: Sequence[str]) -> date | None:

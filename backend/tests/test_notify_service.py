@@ -999,6 +999,16 @@ _BRIDGE_502 = (
     " Socket EClients\" is enabled and connection port is the same as \"Socket Port\""
 )
 _BRIDGE_REFUSED = "11:06:57 ET  CRITICAL TWS did not answer on 127.0.0.1:7497 (client 18) — exit 75"
+# Live bridge.log 2026-10-14 14:32:16 / 15:24:53 ET (the bridge's own wording).
+_BRIDGE_1100 = "14:32:16 ET  CRITICAL TWS -1 1100 Connectivity between IBKR and Trader Workstation has been lost."
+_BRIDGE_1102 = (
+    "15:24:53 ET  INFO TWS -1 1102 Connectivity between IBKR and Trader Workstation has been restored"
+    " - data maintained."
+)
+_BRIDGE_2110 = (
+    "09:25:04 ET  CRITICAL TWS -1 2110 Connectivity between Trader Workstation and server is broken."
+    " It will be restored automatically."
+)
 _CHILD_TRACEBACK = "trading.market.tws_actor.TWSConnectionError: TWS PAPER handshake failed"
 _CHILD_FAILED = "error: shadow run --strategy orb-v2 failed: TWSConnectionError: TWS PAPER handshake failed"
 _SWEEP_LINE = "2026-10-13 15:10:02,263 INFO sweep 2026-10-13: qualified=396 quoted=396 errors=0 hot=35 seconds=89.8"
@@ -1012,8 +1022,19 @@ def test_broker_evidence_classifies_the_live_lines():
     assert broker_evidence("screener", _SCREENER_FAILED) == "screener_failed"
     assert broker_evidence("screener", _SWEEP_LINE) == "sweep"
     assert broker_evidence("screener", "2026-10-13 15:00:00,014 INFO screener connected to TWS") is None
-    assert broker_evidence("bridge", _BRIDGE_502) == "bridge_refused"
+    # One failed bridge connect attempt writes the 502 line and then its closing
+    # CRITICAL: only the latter is a signal (review P1-A F-7: it counted twice).
+    assert broker_evidence("bridge", _BRIDGE_502) is None
     assert broker_evidence("bridge", _BRIDGE_REFUSED) == "bridge_refused"
+    # IBKR's side lost with the port open, and restored (review P1-A F-6).
+    assert broker_evidence("bridge", _BRIDGE_1100) == "ibkr_lost"
+    assert broker_evidence("bridge", _BRIDGE_2110) == "ibkr_lost"
+    assert broker_evidence("bridge", _BRIDGE_1102) == "ibkr_restored"
+    assert broker_evidence("bridge", _BRIDGE_1102.replace(" 1102 ", " 1101 ")) == "ibkr_restored"
+    assert broker_evidence("bridge", "10:00:00 ET  INFO TWS -1 2104 Market data farm connection is OK:usfarm") is None
+    # The codes as TWS codes only, never as a number elsewhere in a line.
+    assert broker_evidence("bridge", "10:00:00 ET  SENT ABC (momo): BUY 1100 @ 11.02") is None
+    assert broker_evidence("screener", _BRIDGE_1100) is None
     assert broker_evidence("bridge", "11:50:14 ET  FILL BF B: 1000/3741 sh @ 26.75 (momo)") is None
     assert broker_evidence("orb-v2", _CHILD_FAILED) == "handshake_failed"
     # The traceback's last line precedes the child's own error line: not a second exit.
@@ -1186,8 +1207,10 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
         "alert queued: broker_unreachable",
         "alert queued: broker_reconnected",
     ]
-    # The bridge's own CRITICAL line still reaches the phone, as before.
-    assert any(text.startswith("⚠️ CRITICAL TWS did not answer") for text in sent)
+    # The bridge's own "did not answer" CRITICAL came while the alert was open:
+    # folded into it (its exit 75 is one of the 4 restarting), not forwarded
+    # once per attempt (review P1-A F-7; it used to reach the phone each time).
+    assert not any("TWS did not answer" in text for text in sent)
     assert state_file(paths, SESSION).exists()
 
 
@@ -1360,6 +1383,225 @@ async def test_a_genuine_outage_alerts_within_two_minutes_and_folds_its_exits(tm
     ]
 
 
+def _between(moment: datetime, start: datetime, *, slack: timedelta = timedelta(seconds=5)) -> bool:
+    """The notifier sends from its next 1-second cycle: allow a few simulated seconds."""
+    return start <= moment < start + slack
+
+
+@pytest.mark.anyio
+async def test_a_real_outage_right_after_an_announced_blip_pages_within_the_sustain_limit(
+    tmp_path, monkeypatch, caplog
+):
+    """Review P1-A F-1 (the reviewer's blip-then-outage probe): a blip paged at
+    08:16, so the one-pair-per-30-min budget held the real 08:25 outage's page
+    until 08:46:10 and folded its child exits into an alert the phone never had."""
+    from datetime import time
+
+    from trading.operations.hysteresis import SUSTAIN_LIMIT
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(9, 20))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(8, 9))
+    clock.at(_et(8, 10), _append(screener, _SWEEP_LINE))
+    # A 70-second blip: three failed connects 08:15:00-08:16:10, sweeps again from 08:17.
+    for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
+        clock.at(at, _append(screener, _SCREENER_FAILED))
+    for n in range(7):
+        clock.at(_et(8, 17) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    # The Gateway dies for real at 08:25 (a failed connect every 70 s) until 09:11.
+    outage = _et(8, 25)
+    for n in range(38):
+        clock.at(outage + timedelta(seconds=70 * n), _append(screener, _SCREENER_FAILED))
+    clock.at(_et(9, 11), _append(screener, _SWEEP_LINE))
+    # A child the outage takes down: once while its page is held back, once after.
+    for at in (_et(8, 28), _et(8, 35)):
+        exited = at + timedelta(seconds=10)
+        clock.at(at, _append(logs / "momo.log", _CHILD_TRACEBACK, _CHILD_FAILED.replace("orb-v2", "momo")))
+        clock.at(exited, _append(
+            logs / "supervisor.log", f"{exited.isoformat(timespec='seconds')} CHILD_EXIT momo code=1 restart_in=300"
+        ))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+    assert [text for _at, text in broker] == [
+        "⛔ IB Gateway unreachable since 08:15 ET — log in; the bot has no market data",
+        "✅ IB Gateway reconnected 08:17 ET — market data is back (unreachable since 08:15 ET)",
+        "⛔ IB Gateway unreachable since 08:25 ET — log in; the bot has no market data",
+        "⛔ IB Gateway unreachable since 08:25 ET — log in; the bot has no market data (1 child restarting)",
+        "✅ IB Gateway reconnected 09:11 ET — market data is back (unreachable since 08:25 ET)",
+    ]
+    # The blip's pair still goes out at once.
+    assert _between(broker[0][0], _et(8, 16, 10)) and _between(broker[1][0], _et(8, 19))
+    # The real outage pages at the first failure that is SUSTAIN_LIMIT into an
+    # unbroken run (08:30:50: failures every 70 s from 08:25:00), not at 08:46:10.
+    assert SUSTAIN_LIMIT == timedelta(minutes=5)
+    assert _between(broker[2][0], _et(8, 30, 50))
+    assert broker[2][0] - outage <= SUSTAIN_LIMIT + timedelta(seconds=70 + 5)
+    assert _between(broker[3][0], _et(9, 0, 50)) and _between(broker[4][0], _et(9, 13))
+    # Held back, the outage's exit is forwarded as before; announced, it is folded
+    # into the alert (the repeat counts it).
+    exits = [(at, text) for at, text in telegram.sent_at if text.startswith("⚙️")]
+    assert [text for _at, text in exits] == ["⚙️ momo exited (code 1), restarting in 300 s"]
+    assert _between(exits[0][0], _et(8, 28, 10))
+
+
+def test_a_held_back_outage_forwards_its_exits_until_the_sustain_limit_announces_it():
+    from trading.operations.notify_service import BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(7, 55))
+    watch.observe("screener", _SWEEP_LINE, _et(8, 10))
+    for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
+        watch.observe("screener", _SCREENER_FAILED, at)
+    assert watch.unreachable
+    watch.observe("screener", _SWEEP_LINE, _et(8, 17))
+    assert watch.check(_et(8, 19)) is not None and not watch.unreachable
+    # Three failures from 08:25: open, but the pair budget holds it back.
+    for at in (_et(8, 25, 0), _et(8, 26, 10), _et(8, 27, 20)):
+        watch.observe("screener", _SCREENER_FAILED, at)
+    watch.observe("momo", _CHILD_FAILED.replace("orb-v2", "momo"), _et(8, 27, 30))
+    watch.observe("bridge", _BRIDGE_REFUSED, _et(8, 27, 40))
+    assert watch.hysteresis.is_open and not watch.unreachable
+    # No alert on the phone: its exits and the bridge's line are news of their own.
+    assert not watch.broker_exit("momo", 1) and not watch.broker_exit("bridge", 75)
+    assert not watch.folds_bridge_line(_BRIDGE_REFUSED)
+    assert watch.restarting == {}
+    # Time alone does not announce it: the last failure is 2 min 40 s into the run.
+    assert watch.check(_et(8, 31)) is None and not watch.unreachable
+    # A failure five minutes or more into the unbroken run: announced, whatever the budget.
+    watch.observe("screener", _SCREENER_FAILED, _et(8, 31, 10))
+    assert watch.unreachable_since == _et(8, 25)
+    assert watch.broker_exit("momo", 1) and watch.folds_bridge_line(_BRIDGE_REFUSED)
+
+
+def test_one_bridge_connect_attempt_is_one_failure_signal():
+    """Review P1-A F-7: the 502 line and the "did not answer" CRITICAL of one
+    attempt counted as two of the three signals."""
+    from trading.operations.notify_service import BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(9, 0))
+    watch.observe("screener", _SWEEP_LINE, _et(10, 0))
+    watch.observe("bridge", _BRIDGE_502, _et(10, 0, 30))
+    watch.observe("bridge", _BRIDGE_REFUSED, _et(10, 0, 40))
+    watch.observe("momo", _CHILD_FAILED.replace("orb-v2", "momo"), _et(10, 1, 0))
+    assert not watch.unreachable
+    # Before the alert the bridge's CRITICAL is forwarded; a third signal opens it.
+    assert not watch.folds_bridge_line(_BRIDGE_REFUSED)
+    watch.observe("orb-v2", _CHILD_FAILED, _et(10, 1, 20))
+    assert watch.unreachable_since == _et(10, 0, 40)
+    assert watch.folds_bridge_line(_BRIDGE_REFUSED)
+    # Only that line: the bridge's other lines still reach the phone.
+    for line in (_BRIDGE_502, _BRIDGE_1100, "10:02:00 ET  FILL ABC: 10/10 sh @ 1.00 (momo)"):
+        assert not watch.folds_bridge_line(line)
+
+
+def test_an_ibkr_loss_not_restored_within_two_minutes_opens_the_alert_and_a_quick_restore_does_not():
+    from trading.operations.notify_service import BrokerWatch
+
+    blip = BrokerWatch(SESSION)
+    blip.session_started(_et(9, 0))
+    blip.observe("screener", _SWEEP_LINE, _et(14, 31))
+    blip.observe("bridge", _BRIDGE_1100, _et(14, 32, 16))
+    blip.observe("bridge", _BRIDGE_1102, _et(14, 32, 46))
+    for second in range(0, 600, 10):
+        blip.check(_et(14, 32, 50) + timedelta(seconds=second))
+    assert not blip.unreachable and blip.ibkr_lost_at is None
+
+    lost = BrokerWatch(SESSION)
+    lost.session_started(_et(9, 0))
+    lost.observe("screener", _SWEEP_LINE, _et(14, 31))
+    lost.observe("bridge", _BRIDGE_1100, _et(14, 32, 16))
+    assert lost.check(_et(14, 34, 15)) is None and not lost.unreachable
+    lost.check(_et(14, 34, 16))
+    assert lost.unreachable_since == _et(14, 32, 16)
+    # The restore is success evidence: two clean minutes later, the recovery line.
+    assert lost.observe("bridge", _BRIDGE_1102, _et(15, 24, 53)) is None
+    assert lost.check(_et(15, 26, 53)) == (
+        "✅ IB Gateway reconnected 15:24 ET — market data is back (unreachable since 14:32 ET)"
+    )
+
+
+@pytest.mark.anyio
+async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_phone(
+    tmp_path, monkeypatch, caplog
+):
+    """Review P1-A F-6: live 2026-10-14 14:32-15:25 ET IBKR's side was lost with
+    the port open (TWS 1100, the screener's snapshots timing out, no "TWS
+    connection failed"); BrokerWatch saw nothing and only two CRITICAL lines went out."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(15, 40))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(14, 25))
+    for n in range(7):
+        clock.at(_et(14, 25, 30) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    clock.at(_et(14, 32, 16), _append(logs / "bridge.log", _BRIDGE_1100))
+    sweep_failed = (
+        "2026-10-14 21:33:48,864 ERROR screener sweep failed: 25 consecutive snapshot failures; last:"
+        " TWS market snapshot timed out without real-time confirmation, a last trade or bid/ask, prior close"
+    )
+    for n in range(38):
+        clock.at(_et(14, 33, 48) + timedelta(seconds=83 * n), _append(
+            screener, sweep_failed, "2026-10-14 21:33:49,872 INFO screener connected to TWS"
+        ))
+    clock.at(_et(15, 24, 50), _append(logs / "bridge.log", _BRIDGE_1100.replace("14:32:16", "15:24:50")))
+    clock.at(_et(15, 24, 53), _append(logs / "bridge.log", _BRIDGE_1102))
+    for n in range(10):
+        clock.at(_et(15, 26, 5) + timedelta(seconds=62 * n), _append(screener, _SWEEP_LINE))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+    assert [text for _at, text in broker] == [
+        "⛔ IB Gateway unreachable since 14:32 ET — log in; the bot has no market data",
+        "⛔ IB Gateway unreachable since 14:32 ET — log in; the bot has no market data",
+        "✅ IB Gateway reconnected 15:24 ET — market data is back (unreachable since 14:32 ET)",
+    ]
+    assert _between(broker[0][0], _et(14, 34, 16))
+    assert _between(broker[1][0], _et(15, 4, 16))
+    assert _between(broker[2][0], _et(15, 26, 53))
+    # The bridge's own 1100 CRITICAL lines still go out, as before.
+    assert sum(text.startswith("⚠️ CRITICAL TWS -1 1100") for _at, text in telegram.sent_at) == 2
+
+
+@pytest.mark.anyio
+async def test_a_supervisor_stop_cancels_a_suspension_page(tmp_path, monkeypatch, caplog):
+    """Review P1-A F-4: a deploy or restart while momo was suspended left the
+    phone's last word "suspended" while momo ran again."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(10, 40))
+    logs = paths.log_directory
+    supervisor_log = logs / "supervisor.log"
+    clock = FakeTime(_et(10, 0))
+    for minute in (0, 15, 30):
+        clock.at(_et(10, minute, 30), _append(logs / "screener.log", _SWEEP_LINE))
+    clock.at(_et(10, 15), _append(supervisor_log, "2026-10-13T14:15:00+00:00 CHILD_SUSPENDED momo count=6 window=30m"))
+    clock.at(_et(10, 20), _append(
+        supervisor_log,
+        "2026-10-13T14:20:00+00:00 CHILD_RESUMED momo reason=supervisor_stop",
+        "2026-10-13T14:20:00+00:00 SIGNAL momo SIGTERM reason=shutdown",
+        "2026-10-13T14:20:01+00:00 SUPERVISOR_STOP reason=SIGTERM",
+        "2026-10-13T14:20:30+00:00 SUPERVISOR_START pid=999 mode=daily",
+        "2026-10-13T14:20:30+00:00 SESSION_START date=2026-10-13",
+        "2026-10-13T14:20:31+00:00 CHILD_START momo pid=1000",
+    ))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert [text for text in telegram.sent() if "momo" in text] == [
+        "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
+        "✅ momo resumed (supervisor_stop)",
+    ]
+
+
 def test_restart_cap_lines_read_as_phone_messages():
     from trading.operations.notify_service import restart_cap_event, supervisor_child_name
 
@@ -1370,8 +1612,12 @@ def test_restart_cap_lines_read_as_phone_messages():
         "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)"
     )
     assert supervisor_event_text(resumed) == "✅ momo resumed (port_open)"
-    for reason in ("probe_healthy", "window_boundary"):
+    for reason in ("probe_healthy", "supervisor_stop"):
         assert supervisor_event_text(resumed.replace("port_open", reason)) == f"✅ momo resumed ({reason})"
+    # At its window end the child does not run again today (review P1-A F-5).
+    assert supervisor_event_text(resumed.replace("port_open", "window_boundary")) == (
+        "✅ momo done for today (window ended)"
+    )
     assert supervisor_event_text(storm) == (
         "⚠️ bridge restart storm: 6 in 30 min (positions protected at IB; backoff continues)"
     )
@@ -1428,7 +1674,7 @@ async def test_restart_cap_lines_reach_the_phone_once_per_child_per_half_hour(tm
         "✅ momo resumed (port_open)",
         "⛔ momo suspended after 7 restarts in 30 min (relaunch probe every 5 min)",
         "⚠️ bridge restart storm: 12 in 30 min (positions protected at IB; backoff continues)",
-        "✅ momo resumed (window_boundary)",
+        "✅ momo done for today (window ended)",
         "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
     ]
     assert _queued_alerts(caplog) == [

@@ -195,11 +195,17 @@ def test_deploy_exposes_only_the_read_only_check(capsys):
     assert (arguments.expect_parent, arguments.now, arguments.skip_clock) == (
         "88b963d", "2026-10-19T02:00:00+03:00", True,
     )
-    defaults = _parser().parse_args(["deploy", "check", "--candidate", "c"])
-    assert (defaults.scope, defaults.ledger, defaults.repo, defaults.expect_parent, defaults.now) == (
-        None, None, None, None, None,
+    # --repo has no default (review P1-A F-8: it defaulted to the running code's
+    # checkout, the candidate itself when run from its worktree as documented).
+    defaults = _parser().parse_args(["deploy", "check", "--candidate", "c", "--repo", "/repo"])
+    assert (defaults.scope, defaults.ledger, defaults.expect_parent, defaults.now) == (
+        None, None, None, None,
     )
     assert defaults.skip_clock is False and not hasattr(defaults, "db_path")
+    with pytest.raises(SystemExit) as error:
+        _parser().parse_args(["deploy", "check", "--candidate", "c"])
+    assert error.value.code == 2
+    assert "the following arguments are required: --repo" in capsys.readouterr().err
 
     # The write half is a separate, reviewed ticket: no apply, merge or launchctl here.
     for action in (["apply"], ["merge"], ["check"]):

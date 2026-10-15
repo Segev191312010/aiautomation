@@ -1903,14 +1903,41 @@ async def test_halt_then_the_right_nonce_stops_only_that_identity(harness, caplo
 
 
 async def test_a_wrong_nonce_writes_nothing_and_the_right_one_still_works(harness):
-    await harness.feed(message(1, "/halt ORB_V2"))
-    for update_id, text in ((2, "/confirm d4e5f6"), (3, "/confirm"), (4, "/confirm a1b2c3 a1b2c3"), (5, "/confirm a1b2c")):
-        await harness.feed(message(update_id, text))
-        assert harness.fences.calls == []
-        assert harness.replies.texts[-1].startswith("❌ Wrong code for /halt ORB_V2 — nothing written.")
-        assert harness.desk.outcomes[update_id] == "halt:confirm:wrong_nonce"
+    for halt_id, wrong in ((1, ("/confirm d4e5f6", "/confirm")), (10, ("/confirm a1b2c3 a1b2c3", "/confirm a1b2c"))):
+        harness.fences.calls.clear()
+        await harness.feed(message(halt_id, "/halt ORB_V2"))
+        for offset, text in enumerate(wrong, start=1):
+            await harness.feed(message(halt_id + offset, text))
+            assert harness.fences.calls == []
+            assert harness.replies.texts[-1].startswith("❌ Wrong code for /halt ORB_V2 — nothing written.")
+            assert harness.desk.outcomes[halt_id + offset] == "halt:confirm:wrong_nonce"
+        assert harness.replies.texts[-1].endswith("(1 try left).")
 
-    await harness.feed(message(6, "/confirm A1B2C3"))  # a phone's capital letters are still the code
+        # A phone's capital letters are still the code.
+        await harness.feed(message(halt_id + 5, "/confirm A1B2C3" if halt_id == 1 else "/confirm d4e5f6"))
+        assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
+
+
+async def test_the_third_wrong_code_drops_the_request(harness):
+    """Review P1-A F-10: wrong codes were unlimited inside the 60 s window."""
+    assert bot.HALT_MAX_WRONG_CODES == 3
+    await harness.feed(message(1, "/halt ORB_V2"))
+    await harness.feed(message(2, "/confirm 000000"), message(3, "/confirm 111111"))
+    assert harness.replies.texts[-1].endswith("(1 try left).")
+
+    await harness.feed(message(4, "/confirm 222222"))
+
+    assert harness.desk.outcomes[4] == "halt:confirm:dropped"
+    assert harness.replies.texts[-1] == (
+        "❌ Wrong code for /halt ORB_V2 — nothing written. 3 wrong codes: this /halt is dropped."
+        " Send /halt ORB_V2 again for a new code."
+    )
+    assert harness.assistant._halts.pending(OWNER) is None
+    # The right code no longer finds anything to confirm.
+    await harness.feed(message(5, "/confirm a1b2c3"))
+    assert harness.fences.calls == [] and harness.desk.outcomes[5] == "halt:confirm:no_pending"
+    # A new /halt starts a new request with its own count.
+    await harness.feed(message(6, "/halt ORB_V2"), message(7, "/confirm 333333"), message(8, "/confirm d4e5f6"))
     assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
 
 
@@ -2019,7 +2046,25 @@ async def test_halt_and_confirm_pass_the_flood_limit(harness):
     await harness.feed(message(30, "/halt ORB_V2"), message(31, "/confirm a1b2c3"))
 
     assert harness.fences.calls == [("telegram /halt by owner", "ORB_V2")]
-    assert "/halt" in bot.FLOOD_NOTICE and "/confirm" in bot.FLOOD_NOTICE
+    assert "/halt" in bot.FLOOD_NOTICE and "first /confirm" in bot.FLOOD_NOTICE
+
+
+async def test_after_a_wrong_code_confirm_is_flood_limited_like_any_command(harness):
+    """Review P1-A F-10: every /confirm bypassed the flood limit (60 wrong codes processed)."""
+    await harness.feed(*(message(n, "/hot") for n in range(1, 22)))
+
+    await harness.feed(message(30, "/halt ORB_V2"), message(31, "/confirm 000000"))
+    assert harness.desk.outcomes[31] == "halt:confirm:wrong_nonce"  # the first one still goes through
+    await harness.feed(*(message(n, f"/confirm {n:06x}") for n in range(32, 92)))
+
+    assert {harness.desk.outcomes[n] for n in range(32, 92)} == {"rate_limited"}
+    assert harness.fences.calls == []
+    # Still pending (one wrong code), and confirmable once the flood has passed.
+    assert harness.assistant._halts.pending(OWNER).wrong_codes == 1
+    # A /confirm with no request waiting is limited too.
+    harness.assistant._halts._pending.clear()
+    await harness.feed(message(93, "/confirm a1b2c3"))
+    assert harness.desk.outcomes[93] == "rate_limited"
 
 
 async def test_fences_is_a_read_command(harness):

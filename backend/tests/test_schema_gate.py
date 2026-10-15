@@ -189,9 +189,14 @@ async def test_the_supervisor_restarts_a_child_that_waits_for_a_migration():
 
     await supervisor.run(session_date=day)
 
-    exits = [line for line in world.child_lines("screener") if "CHILD_EXIT" in line]
+    exits = [line for line in world.child_lines("screener") if " CHILD_EXIT " in line]
     assert exits[0].endswith("CHILD_EXIT screener code=75 restart_in=15")
     assert exits[1].endswith("CHILD_EXIT screener code=75 restart_in=30")
+    # Never counted toward the restart cap (review P1-A F-11): the schema alert pages it.
+    uncounted = [line for line in world.child_lines("screener") if "CHILD_EXIT_UNCOUNTED" in line]
+    assert [line.split(" ", 1)[1] for line in uncounted] == [
+        "CHILD_EXIT_UNCOUNTED screener reason=schema_not_ready"
+    ] * 2
     # Once migrated, the third start runs until the stop.
     assert len(world.launch_times("screener")) == 3
 

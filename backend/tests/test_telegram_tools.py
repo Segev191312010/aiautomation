@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -66,8 +67,9 @@ class ProbeGuard:
 
 @pytest.fixture(autouse=True)
 def no_real_probes(monkeypatch) -> ProbeGuard:
-    """No test here may connect to the Gateway port or run a system command:
-    a DataTools built without fakes reaches these stand-ins instead."""
+    """No test here may run a system command, and a DataTools built without
+    fakes reaches these stand-ins instead of probing the Gateway (counted). The
+    suite-wide refusal of the live port itself is tests/conftest.py's."""
     guard = ProbeGuard()
 
     async def gateway() -> bool:
@@ -761,7 +763,7 @@ async def test_status_adds_every_operations_line_from_its_source(tmp_path):
         "Recorder/replay: recorder ok Mon 12 Oct 17:02 ET, bars through 2026-10-12"
         " · replay ok Mon 12 Oct 18:05 ET, report 2026-10-12 with evidence",
         "Power: AC",
-        "Restarts today: bridge=2 orb=1 screener=1 telegram=1",
+        "Restarts today: bridge=1 (starts after each child's first today)",
     ]
     # The original lines are unchanged and come first.
     assert text.splitlines()[0] == "🤖 Status · Tue 13 Oct 10:30:00 ET"
@@ -836,7 +838,7 @@ async def test_a_hung_probe_costs_its_own_line_only_within_the_budget(tmp_path):
     assert "Gateway 7497: CLOSED (no answer in 0.05 s)" in lines
     assert "Schema: unknown (no answer in 0.05 s)" in lines
     assert "Power: AC" in lines and "LaunchAgent: loaded pid 4242" in lines
-    assert "Restarts today: bridge=2 orb=1 screener=1 telegram=1" in lines
+    assert "Restarts today: bridge=1 (starts after each child's first today)" in lines
 
 
 async def test_status_without_injected_probes_uses_the_module_probes_and_pmset(tmp_path, no_real_probes):
@@ -861,15 +863,20 @@ async def test_restart_counts_say_at_least_when_today_runs_past_the_log_tail(tmp
 
     (restarts,) = [entry for entry in text.splitlines() if entry.startswith("Restarts today:")]
     assert restarts.startswith("Restarts today: bridge=")
-    assert restarts.endswith(" (at least: older lines are past the log tail)")
+    assert restarts.endswith(" (starts after each child's first today; at least: older lines are past the log tail)")
 
 
 def test_child_starts_count_the_et_day_only():
     lines = OPS_LOG.splitlines()
     assert child_starts_on(lines, DAY) == {"telegram": 1, "screener": 1, "bridge": 2, "orb": 1}
     assert child_starts_on(lines, date(2026, 10, 12)) == {"recorder": 1, "replay": 1, "telegram": 1}
-    assert restarts_text({}) == "none"
-    assert restarts_text({"screener": 1, "bridge": 3}) == "bridge=3 screener=1"
+    # Review P1-A F-11: these are restarts, a child's starts after its first one.
+    assert restarts_text({}) == "none (no child started today)"
+    assert restarts_text({"screener": 1}) == "none (1 child started once today)"
+    assert restarts_text({"screener": 1, "telegram": 1}) == "none (2 children started once today)"
+    assert restarts_text({"screener": 1, "bridge": 3, "orb": 2}) == (
+        "bridge=2 orb=1 (starts after each child's first today)"
+    )
 
 
 @pytest.mark.parametrize(
@@ -935,6 +942,20 @@ async def test_the_gateway_probe_is_a_plain_tcp_connect(monkeypatch):
         server.close()
         await server.wait_closed()
     assert await REAL_GATEWAY_PROBE() is False
+
+
+async def test_the_suite_wide_guard_refuses_the_live_gateway_port(no_live_gateway_port):
+    """tests/conftest.py, for every module (review P1-A F-11: the guard was this
+    module's only): the real probes of /status and of the supervisor find the
+    live port refused, and the attempt is recorded so the test would fail."""
+    from trading.operations import supervisor
+
+    assert await REAL_GATEWAY_PROBE() is False
+    assert supervisor.gateway_port_open() is False
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", 7497), timeout=0.5)
+    assert [address[1] for address in no_live_gateway_port.attempts] == [7497, 7497, 7497]
+    no_live_gateway_port.attempts.clear()  # expected here: the teardown check would fail the test
 
 
 def test_the_command_runner_returns_stdout_and_refuses_a_failure():

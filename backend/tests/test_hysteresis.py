@@ -37,6 +37,7 @@ def test_the_constants_live_here_and_are_the_constructor_defaults():
     assert hysteresis.CLOSE_AFTER == timedelta(minutes=2)
     assert hysteresis.MAX_PAIRS_PER_WINDOW == 1
     assert hysteresis.PAIR_WINDOW == timedelta(minutes=30)
+    assert hysteresis.SUSTAIN_LIMIT == timedelta(minutes=5)
     machine = Hysteresis()
     assert (
         machine.open_after_count,
@@ -44,7 +45,8 @@ def test_the_constants_live_here_and_are_the_constructor_defaults():
         machine.close_after,
         machine.max_pairs_per_window,
         machine.window,
-    ) == (3, timedelta(minutes=2), timedelta(minutes=2), 1, timedelta(minutes=30))
+        machine.sustain_limit,
+    ) == (3, timedelta(minutes=2), timedelta(minutes=2), 1, timedelta(minutes=30), timedelta(minutes=5))
     assert machine.state is State.CLEAR and machine.flaps == 0 and not machine.announced
 
 
@@ -129,6 +131,50 @@ SCENARIOS = [
         [(10, "OPEN"), (180, "CLOSE"), (1810, "OPEN")],
         State.OPEN,
         1,
+    ),
+    (
+        # Review P1-A F-1: a genuine outage right after an announced blip waited
+        # for the window (to 1810) and its exits were folded meanwhile.
+        "a held-back open is announced once its failures run unbroken for the sustain limit",
+        [
+            (0, "F"), (5, "F"), (10, "F"), (60, "S"), (180, "T"),  # a blip's pair
+            (300, "F"), (370, "F"), (440, "F"),  # held back at 440
+            (510, "F"), (580, "F"),  # 280 s into the run
+            (599, "T"), (601, "T"),  # time alone never counts
+            (650, "F"),  # 350 s >= 300 s: announced, the budget notwithstanding
+            (720, "F"), (790, "S"), (910, "T"),
+        ],
+        [(10, "OPEN"), (180, "CLOSE"), (650, "OPEN"), (910, "CLOSE")],
+        State.CLEAR,
+        1,
+    ),
+    (
+        "the sustain limit is reached exactly at five minutes of failures",
+        [
+            (0, "F"), (5, "F"), (10, "F"), (60, "S"), (180, "T"),
+            (300, "F"), (301, "F"), (302, "F"),  # held back
+            (599, "F"),  # 299 s
+            (600, "F"),  # 300 s: announced
+        ],
+        [(10, "OPEN"), (180, "CLOSE"), (600, "OPEN")],
+        State.OPEN,
+        1,
+    ),
+    (
+        "a flapping held-back open never reaches the sustain limit: a success breaks the run",
+        [
+            (0, "F"), (5, "F"), (10, "F"), (60, "S"), (180, "T"),
+            (300, "F"), (305, "F"), (310, "F"),  # held back
+            *[
+                step
+                for start in range(380, 1700, 140)
+                for step in ((start, "S"), (start + 70, "F"), (start + 71, "T"))
+            ],
+            (1780, "S"), (1900, "T"),  # a silent close
+        ],
+        [(10, "OPEN"), (180, "CLOSE")],
+        State.CLEAR,
+        11,
     ),
     (
         "after the window an open is announced at once",
@@ -268,6 +314,8 @@ def test_inputs_are_validated():
         {"open_after": timedelta(seconds=-1)},
         {"close_after": timedelta(seconds=-1)},
         {"window": timedelta(0)},
+        {"sustain_limit": timedelta(0)},
+        {"sustain_limit": 300},
     ):
         with pytest.raises(ValueError):
             Hysteresis(**kwargs)

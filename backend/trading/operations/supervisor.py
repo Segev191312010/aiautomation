@@ -65,13 +65,18 @@ SIGHUP, the child gets SIGTERM and, 20 s later, SIGKILL.
 
 Restart cap. Each child's restartable exits are counted in a rolling 30
 minutes, but only while the IB Gateway's port (127.0.0.1:7497) answers: the
-supervisor probes it at each such exit, and an exit with the port closed is
-not counted, so a Gateway outage (2026-10-14: 20-25 exits per child before the
-11:29 ET login) never suspends anything and never costs a trading day. At 6
-counted exits a scheduled child other than the bridge is suspended: from then
-on it is relaunched only as a probe every 5 minutes, and the suspension lifts
-when a probe stays up 5 minutes, when the port was seen closed and opens again
-(relaunched at once), or at its window end or the session's end. The bridge
+supervisor probes it when it reaps such an exit (one probe per loop pass,
+shared by every exit and port re-check in that pass), and an exit with the
+port closed is not counted, so a Gateway outage (2026-10-14: 20-25 exits per
+child before the 11:29 ET login) never suspends anything and never costs a
+trading day. Nor is a scheduled child's exit 75: for those children it is
+only the schema gate's refusal (below), which the notifier's schema alert
+already pages and which ends by itself after ``db migrate``. At 6 counted
+exits a scheduled child other than the bridge is suspended: from then on it is
+relaunched only as a probe every 5 minutes, and the suspension lifts when a
+probe stays up 5 minutes, when the port was seen closed and opens again
+(relaunched at once), at its window end or the session's end, or when the
+supervisor stops (a new supervisor starts with empty ledgers). The bridge
 (its positions are protected at IB) and the always-on children are never
 suspended: they only page a restart storm and keep their backoff.
 
@@ -86,17 +91,23 @@ Log contract. ``supervisor.log`` lines
     <ISO UTC> CHILD_EXIT <name> code=<n> restart_in=<seconds|none>
 
 are tailed by the notifier; their format must not change. The restart cap
-adds, after the CHILD_EXIT line of the exit concerned,
+adds, after the CHILD_EXIT line of the exit concerned and in this order,
 
-    <ISO UTC> CHILD_EXIT_UNCOUNTED <name> reason=port_closed
+    <ISO UTC> CHILD_RESUMED <name> reason=probe_healthy    (the exiting probe had run 5 min)
+    <ISO UTC> PORT_PROBE_FAILED error=<exception class>
+    <ISO UTC> CHILD_EXIT_UNCOUNTED <name> reason=port_closed|port_unknown|schema_not_ready
     <ISO UTC> CHILD_SUSPENDED <name> count=<n> window=30m
     <ISO UTC> CHILD_RESTART_STORM <name> count=<n> window=30m
-    <ISO UTC> CHILD_RESUMED <name> reason=probe_healthy|port_open|window_boundary
 
-(CHILD_SUSPENDED once per suspension, CHILD_RESTART_STORM once per storm,
-CHILD_RESUMED only for a suspended child; an exit is uncounted with
-``reason=port_unknown`` after a ``PORT_PROBE_FAILED`` line if the probe itself
-fails). The children stop in
+and, on their own, ``CHILD_RESUMED <name>
+reason=probe_healthy|port_open|window_boundary|supervisor_stop`` (a probe
+still running at 5 minutes, a port re-check, a window or session end, the
+supervisor's stop before its children are signalled) and
+``PORT_PROBE_FAILED`` for a failed re-check. CHILD_SUSPENDED comes once per
+suspension, CHILD_RESTART_STORM once per storm, CHILD_RESUMED only for a
+suspended child; ``reason=port_unknown`` means the probe itself failed (a
+``PORT_PROBE_FAILED`` line in the same loop pass says why, once per pass), so
+the exit is not counted. The children stop in
 order on SIGTERM and exit 0; a child killed by signal N reports 128 + N (137
 after SIGKILL); 127 means the child could not be launched. Each child's stdout
 and stderr are appended to its own private ``<name>.log``.
@@ -158,6 +169,11 @@ BRIDGE_FINISH_BEFORE_CLOSE = timedelta(minutes=5)
 # unusable config or state). Logged with restart_in=none so the phone alerts.
 BRIDGE_REFUSED_CODE = 78
 BRIDGE_CHILD = "bridge"
+# trading.operations.schema_gate.EXIT_SCHEMA_NOT_READY (pinned by a test): a
+# scheduled child's refusal to start on a schema that is not the code's. The
+# bridge's own 75 ("TWS did not answer") is a different exit: it never reaches
+# the rule that uses this, because the bridge is never suspended.
+SCHEMA_REFUSAL_CODE = 75
 # The registry preflight: the strategy registry, the sendable tuple and the
 # identity size table must agree (shadow_service.registry_problems) or nothing
 # launches. Logged as LAUNCH_REFUSED registry code=78 reason=<token>, the
@@ -230,7 +246,17 @@ PROBE_HEALTHY_RUN = timedelta(minutes=5)
 # re-checked this often while it waits, and is relaunched at once when it opens.
 PORT_RECHECK = timedelta(seconds=15)
 # The IB Gateway's PAPER API port. A loopback connect is answered at once
-# (accepted or refused); the timeout bounds the rare hung case.
+# (accepted or refused); the timeout bounds the rare hung case (a frozen
+# Gateway whose listen backlog is full). The probe is synchronous, so it
+# blocks the whole loop (reaping, starts, window-end signals); hence at most
+# one probe per loop pass, its result shared by every exit and port re-check
+# in that pass. Worst case: one pass blocks PORT_PROBE_TIMEOUT_S (2 s) however
+# many children exited at once (it was 2 s per exit and per suspended child,
+# ~18 s for nine; review P1-A F-3). Passes that probe are those that reap a
+# restartable exit of a scheduled child or find a port re-check due, and the
+# re-checks of every suspended child waiting on the port fall into the same
+# pass once one has probed, so a hung port costs at most 2 s per exit batch
+# plus 2 s per PORT_RECHECK. The stop path never probes.
 GATEWAY_HOST = "127.0.0.1"
 GATEWAY_PORT = 7497
 PORT_PROBE_TIMEOUT_S = 2.0
@@ -656,6 +682,9 @@ class Supervisor:
         self._sleep = sleep
         self._chunk = sleep_chunk_seconds
         self._port_probe = port_probe
+        # The Gateway port's state as probed in the current loop pass (None: not
+        # probed yet in this pass); see PORT_PROBE_TIMEOUT_S.
+        self._pass_port: str | None = None
         self._stop = asyncio.Event()
         self._stop_reason = "completed"
         # next_start is set when run() begins: they start with the supervisor.
@@ -728,7 +757,7 @@ class Supervisor:
                 # before its own window end (no room for another probe) is
                 # suspended no longer.
                 for child in children:
-                    self._close_ledger(child)
+                    self._end_ledger(child, "window_boundary")
         finally:
             await self._abandon(children)
 
@@ -756,14 +785,21 @@ class Supervisor:
         alongside and keep running when this returns."""
         everyone = [*children, *self._always]
         while True:
+            # A new loop pass: at most one Gateway port probe, shared by the pass.
+            self._pass_port = None
             now = self._clock()
             for child in everyone:
                 self._reap(child, now)
             if self.stopping:
                 for child in everyone:
                     child.next_start = None
-                    # Nothing restarts after a stop: the cap's state is moot.
-                    child.ledger.reset()
+                    # Nothing restarts after a stop and the next supervisor
+                    # starts with empty ledgers, so a suspension ends here, and
+                    # says so before any child (the notifier among them) is
+                    # signalled: the phone never keeps "suspended" for a child
+                    # that runs again after a deploy (review P1-A F-4).
+                    self._end_ledger(child, "supervisor_stop")
+                for child in everyone:
                     self._terminate(child, now, reason="shutdown")
             else:
                 for child in children:
@@ -832,15 +868,18 @@ class Supervisor:
         self._after_exit(child, code, now, ran)
 
     def _after_exit(self, child: _Child, code: int, now: datetime, ran: timedelta) -> None:
-        if child.ledger.suspended and ran >= PROBE_HEALTHY_RUN:
-            # The probe outlived its deadline before the loop looked at it.
-            self._resume(child, "probe_healthy")
-        restart_in = self._restart_delay(child, code, now, ran)
+        # Every restart-cap line about this exit follows its CHILD_EXIT line.
         cap_lines: list[str] = []
+        if child.ledger.suspended and ran >= PROBE_HEALTHY_RUN:
+            # The probe outlived its deadline before the loop looked at it: the
+            # ledger starts over before this exit is counted.
+            cap_lines.append(self._lift(child, "probe_healthy"))
+        restart_in = self._restart_delay(child, code, now, ran)
         if restart_in is not None:
             # Only an exit that would be restarted is counted: a window end, a
             # shutdown, a planned finish or a final code ends the child's day.
-            restart_in, cap_lines = self._count_exit(child, now, restart_in)
+            restart_in, counted = self._count_exit(child, code, now, restart_in)
+            cap_lines += counted
         self._emit(child_exit_line(now, child.plan.name, code, restart_in))
         for line in cap_lines:
             self._event(line)
@@ -851,22 +890,38 @@ class Supervisor:
         child.backoff = min(restart_in * 2, MAX_BACKOFF)
 
     def _count_exit(
-        self, child: _Child, now: datetime, delay: timedelta
+        self, child: _Child, code: int, now: datetime, delay: timedelta
     ) -> tuple[timedelta | None, list[str]]:
         """The restart cap for one restartable exit: the delay it leaves and its lines."""
         name = child.plan.name
         ledger = child.ledger
         lines: list[str] = []
+        uncounted: str | None = None
+        if child.suspendable and code == SCHEMA_REFUSAL_CODE:
+            # The schema gate's refusal (a pending migration or another schema
+            # problem): every scheduled child loops on it until `db migrate`,
+            # the notifier's schema alert already pages it, and the ordinary
+            # backoff already caps the relaunches at one per 5 minutes. Counted,
+            # it suspended every child after ~8 minutes and paged each one on
+            # top of that alert (review P1-A F-11). No port question: not probed.
+            uncounted = "schema_not_ready"
+        elif isinstance(child.plan, ChildPlan):
+            port, failed = self._probe_port()
+            if failed is not None:
+                lines.append(failed)
+            if port != "open":
+                # A closed Gateway is an outage, not a crashing child: never
+                # counted, so an outage can never suspend anything.
+                uncounted = f"port_{port}"
+                if ledger.suspended:
+                    ledger.port_recheck_at = now + PORT_RECHECK
         # Always-on children (telegram) do not need the Gateway: their exits
-        # always count, so a crash loop during the Gateway's nightly restart
-        # still pages a storm. Scheduled children that do need it are probed.
-        port = self._port_state() if isinstance(child.plan, ChildPlan) else "open"
-        if port != "open":
-            # A closed Gateway is an outage, not a crashing child: never
-            # counted, so an outage can never suspend anything.
-            lines.append(f"CHILD_EXIT_UNCOUNTED {name} reason=port_{port}")
-            if ledger.suspended:
-                ledger.port_recheck_at = now + PORT_RECHECK
+        # always count and are never probed. Their storm reaches the phone only
+        # while the notifier runs (07:55-16:15 ET on session days); a crash loop
+        # overnight, during the Gateway's nightly restart, is in supervisor.log
+        # only until the T-4 overnight watch forwards it (review P1-A F-2).
+        if uncounted is not None:
+            lines.append(f"CHILD_EXIT_UNCOUNTED {name} reason={uncounted}")
         else:
             # Exits caused by a competing IBKR login (the phone app or the web
             # takes the market data, errors 10197/162/165) happen with the port
@@ -899,24 +954,34 @@ class Supervisor:
                 return None, lines
         return delay, lines
 
-    def _port_state(self) -> str:
-        """``open``, ``closed`` or, when the probe itself fails, ``unknown``."""
+    def _probe_port(self) -> tuple[str, str | None]:
+        """``(state, line)``: ``open``, ``closed`` or, when the probe itself fails,
+        ``unknown`` with its ``PORT_PROBE_FAILED`` line (the caller places it).
+
+        At most one probe per loop pass: later callers in the same pass share
+        its result and get no line (see PORT_PROBE_TIMEOUT_S for the bound).
+        """
         if self._port_probe is None:
-            return "open"
+            return "open", None
+        if self._pass_port is not None:
+            return self._pass_port, None
+        failed: str | None = None
         try:
-            return "open" if self._port_probe() else "closed"
+            state = "open" if self._port_probe() else "closed"
         except Exception as exc:  # noqa: BLE001 - a broken probe must not stop the supervisor
-            self._event(f"PORT_PROBE_FAILED error={type(exc).__name__}")
+            failed = f"PORT_PROBE_FAILED error={type(exc).__name__}"
             # Uncounted, like a closed port: a broken probe can only disable
             # the cap (yesterday's behaviour), never suspend a child.
-            return "unknown"
+            state = "unknown"
+        self._pass_port = state
+        return state, failed
 
     def _review_ledger(self, child: _Child, now: datetime) -> None:
         """The suspension's timed transitions: window end, healthy probe, reopened port."""
         ledger = child.ledger
         end = child.window_end
         if end is not None and now >= end:
-            self._close_ledger(child)
+            self._end_ledger(child, "window_boundary")
             return
         if not ledger.suspended:
             return
@@ -930,24 +995,32 @@ class Supervisor:
         elif (
             child.next_start is not None
             and ledger.port_recheck_at is not None
-            and now >= ledger.port_recheck_at
+            # Due, or the port was already probed in this pass: the re-checks
+            # of every child waiting on the port share one probe from then on.
+            and (now >= ledger.port_recheck_at or self._pass_port is not None)
         ):
-            if self._port_state() == "open":
+            port, failed = self._probe_port()
+            if failed is not None:
+                self._event(failed)
+            if port == "open":
                 self._resume(child, "port_open")
                 child.next_start = now  # relaunched at once
             else:
                 ledger.port_recheck_at = now + PORT_RECHECK
 
-    def _resume(self, child: _Child, reason: str) -> None:
-        """Lift a suspension: the ledger starts over and so does the backoff."""
-        self._event(f"CHILD_RESUMED {child.plan.name} reason={reason}")
+    def _lift(self, child: _Child, reason: str) -> str:
+        """Lift a suspension (the ledger and the backoff start over); its line."""
         child.ledger.reset()
         child.backoff = child.plan.base_backoff
+        return f"CHILD_RESUMED {child.plan.name} reason={reason}"
 
-    def _close_ledger(self, child: _Child) -> None:
-        """A window end or the session boundary: the ledger starts over."""
+    def _resume(self, child: _Child, reason: str) -> None:
+        self._event(self._lift(child, reason))
+
+    def _end_ledger(self, child: _Child, reason: str) -> None:
+        """The ledger starts over at a boundary; a suspended child says it is lifted."""
         if child.ledger.suspended:
-            self._resume(child, "window_boundary")
+            self._resume(child, reason)
         else:
             child.ledger.reset()
 
@@ -1092,6 +1165,13 @@ class Supervisor:
         Signals go straight to the processes and every log write is best
         effort, because the error being handled may be a failing log.
         """
+        for child in children:
+            if child.ledger.suspended:
+                # As on an orderly stop: the next supervisor starts afresh.
+                try:
+                    self._resume(child, "supervisor_stop")
+                except Exception:  # noqa: BLE001 - best effort, as every write here
+                    pass
         processes = [child.process for child in children if child.process is not None]
         if not processes:
             return

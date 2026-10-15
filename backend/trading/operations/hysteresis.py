@@ -32,19 +32,28 @@ Rules (defaults in brackets)
     condition stays open and the next success restarts the clock.
   * Budget: at most ``max_pairs_per_window`` [1] OPEN announcements in any
     ``window`` [30 min] (counted from each announced OPEN), hence at most that
-    many OPEN/CLOSE pairs. An open beyond the budget is a flap: no event, and
-    its later close is silent too. A held-back open that is still failing once
-    the budget allows is announced then (on the next ``failure`` or ``tick``),
-    so a real outage is never hidden behind an earlier pair for more than one
-    window.
+    many OPEN/CLOSE pairs, with one exception below. An open beyond the budget
+    is held back: no event, and if it closes before it is announced its close
+    is silent too. A held-back open that is still failing once the budget
+    allows is announced then (on the next ``failure`` or ``tick``).
+  * Sustain limit: the budget holds an open back only while its failures are
+    younger than ``sustain_limit`` [5 min]. Once failures have run unbroken
+    that long (from the first failure after the last success to the latest
+    failure signal; time alone still never counts), the open is announced
+    whatever the budget, on that ``failure`` or the next ``tick``. A flap never
+    lasts that long (a success breaks the run), so flaps stay one pair plus a
+    count; a genuine outage right after an announced blip pages within the
+    sustain limit plus one failure interval, not up to a window later (review
+    P1-A F-1: 21 minutes of silence before 08:46 on the blip-then-outage replay).
   * ``flaps`` counts the condition flipping without a message: a recovery that
-    did not hold for ``close_after``, and an open held back by the budget. It
-    only grows (until ``reset``); callers report the difference (BrokerWatch:
-    a line in the next digest).
+    did not hold for ``close_after``, and an open held back by the budget (also
+    when the sustain limit or the window later announces it). It only grows
+    (until ``reset``); callers report the difference (BrokerWatch: a line in
+    the next digest).
 
 API
   ``Hysteresis(open_after_count=3, open_after=2 min, close_after=2 min,
-  max_pairs_per_window=1, window=30 min)``
+  max_pairs_per_window=1, window=30 min, sustain_limit=5 min)``
   ``failure(now, *, since=None) -> Event | None``: a failure signal; ``since``
       backdates a streak that has not opened yet when the caller knows the
       failure began earlier (BrokerWatch: no first sweep since the screener's
@@ -71,6 +80,7 @@ OPEN_AFTER = timedelta(minutes=2)
 CLOSE_AFTER = timedelta(minutes=2)
 MAX_PAIRS_PER_WINDOW = 1
 PAIR_WINDOW = timedelta(minutes=30)
+SUSTAIN_LIMIT = timedelta(minutes=5)
 
 
 class State(Enum):
@@ -119,6 +129,7 @@ class Hysteresis:
         close_after: timedelta = CLOSE_AFTER,
         max_pairs_per_window: int = MAX_PAIRS_PER_WINDOW,
         window: timedelta = PAIR_WINDOW,
+        sustain_limit: timedelta = SUSTAIN_LIMIT,
     ) -> None:
         for name, count in (
             ("open_after_count", open_after_count),
@@ -129,13 +140,15 @@ class Hysteresis:
         for name, value in (("open_after", open_after), ("close_after", close_after)):
             if not isinstance(value, timedelta) or value < timedelta(0):
                 raise ValueError(f"{name} must be a non-negative timedelta")
-        if not isinstance(window, timedelta) or window <= timedelta(0):
-            raise ValueError("window must be a positive timedelta")
+        for name, value in (("window", window), ("sustain_limit", sustain_limit)):
+            if not isinstance(value, timedelta) or value <= timedelta(0):
+                raise ValueError(f"{name} must be a positive timedelta")
         self.open_after_count = open_after_count
         self.open_after = open_after
         self.close_after = close_after
         self.max_pairs_per_window = max_pairs_per_window
         self.window = window
+        self.sustain_limit = sustain_limit
         self.reset()
 
     def reset(self) -> None:
@@ -144,6 +157,8 @@ class Hysteresis:
         self._failures = 0
         self._failing_since: datetime | None = None
         self._last_failure_at: datetime | None = None
+        # The first failure after the last success: where the sustain limit counts from.
+        self._unbroken_since: datetime | None = None
         self._recovering_since: datetime | None = None
         self._opens: deque[datetime] = deque()
         self._flaps = 0
@@ -197,10 +212,13 @@ class Hysteresis:
             self._backdate(since)
             return self._open_if_due(now)
         if state is State.RECOVERING:
-            # The recovery did not hold: no message, one flap.
+            # The recovery did not hold: no message, one flap. The success broke
+            # the run of failures, so the sustain limit counts from here.
             self._state = State.OPEN
             self._recovering_since = None
+            self._unbroken_since = now
             self._flaps += 1
+        self._last_failure_at = now
         # Open already: its start is the one announced (``since`` no longer moves it).
         return self._announce_if_allowed(now)
 
@@ -232,12 +250,15 @@ class Hysteresis:
         self._state = State.FAILING
         self._failures = 1
         self._failing_since = now
+        self._unbroken_since = now
         self._last_failure_at = now
         self._backdate(since)
 
     def _backdate(self, since: datetime | None) -> None:
         if since is not None and self._failing_since is not None and since < self._failing_since:
+            # Still FAILING (no success yet): the unbroken run starts there too.
             self._failing_since = since
+            self._unbroken_since = since
 
     def _open_if_due(self, now: datetime) -> Event | None:
         assert self._failing_since is not None and self._last_failure_at is not None
@@ -256,12 +277,26 @@ class Hysteresis:
             return None
         while self._opens and now - self._opens[0] >= self.window:
             self._opens.popleft()
-        if len(self._opens) >= self.max_pairs_per_window:
+        if len(self._opens) >= self.max_pairs_per_window and not self._sustained():
             return None
         assert self._failing_since is not None
         self._opens.append(now)
         self._announced = True
         return Event(kind=OPEN, at=now, since=self._failing_since)
+
+    def _sustained(self) -> bool:
+        """Failures have run unbroken for ``sustain_limit``: an outage, not a flap.
+
+        Measured at the latest failure signal, never at "now", so a held-back
+        open whose failures stopped (the Gateway back, the first sweep still
+        qualifying) is not announced by time alone.
+        """
+        return (
+            self._state is State.OPEN
+            and self._unbroken_since is not None
+            and self._last_failure_at is not None
+            and self._last_failure_at - self._unbroken_since >= self.sustain_limit
+        )
 
     def _clean_long_enough(self, now: datetime) -> bool:
         assert self._recovering_since is not None
@@ -286,6 +321,7 @@ class Hysteresis:
         self._failures = 0
         self._failing_since = None
         self._last_failure_at = None
+        self._unbroken_since = None
         self._recovering_since = None
 
 
@@ -300,5 +336,6 @@ __all__ = [
     "OPEN_AFTER",
     "OPEN_AFTER_COUNT",
     "PAIR_WINDOW",
+    "SUSTAIN_LIMIT",
     "State",
 ]

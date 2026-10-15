@@ -66,6 +66,53 @@ def tmp_path(request):
     shutil.rmtree(p, ignore_errors=True)
 
 
+# The live IB Gateway's PAPER API port. A /status, a supervisor exit or a
+# deploy check under test must use a fake; reaching the real Gateway from a
+# test is a defect even when nothing is listening (review P1-A F-11).
+LIVE_GATEWAY_PORT = 7497
+
+
+class GatewayPortGuard:
+    """Records every refused connect to the live Gateway port during one test."""
+
+    def __init__(self) -> None:
+        self.attempts: list[object] = []
+
+
+def _address_port(address: object) -> object:
+    if isinstance(address, tuple) and len(address) >= 2:
+        return address[1]
+    return None
+
+
+@pytest.fixture(autouse=True)
+def no_live_gateway_port(monkeypatch) -> GatewayPortGuard:
+    """Suite-wide: a connect to port 7497 is refused (as if closed) and fails the
+    test at teardown, whatever module made it and whatever caught the error."""
+    import socket
+
+    guard = GatewayPortGuard()
+    connect = socket.socket.connect
+    connect_ex = socket.socket.connect_ex
+
+    def guarded_connect(self, address):
+        if _address_port(address) == LIVE_GATEWAY_PORT:
+            guard.attempts.append(address)
+            raise ConnectionRefusedError(61, "test guard: the live Gateway port 7497 is off limits")
+        return connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if _address_port(address) == LIVE_GATEWAY_PORT:
+            guard.attempts.append(address)
+            return 61
+        return connect_ex(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    yield guard
+    assert not guard.attempts, f"a test tried to connect to the live Gateway port: {guard.attempts}"
+
+
 @pytest.fixture(autouse=True)
 def _restore_db_path():
     """Restore the configured database path after each test."""

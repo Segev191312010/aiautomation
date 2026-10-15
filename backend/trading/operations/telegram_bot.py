@@ -31,7 +31,8 @@ read or write the switch.
 
 Identity fences. ``/halt <IDENTITY>`` stops one sendable identity's new
 entries, only after ``/confirm <nonce>`` within 60 s (one pending halt per
-chat, in memory: a restart forgets it). The name must be exactly one of
+chat, in memory: a restart forgets it, and the third wrong code drops it).
+The name must be exactly one of
 ``SENDABLE_IDENTITIES``; the write is ``paper:<IDENTITY>`` stopped=1, never
 the global row. There is no resume from the phone: ``autotraderctl paper
 resume --identity`` at the Mac only. ``/fences`` lists every fence row.
@@ -49,7 +50,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import importlib
@@ -156,10 +157,13 @@ READ_COMMANDS = frozenset(
     {"status", "pnl", "positions", "orders", "hot", "market", "signals", "report", "quote", "fences"}
 )
 # One identity's fence, stop only, two steps: /halt <IDENTITY> then /confirm <nonce>.
-# Like the kill switch they reduce risk, so the flood limit never holds them back.
-HALT_COMMANDS = frozenset({"halt", "confirm"})
+# Like the kill switch they reduce risk, so the flood limit never holds back
+# /halt, nor the first /confirm of a request; after a wrong code /confirm is
+# flood-limited like any other command, and the third wrong code drops the
+# request (review P1-A F-10: wrong codes were unlimited and never limited).
 HALT_REASON = "telegram /halt by owner"
 HALT_CONFIRM_WINDOW = timedelta(seconds=60)
+HALT_MAX_WRONG_CODES = 3
 HALT_NONCE_BYTES = 3  # secrets.token_hex(3): six hex characters
 _HALT_NONCE = re.compile(r"^[0-9a-f]{6}$")
 # The AI day manager's switch and plan, by the command parser only.
@@ -185,7 +189,7 @@ VIA_BOT_NOTICE = "Messages sent via another bot are ignored."
 NOT_TEXT_NOTICE = "Only text messages are understood — send a command or a question. /help"
 FLOOD_NOTICE = (
     "⚠️ Over 20 messages in a minute — further messages are ignored for a moment. "
-    "/stop, /halt, /confirm, /close, /closeall and /cancel always go through."
+    "/stop, /halt, /close, /closeall, /cancel and the first /confirm of a /halt always go through."
 )
 BUDGET_NOTICE = "Daily question budget reached — commands still work."
 BUSY_NOTICE = "Still answering earlier questions — ask again in a minute. Commands work meanwhile."
@@ -437,20 +441,22 @@ class PendingHalt:
     identity: str
     nonce: str
     requested_at: datetime
+    wrong_codes: int = 0
 
     def expired(self, now: datetime, window: timedelta = HALT_CONFIRM_WINDOW) -> bool:
         # A clock that went backwards expires it too: ask again rather than guess.
         return now < self.requested_at or now - self.requested_at > window
 
 
-HaltOutcome = Literal["confirmed", "no_pending", "expired", "wrong_nonce"]
+HaltOutcome = Literal["confirmed", "no_pending", "expired", "wrong_nonce", "dropped"]
 
 
 class HaltRequests:
     """One pending /halt per chat, in memory only; a new /halt replaces it.
 
     Confirmation needs the exact nonce of the pending request within the
-    window. A wrong nonce writes nothing and keeps the request (retype it); an
+    window. A wrong nonce writes nothing and keeps the request (retype it),
+    except that the ``HALT_MAX_WRONG_CODES``-th wrong nonce drops it; an
     expired one is dropped. Nothing here writes a fence: the caller does, and
     only for a ``confirmed`` outcome.
     """
@@ -489,7 +495,12 @@ class HaltRequests:
             return "expired", pending
         given = nonce.strip().lower().encode("utf-8")
         if not secrets.compare_digest(given, pending.nonce.encode("utf-8")):
-            return "wrong_nonce", pending
+            wrong = replace(pending, wrong_codes=pending.wrong_codes + 1)
+            if wrong.wrong_codes >= HALT_MAX_WRONG_CODES:
+                del self._pending[chat_id]
+                return "dropped", wrong
+            self._pending[chat_id] = wrong
+            return "wrong_nonce", wrong
         del self._pending[chat_id]
         return "confirmed", pending
 
@@ -1334,7 +1345,7 @@ class TelegramAssistant:
             return f"dropped:{inbound.kind}"
         command, args = split_command(inbound.text) if inbound.kind == "text" else (None, "")
         allowed, notice = self._limit.admit()
-        if not allowed and not (inbound.kind == "text" and self._is_exit(inbound.text, command)):
+        if not allowed and not (inbound.kind == "text" and self._is_exit(inbound, command)):
             logger.warning(
                 "update %d ignored: over %d messages a minute", inbound.update_id, MAX_INBOUND_PER_WINDOW
             )
@@ -1362,12 +1373,16 @@ class TelegramAssistant:
             )
             return f"error:{type(exc).__name__}"
 
-    def _is_exit(self, text: str, command: str | None) -> bool:
-        """Exits, the kill switch and identity halts are never held back by the flood limit."""
-        if command in EXIT_COMMANDS or command in HALT_COMMANDS:
+    def _is_exit(self, inbound: Inbound, command: str | None) -> bool:
+        """Exits, the kill switch and identity halts are never held back by the
+        flood limit; a /confirm only while its request has no wrong code yet."""
+        if command in EXIT_COMMANDS or command == "halt":
             return True
+        if command == "confirm":
+            pending = self._halts.pending(inbound.chat_id)
+            return pending is not None and pending.wrong_codes == 0
         try:
-            return self._desk.is_exit(text)
+            return self._desk.is_exit(inbound.text)
         except Exception:  # noqa: BLE001 - unknown means not exempt
             return False
 
@@ -1482,10 +1497,18 @@ class TelegramAssistant:
         if outcome == "expired":
             self._reply(f"⌛ /halt {identity} expired — send /halt {identity} again. Nothing written.")
             return "halt:confirm:expired"
+        if outcome == "dropped":
+            self._reply(
+                f"❌ Wrong code for /halt {identity} — nothing written. {HALT_MAX_WRONG_CODES} wrong codes:"
+                f" this /halt is dropped. Send /halt {identity} again for a new code."
+            )
+            return "halt:confirm:dropped"
         if outcome == "wrong_nonce":
+            left = HALT_MAX_WRONG_CODES - pending.wrong_codes
+            tries = "1 try" if left == 1 else f"{left} tries"
             self._reply(
                 f"❌ Wrong code for /halt {identity} — nothing written. "
-                "Send /confirm with the code from the /halt reply."
+                f"Send /confirm with the code from the /halt reply ({tries} left)."
             )
             return "halt:confirm:wrong_nonce"
         return await self._halt_identity(identity)

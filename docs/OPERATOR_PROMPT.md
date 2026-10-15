@@ -152,7 +152,9 @@ launchd  (LaunchAgent com.maccabi.autotrader-v1.shadow)
 ```
 
 **Restart policy** (`supervisor.py`): backoff 15 → 30 → 60 → 120 → 300 s, capped at 5 min, reset after 5 min healthy.
-**Restart cap** `[NOW]`: exits are counted per child over a rolling 30 min, only while port 7497 answers (`CHILD_EXIT_UNCOUNTED <name> reason=port_closed` otherwise; always-on children always count). At 6, a scheduled child is suspended into a probe every 5 min (`CHILD_SUSPENDED`) and resumes when a probe stays up 5 min, the port reopens, or its window ends (`CHILD_RESUMED`). The bridge and always-on children are never suspended: they page `CHILD_RESTART_STORM` and keep their backoff.
+**Restart cap** `[NOW]`: exits are counted per child over a rolling 30 min, only while port 7497 answers (`CHILD_EXIT_UNCOUNTED <name> reason=port_closed`, or `reason=port_unknown` when the probe itself failed; always-on children always count). A scheduled child's exit 75 is the schema gate's refusal (a pending migration): never counted (`reason=schema_not_ready`); the schema alert pages it once. At 6, a scheduled child is suspended into a probe every 5 min (`CHILD_SUSPENDED`) and resumes when a probe stays up 5 min, the port reopens, its window ends, or the supervisor stops (`CHILD_RESUMED`, written before any child is signalled). The bridge and always-on children are never suspended: they page `CHILD_RESTART_STORM` and keep their backoff.
+
+**Restart-cap pages reach the phone only 07:55–16:15 ET on session days** (the notifier's window), until the T-4 overnight watch lands (P1-B). A recorder suspension (16:20–17:30), a replay suspension (17:35–18:30) and a `telegram` crash loop overnight are written to `supervisor.log` and **not paged**; nothing reaches the phone for them. Check `grep -E 'CHILD_(SUSPENDED|RESTART_STORM)' $L/supervisor.log` in the post-session report.
 
 | Exit code | Meaning | What happens / what you do |
 |---|---|---|
@@ -526,16 +528,22 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `identity_stopped:<ID>` | bridge.log | Entry skipped by an identity fence |
 | `identity_caps_missing` / `identity_sizing_missing` | bridge.log / pipeline | Table row missing: fail-closed skip + CRITICAL |
 | `size_scaled_to_zero` | pipeline | floor(q × m) = 0, no order |
-| `TWS did not answer` / exit 75 | bridge.log | Gateway down or slow, restart loop |
+| `TWS did not answer` / exit 75 | bridge.log | Gateway down or slow, restart loop (one line per connect attempt; the `502 Couldn't connect` INFO before it is the same attempt) |
+| `TWS -1 1100` / `TWS -1 2110` (CRITICAL), `TWS -1 1101` / `1102` (INFO) | bridge.log | IBKR's side lost with the port open / restored; a loss not restored within 2 min opens the Gateway alert |
 | `TWS PAPER handshake failed` | children | Gateway down |
 | `IBKR login active elsewhere` | screener/children | Competing phone/web login; market data refused |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_closed` | supervisor.log | Exit while the Gateway port was closed: not counted toward the cap |
-| `CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM` | supervisor.log | Restart cap (Part 2.2); each reaches the phone |
+| `CHILD_EXIT_UNCOUNTED <name> reason=port_unknown` | supervisor.log | The port probe itself failed (`PORT_PROBE_FAILED error=<class>` in the same pass): not counted |
+| `CHILD_EXIT_UNCOUNTED <name> reason=schema_not_ready` | supervisor.log | Exit 75 of a scheduled child: the schema gate's refusal (migration pending), not counted |
+| `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` | supervisor.log | Restart cap (Part 2.2); paged 07:55–16:15 ET on session days only |
+| `CHILD_RESUMED <name> reason=probe_healthy\|port_open\|window_boundary\|supervisor_stop` | supervisor.log | Suspension lifted: a probe stayed up 5 min, the port reopened, the child's window or the session ended, the supervisor stopped (deploy, restart); paged 07:55–16:15 ET only |
+
+Every cap line follows the `CHILD_EXIT` line of the exit it is about (`CHILD_RESUMED reason=probe_healthy`, `PORT_PROBE_FAILED`, `CHILD_EXIT_UNCOUNTED`, `CHILD_SUSPENDED` / `CHILD_RESTART_STORM`, in that order).
 
 ```bash
 tail -n 3  $L/supervisor.log
 grep -n 'CRITICAL' $L/bridge.log | tail
-grep -c 'CHILD_START' $L/supervisor.log           # restart count proxy
+grep -c 'CHILD_START' $L/supervisor.log           # starts; a child's restarts = its starts − 1
 ```
 
 ### 4.7 Git and worktrees
@@ -589,20 +597,25 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | IB Gateway unreachable / reconnected alert; competing-login alert | `[NOW]` (904af38 A10) |
 | `/closeall`, `/close`, `/sell`, `/cancel`, `/stop <sym> <price>`, `/buy` | `[NOW]` owner orders |
 | `/status` (supervisor, bridge heartbeat, regime, kill switch, identity fences) | `[NOW]` |
-| `/status` extended (Gateway port, schema, LaunchAgent from the plist, recorder/replay, power, today's restarts), `/fences` | `[NOW]` |
-| `/halt <IDENTITY>` + `/confirm <code>` (identity stop only, 6-character code valid 60 s; no resume from the phone) | `[NOW]` |
-| Gateway unreachable alert with hysteresis (one pair per outage, flap count in the digest) | `[NOW]` |
-| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`) | `[NOW]` |
-| Overnight Gateway watch with quiet hours, external dead-man's switch, competing-login page | `[PLANNED]` P1-B |
+| `/status` extended (Gateway port, schema, LaunchAgent from the plist, recorder/replay, power, today's restarts = each child's starts after its first), `/fences` | `[NOW]` |
+| `/halt <IDENTITY>` + `/confirm <code>` (identity stop only, 6-character code valid 60 s; the third wrong code drops the request; no resume from the phone) | `[NOW]` |
+| Gateway unreachable alert with hysteresis (one pair per 30 min, flap count in the digest; failures unbroken for 5 min always page) | `[NOW]` |
+| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`), **07:55–16:15 ET on session days only** | `[NOW]` |
+| Overnight Gateway watch with quiet hours, external dead-man's switch, competing-login page; restart-cap pages outside 07:55–16:15 ET | `[PLANNED]` P1-B |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
+
+What the phone says:
+- **Gateway alert.** `⛔ IB Gateway unreachable since HH:MM ET` opens at the third failure signal in a row or a failure 2 min into the streak (a failed connect of the screener, the bridge or a child; the bridge's TWS 1100/2110 "IBKR connectivity lost" not restored within 2 min). `✅ IB Gateway reconnected` comes 2 min after the first success (a screener sweep or TWS 1101/1102). At most one pair per 30 min: a second outage inside that half hour is held back as a flap only while its failures are younger than 5 min, then it pages anyway. While the alert is open the outage's child exits and the bridge's repeated `TWS did not answer` lines are folded into it ("N children restarting"), not sent one by one.
+- **Restart cap.** `⛔ <child> suspended after 6 restarts in 30 min (relaunch probe every 5 min)`; `✅ <child> resumed (<reason>)` for `probe_healthy`, `port_open` and `supervisor_stop` (a deploy or restart while it was suspended: it starts afresh); `✅ <child> done for today (window ended)` when the suspension ends with the child's window (it does not run again today); `⚠️ <child> restart storm: …` for the bridge and `telegram`. **Only 07:55–16:15 ET on session days** (the notifier's window) until T-4: recorder and replay suspensions and an overnight `telegram` crash loop are in `supervisor.log` only.
+- **`/halt`.** The reply carries a 6-character code; `/confirm <code>` within 60 s writes `paper:<IDENTITY>`. A wrong code writes nothing and says how many tries are left; the third wrong code drops the request (send `/halt` again). `/halt` and a request's first `/confirm` pass the flood limit; after a wrong code `/confirm` is flood-limited like any command.
 
 ### 4.10 Ledger
 
 The ledger is the decision and evidence log. It lives **in the repo**: `docs/reviews/<date>-ledger.md`, with reports beside it (`docs/reviews/<date>-<subject>-review.md`). During a deploy, lines are first written **outside the git tree** to `$L/deploys.log` (the live tree must stay clean for the fast-forward) and copied into the repo ledger afterwards as a docs commit.
 
 ```
-<ISO-time> <sha> verdict=GO scope=<slices> reviewer=<id> report=<path>
+<ISO-time> | [<label>] <sha> verdict=GO scope=<slices> bridge_sha=<64hex> | <result, reviewer> | <report path>
 <ISO-time> DEPLOY <candidate>@<sha> PREV_SHA=<sha> pin=<12hex> result=PASS|ROLLBACK
 <ISO-time> DECISION owner: <one line, exact numbers>
 <ISO-time> INCIDENT <id> signal=<…> action=<…> result=<…>
@@ -671,16 +684,21 @@ Variables: `CANDIDATE` (branch), `EXPECTED_PARENT` (live sha now), `EXPECTED_PIN
 `autotraderctl deploy check` (read-only, from P1-A on) runs every STEP 0 check below and exits 78 on
 any refusal. **Run it from the candidate's worktree**, not from the live checkout: its schema check
 compares the database with the migrations of the code that runs it, so only the candidate's code
-notices a migration the candidate adds.
+notices a migration the candidate adds. **`--repo` is required** and names the live checkout the
+candidate is deployed into; `parent` refuses when that checkout's HEAD is the candidate itself
+(the candidate checked against itself proves nothing).
 
 ```bash
 # from the candidate worktree's backend/:
-.venv/bin/python autotraderctl.py deploy check --candidate $CANDIDATE --repo /Users/salomon/aiautomation
+.venv/bin/python autotraderctl.py deploy check --candidate $CANDIDATE --repo /Users/salomon/aiautomation --scope $SCOPE
 ```
 
 A commit cannot contain its own sha, so in practice the ledger's verdict line names an earlier
 commit and every commit after it touches only `docs/reviews/` (I-11's exception); `deploy check`
-prints the matched line and those commits.
+prints the matched line and those commits. Only a ledger verdict line counts: its check field
+(the second `|`-separated field, after the time) starts `[<label>] <sha> verdict=GO`, the label
+being a release name with a digit (`v7a`, `P1-A`); a sha with `verdict=GO` anywhere else in a line
+("not yet: <sha> verdict=GO", a backticked quote) is not a verdict.
 
 ```bash
 # STEP 0 — pre-checks (abort on ANY mismatch)

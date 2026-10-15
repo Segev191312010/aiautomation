@@ -16,12 +16,15 @@ that fails open is no pre-check.
 
 Tokens, in the runbook's order:
 
-* ``verdict`` (I-11): a ``<sha> verdict=GO`` line in a ``docs/reviews`` ledger
-  of the candidate itself names the candidate head, or names an ancestor
-  followed only by ``docs/reviews/`` changes (the addendum commit).
+* ``verdict`` (I-11): a ledger verdict line (``<time> | [<label>] <sha>
+  verdict=GO ... | ...``, the verdict at the start of the check field) in a
+  ``docs/reviews`` ledger of the candidate itself names the candidate head, or
+  names an ancestor followed only by ``docs/reviews/`` changes (the addendum
+  commit).
 * ``tree_clean``: the live checkout has nothing but known-benign entries.
-* ``parent``: its HEAD is an ancestor of the candidate (a fast-forward), and
-  equals ``--expect-parent`` when given.
+* ``parent``: its HEAD is an ancestor of the candidate (a fast-forward) and
+  not the candidate itself (``--repo`` is the live checkout, never the
+  candidate's own worktree), and equals ``--expect-parent`` when given.
 * ``files`` (warn only): the candidate changes nothing outside the deployable
   top-level paths.
 * ``schema``: the database is at exactly this code's schema; never migrates.
@@ -73,7 +76,6 @@ WINDOW = "window"
 PIN = "pin"
 TOKENS = (VERDICT, TREE_CLEAN, PARENT, FILES, SCHEMA, FENCE, CLOCK, WINDOW, PIN)
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 REVIEWS_DIRECTORY = "docs/reviews"
 DEFAULT_LEDGER_GLOB = f"{REVIEWS_DIRECTORY}/*ledger*.md"
 # I-11: the only commits allowed between a verdict sha and the deployed head
@@ -98,10 +100,24 @@ GIT_TIMEOUT_SECONDS = 60
 FENCE_READ_TIMEOUT_SECONDS = 5
 NOTE_LIMIT = 12
 
-# `<sha> verdict=GO`: a 7-40 hex sha not glued to a word or a backtick (a
-# ledger note that quotes the line it is waiting for is not a verdict), and GO
+# A ledger line is `<time> | <check> | <result> | <evidence>`, and a verdict is
+# a check field that starts `[<label> ...] <sha> verdict=GO`, e.g.
+#   2026-10-16T00:53:35+03:00 | P1-A 299d6e1 verdict=GO scope=T-1,T-2,T-5,T-7 bridge_sha=... | ... | ...
+#   05:15 | 904af38 verdict=GO scope=A6,A7,A8,A10 | GO; ... | ...
+# Nothing else counts (review P1-A F-9): prose that mentions a verdict ("not
+# yet: <sha> verdict=GO", "(<sha> verdict=GO)", a backticked line a note is
+# waiting for) in any other field, or a line outside the ledger grammar.
+# The time is HH:MM[:SS], a date, or an ISO date-time with its offset.
+LEDGER_TIME_PATTERN = re.compile(
+    r"\d{1,2}:\d{2}(?::\d{2})?"
+    r"|\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+)
+# Up to two release labels, each with a digit (v7a, v7a.1, P1-A; never a plain
+# English word), then a 7-40 hex sha not glued to a word or a backtick, and GO
 # not followed by more of a word (no GO-PENDING).
-VERDICT_PATTERN = re.compile(r"(?<![\w`])([0-9a-f]{7,40}) verdict=GO(?![\w-])")
+VERDICT_PATTERN = re.compile(
+    r"(?:(?=[\w.-]*\d)[A-Za-z][\w.-]* ){0,2}(?<![\w`])([0-9a-f]{7,40}) verdict=GO(?![\w-])"
+)
 SCOPE_PATTERN = re.compile(r"\bscope=([^\s|`]+)")
 PIN_PATTERN = re.compile(
     rf"^{PIN_NAME}\s*(?::\s*[\w\[\]]+\s*)?=\s*[\"']([0-9a-fA-F]{{64}})[\"']", re.MULTILINE
@@ -312,19 +328,31 @@ def static_prefix(pattern: str) -> str | None:
     return "/".join(parts) or None
 
 
+def verdict_field(line: str) -> str | None:
+    """The check field of a ledger line (``<time> | <check> | ...``), or None."""
+    fields = line.split("|")
+    if len(fields) < 2 or LEDGER_TIME_PATTERN.fullmatch(fields[0].strip()) is None:
+        return None
+    return fields[1].strip()
+
+
 def verdict_lines(path: str, text: str, scope: Sequence[str] = ()) -> list[VerdictLine]:
-    """Every ``<sha> verdict=GO`` on a ledger's lines; with ``scope`` only lines whose
-    ``scope=`` (after the verdict) lists every requested slice."""
+    """Every ledger line whose check field is a ``<sha> verdict=GO`` verdict; with
+    ``scope`` only those whose ``scope=`` (in that field, after the verdict) lists
+    every requested slice."""
     wanted = set(scope)
     found: list[VerdictLine] = []
     for number, line in enumerate(text.splitlines(), start=1):
-        for match in VERDICT_PATTERN.finditer(line):
-            if wanted:
-                scoped = SCOPE_PATTERN.search(line, match.end())
-                listed = set(parse_scope(scoped.group(1))) if scoped else set()
-                if not wanted <= listed:
-                    continue
-            found.append(VerdictLine(path=path, line_number=number, text=line, sha=match.group(1)))
+        field = verdict_field(line)
+        match = VERDICT_PATTERN.match(field) if field is not None else None
+        if field is None or match is None:
+            continue
+        if wanted:
+            scoped = SCOPE_PATTERN.search(field, match.end())
+            listed = set(parse_scope(scoped.group(1))) if scoped else set()
+            if not wanted <= listed:
+                continue
+        found.append(VerdictLine(path=path, line_number=number, text=line, sha=match.group(1)))
     return found
 
 
@@ -414,7 +442,12 @@ def check_verdict(
     scope_text = f" scope={','.join(scope)}" if scope else ""
     searched = f"{len(ledgers)} ledger(s): {', '.join(ledgers)}"
     if not lines:
-        return CheckResult(VERDICT, REFUSE, f"no `<sha> verdict=GO{scope_text}` line in {searched}")
+        return CheckResult(
+            VERDICT,
+            REFUSE,
+            f"no `<sha> verdict=GO{scope_text}` line (ledger grammar"
+            f" `<time> | [<label>] <sha> verdict=GO ... | ...`) in {searched}",
+        )
     by_sha: dict[str, list[VerdictLine]] = {}
     unresolved: list[VerdictLine] = []
     for line in lines:
@@ -500,6 +533,16 @@ def check_parent(
             )
     if head is None:
         return _missing_candidate(PARENT, candidate, git.repo)
+    if current == head:
+        # Run from the candidate's worktree with --repo pointing at itself, the
+        # check compares the candidate with itself and proves nothing (review
+        # P1-A F-8); after a deploy there is nothing left to fast-forward.
+        return CheckResult(
+            PARENT,
+            REFUSE,
+            f"HEAD of {git.repo} is the candidate {candidate} {_short(head)} itself: --repo must be"
+            " the live checkout the candidate is deployed into (nothing to fast-forward)",
+        )
     if not git.is_ancestor(current, head):
         return CheckResult(
             PARENT,
@@ -744,7 +787,6 @@ __all__ = [
     "EXIT_REFUSED",
     "Git",
     "GitError",
-    "REPO_ROOT",
     "REVIEW_ONLY_PREFIX",
     "SUPERVISOR_PATH",
     "TOKENS",
@@ -770,5 +812,6 @@ __all__ = [
     "summary_line",
     "system_sntp",
     "validate_ref",
+    "verdict_field",
     "verdict_lines",
 ]

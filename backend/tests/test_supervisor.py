@@ -1818,8 +1818,12 @@ async def test_six_counted_exits_suspend_a_child_into_five_minute_probes():
         "07:55:00", "07:55:25", "07:56:05", "07:57:15", "07:59:25", "08:04:41",
         "08:09:51", "08:15:01", "08:20:11", "08:25:21", "08:30:31", "08:35:41",
     ]
-    # Announced once, right after the sixth counted exit; no probe stayed up 5 minutes.
-    assert cap_lines(world) == ["2026-10-13T12:04:51+00:00 CHILD_SUSPENDED screener count=6 window=30m"]
+    # Announced once, right after the sixth counted exit; no probe stayed up 5
+    # minutes, and the stop lifts it before the children are signalled (P1-A F-4).
+    assert cap_lines(world) == [
+        "2026-10-13T12:04:51+00:00 CHILD_SUSPENDED screener count=6 window=30m",
+        "2026-10-13T12:40:00+00:00 CHILD_RESUMED screener reason=supervisor_stop",
+    ]
     lines = world.child_lines("screener")
     sixth = lines.index("2026-10-13T12:04:51+00:00 CHILD_EXIT screener code=1 restart_in=300")
     assert lines[sixth + 1] == cap_lines(world)[0]
@@ -1862,6 +1866,11 @@ async def test_a_probe_that_exits_at_its_five_minute_mark_counts_as_healthy():
         "CHILD_RESUMED screener reason=probe_healthy",
     ]
     assert restart_values(world, "screener")[6] == "15"
+    # The resumption is about that exit, so it follows its CHILD_EXIT line, as the
+    # log contract says (review P1-A F-11; it used to come before it).
+    lines = [line.split(" ", 1)[1] for line in world.lines]
+    resumed = lines.index("CHILD_RESUMED screener reason=probe_healthy")
+    assert lines[resumed - 1] == "CHILD_EXIT screener code=1 restart_in=15"
 
 
 async def test_twenty_five_exits_while_the_gateway_port_is_closed_never_suspend():
@@ -1900,7 +1909,10 @@ async def test_counting_starts_from_zero_when_the_gateway_port_opens():
     lines = cap_lines(world)
     assert sum("CHILD_EXIT_UNCOUNTED" in line for line in lines) == 25
     # The 25 outage exits are forgotten: the sixth exit after the login suspends.
-    assert lines[25:] == ["2026-10-13T14:12:55+00:00 CHILD_SUSPENDED screener count=6 window=30m"]
+    assert lines[25:] == [
+        "2026-10-13T14:12:55+00:00 CHILD_SUSPENDED screener count=6 window=30m",
+        "2026-10-13T14:20:00+00:00 CHILD_RESUMED screener reason=supervisor_stop",
+    ]
 
 
 async def test_a_suspended_child_is_relaunched_at_once_when_the_closed_port_opens():
@@ -1972,7 +1984,9 @@ async def test_an_always_on_child_is_never_suspended_it_pages_a_storm():
 
 async def test_an_always_on_child_counts_its_exits_even_while_the_gateway_port_is_closed():
     # Telegram does not need the Gateway: a crash loop during the Gateway's
-    # nightly restart still pages a storm, and the port is never probed for it.
+    # nightly restart still writes its storm line, and the port is never probed
+    # for it. (The line reaches the phone only while the notifier runs, 07:55-16:15
+    # ET, until T-4; review P1-A F-2.)
     world = FakeWorld(et(TUESDAY, 18, 0), {"telegram": [QUICK] * 7})
     world.port_closed = [(et(TUESDAY, 17, 0), et(TUESDAY, 20, 0))]
     world.stop_at = et(TUESDAY, 19, 0)
@@ -2037,6 +2051,212 @@ async def test_a_failing_port_probe_never_suspends_and_never_stops_the_superviso
     assert sum(line.endswith("PORT_PROBE_FAILED error=RuntimeError") for line in world.lines) == 8
     assert sum(line.endswith("CHILD_EXIT_UNCOUNTED screener reason=port_unknown") for line in world.lines) == 8
     assert world.lines[-1].endswith("SUPERVISOR_STOP reason=SIGTERM")
+    # Each exit's lines in the documented order: CHILD_EXIT, then why it was not counted.
+    lines = [line.split(" ", 1)[1] for line in world.lines]
+    for index, line in enumerate(lines):
+        if line.startswith("PORT_PROBE_FAILED"):
+            assert lines[index - 1].startswith("CHILD_EXIT screener code=1")
+            assert lines[index + 1] == "CHILD_EXIT_UNCOUNTED screener reason=port_unknown"
+
+
+async def test_a_stop_while_suspended_lifts_the_suspension_before_any_child_is_signalled():
+    """Review P1-A F-4: a deploy (agent disable) while a child was suspended reset
+    the ledgers silently; the phone kept "suspended" while the child ran again."""
+    world = FakeWorld(et(TUESDAY, 7, 50), {"screener": [QUICK] * 12})
+    world.stop_at = et(TUESDAY, 8, 40)
+
+    await world.supervisor_for(planner=only("screener", "notifier")).run(session_date=TUESDAY)
+
+    lines = [line.split(" ", 1)[1] for line in world.lines]
+    resumed = lines.index("CHILD_RESUMED screener reason=supervisor_stop")
+    signalled = [index for index, line in enumerate(lines) if line.startswith("SIGNAL ")]
+    # Written before the notifier (which forwards it) is told to stop.
+    assert "SIGNAL notifier SIGTERM reason=shutdown" in lines and resumed < min(signalled)
+    assert lines.count("CHILD_RESUMED screener reason=supervisor_stop") == 1
+    assert world.lines[resumed].startswith("2026-10-13T12:40:00+00:00 ")
+    # A child that was not suspended says nothing.
+    assert not any("CHILD_RESUMED notifier" in line for line in lines)
+
+    # The next supervisor starts with empty ledgers and has nothing to lift.
+    again = FakeWorld(et(TUESDAY, 8, 45))
+    again.stop_at = et(TUESDAY, 9, 0)
+    await again.supervisor_for(planner=only("screener", "notifier")).run(session_date=TUESDAY)
+    assert cap_lines(again) == []
+
+
+async def test_a_supervisor_failure_while_a_child_is_suspended_still_lifts_it():
+    world = FakeWorld(et(TUESDAY, 7, 50), {"screener": [QUICK] * 30})
+
+    def emit(line: str) -> None:
+        if "CHILD_START bridge" in line:
+            raise OSError("disk full")
+        world.lines.append(line)
+
+    supervisor = Supervisor(
+        launcher=world, emit=emit, planner=only("screener", "bridge"), clock=world.clock,
+        sleep=world.sleep, sleep_chunk_seconds=3600.0, port_probe=world.port_open,
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        await supervisor.run(session_date=TUESDAY)
+
+    lines = [line.split(" ", 1)[1] for line in world.lines]
+    assert "CHILD_SUSPENDED screener count=6 window=30m" in lines
+    # Lifted before the children are stopped, as on an orderly stop.
+    resumed = lines.index("CHILD_RESUMED screener reason=supervisor_stop")
+    assert resumed < lines.index("CHILD_EXIT bridge code=143 restart_in=none")
+    assert lines[-1] == "SUPERVISOR_STOP reason=supervisor_error"
+
+
+class _SimultaneousExits(FakeWorld):
+    """Every child due at the same moment exits before the loop looks again."""
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        target = self.now + timedelta(seconds=seconds)
+        running = [
+            child for child in self.children if child.returncode is None and child.script.exit_after is not None
+        ]
+        first = min((child.started + child.script.exit_after for child in running), default=None)
+        if first is not None and first <= target:
+            self.now = max(self.now, first)
+            for child in running:
+                if child.started + child.script.exit_after == first:
+                    child.finish(child.script.code)
+        else:
+            self.now = target
+        await asyncio.sleep(0)
+
+
+async def test_exits_reaped_in_one_loop_pass_share_one_port_probe():
+    """Review P1-A F-3: the 2-s probe blocks the whole loop; it ran once per exit."""
+    world = _SimultaneousExits(
+        et(TUESDAY, 9, 35),
+        {
+            "orb": [Script(exit_after=timedelta(minutes=20), code=1)],
+            "momo": [Script(exit_after=timedelta(minutes=5), code=1)],
+        },
+    )
+
+    supervisor = world.supervisor_for(planner=only("orb", "momo"))
+    task = asyncio.ensure_future(supervisor.run(session_date=TUESDAY))
+    while world.now < et(TUESDAY, 10, 5):
+        await asyncio.sleep(0)
+    supervisor.request_stop(signal.SIGTERM)
+    await task
+
+    exits = [line.split(" ", 1)[1] for line in world.lines if " CHILD_EXIT " in line][:2]
+    assert sorted(exits) == ["CHILD_EXIT momo code=1 restart_in=95", "CHILD_EXIT orb code=1 restart_in=95"]
+    # Both exits at 10:00:00, one probe for the pass.
+    assert world.port_probes == [et(TUESDAY, 10, 0)]
+
+
+async def test_suspended_children_waiting_on_a_closed_port_share_its_re_checks():
+    """Review P1-A F-3: each suspended child re-checked the port on its own
+    15-s clock, so the blocking probes stacked up (68% of the loop's time)."""
+    world = FakeWorld(et(TUESDAY, 9, 30), {"orb": [QUICK] * 60, "momo": [QUICK] * 60})
+    world.port_closed = [(et(TUESDAY, 10, 40), et(TUESDAY, 13, 0))]
+    world.stop_at = et(TUESDAY, 11, 30)
+
+    await world.supervisor_for(planner=only("orb", "momo")).run(session_date=TUESDAY)
+
+    assert [line.split(" ", 1)[1] for line in cap_lines(world) if "SUSPENDED" in line] == [
+        "CHILD_SUSPENDED orb count=6 window=30m",
+        "CHILD_SUSPENDED momo count=6 window=30m",
+    ]
+    # Both wait on the closed port from 10:46 on; one probe per 15 s serves them
+    # both (plus one per probe launch that exits), not one per child.
+    window = [moment for moment in world.port_probes if et(TUESDAY, 10, 50) <= moment < et(TUESDAY, 11, 20)]
+    exits = [
+        line for line in cap_lines(world)
+        if "UNCOUNTED" in line and et(TUESDAY, 10, 50) <= datetime.fromisoformat(line.split(" ")[0]) < et(TUESDAY, 11, 20)
+    ]
+    assert len(window) <= 30 * 60 // 15 + len(exits) + 1
+
+
+async def test_schema_refusals_never_count_toward_the_cap():
+    """Review P1-A F-11: with a migration pending every scheduled child exits 75
+    until `db migrate`; counted, each was suspended (and paged) after ~8 minutes
+    on top of the schema alert."""
+    from trading.operations.schema_gate import EXIT_SCHEMA_NOT_READY
+
+    assert supervisor_module.SCHEMA_REFUSAL_CODE == EXIT_SCHEMA_NOT_READY
+    refused = Script(exit_after=timedelta(seconds=2), code=EXIT_SCHEMA_NOT_READY)
+    world = FakeWorld(et(TUESDAY, 7, 50), {"screener": [refused] * 12})
+    world.stop_at = et(TUESDAY, 9, 0)
+
+    await world.supervisor_for(planner=only("screener")).run(session_date=TUESDAY)
+
+    # The ordinary backoff (at most one relaunch per 5 minutes), no suspension, no probe.
+    assert restart_values(world, "screener") == ["15", "30", "60", "120", "240"] + ["300"] * 7 + ["none"]
+    assert cap_lines(world) == [
+        line for line in world.lines if line.endswith("CHILD_EXIT_UNCOUNTED screener reason=schema_not_ready")
+    ]
+    assert len(cap_lines(world)) == 12
+    assert world.port_probes == []
+    # The bridge's own 75 ("TWS did not answer") still counts toward its storm page.
+    bridge = FakeWorld(et(TUESDAY, 9, 20), {"bridge": [Script(exit_after=timedelta(seconds=1), code=75)] * 7})
+    await bridge.supervisor_for(planner=only("bridge")).run(session_date=TUESDAY)
+    assert [line.split(" ", 1)[1] for line in cap_lines(bridge)] == ["CHILD_RESTART_STORM bridge count=6 window=30m"]
+
+
+class _ReplayWorld(FakeWorld):
+    """Each launch's behaviour is decided at launch from the world's clock."""
+
+    def __init__(self, start: datetime, behaviour) -> None:
+        super().__init__(start)
+        self.behaviour = behaviour
+
+    async def start(self, plan: ChildPlan) -> FakeChild:
+        exit_after, code = self.behaviour(self, plan.name)
+        self.scripts[plan.name] = [Script(exit_after=exit_after, code=code)] * (
+            1 + sum(1 for _, name in self.launches if name == plan.name)
+        )
+        return await super().start(plan)
+
+
+_IB_CHILDREN = {"bridge", "orb-v2", "gap-v2", "vwap-v2", "momo", "momo-ap"}
+
+
+def _october_14(world: _ReplayWorld, name: str):
+    """2026-10-14 as supervisor.log shows it: the port closed until 11:29 ET, every IB
+    child exiting ~10 s after each launch meanwhile (the bridge 75, the others 1);
+    four strategies exit twice more after the login; the recorder loops from 16:45."""
+    wednesday = date(2026, 10, 14)
+    if name in _IB_CHILDREN and world.now < et(wednesday, 11, 29):
+        return timedelta(seconds=10), 75 if name == "bridge" else 1
+    if name in {"momo", "momo-ap", "vwap-v2", "gap-v2"}:
+        if sum(1 for moment, launched in world.launches if launched == name and moment >= et(wednesday, 11, 29)) < 2:
+            return timedelta(seconds=2), 1
+    if name == "recorder":
+        return (timedelta(minutes=25), 1) if world.now < et(wednesday, 16, 21) else (timedelta(seconds=10), 1)
+    if name == "replay":
+        return timedelta(minutes=2, seconds=24), 0
+    return None, 0
+
+
+@pytest.mark.full_schedule
+async def test_a_replay_of_october_14_moves_no_launch_and_suspends_nothing_in_session():
+    """The reviewer's P1-A replay, kept as a guard: with the real schedule and the
+    real outage, every launch of every child happens at exactly the instant it
+    happens with the cap disabled, and nothing the session needs is suspended."""
+    wednesday = date(2026, 10, 14)
+    closed = [(et(wednesday, 7, 0), et(wednesday, 11, 29))]
+    real = _ReplayWorld(et(wednesday, 7, 50), _october_14)
+    real.port_closed = closed
+    await real.supervisor_for().run(session_date=wednesday)
+    capless = _ReplayWorld(et(wednesday, 7, 50), _october_14)
+    await capless.supervisor_for(port_probe=lambda: False).run(session_date=wednesday)
+
+    assert real.launches == capless.launches
+    counted = [line for line in cap_lines(real) if "UNCOUNTED" not in line]
+    assert [line.split(" ", 1)[1] for line in counted] == [
+        "CHILD_SUSPENDED recorder count=6 window=30m",
+        "CHILD_RESUMED recorder reason=window_boundary",
+    ]
+    assert all(datetime.fromisoformat(line.split(" ")[0]) >= et(wednesday, 16, 0) for line in counted)
+    uncounted_bridge = [line for line in cap_lines(real, "bridge") if "reason=port_closed" in line]
+    assert len(uncounted_bridge) >= 20
 
 
 def test_the_gateway_port_probe_is_a_two_second_loopback_connect(monkeypatch):

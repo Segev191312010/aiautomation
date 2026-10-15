@@ -586,6 +586,72 @@ def test_lines_that_are_not_a_go_verdict_do_not_count(tmp_path, line):
     assert _verdict_result(scenario).status == REFUSE
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Review P1-A F-9: prose that mentions a verdict matched without --scope.
+        "not yet: {sha} verdict=GO expected after fixes",
+        "(see the review: {sha} verdict=GO)",
+        "2026-10-16T01:00:00+03:00 | P1-A review | not yet: {sha} verdict=GO expected after fixes | pending",
+        "2026-10-16T01:00:00+03:00 | not yet: {sha} verdict=GO | pending",
+        "2026-10-16T01:00:00+03:00 | expected {sha} verdict=GO | pending",
+        "2026-10-16T01:00:00+03:00 | waiting for `{sha} verdict=GO` | pending",
+        "2026-10-16T01:00:00+03:00 | `{sha} verdict=GO` | quoted",
+        "| {sha} verdict=GO | a table row, not a ledger line",
+        "Ledger note | {sha} verdict=GO | the first field is not a time",
+        "2026-10-16T01:00:00+03:00 DECISION owner: deploy once {sha} verdict=GO is recorded",
+    ],
+)
+def test_a_verdict_counts_only_as_a_ledger_lines_check_field(tmp_path, line):
+    scenario = _scenario(tmp_path)
+    scenario.repo.git("checkout", "-q", "cand")
+    scenario.repo.write(LEDGER, "# Ledger\n" + line.format(sha=scenario.reviewed[:7]) + "\n")
+    scenario.repo.commit("docs(reviews): prose only")
+    scenario.repo.git("checkout", "-q", "main")
+
+    result = _verdict_result(scenario)  # no --scope: the case F-9 found open
+
+    assert result.status == REFUSE
+    assert "ledger grammar `<time> | [<label>] <sha> verdict=GO ... | ...`" in result.detail
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # The shapes of the real docs/reviews/2026-10-15-ledger.md.
+        "05:15 | {sha} verdict=GO scope=A6,A7,A8,A10 | GO; no HIGH | docs/reviews/r.md",
+        "05:43 | v7a {sha} verdict=GO bridge_sha=a63982cc01c3 | GO on the order path | docs/reviews/r.md",
+        "14:42 | v7a.1 {sha} verdict=GO bridge_sha=9790eb3c1e81 | GO | docs/reviews/r.md",
+        "2026-10-15T20:34:28+03:00 | v7a {sha} verdict=GO addendum: docs/tests only | (copied) | r.md",
+        "2026-10-16T00:53:35+03:00 | P1-A {sha} verdict=GO scope=T-1,T-2,T-5,T-7 bridge_sha=7d313fd0 | N10 | r.md",
+    ],
+)
+def test_the_real_ledger_verdict_shapes_still_match(tmp_path, line):
+    scenario = _scenario(tmp_path)
+    scenario.repo.git("checkout", "-q", "cand")
+    scenario.repo.write(LEDGER, "# Ledger\n" + line.format(sha=scenario.reviewed[:7]) + "\n")
+    scenario.repo.commit("docs(reviews): verdict")
+    scenario.repo.git("checkout", "-q", "main")
+
+    result = _verdict_result(scenario)
+
+    assert result.status == OK
+    assert result.notes[0] == f"{LEDGER}:2: {line.format(sha=scenario.reviewed[:7])}"
+
+
+def test_a_scope_is_read_from_the_verdict_field_only(tmp_path):
+    scenario = _scenario(tmp_path)
+    scenario.repo.git("checkout", "-q", "cand")
+    scenario.repo.write(
+        LEDGER, f"# Ledger\n05:15 | v9 {scenario.reviewed[:7]} verdict=GO | GO; next: scope=A1,A2 | r.md\n"
+    )
+    scenario.repo.commit("docs(reviews): unscoped verdict, a scope in the result field")
+    scenario.repo.git("checkout", "-q", "main")
+
+    assert _verdict_result(scenario).status == OK
+    assert _verdict_result(scenario, scope=("A1",)).status == REFUSE
+
+
 def test_a_verdict_for_a_commit_off_the_candidate_line_refuses(tmp_path):
     scenario = _scenario(tmp_path)
     scenario.repo.git("checkout", "-q", "-b", "side", "main")
@@ -684,6 +750,20 @@ def test_parent_refuses_a_diverged_head(scenario):
 
     assert result.status == REFUSE
     assert result.detail == f"HEAD {hotfix[:12]} is not an ancestor of cand {scenario.head[:12]}: no fast-forward"
+
+
+def test_parent_refuses_the_candidate_checked_against_itself(scenario):
+    """Review P1-A F-8: run from the candidate's worktree with --repo at itself,
+    tree_clean, parent and files passed vacuously (0 commits ahead)."""
+    scenario.repo.git("checkout", "-q", "cand")
+
+    result = _parent(scenario)
+
+    assert result.status == REFUSE
+    assert result.detail == (
+        f"HEAD of {scenario.repo.path} is the candidate cand {scenario.head[:12]} itself: --repo must be"
+        " the live checkout the candidate is deployed into (nothing to fast-forward)"
+    )
 
 
 def test_expect_parent_accepts_short_and_full_shas(scenario):
@@ -969,6 +1049,17 @@ def test_the_cli_refuses_bad_arguments(tmp_path, capsys, extra):
 
     assert error.value.code == 2
     assert capsys.readouterr().out == ""
+
+
+def test_the_cli_requires_the_repo(capsys):
+    # Review P1-A F-8: the default was the running code's own checkout, which run
+    # from the candidate's worktree is the candidate itself.
+    with pytest.raises(SystemExit) as error:
+        main(["deploy", "check", "--candidate", "cand", "--skip-clock"])
+
+    assert error.value.code == 2
+    assert "--repo" in capsys.readouterr().err
+    assert not hasattr(deploy_check, "REPO_ROOT")
 
 
 def test_the_cli_refuses_a_candidate_that_looks_like_an_option(tmp_path, capsys):

@@ -365,7 +365,10 @@ def _parser() -> argparse.ArgumentParser:
         help="ledgers on the candidate to search (default: every docs/reviews/*ledger*.md)",
     )
     deploy_check.add_argument(
-        "--repo", type=Path, default=None, help="the checkout to deploy into (default: this code's)"
+        "--repo",
+        type=Path,
+        required=True,
+        help="the live checkout to deploy into (required: run from the candidate's worktree, never itself)",
     )
     deploy_check.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
     deploy_check.add_argument(
@@ -935,7 +938,7 @@ def _deploy_command(arguments: argparse.Namespace, parser: argparse.ArgumentPars
     requested_db_path = getattr(arguments, "db_path", None)
     request = deploy_check.DeployCheckRequest(
         candidate=candidate,
-        repo=(arguments.repo or deploy_check.REPO_ROOT).expanduser(),
+        repo=arguments.repo.expanduser(),
         db_path=(requested_db_path or Path(cfg.DB_PATH)).expanduser(),
         scope=deploy_check.parse_scope(arguments.scope),
         ledger_glob=arguments.ledger or deploy_check.DEFAULT_LEDGER_GLOB,

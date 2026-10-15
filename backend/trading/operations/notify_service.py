@@ -614,7 +614,7 @@ _LAUNCH_REFUSED = re.compile(
 )
 # The supervisor's restart cap (T-5), timestamp-prefixed like CHILD_EXIT:
 #   <ISO UTC> CHILD_SUSPENDED <name> count=<n> window=30m
-#   <ISO UTC> CHILD_RESUMED <name> reason=<port_open|probe_healthy|window_boundary>
+#   <ISO UTC> CHILD_RESUMED <name> reason=<port_open|probe_healthy|window_boundary|supervisor_stop>
 #   <ISO UTC> CHILD_RESTART_STORM <name> count=<n> window=30m
 CHILD_SUSPENDED = "child_suspended"
 CHILD_RESUMED = "child_resumed"
@@ -630,6 +630,8 @@ _RESTART_CAP_LINES = {
 }
 # The two that say what state a child is in (the phone must not lag behind).
 _CHILD_STATES = frozenset({CHILD_SUSPENDED, CHILD_RESUMED})
+# The supervisor's CHILD_RESUMED reason at a child's window end or the session's.
+WINDOW_BOUNDARY = "window_boundary"
 # A line that names the event but not in that grammar is still forwarded (raw),
 # never dropped: a format drift must not silence a suspension.
 _RESTART_CAP_TOKENS = {
@@ -731,7 +733,13 @@ def restart_cap_event(line: str) -> tuple[str, str, str] | None:
                 f" {_window_text(match.group('window'))} (relaunch probe every 5 min)"
             )
         elif kind == CHILD_RESUMED:
-            text = f"✅ {name} resumed ({match.group('reason')})"
+            reason = match.group("reason")
+            if reason == WINDOW_BOUNDARY:
+                # The suspension is cleared because the child's day is over, not
+                # because it runs again (review P1-A F-5).
+                text = f"✅ {name} done for today (window ended)"
+            else:
+                text = f"✅ {name} resumed ({reason})"
         else:
             text = (
                 f"⚠️ {name} restart storm: {match.group('count')} in"
@@ -842,7 +850,16 @@ FIRST_SWEEP_GRACE = timedelta(minutes=30)
 # Open/close thresholds and the pair cap are the shared Hysteresis defaults
 # (trading/operations/hysteresis.py, also the overnight watch's): no copy here.
 _SESSION_START = re.compile(r"\bSESSION_START\s+date=(?P<date>\d{4}-\d{2}-\d{2})\b")
-_BRIDGE_UNREACHABLE = re.compile(r"TWS did not answer|Couldn't connect to TWS", re.IGNORECASE)
+# One line per failed bridge connect attempt: its closing CRITICAL. The
+# "TWS -1 502 Couldn't connect" INFO line before it is the same attempt (live
+# 2026-10-14: 28 of each), so it is not a second signal (review P1-A F-7).
+_BRIDGE_UNREACHABLE = re.compile(r"\bTWS did not answer\b|\bTWS connect failed\b", re.IGNORECASE)
+# IBKR's side lost with the Gateway's port open (live 2026-10-14 14:32-15:25 ET,
+# review P1-A F-6): the bridge logs TWS 1100 ("connectivity between IBKR and
+# Trader Workstation has been lost"), or 2110 when it connects while TWS is
+# already cut off from the server, once; 1101/1102 once when it is restored.
+_IBKR_LOST = re.compile(r"\bTWS\s+-?\d+\s+(?:1100|2110)\b")
+_IBKR_RESTORED = re.compile(r"\bTWS\s+-?\d+\s+110[12]\b")
 _SCREENER_UNREACHABLE = re.compile(r"\bTWS connection failed\b", re.IGNORECASE)
 # The child's own last line (`error: shadow run --strategy <name> failed: ...`),
 # not the traceback line above it: one per exit.
@@ -852,7 +869,8 @@ _SWEEP = re.compile(r"\bsweep (?P<date>\d{4}-\d{2}-\d{2}):")
 
 def broker_evidence(source: str, line: str) -> str | None:
     """What one log line says about the Gateway: ``sweep`` (market data flows),
-    ``bridge_refused``, ``screener_failed``, ``handshake_failed``, or None."""
+    ``ibkr_restored`` (TWS 1101/1102), ``bridge_refused``, ``ibkr_lost`` (TWS
+    1100/2110), ``screener_failed``, ``handshake_failed``, or None."""
     if source == "screener":
         if _SWEEP.search(line):
             return "sweep"
@@ -860,7 +878,13 @@ def broker_evidence(source: str, line: str) -> str | None:
             return "screener_failed"
         return None
     if source == "bridge":
-        return "bridge_refused" if _BRIDGE_UNREACHABLE.search(line) else None
+        if _BRIDGE_UNREACHABLE.search(line):
+            return "bridge_refused"
+        if _IBKR_LOST.search(line):
+            return "ibkr_lost"
+        if _IBKR_RESTORED.search(line):
+            return "ibkr_restored"
+        return None
     if source == "supervisor":
         return None
     return "handshake_failed" if _HANDSHAKE_FAILED.match(line.strip()) else None
@@ -874,14 +898,21 @@ def _et_hhmm(moment: datetime) -> str:
 class BrokerWatch:
     """The Gateway's reachability as the logs show it; the alert and the recovery line.
 
-    Every failure line (the bridge's refusal, the screener's failed connect, a
-    child's failed handshake) is a failure signal and every screener sweep a
-    success for one shared ``Hysteresis``: the outage opens at the third
-    failure in a row or at a failure two minutes into the streak (a sweep
-    breaks it), and closes once a sweep has been followed by two minutes with
-    no failure; at most one alert/recovery pair per half hour. What it holds
-    back is a flap, reported by ``take_flap_line`` in the next digest
-    (live 2026-10-14: 183 "TWS connection failed" lines; review 904af38 F-1).
+    Every failure line (the bridge's failed connect attempt, the screener's
+    failed connect, a child's failed handshake, the bridge's TWS 1100/2110
+    "IBKR connectivity lost") is a failure signal, and every screener sweep and
+    the bridge's TWS 1101/1102 "restored" a success, for one shared
+    ``Hysteresis``: the outage opens at the third failure in a row or at a
+    failure two minutes into the streak (a success breaks it), and closes once
+    a success has been followed by two minutes with no failure; at most one
+    alert/recovery pair per half hour, except that failures running unbroken
+    for the sustain limit (5 min) always page. What it holds back is a flap,
+    reported by ``take_flap_line`` in the next digest (live 2026-10-14: 183
+    "TWS connection failed" lines; review 904af38 F-1).
+
+    TWS says "lost" once and "restored" once, so a loss with no restore and no
+    sweep is re-asserted as a failure every ``open_after`` (2 min): a loss that
+    is not restored within two minutes opens the alert, one that is is a blip.
 
     In memory only: after a notifier restart during an outage the next
     evidence reopens it (the 30-minute cadence lives in the persisted
@@ -901,6 +932,9 @@ class BrokerWatch:
     restarting: dict[str, int] = field(default_factory=dict)
     hysteresis: Hysteresis = field(default_factory=Hysteresis)
     first_sweep_overdue: bool = False
+    # The bridge's last TWS 1100/2110 (or its re-assertion) while no restore
+    # and no sweep has come since; None when IBKR's side is not known lost.
+    ibkr_lost_at: datetime | None = None
     alerted: bool = False
     swept_since_alert: bool = False
     flaps_seen: int = 0
@@ -938,12 +972,14 @@ class BrokerWatch:
         """Whether a ``CHILD_EXIT`` is the outage (counted, not forwarded).
 
         Live 2026-10-14: ~12 "<child> exited (code N), restarting" lines an
-        hour and never a plain "Gateway off". While the outage is open
-        (announced, or held back as a flap), the bridge's exit 75 after its
-        "TWS did not answer", and a child's exit 1 after its handshake
-        failure, are folded into the broker alert; any other exit goes through.
+        hour and never a plain "Gateway off". While the outage is announced,
+        the bridge's exit 75 after its "TWS did not answer", and a child's
+        exit 1 after its handshake failure, are folded into the broker alert;
+        any other exit goes through. While the pair budget holds an outage
+        back the phone has no alert to count them in, so they go through as
+        before (review P1-A F-1).
         """
-        if not self.hysteresis.is_open:
+        if not self.unreachable:
             return False
         if name == BRIDGE_CHILD_NAME:
             caused = code == BRIDGE_RESTART_CODE and self.bridge_refused
@@ -958,6 +994,12 @@ class BrokerWatch:
         self.alerted = True
         self.swept_since_alert = False
 
+    def folds_bridge_line(self, line: str) -> bool:
+        """The bridge's "TWS did not answer" CRITICAL while the outage is announced:
+        the alert's (its bridge exit is counted there), not a message of its own.
+        Live 2026-10-14 it reached the phone on every attempt (review P1-A F-7)."""
+        return self.unreachable and broker_evidence(BRIDGE_CHILD_NAME, line) == "bridge_refused"
+
     def observe(self, source: str, line: str, now: datetime) -> str | None:
         """Feed one log line; the recovery text when it ends the outage, else None."""
         if source == "supervisor":
@@ -969,9 +1011,12 @@ class BrokerWatch:
         if evidence is None:
             return None
         if evidence == "sweep":
-            # Market data answered: who the outage took down is forgotten (a
-            # later exit is its own news unless the failure line comes again).
             self.last_sweep_at = now
+        if evidence in {"sweep", "ibkr_restored"}:
+            # Market data answered, or TWS says IBKR is back: who the outage
+            # took down is forgotten (a later exit is its own news unless the
+            # failure line comes again).
+            self.ibkr_lost_at = None
             self.bridge_refused = False
             self.handshake_children.clear()
             self.restarting.clear()
@@ -982,12 +1027,15 @@ class BrokerWatch:
             self.bridge_refused = True
         elif evidence == "handshake_failed":
             self.handshake_children.add(source)
+        elif evidence == "ibkr_lost":
+            self.ibkr_lost_at = now
         return self._apply(self.hysteresis.failure(now), now)
 
     def check(self, now: datetime) -> str | None:
-        """Time passing: no first sweep in time (the Gateway never answered), the
-        recovery line two clean minutes after a sweep, or a held-back outage
-        announced once the pair cap allows; the recovery text, else None."""
+        """Time passing: no first sweep in time (the Gateway never answered), an
+        IBKR loss still not restored, the recovery line two clean minutes after a
+        success, or a held-back outage announced once the pair cap or the
+        sustain limit allows; the recovery text, else None."""
         due = self.first_sweep_due()
         if (
             due is not None
@@ -999,6 +1047,12 @@ class BrokerWatch:
             # No market data since the screener's window opened: failing since then.
             event = self.hysteresis.failure(now, since=due - FIRST_SWEEP_GRACE)
             return self._apply(event, now)
+        lost = self.ibkr_lost_at
+        if lost is not None and now - lost >= self.hysteresis.open_after:
+            # TWS said "lost" once and has not said "restored", and no sweep came:
+            # still lost, one more failure signal.
+            self.ibkr_lost_at = now
+            return self._apply(self.hysteresis.failure(now), now)
         return self._apply(self.hysteresis.tick(now), now)
 
     def _apply(self, event: HysteresisEvent | None, now: datetime) -> str | None:
@@ -1801,7 +1855,8 @@ class _NotifierSession:
             if self._alert_allowed(f"tripwire:{token}", TRIPWIRE_ALERT_INTERVAL):
                 self._send_alert(f"tripwire:{token}", text)
         if source == "bridge":
-            self._handle_bridge_line(line)
+            if not self._broker.folds_bridge_line(line):
+                self._handle_bridge_line(line)
             # The bridge already reports its own disconnects as CRITICAL.
             problem = ibkr_session_problem(line, include_connection_lost=False)
         else:
