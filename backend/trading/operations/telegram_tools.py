@@ -212,6 +212,8 @@ class DataActor(Protocol):
 
     async def market_snapshot(self, con_id: int, *, timeout_seconds: float = 3.0) -> Any: ...
 
+    async def daily_trade_bars(self, con_id: int) -> Any: ...
+
     async def contract_details_for_symbol(
         self, symbol: str, primary_exchange: str | None
     ) -> Any: ...
@@ -246,6 +248,11 @@ class TWSDataSession:
     and an order's fact gathering never interleave on the connection. The
     connection is dropped after ``idle_seconds`` without use and after any
     connection-level failure; it is never used to send orders.
+
+    ``use(status_listener=..., competing_listener=...)`` (the pre-session
+    data check, T-4b) sets the actor's opt-in listeners for that one use only,
+    before the connect when it connects, and removes them afterwards: every
+    other user sees the actor's defaults.
     """
 
     def __init__(
@@ -283,9 +290,30 @@ class TWSDataSession:
         return self._accounts
 
     @asynccontextmanager
-    async def use(self) -> AsyncIterator[DataActor]:
+    async def use(
+        self,
+        *,
+        status_listener: Callable[[int, str], None] | None = None,
+        competing_listener: Callable[[str], None] | None = None,
+    ) -> AsyncIterator[DataActor]:
+        listening = status_listener is not None or competing_listener is not None
+
+        def listen(actor: DataActor, status: Any, competing: Any) -> None:
+            for name, listener in (
+                ("set_status_listener", status),
+                ("set_competing_session_listener", competing),
+            ):
+                attach = getattr(actor, name, None)
+                if callable(attach):
+                    attach(listener)
+
+        def attach_listeners(actor: DataActor) -> None:
+            listen(actor, status_listener, competing_listener)
+
         async with self._lock:
-            actor = await self._connected()
+            actor = await self._connected(attach_listeners if listening else None)
+            if listening:
+                attach_listeners(actor)  # an existing connection
             try:
                 yield actor
             except BaseException as exc:
@@ -296,6 +324,8 @@ class TWSDataSession:
                     await self._drop()
                 raise
             finally:
+                if listening:
+                    listen(actor, None, None)
                 self._last_used = self._monotonic()
 
     async def close_if_idle(self) -> None:
@@ -309,13 +339,15 @@ class TWSDataSession:
         async with self._lock:
             await self._drop()
 
-    async def _connected(self) -> DataActor:
+    async def _connected(self, prepare: Callable[[DataActor], None] | None = None) -> DataActor:
         if self._actor is not None and self._actor.connected:
             return self._actor
         await self._drop()
         from trading.market.tws_actor import TWSActorConfig
 
         actor = self._factory(TWSActorConfig(account=self._account, client_id=self._client_id))
+        if prepare is not None:
+            prepare(actor)  # before the connect: its status codes come with the handshake
         try:
             await asyncio.wait_for(actor.connect(), timeout=self._connect_timeout)
         except BaseException:

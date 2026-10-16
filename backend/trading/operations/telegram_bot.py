@@ -41,8 +41,10 @@ Overnight watch (T-4). The assistant is the only always-on child, so it also
 runs ``overnight_watch.OvernightWatch`` as a background task: the IB Gateway
 port outside the notifier's window (quiet hours, a morning digest, pages at
 the pre-session leads), the restart cap's lines outside that window, and a
-competing login in the recorder's log. It sends text only; its log
-checkpoints are kept in the assistant's state file.
+competing login in the recorder's log. At each lead, with the port open, it
+runs the pre-session data check (T-4b, ``pre_session_check``): one
+daily-history request on the assistant's own TWS data client 21. It sends
+text only; its log checkpoints are kept in the assistant's state file.
 
 Schema. The assistant never migrates. It starts while only migrations newer
 than ``schema_gate.TELEGRAM_ASSISTANT_REQUIRES`` are pending, so /stop and
@@ -1724,6 +1726,8 @@ class AssistantEnvironment:
     # The Gateway port probe for /status and the overnight watch; None:
     # telegram_tools.gateway_port_open (the supervisor's one bounded connect).
     gateway_probe: Callable[[], Awaitable[bool]] | None = None
+    # The TWS data client's actor factory (client 21); None: the real TWSPaperActor.
+    tws_factory: Callable[[Any], Any] | None = None
 
     @classmethod
     def current(cls) -> AssistantEnvironment:
@@ -1795,9 +1799,13 @@ def _data_tools(environment: AssistantEnvironment) -> DataTools:
             clock=environment.clock,
             gateway_probe=environment.gateway_probe,
         )
+    if environment.tws_factory is None:
+        session = TWSDataSession(account=config.paper_account_id)
+    else:
+        session = TWSDataSession(account=config.paper_account_id, factory=environment.tws_factory)
     return DataTools(
         paths=environment.paths,
-        tws=TWSDataSession(account=config.paper_account_id),
+        tws=session,
         clock=environment.clock,
         gateway_probe=environment.gateway_probe,
     )
@@ -1881,6 +1889,7 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
     )
     from trading.manager.telegram import ManagerDesk
     from trading.operations.overnight_watch import OvernightWatch
+    from trading.operations.pre_session_check import PreSessionCheck
 
     overnight = OvernightWatch(
         log_directory=environment.paths.log_directory,
@@ -1888,6 +1897,13 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
         clock=environment.clock,
         sleep=environment.sleep,
         probe=environment.gateway_probe,
+        # T-4b: at each lead, with the port open, one real daily-history request
+        # on the assistant's own TWS data connection (client 21).
+        lead_check=PreSessionCheck(
+            session=tools.tws,
+            unavailable=tools.tws_problem_text or "",
+            probe=environment.gateway_probe,
+        ),
     )
     assistant = TelegramAssistant(
         manager=ManagerDesk(),

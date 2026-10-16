@@ -170,9 +170,9 @@ Scheduling is code-driven in **America/New_York**. Israel = ET + 7 until 2026-10
 | ET | Israel (ET+7) | Event |
 |---|---|---|
 | 18:30 → 05:55 | 01:30 → 12:55 | Gateway watch quiet hours: a closed port is not paged, it goes to the 05:55 digest (weekends and holidays are quiet throughout) |
-| 05:55 | 12:55 | Gateway watch lead 1 (`telegram` child): the quiet-hours digest line; a page if the port is closed |
+| 05:55 | 12:55 | Gateway watch lead 1 (`telegram` child): the quiet-hours digest line; a page if the port is closed; with the port open, the pre-session data check (one daily-history request, client 21) pages if IBKR returns no prices |
 | 07:20 | 14:20 | **Last moment to start a deploy** |
-| 07:40 | 14:40 | Gateway watch lead 2: a page if the port is closed. Pre-session check (Part 6.4) |
+| 07:40 | 14:40 | Gateway watch lead 2: a page if the port is closed, else the pre-session data check again. Pre-session check (Part 6.4) |
 | 07:55 | 14:55 | `SESSION_START`; the notifier's BrokerWatch owns the Gateway until 16:15 |
 | 09:25 | 16:25 | Bridge starts, connects to IB |
 | 09:28 | 16:28 | V2 children start |
@@ -515,6 +515,7 @@ tail -n 50 ~/Jts/launcher.log                               # restarts, logoffs
 | `CLOSED` before 07:55 ET | Session will start blind. Owner must log in (Playbook 7.1) |
 | launcher log "Daily auto-restart is not enabled" | Auto-restart setting lost: Gateway will log off nightly |
 | Port OPEN but children log "login active elsewhere" (TWS 10197/162/165) | A phone/web IBKR login is taking the market data: log out there (Playbook 7.10) |
+| `⛔ IB Gateway is not returning prices (05:55 ET check)` (or 07:40) | Port open, but the pre-session data check's one daily-history request timed out, failed or returned no bars (GW-HMDS-1016): log out of the IBKR app and website, then restart IB Gateway (File → Exit, reopen, log in) |
 | Sunday | Weekly 2FA login is due (owner) |
 
 TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, data lost (resubscribe) · `1102` restored, data maintained.
@@ -541,6 +542,7 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `TWS status 2103\|2105\|2157\|2110: <message>` | screener.log | The screener's opt-in status lines, one per code change (and again after a reconnect): a broken market-data / HMDS / sec-def farm, or TWS cut off from IBKR (GW-HMDS-1016). A failure signal worded "IBKR connectivity lost" (4.9), at most one per 2 min, never re-asserted, so a farm blip during the 08:00 qualification pages nothing alone. 2104/2106/2158 ("OK", every connect) are never logged |
 | `backfill stopped at <SYM>: competing_session: TWS error 10197 …` | recorder.log | A competing login during the recording: paged by the `telegram` child 16:15–17:30 ET |
 | `overnight watch: …` | telegram.log | The `telegram` child's watch: each lead's port result, every message it sends, `BrokerWatch owns the Gateway until 16:15 ET` at the handover |
+| `pre-session data check HH:MM ET: N daily bars for <SYM> (conId N); TWS status codes: …` (INFO) / `… : no_prices\|logged_in_elsewhere\|port_closed\|not_run (<detail>) …` (WARNING) | telegram.log | The 05:55 / 07:40 real-data check (T-4b): healthy (nothing sent) or why it paged; `port_closed` sends nothing (the port watch's page) |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_closed` | supervisor.log | Exit while the Gateway port was closed: not counted toward the cap |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_unknown` | supervisor.log | The port probe itself failed (`PORT_PROBE_FAILED error=<class>` in the same pass): not counted |
 | `CHILD_EXIT_UNCOUNTED <name> reason=schema_not_ready` | supervisor.log | Exit 75 of a scheduled child: the schema gate's refusal (migration pending), not counted |
@@ -613,6 +615,7 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`) at any hour: the notifier 07:55–16:15 ET on session days, the `telegram` child outside that window | `[NOW]` |
 | Overnight Gateway watch (`telegram` child, outside 07:55–16:15 ET): 5-min port checks, quiet hours 18:30 → 05:55 ET with a morning digest, pages at 05:55 and 07:40 ET on session days, one recovery line | `[NOW]` |
 | Competing-login page 07:55–17:30 ET: at the first line, re-paged every 10 min while it is still seen (the notifier to 16:15, then the `telegram` child from `recorder.log`) | `[NOW]` |
+| Pre-session data check at 05:55 and 07:40 ET on session days (port open): one daily-history request like the screener's qualification ("2 M" of daily TRADES bars, 20 s timeout) for one universe contract (the first of AAPL, MSFT, NVDA, AMZN, GOOGL it resolved), on the assistant's own client 21; records TWS 2103/2105/2157/2110 and 10197/162/165 | `[NOW]` |
 | External dead-man's switch | `[PLANNED]` P1-B |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
@@ -631,6 +634,11 @@ What the phone says:
   - at 05:55 and 07:40 ET on session days, if the port is closed (a lead's first failed check is confirmed 2 min later, so a Gateway restart spanning the lead is not paged): `⛔ IB Gateway closed since HH:MM ET (its API port does not answer) — log in to IB Gateway; session starts 07:55 ET (05:55 ET check)`;
   - 05:55–07:55 and 16:15–18:30 ET: the same page (without the check) when an outage opens;
   - once per paged outage, whenever it reopens: `✅ IB Gateway port open again HH:MM ET (closed since HH:MM ET)` (at 07:55 at the latest, if the last check before the notifier's window succeeded). Inside 07:55–16:15 the watch is silent: the Gateway alert above is the notifier's.
+- **Pre-session data check** (05:55 and 07:40 ET on session days, when the port watch found the port open; owner decision 2026-10-16: a historical-bar request, because quotes are thin at 05:55). Healthy (bars came back): nothing. Otherwise one page per check, so 07:40 pages again after a 05:55 failure:
+  - a timeout, an error or no bars (with or without TWS 2110): `⛔ IB Gateway is not returning prices (05:55 ET check) — 1) log out of the IBKR app and website, 2) restart IB Gateway: File → Exit, reopen, log in`;
+  - a competing session (TWS 10197, or 162/165 "different IP address"): `⛔ IBKR is logged in elsewhere — log out of IBKR on your phone and the website (05:55 ET check)`;
+  - the check cannot run (IBKR data not configured for the assistant, no resolved contract in the universe): `⚠️ Pre-session data check could not run (05:55 ET check): <reason>`;
+  - the port closed by the time it connects: nothing (the port watch pages it once).
 - **Competing login.** `⚠️ IBKR login active elsewhere — log out of the IBKR app/website` `(seen in the <source> log)` at its first line, then every 10 min while it is still seen: `⚠️ IBKR login still active elsewhere since HH:MM ET — log out of the IBKR app/website`. IBKR says nothing when the other login ends: 10 min without a line ends it (no message). 07:55–16:15 ET from the notifier (screener, bridge, children), 16:15–17:30 ET from the `telegram` child (`recorder.log`).
 - **`/halt`.** The reply carries a 6-character code; `/confirm <code>` within 60 s writes `paper:<IDENTITY>`. A wrong code writes nothing and says how many tries are left; the third wrong code drops the request (send `/halt` again). `/halt` and a request's first `/confirm` pass the flood limit; after a wrong code `/confirm` is flood-limited like any command.
 
@@ -771,6 +779,8 @@ echo "$(date -Iseconds) DEPLOY rollback to $PREV_SHA result=ROLLBACK reason=<…
 Mid-session emergency is **never** a rollback: it is `/closeall` + `paper stop`.
 
 ### 6.4 Pre-session check (07:40 ET)
+
+The `telegram` child has already checked the port and requested real data at 05:55 and 07:40 ET; a silent phone means both passed (`grep 'pre-session data check' $L/telegram.log`). The manual check below is the agent's own:
 
 ```bash
 nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
