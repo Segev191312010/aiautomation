@@ -23,6 +23,13 @@ schedule); this module probes, reads the logs and sends:
     ``CompetingLoginWatch`` (a page at once, a re-page every 10 minutes while
     they keep coming, over after a 10-minute silence).
 
+A stop is never lost. ``TelegramAssistant.stop`` cancels this task and waits
+for it; Python 3.11's ``asyncio.wait_for`` runs its awaitable in a task of its
+own and drops a cancellation that lands just as that task finishes (gh-86296),
+so the timeouts here are ``asyncio.timeout`` (the caller's own task), and the
+loop checks for a pending cancellation before every sleep in case a library
+swallowed one (live flake 2026-10-17: the watch paged on while stop() waited).
+
 Both logs are followed by ``LogTailer``s whose checkpoints live in the
 assistant's state file: a restart neither resends nor skips, and the first
 start follows each log from its end. The digest of the quiet hours and the
@@ -97,6 +104,14 @@ async def _default_probe() -> bool:
     from trading.operations import telegram_tools
 
     return await telegram_tools.gateway_port_open()
+
+
+def _raise_if_cancelling() -> None:
+    """A cancellation that something inside the step swallowed is still pending:
+    honour it before sleeping again (``Task.cancelling`` counts it)."""
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError
 
 
 class RestartCapGate:
@@ -179,6 +194,7 @@ class OvernightWatch:
                     raise
                 except Exception:  # noqa: BLE001 - one bad step never stops the watch
                     logger.exception("overnight watch step failed")
+                _raise_if_cancelling()
                 await self._sleep(self._wait_seconds(self._clock()))
         finally:
             self.close()
@@ -311,7 +327,9 @@ class OvernightWatch:
 
     async def _probe(self) -> bool | None:
         try:
-            return bool(await asyncio.wait_for(self._probe_fn(), PROBE_DEADLINE_S))
+            # Not wait_for: on 3.11 it can drop a stop that lands as the probe returns.
+            async with asyncio.timeout(PROBE_DEADLINE_S):
+                return bool(await self._probe_fn())
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - an unknown port is neither open nor closed

@@ -349,7 +349,10 @@ class TWSDataSession:
         if prepare is not None:
             prepare(actor)  # before the connect: its status codes come with the handshake
         try:
-            await asyncio.wait_for(actor.connect(), timeout=self._connect_timeout)
+            # Not wait_for: on 3.11 it can drop a stop that lands as the connect
+            # returns (gh-86296), and the overnight watch's stop waits on this task.
+            async with asyncio.timeout(self._connect_timeout):
+                await actor.connect()
         except BaseException:
             try:
                 await actor.disconnect()

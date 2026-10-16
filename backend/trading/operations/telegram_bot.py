@@ -140,6 +140,11 @@ INBOUND_WINDOW_SECONDS = 60.0
 WATCH_POLL_SECONDS = 2.0
 UNCLAIMED_GRACE = timedelta(seconds=10)
 MAX_QUEUED_QUESTIONS = 5
+# stop(): a background task that has not ended this long after its cancel is
+# cancelled again (Python 3.11's wait_for can drop a cancel, gh-86296), at most
+# STOP_ATTEMPTS times, so a shutdown or a fatal poll error never hangs.
+STOP_RECANCEL_SECONDS = 1.0
+STOP_ATTEMPTS = 5
 MAX_NOTIFIED_ORDERS = 500
 
 CHAT_MODEL = "claude-opus-5-5"
@@ -1291,9 +1296,22 @@ class TelegramAssistant:
 
     async def stop(self) -> None:
         tasks, self._tasks = self._tasks, []
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        pending = set(tasks)
+        for attempt in range(1, STOP_ATTEMPTS + 1):
+            if not pending:
+                break
+            for task in pending:
+                task.cancel()
+            _done, pending = await asyncio.wait(pending, timeout=STOP_RECANCEL_SECONDS)
+            if pending:
+                logger.error(
+                    "background task(s) %s still running %.0f s after cancel %d of %d",
+                    ", ".join(sorted(task.get_name() for task in pending)),
+                    STOP_RECANCEL_SECONDS, attempt, STOP_ATTEMPTS,
+                )
+        if pending:
+            logger.critical("background task(s) never stopped; leaving them")
+        await asyncio.gather(*(task for task in tasks if task not in pending), return_exceptions=True)
 
     async def drain(self) -> None:
         """Tests: wait until every queued question is answered."""

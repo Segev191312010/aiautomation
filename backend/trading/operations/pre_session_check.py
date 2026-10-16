@@ -196,7 +196,10 @@ class PreSessionCheck:
             async with self._session.use(
                 status_listener=seen.status, competing_listener=seen.competing_report
             ) as actor:
-                batch = await asyncio.wait_for(actor.daily_trade_bars(con_id), self._deadline)
+                # Not wait_for: on 3.11 it runs the request in a task of its own and
+                # can drop a stop that lands as the request returns (gh-86296).
+                async with asyncio.timeout(self._deadline):
+                    batch = await actor.daily_trade_bars(con_id)
         except asyncio.CancelledError:
             raise
         except TWSCompetingSessionError as exc:

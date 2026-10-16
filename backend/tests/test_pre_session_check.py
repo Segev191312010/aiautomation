@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import timedelta
 import logging
 from typing import Any
 
@@ -313,7 +312,7 @@ async def test_end_to_end_the_composition_root_runs_the_check_at_the_lead(tmp_pa
     import json
 
     from tests.test_screener import runtime_config
-    from tests.test_telegram_bot import OWNER, env, fence_database
+    from tests.test_telegram_bot import OWNER, CeilingClock, env, fence_database, run_bounded
     from trading.operations import settings, telegram_bot as bot
     from trading.operations.keychain import KeychainReadError
     from trading.operations.notifier import save_chat_id, telegram_config_file
@@ -324,13 +323,10 @@ async def test_end_to_end_the_composition_root_runs_the_check_at_the_lead(tmp_pa
         "trading.operations.pre_session_check.universe_check_contract", contract_aapl, raising=True
     )
     gateway = Gateway(history="silent", request_timeout=0.05)
-    now = {"at": et(MONDAY, 5, 54)}
+    # Never past 06:00 ET: one lead (05:55) and nothing after it.
+    clock = CeilingClock(et(MONDAY, 5, 54), ceiling=et(MONDAY, 6, 0))
     sent: list[str] = []
     page = NO_PRICES_TEXT.format(check="05:55")
-
-    async def sleep(seconds: float) -> None:
-        now["at"] += timedelta(seconds=seconds)
-        await asyncio.sleep(0)
 
     async def handle(request: httpx.Request) -> httpx.Response:
         method = request.url.path.rsplit("/", 1)[-1]
@@ -338,8 +334,8 @@ async def test_end_to_end_the_composition_root_runs_the_check_at_the_lead(tmp_pa
         if method == "sendMessage":
             sent.append(payload["text"])
             return httpx.Response(200, json={"ok": True, "result": {"message_id": len(sent)}})
-        await asyncio.sleep(0.01)
-        if page in sent:
+        await asyncio.sleep(0)
+        if page in sent or clock.stalled():
             return httpx.Response(401, json={"ok": False, "error_code": 401, "description": "Unauthorized"})
         return httpx.Response(200, json={"ok": True, "result": []})
 
@@ -350,14 +346,69 @@ async def test_end_to_end_the_composition_root_runs_the_check_at_the_lead(tmp_pa
         tmp_path,
         transport=httpx.MockTransport(handle),
         read_anthropic_key=no_key,
-        clock=lambda: now["at"],
-        sleep=sleep,
+        clock=clock.clock,
+        sleep=clock.sleep,
         gateway_probe=port_open,
         tws_factory=gateway,
     )
     save_chat_id(telegram_config_file(environment.paths), OWNER)
 
-    assert await asyncio.wait_for(bot.run_telegram_assistant(env=environment), 20) == bot.EXIT_CONFIG
-    assert page in sent
+    assert await run_bounded(bot.run_telegram_assistant(env=environment)) == bot.EXIT_CONFIG
+    assert sent == [page], f"expected the one 05:55 page; sent {sent}, clock {clock.now}"
     assert [config.client_id for config in gateway.configs][:1] == [TELEGRAM_TWS_CLIENT_ID]
     assert len(gateway.requests) == 1
+
+
+async def test_a_stop_that_lands_as_the_bars_return_still_cancels_the_check():
+    """3.11's wait_for (gh-86296): the request ran in a task of its own, and a
+    stop landing as it returned was dropped. The check must end cancelled."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    holder: dict = {}
+
+    class Actor:
+        connected = True
+
+        async def daily_trade_bars(self, con_id: int) -> Any:
+            holder["task"].cancel()
+            return SimpleNamespace(bars=("bar",), competing_session=False, error=None)
+
+    class Session:
+        @asynccontextmanager
+        async def use(self, **listeners: Any):
+            yield Actor()
+
+    task = asyncio.create_task(check_for(Session())(LEAD, LEAD))
+    holder["task"] = task
+    await asyncio.wait({task})
+
+    assert task.cancelled(), f"the stop was lost: the check returned {task.result()!r}"
+
+
+async def test_a_stop_that_lands_as_the_connect_returns_still_cancels_the_session_user():
+    """The shared client-21 session's connect: the same 3.11 wait_for race."""
+    holder: dict = {}
+
+    class Actor:
+        connected = False
+        managed_accounts = frozenset({ACCOUNT})
+
+        async def connect(self) -> None:
+            holder["task"].cancel()
+            self.connected = True
+
+        async def disconnect(self) -> None:
+            self.connected = False
+
+    session = TWSDataSession(account=ACCOUNT, factory=lambda config: Actor())
+
+    async def user() -> str:
+        async with session.use():
+            return "used"
+
+    task = asyncio.create_task(user())
+    holder["task"] = task
+    await asyncio.wait({task})
+
+    assert task.cancelled(), f"the stop was lost: the session user got {task.result()!r}"

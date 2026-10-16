@@ -619,3 +619,76 @@ def test_brokerwatch_counts_a_screener_2110_as_ibkr_side_never_re_asserted():
 
 
 from tests.test_screener import database, screener_logs  # noqa: E402,F401 - fixtures
+
+
+# --------------------------------------------------------------------------
+# A stop is never lost (the T-4b end-to-end flake, 2026-10-17)
+# --------------------------------------------------------------------------
+
+
+async def _run_until_done(watch: OvernightWatch, holder: dict) -> asyncio.Task:
+    task = asyncio.create_task(watch.run(lambda text: None, lambda: None))
+    holder["watch"] = task
+    await asyncio.wait({task})
+    return task
+
+
+async def test_a_stop_that_lands_as_the_port_check_returns_still_stops_the_watch(tmp_path):
+    """Python 3.11's asyncio.wait_for runs its awaitable in a task of its own and
+    drops a cancellation that lands as that task finishes (gh-86296). With the
+    port probe under wait_for, TelegramAssistant.stop() waited forever while the
+    watch kept paging. Here the probe cancels the watch exactly as it returns:
+    the watch must end cancelled, not run on to the fake clock's end."""
+    clock = Time(et(MONDAY, 17, 0), et(MONDAY, 18, 0))
+    holder: dict = {}
+
+    async def probe() -> bool:
+        holder["watch"].cancel()
+        return True
+
+    watch, _ = make_watch(tmp_path, clock, Port(clock))
+    watch._probe_fn = probe
+    task = await _run_until_done(watch, holder)
+
+    assert task.cancelled(), f"the stop was lost: the watch ran on to {clock.now} ({task.exception()!r})"
+    assert clock.now == et(MONDAY, 17, 0)
+
+
+async def test_a_cancellation_swallowed_inside_a_step_still_stops_the_watch(tmp_path):
+    """Whatever swallows a stop inside a step (a library's wait_for, a lead hook),
+    the watch checks for a pending cancellation before it sleeps again."""
+    clock = Time(et(MONDAY, 5, 50), et(MONDAY, 9, 0))
+    holder: dict = {}
+
+    async def lead_check(now: datetime, lead: datetime) -> str | None:
+        holder["watch"].cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass  # what 3.11's wait_for does when its inner task has just finished
+        return None
+
+    watch, _ = make_watch(tmp_path, clock, Port(clock), lead_check=lead_check)
+    task = await _run_until_done(watch, holder)
+
+    assert task.cancelled(), f"the stop was lost: the watch ran on to {clock.now} ({task.exception()!r})"
+    assert clock.now == et(MONDAY, 5, 55)
+
+
+async def test_the_port_check_itself_never_drops_a_stop(tmp_path):
+    """The probe layer on its own (the loop's guard is a second layer): a stop that
+    lands as the probe returns ends the check cancelled, never with its result."""
+    clock = Time(et(MONDAY, 17, 0), et(MONDAY, 18, 0))
+    holder: dict = {}
+
+    async def probe() -> bool:
+        holder["task"].cancel()
+        return True
+
+    watch, _ = make_watch(tmp_path, clock, Port(clock))
+    watch._probe_fn = probe
+    task = asyncio.create_task(watch._probe())
+    holder["task"] = task
+    await asyncio.wait({task})
+
+    assert task.cancelled(), f"the stop was lost: the check returned {task.result()!r}"

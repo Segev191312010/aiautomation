@@ -2095,6 +2095,39 @@ def test_halt_requests_refuse_a_bad_name_or_nonce_at_the_source():
     assert len(bot.new_halt_nonce()) == 6 and int(bot.new_halt_nonce(), 16) >= 0
 
 
+class CeilingClock:
+    """The composition-root tests' clock: it moves only when the code under test
+    sleeps, and never past ``ceiling``. Unbounded, the background watch's
+    30-second sleeps raced it through months of leads while the poll loop
+    waited on real time. At the ceiling a sleep yields to the event loop only;
+    ``stalled`` says the test's window has passed (the run is then ended)."""
+
+    def __init__(self, start: datetime, *, ceiling: datetime) -> None:
+        self.now = start
+        self.ceiling = ceiling
+        self._stalled_sleeps = 0
+
+    def clock(self) -> datetime:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        if self.now >= self.ceiling:
+            self._stalled_sleeps += 1
+        self.now = min(self.ceiling, self.now + timedelta(seconds=max(seconds, 0.0)))
+        await asyncio.sleep(0)
+
+    def stalled(self) -> bool:
+        return self._stalled_sleeps > 0
+
+
+async def run_bounded(run: Any, seconds: float = 10.0) -> Any:
+    """A composition-root run that ends by itself; a hang fails at once, plainly."""
+    try:
+        return await asyncio.wait_for(run, seconds)
+    except asyncio.TimeoutError:
+        pytest.fail(f"the assistant did not stop within {seconds:g} s (a lost cancellation?)")
+
+
 async def fence_database(tmp_path: Path, monkeypatch) -> Path:
     from config import cfg
     from db.core import init_db
@@ -2200,17 +2233,14 @@ async def test_end_to_end_the_composition_root_runs_the_overnight_watch(tmp_path
 
     await fence_database(tmp_path, monkeypatch)
     monday = datetime(2026, 10, 19, 5, 50, tzinfo=ET).astimezone(UTC)
-    now = {"at": monday}
     probes: list[datetime] = []
     sent: list[tuple[int, str]] = []
 
     async def closed() -> bool:
-        probes.append(now["at"])
+        probes.append(clock.now)
         return False
 
-    async def sleep(seconds: float) -> None:
-        now["at"] += timedelta(seconds=seconds)
-        await asyncio.sleep(0)
+    clock = CeilingClock(monday, ceiling=monday + timedelta(minutes=6))
 
     page = (
         "⛔ IB Gateway closed since 05:50 ET (its API port does not answer) — log in to IB Gateway;"
@@ -2223,8 +2253,8 @@ async def test_end_to_end_the_composition_root_runs_the_overnight_watch(tmp_path
         if method == "sendMessage":
             sent.append((payload["chat_id"], payload["text"]))
             return httpx.Response(200, json={"ok": True, "result": {"message_id": len(sent)}})
-        await asyncio.sleep(0.01)
-        if any(text == page for _chat, text in sent):
+        await asyncio.sleep(0)
+        if any(text == page for _chat, text in sent) or clock.stalled():
             return httpx.Response(401, json={"ok": False, "error_code": 401, "description": "Unauthorized"})
         return httpx.Response(200, json={"ok": True, "result": []})
 
@@ -2235,12 +2265,40 @@ async def test_end_to_end_the_composition_root_runs_the_overnight_watch(tmp_path
         tmp_path,
         transport=httpx.MockTransport(handle),
         read_anthropic_key=no_key,
-        clock=lambda: now["at"],
-        sleep=sleep,
+        clock=clock.clock,
+        sleep=clock.sleep,
         gateway_probe=closed,
     )
     save_chat_id(telegram_config_file(environment.paths), OWNER)
 
-    assert await asyncio.wait_for(bot.run_telegram_assistant(env=environment), 20) == bot.EXIT_CONFIG
-    assert (OWNER, page) in sent
+    assert await run_bounded(bot.run_telegram_assistant(env=environment)) == bot.EXIT_CONFIG
+    assert (OWNER, page) in sent, f"no 05:55 page; sent {sent}, clock {clock.now}"
     assert probes[:2] == [monday, monday + timedelta(minutes=5)]
+
+
+async def test_stop_cancels_again_a_background_task_that_lost_its_first_cancel(tmp_path, monkeypatch):
+    """Python 3.11's wait_for can drop a cancellation (gh-86296); stop() cancels a
+    survivor again, so a shutdown or a fatal poll error never hangs on it."""
+    monkeypatch.setattr(bot, "STOP_RECANCEL_SECONDS", 0.01)
+    cancels: list[int] = []
+
+    class Stubborn:
+        async def run(self, send, save) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancels.append(1)  # dropped, as wait_for does when its inner task just finished
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancels.append(2)
+                raise
+
+    h = make(tmp_path)
+    h.assistant._overnight = Stubborn()
+    await h.assistant.start()
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(h.assistant.stop(), 5)
+
+    assert cancels == [1, 2]
