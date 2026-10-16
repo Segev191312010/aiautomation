@@ -58,6 +58,17 @@ def _two_strategy_schedule(request, monkeypatch):
     monkeypatch.setattr(supervisor_module, "RESEARCH_CHILDREN", {})
     monkeypatch.setattr(supervisor_module, "manager_plans", lambda *_args, **_kwargs: ())
 
+@pytest.fixture(autouse=True)
+def _no_real_keychain(monkeypatch):
+    """The dead-man's switch URL is read from the real Keychain only by the real
+    CLI: a test that reaches that reader without injecting a fake fails."""
+
+    def refuse() -> str | None:
+        pytest.fail("a test reached the real Keychain read of the heartbeat URL")
+
+    monkeypatch.setattr(supervisor_module, "heartbeat_url_from_keychain", refuse)
+
+
 ET = ZoneInfo("America/New_York")
 UTC = timezone.utc
 TUESDAY = date(2026, 10, 13)
@@ -1032,6 +1043,14 @@ def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsy
 
     monkeypatch.setattr(supervisor_module, "run_supervisor", lambda **_kwargs: pytest.fail("ran"))
     monkeypatch.setattr(supervisor_module, "run_bridge_preflight", _PREFLIGHT_OK)
+    # The CLI's dry run asks the Keychain reader (a fake here) for the heartbeat URL.
+    keychain_reads: list[str] = []
+
+    def fake_keychain() -> str | None:
+        keychain_reads.append("read")
+        return None
+
+    monkeypatch.setattr(supervisor_module, "heartbeat_url_from_keychain", fake_keychain)
 
     # A fixed simulated clock: on the session's own date the default clock
     # start is "now", which would make this test depend on the time of day.
@@ -1039,6 +1058,11 @@ def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsy
     output = capsys.readouterr().out
     assert output.startswith("DRY RUN: nothing is launched")
     assert "07:55:00  CHILD_START screener pid=1" in output
+    assert keychain_reads == ["read"]
+    assert (
+        "heartbeat    not configured (no Keychain item"
+        " com.maccabi.autotrader-v1.heartbeat/heartbeat-url)"
+    ) in output.splitlines()
 
     assert cli.main(["run", "--dry-run", "--date", "2026-10-17"]) == 1
     assert "not an XNYS trading session" in capsys.readouterr().err
@@ -1292,7 +1316,10 @@ def test_run_supervisor_registers_the_always_on_children(tmp_path, monkeypatch):
 
     assert (
         supervisor_module.run_supervisor(
-            user_paths=UserPaths(home=tmp_path), echo=io.StringIO(), unsupervised=list
+            user_paths=UserPaths(home=tmp_path),
+            echo=io.StringIO(),
+            unsupervised=list,
+            heartbeat_url=lambda: None,
         )
         == 0
     )
@@ -2067,3 +2094,158 @@ def test_dry_run_names_the_restart_cap_as_an_informational_line():
     assert report.splitlines().count(line) == 1
     assert not any(row.startswith("!!!") and "restart" in row for row in report.splitlines())
     assert not any(event in report for event in CAP_EVENTS)  # the simulated day has no failures
+
+
+# --- the dead-man's switch child (T-3) ---------------------------------------------------
+
+# A fake ping URL: the token is a secret that must never reach a log or a report.
+HEARTBEAT_TOKEN = "f4ke-0000-uuid-supervisor-secret"
+HEARTBEAT_URL = f"https://hc-ping.example/{HEARTBEAT_TOKEN}"
+HEARTBEAT_ITEM = "com.maccabi.autotrader-v1.heartbeat/heartbeat-url"
+
+
+def test_the_heartbeat_is_an_always_on_child_only_with_a_url():
+    without = supervisor_module.always_on_plans(python=PYTHON, backend=BACKEND)
+    with_url = supervisor_module.always_on_plans(python=PYTHON, backend=BACKEND, heartbeat=True)
+
+    assert [plan.name for plan in without] == ["telegram"]
+    assert [plan.name for plan in with_url] == ["telegram", "heartbeat"]
+    heartbeat = with_url[1]
+    # No URL in the argv (ps, the child log's header): the child reads the Keychain.
+    assert heartbeat.argv == (str(PYTHON), "-m", "trading.operations.heartbeat")
+    assert heartbeat.base_backoff == timedelta(seconds=15)
+    assert "heartbeat" not in {child.name for child in plans_for(market_session(TUESDAY))}
+
+
+@pytest.mark.parametrize(
+    ("url", "scheduled", "warning"),
+    [
+        (None, False, f"PREFLIGHT_WARNING heartbeat not configured (no Keychain item {HEARTBEAT_ITEM})"),
+        (
+            f"http://hc-ping.example/{HEARTBEAT_TOKEN}",
+            False,
+            f"PREFLIGHT_WARNING heartbeat not configured (Keychain item {HEARTBEAT_ITEM} is not an https URL)",
+        ),
+        (HEARTBEAT_URL, True, None),
+    ],
+)
+def test_run_supervisor_schedules_the_heartbeat_only_when_its_url_is_configured(
+    tmp_path, monkeypatch, url, scheduled, warning
+):
+    captured: dict[str, object] = {}
+
+    class CapturingSupervisor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def request_stop(self, signum: int | None = None) -> None:
+            pass
+
+        async def run(self, *, session_date: date | None = None) -> int:
+            return 0
+
+    monkeypatch.setattr(supervisor_module, "Supervisor", CapturingSupervisor)
+    paths = UserPaths(home=tmp_path)
+    echo = io.StringIO()
+
+    assert supervisor_module.run_supervisor(
+        user_paths=paths, echo=echo, unsupervised=list, heartbeat_url=lambda: url
+    ) == 0
+
+    names = [plan.name for plan in captured["always"]]
+    assert names == (["telegram", "heartbeat"] if scheduled else ["telegram"])
+    log = (paths.log_directory / "supervisor.log").read_text()
+    warnings = [line.split(" ", 1)[1] for line in log.splitlines() if "PREFLIGHT_WARNING heartbeat" in line]
+    assert warnings == ([] if warning is None else [warning])
+    assert HEARTBEAT_TOKEN not in log and HEARTBEAT_TOKEN not in echo.getvalue()
+    assert all(HEARTBEAT_TOKEN not in arg for plan in captured["always"] for arg in plan.argv)
+    # The real supervisor rotates its logs; tests and the dry run never do.
+    assert isinstance(captured["rotation"], supervisor_module.LogRotation)
+
+
+def test_dry_run_reports_the_heartbeat_by_host_never_its_url():
+    configured = dry_run_report(
+        session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK, heartbeat_url=lambda: HEARTBEAT_URL
+    )
+    missing = dry_run_report(
+        session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK, heartbeat_url=lambda: None
+    )
+    unchecked = dry_run_report(session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK)
+
+    assert "heartbeat    every 60 s to hc-ping.example" in configured.splitlines()
+    assert "heartbeat always-on" in configured
+    assert "-m trading.operations.heartbeat" in configured
+    assert HEARTBEAT_TOKEN not in configured
+    assert f"heartbeat    not configured (no Keychain item {HEARTBEAT_ITEM})" in missing.splitlines()
+    assert "heartbeat always-on" not in missing
+    assert "heartbeat    not checked (no Keychain reader given)" in unchecked.splitlines()
+    for report in (configured, missing, unchecked):
+        # A missing switch is a warning, never a refusal.
+        assert not any(row.startswith("!!!") and "heartbeat" in row for row in report.splitlines())
+        assert "CHILD_START heartbeat" not in report  # the timeline shows session children only
+        assert report.splitlines().count(supervisor_module.rotation_line()) == 1
+
+
+def test_the_dry_run_names_the_log_rotation():
+    assert supervisor_module.rotation_line() == (
+        "rotation     daily at 18:35 ET between sessions into <name>.log.YYYY-MM-DD, 14 days kept;"
+        " launchd.*.log and running always-on children's logs copied then truncated"
+    )
+
+
+@pytest.mark.full_schedule
+def test_rotation_covers_every_log_the_supervisor_opens():
+    session_names = {plan.name for plan in plans_for(market_session(TUESDAY))}
+    half_day_names = {plan.name for plan in plans_for(market_session(date(2026, 11, 27)))}
+    always_names = {
+        plan.name for plan in supervisor_module.always_on_plans(python=PYTHON, backend=BACKEND, heartbeat=True)
+    }
+
+    assert session_names | half_day_names | always_names <= set(supervisor_module.rotated_child_names())
+    assert "shadow" not in supervisor_module.rotated_child_names()  # it rotates by size on its own
+    assert supervisor_module.LAUNCHD_LOG_NAMES == (
+        UserPaths(home=Path("/x")).launchd_stdout_file.name,
+        UserPaths(home=Path("/x")).launchd_stderr_file.name,
+    )
+
+
+def test_a_hand_started_heartbeat_is_reported_as_unsupervised():
+    pattern = supervisor_module._UNSUPERVISED_PATTERN
+
+    assert re.search(pattern, f"{_PY} -m trading.operations.heartbeat")
+    # The owner's one-ping check ends by itself.
+    assert not re.search(pattern, f"{_PY} -m trading.operations.heartbeat --once")
+    table = [
+        (500, 1, f"{_PY} {_CTL} run"),
+        (501, 500, f"{_PY} -m trading.operations.heartbeat"),
+        (600, 1, f"{_PY} -m trading.operations.heartbeat"),
+    ]
+    assert supervisor_module.unsupervised_children(lambda: table) == [
+        (600, f"{_PY} -m trading.operations.heartbeat")
+    ]
+
+
+async def test_the_heartbeat_reads_the_supervisors_own_lines():
+    from trading.operations import heartbeat
+
+    assert heartbeat.SUPERVISOR_LOG_NAME == supervisor_module.SUPERVISOR_LOG_NAME
+    world = FakeWorld(et(TUESDAY, 7, 50), {"screener": [QUICK] * 3})
+    world.port_closed = [(et(TUESDAY, 7, 0), et(TUESDAY, 8, 0))]
+    world.stop_at = et(TUESDAY, 8, 30)
+
+    await world.supervisor_for(planner=only("screener")).run(session_date=TUESDAY)
+
+    state = heartbeat.SupervisorLogState(Path("/unused"))
+    uncounted = [line for line in world.lines if "CHILD_EXIT_UNCOUNTED" in line]
+    assert uncounted
+    for line in world.lines:
+        if line is uncounted[-1]:
+            break
+        state.observe(line)
+    state.observe(uncounted[-1])
+    last_closed = datetime.fromisoformat(uncounted[-1].split(" ")[0])
+    assert state.state(last_closed) == "outage"
+    assert state.state(last_closed + timedelta(minutes=11)) == "session"
+    for line in world.lines[world.lines.index(uncounted[-1]) + 1 :]:
+        state.observe(line)
+    assert state.state(et(TUESDAY, 9, 0)) == "idle"  # SUPERVISOR_STOP after the run

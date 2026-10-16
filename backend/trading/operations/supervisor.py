@@ -47,10 +47,14 @@ assistant's /status.
 
 Always-on children run outside any session, for the supervisor's whole life:
 
-    telegram  autotraderctl.py telegram run   (the owner's Telegram assistant)
+    telegram   autotraderctl.py telegram run          (the owner's Telegram assistant)
+    heartbeat  python -m trading.operations.heartbeat (the dead-man's switch's
+               pings; scheduled only when its Keychain item exists)
 
 They start when the supervisor starts, keep running between sessions and on
-closed days, and stop only when the supervisor itself stops.
+closed days, and stop only when the supervisor itself stops. The heartbeat's
+URL is read from the Keychain at the supervisor's start (an item added later
+takes effect at the next start) and by the child itself, never passed in argv.
 
 Restart policy. A child that exits before its window end is restarted after a
 backoff: 95 s for strategies (longer than their 90 s shadow-run lease), 15 s
@@ -101,6 +105,22 @@ order on SIGTERM and exit 0; a child killed by signal N reports 128 + N (137
 after SIGKILL); 127 means the child could not be launched. Each child's stdout
 and stderr are appended to its own private ``<name>.log``.
 
+Log rotation (trading.operations.logging). Between sessions, at 18:35 ET each
+day (after the replay window), ``supervisor.log``, every child's ``<name>.log``
+and launchd's ``launchd.stdout.log``/``launchd.stderr.log`` rotate into
+``<name>.log.YYYY-MM-DD``, kept 14 days. ``supervisor.log`` is renamed and
+reopened, and the newest state lines (this run's SUPERVISOR_START, the newest
+SESSION_* line, each child's newest CHILD_START or CHILD_EXIT) are copied,
+verbatim with their original times, to the top of the new file, so a reader
+of the new file alone (the Telegram /status, the heartbeat) still sees the
+running supervisor. A child log nobody holds is renamed; a running always-on
+child's log and launchd's files (held open by those processes) are copied then
+truncated in place. A rotation missed while the supervisor was down is made
+up between sessions at the next start; it is logged as
+
+    <ISO UTC> LOG_ROTATED date=<YYYY-MM-DD> renamed=<n> truncated=<n> pruned=<n> carried=<n>
+    <ISO UTC> LOG_ROTATION_FAILED file=<name> error=<type>   (one per failed file)
+
 The supervisor holds no broker connection and grants no authority; every child
 enforces its own shadow or PAPER boundary.
 """
@@ -108,7 +128,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -126,6 +146,23 @@ import subprocess
 import sys
 from typing import Protocol, TextIO
 
+from trading.operations.heartbeat import (
+    HEARTBEAT_CHILD,
+    HEARTBEAT_MODULE,
+    UrlSource as HeartbeatUrlSource,
+    load_target as load_heartbeat_target,
+    url_from_keychain as heartbeat_url_from_keychain,
+)
+from trading.operations.logging import (
+    ROTATION_KEEP_DAYS,
+    ROTATION_TIME,
+    archive_path,
+    latest_rotation_boundary,
+    next_rotation_boundary,
+    prune_archives,
+    rotate_by_copy_truncate,
+    rotate_by_rename,
+)
 from trading.operations.paths import FILE_MODE, PathSecurityError, UserPaths, ensure_private_directory
 from trading.scheduler.lease import DEFAULT_LEASE_TTL
 from trading.scheduler.sessions import (
@@ -240,6 +277,9 @@ TERMINATE_GRACE = timedelta(seconds=20)
 MAX_SLEEP_CHUNK_SECONDS = 30.0
 LAUNCH_FAILED_CODE = 127
 SUPERVISOR_LOG_NAME = "supervisor.log"
+# Written by launchd itself (the supervisor's own stdout and stderr), so held
+# open by launchd: rotated by copy-then-truncate, never renamed.
+LAUNCHD_LOG_NAMES = ("launchd.stdout.log", "launchd.stderr.log")
 LOCK_FILE_NAME = "supervisor.lock"
 _SHUTDOWN_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
 
@@ -379,11 +419,20 @@ LaunchPlan = ChildPlan | AlwaysOnPlan
 
 
 def always_on_plans(
-    *, python: Path = VENV_PYTHON, backend: Path = BACKEND_DIR
+    *, python: Path = VENV_PYTHON, backend: Path = BACKEND_DIR, heartbeat: bool = False
 ) -> tuple[AlwaysOnPlan, ...]:
-    """The children that run independently of trading sessions."""
+    """The children that run independently of trading sessions.
+
+    ``heartbeat`` only when its URL is configured (``heartbeat.load_target``):
+    without one the child could only exit 78 in a restart loop.
+    """
     control = str(backend / "autotraderctl.py")
-    return (AlwaysOnPlan(name=TELEGRAM_CHILD, argv=(str(python), control, "telegram", "run")),)
+    plans = [AlwaysOnPlan(name=TELEGRAM_CHILD, argv=(str(python), control, "telegram", "run"))]
+    if heartbeat:
+        # No URL in the argv: argv is visible to ps and copied into the child
+        # log's header line. The child reads the Keychain itself (cwd backend/).
+        plans.append(AlwaysOnPlan(name=HEARTBEAT_CHILD, argv=(str(python), "-m", HEARTBEAT_MODULE)))
+    return tuple(plans)
 
 
 def strategy_cutoff(strategy_name: str, session_date: date) -> datetime:
@@ -639,10 +688,13 @@ class Supervisor:
         sleep: Sleeper = asyncio.sleep,
         sleep_chunk_seconds: float = MAX_SLEEP_CHUNK_SECONDS,
         port_probe: PortProbe | None = None,
+        rotation: LogRotation | None = None,
     ) -> None:
         """``port_probe`` says whether the Gateway's port is open at an exit;
         ``run_supervisor`` passes ``gateway_port_open``. Without one (tests,
         the dry run) the port counts as open, so every restartable exit counts.
+        ``rotation`` rotates the logs daily between sessions; without one
+        (tests, the dry run) nothing is rotated.
         """
         if not sleep_chunk_seconds > 0:
             raise ValueError("sleep_chunk_seconds must be positive")
@@ -656,6 +708,8 @@ class Supervisor:
         self._sleep = sleep
         self._chunk = sleep_chunk_seconds
         self._port_probe = port_probe
+        self._rotation = rotation
+        self._rotation_due: datetime | None = None
         self._stop = asyncio.Event()
         self._stop_reason = "completed"
         # next_start is set when run() begins: they start with the supervisor.
@@ -683,6 +737,8 @@ class Supervisor:
         self._event(f"SUPERVISOR_START pid={os.getpid()} mode={mode}")
         try:
             started = self._clock()
+            if self._rotation is not None:
+                self._rotation_due = self._rotation.due_at(started)
             for child in self._always:
                 child.next_start = started
             await self._tend_always(started)
@@ -1074,17 +1130,39 @@ class Supervisor:
                 stop.cancel()
 
     async def _wait_until(self, moment: datetime) -> None:
-        """Between sessions: only the always-on children are tended."""
+        """Between sessions: only the always-on children are tended, and the
+        logs rotate (never during a session, so a rotation never splits one)."""
         while not self.stopping:
             now = self._clock()
             await self._tend_always(now)
             if self.stopping or now >= moment:
                 return
+            self._rotate_logs_if_due(now)
             if any(child.has_exited for child in self._always):
                 continue
+            deadlines = [moment]
             restarts = self._next_deadline(self._always)
-            deadline = moment if restarts is None else min(moment, restarts)
-            await self._wait(deadline, self._always)
+            if restarts is not None:
+                deadlines.append(restarts)
+            if self._rotation_due is not None:
+                deadlines.append(self._rotation_due)
+            await self._wait(min(deadlines), self._always)
+
+    def _rotate_logs_if_due(self, now: datetime) -> None:
+        rotation, due = self._rotation, self._rotation_due
+        if rotation is None or due is None or now < due:
+            return
+        # The next boundary first: a failing rotation is retried at the next
+        # boundary (or the next start), never in a loop.
+        self._rotation_due = next_rotation_boundary(now)
+        # A running always-on child holds its log open: copied then truncated.
+        held = frozenset(child.plan.name for child in self._always if child.running)
+        try:
+            lines = rotation.rotate(now, held_open=held)
+        except Exception as exc:  # noqa: BLE001 - a failed rotation must never stop the supervisor
+            lines = [f"LOG_ROTATION_FAILED file=all error={type(exc).__name__}"]
+        for line in lines:
+            self._event(line)
 
     async def _abandon(self, children: Sequence[_Child]) -> None:
         """Error path: never leave a child running without its supervisor.
@@ -1236,25 +1314,174 @@ class SubprocessLauncher:
         return _GroupLeader(process)
 
 
+class _CarriedLines:
+    """The newest lines a reader of a freshly rotated ``supervisor.log`` needs:
+    this run's SUPERVISOR_START, the newest SESSION_* line, and each child's
+    newest CHILD_START or CHILD_EXIT, in their original order."""
+
+    def __init__(self) -> None:
+        self._newest: dict[str, tuple[int, str]] = {}
+        self._order = itertools.count()
+
+    def observe(self, line: str) -> None:
+        fields = line.split(" ", 3)
+        if len(fields) < 2:
+            return
+        kind = fields[1]
+        if kind == "SUPERVISOR_START":
+            self._newest.clear()
+            key = kind
+        elif kind.startswith("SESSION_"):
+            key = "SESSION_"
+        elif kind in ("CHILD_START", "CHILD_EXIT") and len(fields) >= 3:
+            key = f"CHILD {fields[2]}"
+        else:
+            return
+        self._newest[key] = (next(self._order), line)
+
+    def lines(self) -> list[str]:
+        return [line for _order, line in sorted(self._newest.values())]
+
+
 class SupervisorLog:
     """Append-only private ``supervisor.log``, echoed to the terminal when attached."""
 
     def __init__(self, path: Path, *, echo: TextIO | None = None) -> None:
         ensure_private_directory(path.parent)
+        self.path = path
         self._stream = os.fdopen(open_private_append(path), "a", encoding="utf-8")
         self._echo = echo
+        self._carried = _CarriedLines()
 
     def __call__(self, line: str) -> None:
         self._stream.write(line + "\n")
         self._stream.flush()
+        self._carried.observe(line)
         if self._echo is not None:
             try:
                 print(line, file=self._echo, flush=True)
             except (OSError, ValueError):
                 self._echo = None  # the terminal went away; the log file remains
 
+    def rotate(self, day: date) -> int:
+        """Rename the log to its archive for ``day``, reopen a new file at the same
+        path, and copy the newest state lines into it; how many were copied.
+
+        If the new file cannot be opened, the old handle (now the archive's)
+        stays in use, so no line is lost, and the error is raised.
+        """
+        self._stream.flush()
+        rotate_by_rename(self.path, day, keep_empty=True)
+        stream = os.fdopen(open_private_append(self.path), "a", encoding="utf-8")
+        previous, self._stream = self._stream, stream
+        previous.close()
+        carried = self._carried.lines()
+        for line in carried:
+            self._stream.write(line + "\n")
+        self._stream.flush()
+        return len(carried)
+
     def close(self) -> None:
         self._stream.close()
+
+
+def rotated_child_names() -> tuple[str, ...]:
+    """Every ``<name>.log`` the supervisor's launcher opens: each scheduled and
+    each always-on child's (a test pins this to the plans)."""
+    names = (
+        "screener",
+        "notifier",
+        BRIDGE_CHILD,
+        *STRATEGY_STARTS,
+        MANAGER_CHILD,
+        *MANAGED_STRATEGY_STARTS,
+        *RESEARCH_CHILDREN,
+        TELEGRAM_CHILD,
+        HEARTBEAT_CHILD,
+    )
+    return tuple(dict.fromkeys(names))
+
+
+def rotation_line() -> str:
+    """The dry run's informational log-rotation line."""
+    return (
+        f"rotation     daily at {ROTATION_TIME:%H:%M} ET between sessions into"
+        f" <name>.log.YYYY-MM-DD, {ROTATION_KEEP_DAYS} days kept;"
+        " launchd.*.log and running always-on children's logs copied then truncated"
+    )
+
+
+class LogRotation:
+    """The supervisor's daily log rotation (trading.operations.logging).
+
+    Only ``supervisor.log``, the children's ``<name>.log`` and launchd's two
+    files: ``shadow.log`` rotates by size on its own, and any other file in
+    the directory (``deploys.log``) is never touched.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        log: SupervisorLog,
+        *,
+        children: Sequence[str] | None = None,
+        keep_days: int = ROTATION_KEEP_DAYS,
+    ) -> None:
+        self._directory = directory
+        self._log = log
+        self._children = tuple(children) if children is not None else rotated_child_names()
+        self._keep_days = keep_days
+
+    def due_at(self, now: datetime) -> datetime:
+        """The newest 18:35 ET boundary while its ``supervisor.log`` archive does
+        not exist (a rotation missed while the supervisor was down is made up),
+        else the next boundary."""
+        boundary = latest_rotation_boundary(now)
+        if archive_path(self._log.path, boundary.date()).exists():
+            return next_rotation_boundary(now)
+        return boundary
+
+    def rotate(self, now: datetime, *, held_open: Collection[str] = ()) -> list[str]:
+        """Rotate everything for the newest boundary's date; the lines to log.
+
+        ``held_open`` names the children running now (their files are copied
+        then truncated). ``supervisor.log`` goes last: its archive marks the
+        day as done.
+        """
+        day = latest_rotation_boundary(now).date()
+        renamed = truncated = carried = pruned = 0
+        failures: list[str] = []
+
+        def attempt(name: str, action: Callable[[], object]) -> object:
+            try:
+                return action()
+            except Exception as exc:  # noqa: BLE001 - one bad file must not stop the others
+                failures.append(f"LOG_ROTATION_FAILED file={name} error={type(exc).__name__}")
+                return None
+
+        for child in self._children:
+            path = self._directory / f"{child}.log"
+            if child in held_open:
+                truncated += bool(attempt(path.name, partial(rotate_by_copy_truncate, path, day)))
+            else:
+                renamed += bool(attempt(path.name, partial(rotate_by_rename, path, day)))
+        for name in LAUNCHD_LOG_NAMES:
+            path = self._directory / name
+            truncated += bool(attempt(name, partial(rotate_by_copy_truncate, path, day)))
+        copied = attempt(SUPERVISOR_LOG_NAME, partial(self._log.rotate, day))
+        if isinstance(copied, int):
+            renamed += 1
+            carried = copied
+        for name in (*(f"{child}.log" for child in self._children), *LAUNCHD_LOG_NAMES, SUPERVISOR_LOG_NAME):
+            removed = attempt(
+                name, partial(prune_archives, self._directory / name, day, keep_days=self._keep_days)
+            )
+            pruned += len(removed) if isinstance(removed, list) else 0
+        return [
+            f"LOG_ROTATED date={day.isoformat()} renamed={renamed} truncated={truncated}"
+            f" pruned={pruned} carried={carried}",
+            *failures,
+        ]
 
 
 class AlreadyRunning(RuntimeError):
@@ -1394,9 +1621,12 @@ def missing_entry_points(*, python: Path = VENV_PYTHON, backend: Path = BACKEND_
 # A hand-started screener idles overnight and resumes at 08:00 on its own; it
 # would hold the supervised child's TWS client ID with no CHILD_EXIT to alert on.
 # A hand-started Telegram assistant holds the single getUpdates consumer lock.
+# A hand-started heartbeat (other than a one-ping --once check) would keep the
+# dead-man's switch quiet after the supervisor stops.
 _UNSUPERVISED_PATTERN = (
     r"^[^ ]*python[^ ]* .*(autotraderctl\.py (screener|shadow|notify|telegram) run"
-    r"|paper_bridge\.py)"
+    r"|paper_bridge\.py"
+    r"|-m trading\.operations\.heartbeat(?!.* --once))"
 )
 # A running supervisor (`autotraderctl run`, never its `--dry-run`): the
 # children under it are its own, not strays.
@@ -1478,8 +1708,13 @@ def run_supervisor(
     backend: Path = BACKEND_DIR,
     echo: TextIO | None = None,
     unsupervised: Callable[[], list[tuple[int, str]]] = unsupervised_children,
+    heartbeat_url: HeartbeatUrlSource | None = None,
 ) -> int:
-    """``autotraderctl run``: supervise in the foreground until signalled."""
+    """``autotraderctl run``: supervise in the foreground until signalled.
+
+    ``heartbeat_url`` (tests) replaces the Keychain read of the dead-man's
+    switch URL; the heartbeat child is scheduled only when it yields one.
+    """
     paths = user_paths or UserPaths.current()
     if session_date is not None and market_session(session_date) is None:
         print(f"error: {session_date.isoformat()} is not an XNYS trading session", file=sys.stderr)
@@ -1511,6 +1746,11 @@ def run_supervisor(
                         f"{iso_utc(_utc_now())} PREFLIGHT_WARNING unsupervised pid={pid} "
                         f"(stop it: kill {pid}) cmd={command}"
                     )
+                heartbeat, heartbeat_detail = load_heartbeat_target(
+                    heartbeat_url_from_keychain if heartbeat_url is None else heartbeat_url
+                )
+                if heartbeat is None:
+                    log(f"{iso_utc(_utc_now())} PREFLIGHT_WARNING heartbeat {heartbeat_detail}")
                 supervisor = Supervisor(
                     launcher=SubprocessLauncher(
                         paths.log_directory,
@@ -1519,8 +1759,11 @@ def run_supervisor(
                     ),
                     emit=log,
                     planner=partial(plan_session, python=python, backend=backend),
-                    always=always_on_plans(python=python, backend=backend),
+                    always=always_on_plans(
+                        python=python, backend=backend, heartbeat=heartbeat is not None
+                    ),
                     port_probe=gateway_port_open,
+                    rotation=LogRotation(paths.log_directory, log),
                 )
                 return asyncio.run(_run_until_signalled(supervisor, session_date))
             finally:
@@ -1643,11 +1886,14 @@ def dry_run_report(
     database: str | Path | None = None,
     registry: Callable[[], Sequence[str]] | None = None,
     preflight: BridgePreflight | None = None,
+    heartbeat_url: HeartbeatUrlSource | None = None,
 ) -> str:
     """The planned child timeline for one session, simulated; launches and writes nothing.
 
     The bridge's own ``--preflight`` is the one subprocess it runs (read-only,
     no TWS), after the pin check, with the launch's interpreter, env and cwd.
+    ``heartbeat_url`` reads the dead-man's switch URL (``autotraderctl run
+    --dry-run`` passes the Keychain read); without one it is not checked.
     """
     if database is None:
         from config import cfg
@@ -1656,6 +1902,12 @@ def dry_run_report(
     schema = schema_lines(database)
     registry_problems = tuple((registry_refusals if registry is None else registry)())
     registry_report = registry_lines(registry_problems)
+    if heartbeat_url is None:
+        heartbeat_scheduled = False
+        heartbeat_detail = "not checked (no Keychain reader given)"
+    else:
+        target, heartbeat_detail = load_heartbeat_target(heartbeat_url)
+        heartbeat_scheduled = target is not None
     current = now or _utc_now()
     planner = partial(plan_session, python=python, backend=backend)
     if session_date is None:
@@ -1697,7 +1949,7 @@ def dry_run_report(
         if plan.final_codes:
             codes = ", ".join(str(code) for code in sorted(plan.final_codes))
             lines.append(f"{plan.name} exit {codes} is a refusal: logged, never restarted")
-    for always in always_on_plans(python=python, backend=backend):
+    for always in always_on_plans(python=python, backend=backend, heartbeat=heartbeat_scheduled):
         lines.append(
             f"{always.name:<9} {'always-on':<12} {'never':<13} "
             f"{f'{always.base_backoff.seconds}-{MAX_BACKOFF.seconds}s':<10} "
@@ -1708,6 +1960,10 @@ def dry_run_report(
             " too; restarted after any exit (not shown in the timeline below)"
         )
     lines.append(restart_cap_line())
+    # Never a !!! line: without the switch the machine still trades; only the
+    # owner's external page on a dead Mac is missing.
+    lines.append(f"{HEARTBEAT_CHILD:<13}{heartbeat_detail}")
+    lines.append(rotation_line())
     lines += ["", "simulated timeline (ET; pids are placeholders):"]
     for moment, line in events:
         lines.append(f"{_local(moment, '%H:%M:%S')}  {line.split(' ', 1)[1]}")
@@ -1734,6 +1990,9 @@ __all__ = [
     "AlreadyRunning",
     "AlwaysOnPlan",
     "BRIDGE_CHILD",
+    "HEARTBEAT_CHILD",
+    "LAUNCHD_LOG_NAMES",
+    "LogRotation",
     "BRIDGE_PREFLIGHT_FLAG",
     "REGISTRY_CHILD",
     "ChildPlan",
@@ -1768,12 +2027,15 @@ __all__ = [
     "exit_status",
     "file_sha256",
     "gateway_port_open",
+    "heartbeat_url_from_keychain",
     "missing_entry_points",
     "open_private_append",
     "plan_session",
     "registry_lines",
     "registry_refusals",
     "restart_cap_line",
+    "rotated_child_names",
+    "rotation_line",
     "run_bridge_preflight",
     "run_supervisor",
     "schema_lines",
