@@ -176,6 +176,30 @@ Order sources:
   Deploys only after one observed v7a session (Friday 2026-10-16), planned
   Monday 2026-10-19 (Sunday deploy with the Gateway 2FA login).
 
+- 2026-10-16: v7b.1 (outside the bridge; bridge file and pin unchanged at
+  7d313fd0…). Found while building promotion Stage 1: the repository runner
+  (`RepositoryBackedShadowRunner.open_session`) rebuilt the shadow pipeline
+  field by field and dropped `identity_multiplier`, so every production
+  session sized every identity at ×1 whatever its row said. Under v7a this
+  changed nothing (MOMO_HOD_V2 is ×1); under v7b as reviewed it would have
+  sent ORB_V2 at 4× and VWAP_PB_V2/GAP_GO_V2 at 2× their rows, inside the
+  bridge's 1 %/25 % ceiling. The dropped keyword also bypassed the
+  fail-closed missing-row block (`identity_sizing_missing`) on v7a and v7b:
+  a sendable identity with no row was sized ×1, and only the launch
+  preflight `registry_problems` held the line. Fix:
+  `ShadowPipeline.with_decision_recorder` copies every constructor argument
+  and the runner uses it; a regression test replays the recorded 2026-10-12
+  MOMO day through the runner at ×0.25 (3726 → 931 shares). v7b.1's copy
+  test checked only the arguments its fixture set; since v7b.2 the test sets
+  every constructor argument off its default, so it ties the copy to the
+  signature for every argument. v7b.2 (tests and docs only) also checks the
+  first hop (`run_shadow_session` passes each sendable identity's row and ×1
+  for every shadow key), the missing-row block through the runner, and the
+  lease-checked recorder. Independent review of v7b.1: GO (N11,
+  docs/reviews/2026-10-16-v7b1-review.md; its MEDIUM-1/2 and LOW-1/2 are the
+  v7b.2 items above). v7b deploys only with this fix, v7b.2 and a GO re-read
+  naming the deployed head.
+
 ## Still to do
 
 - Supervised first live runs: the first owner order through the bridge (the

@@ -290,3 +290,154 @@ async def test_a_sendable_identity_without_a_row_blocks_every_setup_once_critica
     assert len(critical) == 1 and "MOMO_HOD_V2" in critical[0].getMessage()
     assert pipeline.identity_multiplier is None
     assert NO_SCALING == Decimal("1")
+
+
+# --- the repository runner keeps the identity factor (found 2026-10-16, before v7b) ---
+
+
+@pytest.mark.anyio
+async def test_the_repository_runner_keeps_the_identity_factor(tmp_path, monkeypatch):
+    """Regression: open_session rebuilt the pipeline without its identity factor, so every
+    production session sized every identity at x1 (ORB_V2 would have sent 4x its row)."""
+    from config import cfg
+    from db.core import init_db
+    from tests.test_setup_persistence import _replay_momo_session
+
+    database = tmp_path / "momo.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    neutral, _ = await _replay_momo_session(database, monkeypatch)
+    base = neutral["BF B"].risk.intent.quantity
+
+    scaled_db = tmp_path / "momo-scaled.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(scaled_db))
+    await init_db()
+    scaled, _ = await _replay_momo_session(scaled_db, monkeypatch, identity_multiplier=Decimal("0.25"))
+    bf_b = scaled["BF B"]
+    assert bf_b.outcome.value == "shadow_accepted"
+    assert bf_b.risk is not None and bf_b.risk.intent is not None
+    assert base > 4
+    assert bf_b.risk.intent.quantity == math.floor(base * Decimal("0.25"))  # 3726 -> 931 on the golden day
+
+
+def test_with_decision_recorder_copies_every_constructor_argument():
+    """Every constructor argument is set away from its default, so a copy that drops one
+    falls back to the default and fails here. A new argument fails here too, until both
+    this fixture and ``with_decision_recorder`` carry it (v7b.2, review MEDIUM-1)."""
+    import inspect
+
+    from trading.contracts import EngineMode
+
+    async def other(**_kwargs) -> None:
+        return None
+
+    parameters = {
+        name: param
+        for name, param in inspect.signature(ShadowPipeline.__init__).parameters.items()
+        if name != "self"
+    }
+    arguments = {
+        "proposal_provider": _Provider(),
+        "decision_recorder": _record_nothing,
+        "strategy": MomoStrategy(),
+        "mode": EngineMode.BACKTEST,  # any valid mode but the default SHADOW
+        "setup_recorder": _setups,
+        "sizing": _Overlay(Decimal("0.5")),
+        "identity_multiplier": Decimal("0.25"),
+    }
+    assert set(arguments) == set(parameters), "a constructor argument the fixture does not set"
+    original = ShadowPipeline(**arguments)
+    copy = original.with_decision_recorder(other)
+    assert copy is not original
+    for name, param in parameters.items():
+        held = getattr(original, f"_{name}")
+        # Off its default: a dropped argument cannot match the original by accident.
+        assert held is not param.default, name
+        if name == "decision_recorder":
+            assert getattr(copy, f"_{name}") is other
+        else:
+            assert getattr(copy, f"_{name}") is held, name
+
+    # A sendable identity with no row (None) stays None in the copy, never x1.
+    missing = ShadowPipeline(**{**arguments, "identity_multiplier": None})
+    assert missing.with_decision_recorder(other).identity_multiplier is None
+
+
+@pytest.mark.anyio
+async def test_the_repository_runner_blocks_a_sendable_identity_without_a_row(tmp_path, monkeypatch):
+    """The fail-closed branch through open_session. Before v7b.1 the copy dropped the
+    factor, so None became x1 and BF B was accepted at 3726 shares (review LOW-1)."""
+    import sqlite3
+
+    from config import cfg
+    from db.core import init_db
+    from tests.test_setup_persistence import _replay_momo_session
+
+    database = tmp_path / "momo-missing.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    decisions, _ = await _replay_momo_session(database, monkeypatch, identity_multiplier=None)
+    bf_b = decisions["BF B"]
+    assert bf_b.outcome.value == "risk_blocked"
+    assert bf_b.risk is not None and bf_b.risk.codes == (IDENTITY_SIZING_MISSING,)
+    assert bf_b.risk.intent is None
+    assert all(decision.outcome.value != "shadow_accepted" for decision in decisions.values())
+    # The bridge reads shadow_accepted rows only: there is nothing for it to send.
+    with sqlite3.connect(database) as db:
+        stored = dict(db.execute("SELECT decision_key, outcome FROM autotrader_candidate_decisions"))
+    assert stored[bf_b.decision_key] == "risk_blocked"
+    assert "shadow_accepted" not in stored.values()
+
+
+@pytest.mark.anyio
+async def test_the_repository_runner_records_through_the_lease_checked_recorder(tmp_path, monkeypatch):
+    """Every decision the runner stores goes through the recorder it hands the pipeline,
+    and that recorder checks the lease before it writes (v7b.2, review LOW-2)."""
+    import sqlite3
+
+    from config import cfg
+    from db.core import init_db
+    from tests.test_setup_persistence import _replay_momo_session
+    from trading.orchestration import persistence
+    from trading.scheduler.lease import LeaseHeartbeat, LeaseLostError
+
+    handed: list = []
+    passed: list = []
+    copy = ShadowPipeline.with_decision_recorder
+
+    def spy(self, decision_recorder):
+        handed.append(decision_recorder)
+
+        async def counting(*, decision, owner_id):
+            passed.append(decision)
+            await decision_recorder(decision=decision, owner_id=owner_id)
+
+        return copy(self, counting)
+
+    monkeypatch.setattr(ShadowPipeline, "with_decision_recorder", spy)
+    database = tmp_path / "momo-lease.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    await _replay_momo_session(database, monkeypatch)
+
+    with sqlite3.connect(database) as db:
+        stored = sorted(row[0] for row in db.execute("SELECT decision_key FROM autotrader_candidate_decisions"))
+    assert len(handed) == 1
+    assert len(stored) == 2 and sorted(decision.decision_key for decision in passed) == stored
+    recorder = handed[0]
+    assert recorder is not persistence._record_decision_idempotent  # never the bare writer
+
+    # Once the lease is gone, the recorder refuses before anything is written.
+    async def lease_lost(self, *, now=None):
+        raise LeaseLostError("fixture: the shadow lease was lost")
+
+    writes: list = []
+
+    async def write(**kwargs):
+        writes.append(kwargs)
+
+    monkeypatch.setattr(LeaseHeartbeat, "require", lease_lost)
+    monkeypatch.setattr(persistence, "_record_decision_idempotent", write)
+    with pytest.raises(LeaseLostError):
+        await recorder(decision=passed[0], owner_id="owner-a")
+    assert writes == []
