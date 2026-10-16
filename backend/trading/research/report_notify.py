@@ -6,7 +6,9 @@ important first, because one Telegram message is cut at its end:
 
 1. evidence: each strategy ELIGIBLE or not under the paper promotion rule,
    and why (the rule only reports; nothing is granted), with the AI
-   do-no-harm verdict and the signal-outcome tracker's night;
+   do-no-harm verdict and the signal-outcome tracker's night, then the
+   promoter's proposals (PROPOSAL / HELD / DEMOTION PROPOSAL lines) and each
+   sendable identity's size and probation;
 2. window research: the replay's swept windows and its trades by signal
    hour, plus the live tracked setups by hour;
 3. live R: every real PAPER bracket in R after commissions;
@@ -406,8 +408,11 @@ def evidence_text(evidence: NightlyEvidence) -> str:
     The phase-3 section is appended after the others (absent when the
     evidence carries no scorecard), so the earlier sections never change.
     """
+    first = evidence_lines(evidence.promotion, tracker=evidence.tracker)
+    if evidence.proposals is not None:
+        first += evidence.proposals.lines()
     sections = [
-        "\n".join(evidence_lines(evidence.promotion, tracker=evidence.tracker)),
+        "\n".join(first),
         "\n".join(window_research_lines(evidence)),
         "\n".join(live_r_lines(evidence)),
     ]

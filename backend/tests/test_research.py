@@ -1008,6 +1008,7 @@ def test_run_replay_cli_reports_every_registered_strategy_and_skips_gap_explicit
         "evidence.json",
         "evidence.txt",
         "live-r.json",
+        "proposals.json",
         "replay-gap-v2.json",
         "replay-gap.json",
         "replay-momo.json",

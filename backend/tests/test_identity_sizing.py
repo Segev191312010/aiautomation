@@ -331,6 +331,9 @@ def test_with_decision_recorder_copies_every_constructor_argument():
     async def other(**_kwargs) -> None:
         return None
 
+    async def keep_sizing(_row) -> None:  # T-8's decision-sizing sidecar, off its default writer
+        return None
+
     parameters = {
         name: param
         for name, param in inspect.signature(ShadowPipeline.__init__).parameters.items()
@@ -344,6 +347,7 @@ def test_with_decision_recorder_copies_every_constructor_argument():
         "setup_recorder": _setups,
         "sizing": _Overlay(Decimal("0.5")),
         "identity_multiplier": Decimal("0.25"),
+        "sizing_recorder": keep_sizing,
     }
     assert set(arguments) == set(parameters), "a constructor argument the fixture does not set"
     original = ShadowPipeline(**arguments)
