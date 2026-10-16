@@ -419,6 +419,14 @@ def strategy_cutoff(strategy_name: str, session_date: date) -> datetime:
     return strategy_entry_window(strategy_name, session_date)[1]
 
 
+def bridge_window(session: MarketSession) -> tuple[datetime, datetime]:
+    """The bridge's window in UTC: ``BRIDGE_START`` to the session's own close
+    (13:00 ET on a half day). The notifier stops re-asserting an IBKR loss the
+    bridge reported once this window ends (review P1-A.1 L-2)."""
+    starts_at = datetime.combine(session.session_date, BRIDGE_START, tzinfo=MARKET_TIMEZONE)
+    return starts_at.astimezone(UTC), session.closes_at.astimezone(UTC)
+
+
 def plan_session(
     session: MarketSession,
     *,
@@ -432,6 +440,7 @@ def plan_session(
     interpreter = str(python)
     control = str(backend / "autotraderctl.py")
     bridge = str(backend / "scripts_local" / "paper_bridge.py")
+    bridge_starts_at, bridge_ends_at = bridge_window(session)
 
     def at(local: time) -> datetime:
         return datetime.combine(day, local, tzinfo=MARKET_TIMEZONE).astimezone(UTC)
@@ -456,8 +465,8 @@ def plan_session(
         ChildPlan(
             name=BRIDGE_CHILD,
             argv=(interpreter, bridge, "--date", iso),
-            starts_at=at(BRIDGE_START),
-            ends_at=session.closes_at.astimezone(UTC),
+            starts_at=bridge_starts_at,
+            ends_at=bridge_ends_at,
             finishes_at=(session.closes_at - BRIDGE_FINISH_BEFORE_CLOSE).astimezone(UTC),
             base_backoff=SERVICE_BACKOFF,
             final_codes=frozenset({BRIDGE_REFUSED_CODE}),
@@ -1838,6 +1847,7 @@ __all__ = [
     "TERMINATE_GRACE",
     "VENV_PYTHON",
     "always_on_plans",
+    "bridge_window",
     "bridge_preflight_argv",
     "bridge_preflight_lines",
     "bridge_review_line",

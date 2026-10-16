@@ -1,6 +1,7 @@
 """The trading-day supervisor: plan, restarts, window ends, shutdown, log contract."""
 from __future__ import annotations
 
+import ast
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -2198,6 +2199,197 @@ async def test_schema_refusals_never_count_toward_the_cap():
     bridge = FakeWorld(et(TUESDAY, 9, 20), {"bridge": [Script(exit_after=timedelta(seconds=1), code=75)] * 7})
     await bridge.supervisor_for(planner=only("bridge")).run(session_date=TUESDAY)
     assert [line.split(" ", 1)[1] for line in cap_lines(bridge)] == ["CHILD_RESTART_STORM bridge count=6 window=30m"]
+
+
+# -- Exit 75 of a scheduled child is the schema gate's refusal, and only that (review P1-A.1 L-4)
+# The supervisor never counts a scheduled child's exit 75 (``SCHEMA_REFUSAL_CODE``).
+# A child that exited 75 for another reason (a strategy copying the bridge's
+# "75 = TWS unreachable") would crash-loop with no suspension page. So every way
+# code under backend/trading (and autotraderctl.py, the entry point of every
+# scheduled child but the bridge) can end a process with 75 is listed here.
+
+# Calls that end a process with their argument as its status.
+_EXIT_CALLS = frozenset({"exit", "_exit", "quit", "SystemExit"})
+# Each place allowed to produce a 75 ("<path>:<function>") and the only functions
+# that may refer to it (None: anyone, through it). Only the schema gate's refusal
+# is reachable from a scheduled child; the other two serve commands no scheduled
+# child runs (pinned below): `db status` (75 = schema not current; `deploy check`
+# reads it) and the always-on telegram assistant (75 = another consumer holds its
+# lock; never suspendable, so its exits count). The bridge's own 75 lives in
+# backend/scripts_local/paper_bridge.py, outside this scan: the bridge is never
+# suspendable, so the exemption never applies to it.
+_EXIT_75_ALLOWED: dict[str, frozenset[str] | None] = {
+    "trading/operations/schema_gate.py:refusal_exit": None,
+    "trading/operations/db_admin.py:run_status": frozenset(
+        {"trading/cli.py:_database_command", "trading/operations/deploy_check.py:check_schema"}
+    ),
+    "trading/operations/telegram_bot.py:run_telegram_assistant": frozenset(
+        {"trading/cli.py:_telegram_command"}
+    ),
+}
+# The autotraderctl domains the scheduled children run; none reaches the two above.
+_SCHEDULED_DOMAINS = frozenset({"screener", "notify", "shadow", "manager", "research"})
+
+
+def _is_75(node: ast.AST | None, names: set[str]) -> bool:
+    """Whether evaluating ``node`` can yield 75: the literal, a name bound to it,
+    or either branch of a conditional or ``and``/``or``. A comparison never can."""
+    if isinstance(node, ast.Constant):
+        return type(node.value) is int and node.value == 75
+    if isinstance(node, ast.Name):
+        return node.id in names
+    if isinstance(node, ast.Attribute):
+        return node.attr in names
+    if isinstance(node, ast.IfExp):
+        return _is_75(node.body, names) or _is_75(node.orelse, names)
+    if isinstance(node, ast.BoolOp):
+        return any(_is_75(value, names) for value in node.values)
+    if isinstance(node, ast.NamedExpr):
+        return _is_75(node.value, names)
+    return False
+
+
+def _names_bound_to_75(trees: list[ast.Module]) -> set[str]:
+    """Every name (constant, local, attribute, import alias) bound to 75 anywhere."""
+    names = {"EX_TEMPFAIL"}
+    while True:
+        found = set(names)
+        for tree in trees:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    found.update(alias.asname for alias in node.names if alias.asname and alias.name in found)
+                    continue
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                    targets = [node.target]
+                else:
+                    continue
+                if not _is_75(node.value, found):
+                    continue
+                for target in targets:
+                    for leaf in ast.walk(target):
+                        if isinstance(leaf, ast.Name):
+                            found.add(leaf.id)
+                        elif isinstance(leaf, ast.Attribute):
+                            found.add(leaf.attr)
+        if found == names:
+            return names
+        names = found
+
+
+def _exit_75_scan(sources: dict[str, str]) -> tuple[set[str], dict[str, set[str]]]:
+    """``(sites, references)`` over ``{path: code}`` (the AST: comments and
+    docstrings never count). A site is ``<path>:<function qualname>`` of a
+    ``return``/``lambda`` that can yield 75, an exit call (``sys.exit``,
+    ``os._exit``, ``exit``, ``quit``, ``SystemExit``) with a 75 argument, or any
+    use of ``EX_TEMPFAIL``. ``references`` maps each allowed function's name to
+    the ``<path>:<top-level function>`` places that load it."""
+    trees = {path: ast.parse(text, filename=path) for path, text in sources.items()}
+    names = _names_bound_to_75(list(trees.values()))
+    watched = {key.rsplit(":", 1)[1] for key in _EXIT_75_ALLOWED}
+    sites: set[str] = set()
+    references: dict[str, set[str]] = {name: set() for name in watched}
+
+    def visit(path: str, node: ast.AST, owner: tuple[str, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = owner
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = (*owner, child.name)
+            hit = False
+            if isinstance(child, ast.Return):
+                hit = _is_75(child.value, names)
+            elif isinstance(child, ast.Lambda):
+                hit = _is_75(child.body, names)
+            elif isinstance(child, ast.Call):
+                func = child.func
+                called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                if called in _EXIT_CALLS:
+                    arguments = [*child.args, *(keyword.value for keyword in child.keywords)]
+                    hit = any(_is_75(argument, names) for argument in arguments)
+            elif isinstance(child, ast.alias):
+                hit = child.name == "EX_TEMPFAIL"
+            if isinstance(child, ast.Attribute) and child.attr == "EX_TEMPFAIL":
+                hit = True
+            if isinstance(child, ast.Name) and child.id == "EX_TEMPFAIL":
+                hit = True
+            if hit:
+                sites.add(f"{path}:{'.'.join(owner) or '<module>'}")
+            loaded = child.id if isinstance(child, ast.Name) else getattr(child, "attr", None)
+            if isinstance(child, (ast.Name, ast.Attribute)) and loaded in watched:
+                references[loaded].add(f"{path}:{owner[0] if owner else '<module>'}")
+            visit(path, child, inner)
+
+    for path, tree in trees.items():
+        visit(path, tree, ())
+    return sites, references
+
+
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [
+        ({"m.py": "def handler(arguments):\n    return 75\n"}, {"m.py:handler"}),
+        ({"m.py": "import sys\ndef main():\n    sys.exit(75)\n"}, {"m.py:main"}),
+        ({"m.py": "def main():\n    raise SystemExit(75)\n"}, {"m.py:main"}),
+        ({"m.py": "import os, sys\ndef run():\n    sys.exit(os.EX_TEMPFAIL)\n"}, {"m.py:run"}),
+        ({"m.py": "from os import EX_TEMPFAIL\n"}, {"m.py:<module>"}),
+        ({"m.py": "import os\nclass Job:\n    def stop(self):\n        os._exit(75)\n"}, {"m.py:Job.stop"}),
+        ({"m.py": "RETRY = 75\ndef handler():\n    return RETRY\n"}, {"m.py:handler"}),
+        ({"m.py": "def handler(ok):\n    code = 75\n    return 0 if ok else code\n"}, {"m.py:handler"}),
+        ({"m.py": "def handler(ok):\n    return ok and 75\n"}, {"m.py:handler"}),
+        ({"m.py": "later = lambda: 75\n"}, {"m.py:<module>"}),
+        (
+            {"a.py": "TEMPFAIL = 75\n", "b.py": "from a import TEMPFAIL as AGAIN\ndef main():\n    return AGAIN\n"},
+            {"b.py:main"},
+        ),
+        # Comments, docstrings, comparisons and other numbers are not exits.
+        (
+            {"m.py": '# return 75\ndef handler():\n    """Exits 75 when the TWS is down."""\n    return 0\n'},
+            set(),
+        ),
+        (
+            {"m.py": "from datetime import timedelta\nTTL = timedelta(minutes=75)\n"
+                     "def refused(code):\n    return code == 75\ndef wide():\n    return 750\n"},
+            set(),
+        ),
+    ],
+)
+def test_the_exit_75_scan_reads_code_not_comments(sources, expected):
+    assert _exit_75_scan(sources)[0] == expected
+
+
+@pytest.mark.full_schedule
+def test_only_the_schema_gate_can_exit_a_scheduled_child_with_75():
+    """Review P1-A.1 L-4: the uncounted exit 75 is safe only while nothing else
+    under backend/trading can make a scheduled child exit 75."""
+    files = [*sorted((BACKEND_DIR / "trading").rglob("*.py")), BACKEND_DIR / "autotraderctl.py"]
+    sources = {path.relative_to(BACKEND_DIR).as_posix(): path.read_text(encoding="utf-8") for path in files}
+    sites, references = _exit_75_scan(sources)
+
+    assert sites == set(_EXIT_75_ALLOWED), (
+        "a new way to exit 75 under backend/trading: route a schema refusal through"
+        " schema_gate.refusal_exit, and give any other exit its own code"
+    )
+    for site, callers in _EXIT_75_ALLOWED.items():
+        if callers is not None:
+            assert references[site.rsplit(":", 1)[1]] == callers, site
+    # The scan covers every scheduled child but the bridge: each runs
+    # autotraderctl.py (trading.cli) in a domain that never reaches the two
+    # commands above. The bridge alone runs a script outside backend/trading.
+    session = market_session(TUESDAY)
+    domains = set()
+    for plan in plan_session(session):
+        child = supervisor_module._Child(plan=plan, backoff=supervisor_module.SERVICE_BACKOFF, next_start=None)
+        if plan.name == supervisor_module.BRIDGE_CHILD:
+            assert plan.argv[1] == str(BACKEND_DIR / "scripts_local" / "paper_bridge.py")
+            assert not child.suspendable
+            continue
+        assert child.suspendable and plan.argv[1] == str(BACKEND_DIR / "autotraderctl.py"), plan.name
+        domains.add(plan.argv[2])
+    assert domains == _SCHEDULED_DOMAINS
+    [telegram] = supervisor_module.always_on_plans()
+    assert telegram.argv[2] == "telegram"
+    assert not supervisor_module._Child(plan=telegram, backoff=supervisor_module.SERVICE_BACKOFF, next_start=None).suspendable
 
 
 class _ReplayWorld(FakeWorld):

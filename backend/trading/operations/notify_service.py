@@ -28,7 +28,10 @@
      while no sweep returns, and one "reconnected" line once a sweep has
      been followed by two minutes without a failure. At most one such pair
      per half hour (the shared ``trading.operations.hysteresis`` machine);
-     what it holds back is a flap, counted in the next digest.
+     what it holds back is a flap, counted in the next digest. An IBKR-side
+     loss the bridge reports (TWS 1100/2110 not restored within two minutes,
+     while the bridge runs inside its window) opens it too, worded "IBKR
+     connectivity lost ... do not log in again".
 
 It only reads the database, the logs, and the bridge state file: nothing here
 can place, modify, or cancel an order. What was delivered, how far each log
@@ -94,6 +97,7 @@ from trading.operations.paths import (
 )
 from trading.operations.schema_alert import schema_alert_text
 from trading.operations.schema_gate import EXIT_SCHEMA_NOT_READY
+from trading.operations.supervisor import bridge_window
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import is_sendable_identity
 from trading.storage.migrations import SchemaStatus, inspect_schema
@@ -860,6 +864,14 @@ _BRIDGE_UNREACHABLE = re.compile(r"\bTWS did not answer\b|\bTWS connect failed\b
 # already cut off from the server, once; 1101/1102 once when it is restored.
 _IBKR_LOST = re.compile(r"\bTWS\s+-?\d+\s+(?:1100|2110)\b")
 _IBKR_RESTORED = re.compile(r"\bTWS\s+-?\d+\s+110[12]\b")
+# What the alert asks of the owner follows the newest failure signal (review
+# P1-A.1 L-3). A failed connect (the bridge's, the screener's, a child's
+# handshake) or no first sweep: the Gateway does not answer, so "log in". TWS
+# 1100/2110 (or its re-assertion) comes from a bridge connected to a logged-in
+# Gateway whose own link to IBKR is down: it reconnects by itself, and a new
+# login or a Gateway restart would only drop the bridge's connection.
+GATEWAY_DOWN = "gateway_down"
+IBKR_LINK_DOWN = "ibkr_link_down"
 _SCREENER_UNREACHABLE = re.compile(r"\bTWS connection failed\b", re.IGNORECASE)
 # The child's own last line (`error: shadow run --strategy <name> failed: ...`),
 # not the traceback line above it: one per exit.
@@ -913,6 +925,16 @@ class BrokerWatch:
     TWS says "lost" once and "restored" once, so a loss with no restore and no
     sweep is re-asserted as a failure every ``open_after`` (2 min): a loss that
     is not restored within two minutes opens the alert, one that is is a blip.
+    Only while the bridge that said "lost" can still say "restored": the
+    supervisor's exit line for the bridge, or the end of the bridge's window
+    (``supervisor.bridge_window``), makes the loss unknown, not lost, and it is
+    never re-asserted after that (review P1-A.1 L-2: 1100 at 15:59, restored at
+    16:00:30 with nobody left to log it, paged "unreachable" at 16:01). A new
+    bridge reports a loss that is still there itself (TWS 2110 on connect).
+
+    The alert names the newest failure: an IBKR-side loss (TWS 1100/2110) says
+    the Gateway is still logged in and reconnects by itself; anything else says
+    "log in" (review P1-A.1 L-3). The recovery line is the same for both.
 
     In memory only: after a notifier restart during an outage the next
     evidence reopens it (the 30-minute cadence lives in the persisted
@@ -935,11 +957,20 @@ class BrokerWatch:
     # The bridge's last TWS 1100/2110 (or its re-assertion) while no restore
     # and no sweep has come since; None when IBKR's side is not known lost.
     ibkr_lost_at: datetime | None = None
+    # The newest failure signal's kind (GATEWAY_DOWN or IBKR_LINK_DOWN): the alert's wording.
+    failure_kind: str = GATEWAY_DOWN
     alerted: bool = False
     swept_since_alert: bool = False
     flaps_seen: int = 0
     flaps_reported: int = 0
     flaps_from: datetime | None = None
+    # The supervisor's bridge window end for this date; None when it is no session.
+    bridge_ends_at: datetime | None = field(init=False, default=None)
+
+    def __post_init__(self) -> None:
+        session = market_session(self.session_date)
+        if session is not None:
+            self.bridge_ends_at = bridge_window(session)[1]
 
     @property
     def unreachable(self) -> bool:
@@ -1006,6 +1037,11 @@ class BrokerWatch:
             started = _SESSION_START.search(line)
             if started is not None and started.group("date") == self.session_date.isoformat():
                 self.session_started(now)
+            exited = _CHILD_EXIT.search(line)
+            if exited is not None and exited.group("name") == BRIDGE_CHILD_NAME:
+                # The client that said "lost" is gone and its successor never
+                # hears the restore: unknown, not lost (review P1-A.1 L-2).
+                self.ibkr_lost_at = None
             return None
         evidence = broker_evidence(source, line)
         if evidence is None:
@@ -1029,6 +1065,7 @@ class BrokerWatch:
             self.handshake_children.add(source)
         elif evidence == "ibkr_lost":
             self.ibkr_lost_at = now
+        self.failure_kind = IBKR_LINK_DOWN if evidence == "ibkr_lost" else GATEWAY_DOWN
         return self._apply(self.hysteresis.failure(now), now)
 
     def check(self, now: datetime) -> str | None:
@@ -1044,14 +1081,24 @@ class BrokerWatch:
             and now >= due
         ):
             self.first_sweep_overdue = True
+            if self.ibkr_lost_at is None:
+                # A known IBKR-side loss explains the missing sweep; otherwise
+                # the Gateway never answered.
+                self.failure_kind = GATEWAY_DOWN
             # No market data since the screener's window opened: failing since then.
             event = self.hysteresis.failure(now, since=due - FIRST_SWEEP_GRACE)
             return self._apply(event, now)
         lost = self.ibkr_lost_at
-        if lost is not None and now - lost >= self.hysteresis.open_after:
+        if lost is not None and (self.bridge_ends_at is None or now >= self.bridge_ends_at):
+            # The bridge's window is over: no client is left to log the restore
+            # and no sweep comes after the screener's own end. Unknown, not lost:
+            # never re-asserted (review P1-A.1 L-2).
+            self.ibkr_lost_at = None
+        elif lost is not None and now - lost >= self.hysteresis.open_after:
             # TWS said "lost" once and has not said "restored", and no sweep came:
             # still lost, one more failure signal.
             self.ibkr_lost_at = now
+            self.failure_kind = IBKR_LINK_DOWN
             return self._apply(self.hysteresis.failure(now), now)
         return self._apply(self.hysteresis.tick(now), now)
 
@@ -1089,10 +1136,14 @@ class BrokerWatch:
 
     def alert_text(self) -> str:
         assert self.unreachable_since is not None
-        text = (
-            f"⛔ IB Gateway unreachable since {_et_hhmm(self.unreachable_since)} ET — log in;"
-            " the bot has no market data"
-        )
+        since = _et_hhmm(self.unreachable_since)
+        if self.failure_kind == IBKR_LINK_DOWN:
+            text = (
+                f"⛔ IBKR connectivity lost since {since} ET — the Gateway is still logged in;"
+                " do not log in again; it reconnects by itself (check IBKR status if it lasts)"
+            )
+        else:
+            text = f"⛔ IB Gateway unreachable since {since} ET — log in; the bot has no market data"
         count = len(self.restarting)
         if count:
             text += f" ({count} {'child' if count == 1 else 'children'} restarting)"

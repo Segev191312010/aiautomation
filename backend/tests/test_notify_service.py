@@ -1012,6 +1012,13 @@ _BRIDGE_2110 = (
 _CHILD_TRACEBACK = "trading.market.tws_actor.TWSConnectionError: TWS PAPER handshake failed"
 _CHILD_FAILED = "error: shadow run --strategy orb-v2 failed: TWSConnectionError: TWS PAPER handshake failed"
 _SWEEP_LINE = "2026-10-13 15:10:02,263 INFO sweep 2026-10-13: qualified=396 quoted=396 errors=0 hot=35 seconds=89.8"
+# The two alert wordings (review P1-A.1 L-3): the Gateway does not answer (a failed
+# connect, no first sweep), or it is logged in and its link to IBKR is down (TWS 1100/2110).
+_GATEWAY_ALERT = "⛔ IB Gateway unreachable since {since} ET — log in; the bot has no market data"
+_IBKR_LOST_ALERT = (
+    "⛔ IBKR connectivity lost since {since} ET — the Gateway is still logged in;"
+    " do not log in again; it reconnects by itself (check IBKR status if it lasts)"
+)
 
 
 def test_broker_evidence_classifies_the_live_lines():
@@ -1518,11 +1525,184 @@ def test_an_ibkr_loss_not_restored_within_two_minutes_opens_the_alert_and_a_quic
     assert lost.check(_et(14, 34, 15)) is None and not lost.unreachable
     lost.check(_et(14, 34, 16))
     assert lost.unreachable_since == _et(14, 32, 16)
+    # The Gateway is still logged in: its own wording, never "log in" (review P1-A.1 L-3).
+    assert lost.alert_text() == _IBKR_LOST_ALERT.format(since="14:32")
     # The restore is success evidence: two clean minutes later, the recovery line.
     assert lost.observe("bridge", _BRIDGE_1102, _et(15, 24, 53)) is None
     assert lost.check(_et(15, 26, 53)) == (
         "✅ IB Gateway reconnected 15:24 ET — market data is back (unreachable since 14:32 ET)"
     )
+
+
+def _bridge_window_end(session_date: date) -> datetime:
+    from trading.operations.supervisor import plan_session
+    from trading.scheduler.sessions import market_session
+
+    [bridge] = [plan for plan in plan_session(market_session(session_date)) if plan.name == "bridge"]
+    return bridge.ends_at
+
+
+def test_an_ibkr_loss_is_unknown_not_lost_once_the_bridges_window_ends():
+    """Review P1-A.1 L-2: the bridge logs 1100 at 15:59:00; IBKR is back at
+    16:00:30, but no client is left to log 1102 and the screener sweeps no more.
+    The 16:01 re-assertion paged "unreachable since 15:59 ET — log in"."""
+    from trading.operations.notify_service import BrokerWatch
+
+    # Only the window end here (no supervisor line): nothing is re-asserted after it.
+    late = BrokerWatch(SESSION)
+    late.session_started(_et(7, 55))
+    late.observe("screener", _SWEEP_LINE, _et(15, 58, 30))
+    late.observe("bridge", _BRIDGE_1100.replace("14:32:16", "15:59:00"), _et(15, 59))
+    moment = _et(15, 59, 1)
+    while moment <= _et(16, 15):
+        assert late.check(moment) is None, moment
+        assert not late.unreachable, moment
+        moment += timedelta(seconds=1)
+    assert late.ibkr_lost_at is None and not late.hysteresis.is_open and not late.flaps_pending
+
+    # In session the same loss, not restored within two minutes, still opens the
+    # alert, in its own wording: 15:57:00 lost, re-asserted (and opened) at 15:59:00.
+    in_session = BrokerWatch(SESSION)
+    in_session.session_started(_et(7, 55))
+    in_session.observe("screener", _SWEEP_LINE, _et(15, 56, 30))
+    in_session.observe("bridge", _BRIDGE_1100.replace("14:32:16", "15:57:00"), _et(15, 57))
+    in_session.check(_et(15, 58, 59))
+    assert not in_session.unreachable
+    in_session.check(_et(15, 59))
+    assert in_session.unreachable_since == _et(15, 57)
+    assert in_session.alert_text() == _IBKR_LOST_ALERT.format(since="15:57")
+
+    # The supervisor's own bridge window, not a copy: 16:00 ET, 13:00 on a half day.
+    assert late.bridge_ends_at == _bridge_window_end(SESSION) == _et(16, 0)
+    half_day = date(2026, 11, 27)
+    assert BrokerWatch(half_day).bridge_ends_at == _bridge_window_end(half_day)
+    assert _bridge_window_end(half_day) == datetime(2026, 11, 27, 13, 0, tzinfo=MARKET_TIMEZONE)
+
+
+def test_a_bridge_exit_makes_an_unrestored_loss_unknown_until_the_new_bridge_reports_it():
+    """Review P1-A.1 L-2, in session: a bridge restarted mid-loss never hears the
+    1102, so its predecessor's 1100 must not be re-asserted; a loss that is still
+    there is the new client's to report (TWS 2110 on connect)."""
+    from trading.operations.notify_service import BrokerWatch
+
+    exit_line = "2026-10-13T15:01:00+00:00 CHILD_EXIT bridge code=1 restart_in=15"
+    start_line = "2026-10-13T15:01:15+00:00 CHILD_START bridge pid=4242"
+
+    restored = BrokerWatch(SESSION)
+    restored.session_started(_et(7, 55))
+    restored.observe("screener", _SWEEP_LINE, _et(11, 0))
+    restored.observe("bridge", _BRIDGE_1100.replace("14:32:16", "11:00:30"), _et(11, 0, 30))
+    # Another child's exit changes nothing; the bridge's makes the loss unknown.
+    restored.observe("supervisor", exit_line.replace("bridge", "momo"), _et(11, 0, 50))
+    assert restored.ibkr_lost_at == _et(11, 0, 30)
+    restored.observe("supervisor", exit_line, _et(11, 1))
+    assert restored.ibkr_lost_at is None
+    restored.observe("supervisor", start_line, _et(11, 1, 15))
+    for second in range(0, 600):
+        assert restored.check(_et(11, 1, 16) + timedelta(seconds=second)) is None
+    assert not restored.unreachable and not restored.hysteresis.is_open
+
+    still_lost = BrokerWatch(SESSION)
+    still_lost.session_started(_et(7, 55))
+    still_lost.observe("screener", _SWEEP_LINE, _et(11, 0))
+    still_lost.observe("bridge", _BRIDGE_1100.replace("14:32:16", "11:00:30"), _et(11, 0, 30))
+    still_lost.observe("supervisor", exit_line, _et(11, 1))
+    still_lost.observe("supervisor", start_line, _et(11, 1, 15))
+    still_lost.observe("bridge", _BRIDGE_2110.replace("09:25:04", "11:01:20"), _et(11, 1, 20))
+    still_lost.check(_et(11, 3, 19))
+    assert not still_lost.unreachable
+    # Re-asserted two minutes after the new client's 2110: the third failure in a row.
+    still_lost.check(_et(11, 3, 20))
+    assert still_lost.unreachable_since == _et(11, 0, 30)
+    assert still_lost.alert_text() == _IBKR_LOST_ALERT.format(since="11:00")
+
+
+def test_the_alert_wording_follows_the_newest_failure_and_pages_at_six_minutes_after_a_pair():
+    """Review P1-A.1 L-3. Inside the half hour after an announced pair an IBKR
+    loss is held back until its re-assertions (every 2 min) meet the 5-minute
+    sustain limit: T+6 (OPERATOR_PROMPT 4.6). The wording names the newest failure."""
+    from trading.operations.hysteresis import SUSTAIN_LIMIT
+    from trading.operations.notify_service import BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(7, 55))
+    watch.observe("screener", _SWEEP_LINE, _et(9, 59))
+    for at in (_et(10, 0, 0), _et(10, 0, 20), _et(10, 0, 40)):
+        watch.observe("screener", _SCREENER_FAILED, at)
+    assert watch.alert_text() == _GATEWAY_ALERT.format(since="10:00")
+    watch.alert_sent()
+    watch.observe("screener", _SWEEP_LINE, _et(10, 1))
+    assert watch.check(_et(10, 3)) is not None and not watch.unreachable
+
+    lost_at = _et(10, 10)
+    watch.observe("bridge", _BRIDGE_1100.replace("14:32:16", "10:10:00"), lost_at)
+    moment = lost_at + timedelta(seconds=1)
+    while moment < lost_at + timedelta(minutes=6):
+        watch.check(moment)
+        assert not watch.unreachable, moment
+        moment += timedelta(seconds=1)
+    # Opened (held back by the pair budget) at T+2; still held at T+4.
+    assert watch.hysteresis.is_open and watch.flaps_pending
+    watch.check(lost_at + timedelta(minutes=6))
+    assert SUSTAIN_LIMIT == timedelta(minutes=5)
+    assert watch.unreachable_since == lost_at
+    assert watch.alert_text() == _IBKR_LOST_ALERT.format(since="10:10")
+    watch.alert_sent()
+    # A failed connect is the Gateway itself not answering: "log in" again...
+    watch.observe("screener", _SCREENER_FAILED, _et(10, 16, 30))
+    assert watch.alert_text() == _GATEWAY_ALERT.format(since="10:10")
+    # ...until the bridge's loss is re-asserted (it still has its connection),
+    # or the bridge reports it again.
+    watch.check(_et(10, 18))
+    assert watch.alert_text() == _IBKR_LOST_ALERT.format(since="10:10")
+    watch.observe("screener", _SCREENER_FAILED, _et(10, 18, 30))
+    assert watch.alert_text() == _GATEWAY_ALERT.format(since="10:10")
+    watch.observe("bridge", _BRIDGE_2110.replace("09:25:04", "10:19:00"), _et(10, 19))
+    assert watch.alert_text() == _IBKR_LOST_ALERT.format(since="10:10")
+
+    # A notifier restarted mid-session with no sweep yet: the first-sweep deadline
+    # passes during a known IBKR loss, which explains it; the wording stays.
+    restarted = BrokerWatch(SESSION)
+    restarted.session_started(_et(10, 0))
+    restarted.observe("bridge", _BRIDGE_1100.replace("14:32:16", "10:05:00"), _et(10, 5))
+    restarted.check(_et(10, 7))
+    assert restarted.alert_text() == _IBKR_LOST_ALERT.format(since="10:05")
+    restarted.check(_et(10, 30))
+    assert restarted.first_sweep_overdue
+    assert restarted.alert_text() == _IBKR_LOST_ALERT.format(since="10:05")
+
+
+@pytest.mark.anyio
+async def test_an_ibkr_loss_at_1559_sends_nothing_after_the_close(tmp_path, monkeypatch, caplog):
+    """Review P1-A.1 L-2 through the notifier, until its 16:15 end: the bridge's
+    1100 at 15:59, then the bridge and the screener stop at 16:00 and IBKR comes
+    back at 16:00:30 with nobody to log it. No "unreachable" after 16:00."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(16, 15))
+    logs = paths.log_directory
+    clock = FakeTime(_et(15, 50))
+    for n in range(8):
+        clock.at(_et(15, 50, 30) + timedelta(seconds=65 * n), _append(logs / "screener.log", _SWEEP_LINE))
+    clock.at(_et(15, 59), _append(logs / "bridge.log", _BRIDGE_1100.replace("14:32:16", "15:59:00")))
+    clock.at(_et(16, 0), _append(
+        logs / "supervisor.log",
+        "2026-10-13T20:00:00+00:00 SIGNAL bridge SIGTERM reason=window_end",
+        "2026-10-13T20:00:00+00:00 SIGNAL screener SIGTERM reason=window_end",
+    ))
+    clock.at(_et(16, 0, 2), _append(
+        logs / "supervisor.log",
+        "2026-10-13T20:00:02+00:00 CHILD_EXIT screener code=0 restart_in=none",
+        "2026-10-13T20:00:02+00:00 CHILD_EXIT bridge code=0 restart_in=none",
+    ))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert [text for text in telegram.sent() if text.startswith(("⛔ IB", "✅ IB"))] == []
+    assert "broker_unreachable" not in _queued_alerts(caplog)
+    # The bridge's own 1100 CRITICAL line still goes out, as before.
+    assert sum(text.startswith("⚠️ CRITICAL TWS -1 1100") for text in telegram.sent()) == 1
 
 
 @pytest.mark.anyio
@@ -1558,9 +1738,13 @@ async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_
     assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
 
     broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+    # The Gateway stayed logged in (the bridge kept its connection): the IBKR-side
+    # wording, never "log in" (review P1-A.1 L-3); the same recovery line follows.
     assert [text for _at, text in broker] == [
-        "⛔ IB Gateway unreachable since 14:32 ET — log in; the bot has no market data",
-        "⛔ IB Gateway unreachable since 14:32 ET — log in; the bot has no market data",
+        "⛔ IBKR connectivity lost since 14:32 ET — the Gateway is still logged in;"
+        " do not log in again; it reconnects by itself (check IBKR status if it lasts)",
+        "⛔ IBKR connectivity lost since 14:32 ET — the Gateway is still logged in;"
+        " do not log in again; it reconnects by itself (check IBKR status if it lasts)",
         "✅ IB Gateway reconnected 15:24 ET — market data is back (unreachable since 14:32 ET)",
     ]
     assert _between(broker[0][0], _et(14, 34, 16))
