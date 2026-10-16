@@ -3089,3 +3089,169 @@ async def test_the_rotations_carried_lines_never_reach_the_phone_again(tmp_path,
         "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)",
         "⚙️ orb-v2 exited (code 1), restarting in 300 s",
     ]
+
+
+# --------------------------------------------------------------------------
+# P1-B: T-3's real rotation read by T-6's tailer, its OPS counts and the phone
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_the_real_1835_rotation_is_read_once_counted_once_and_forwarded_once(tmp_path, monkeypatch):
+    """T-3's own SupervisorLog and LogRotation rotate the logs at 18:35 ET: supervisor.log
+    and an idle child's log are renamed, a running always-on child's log and launchd's
+    are copied then truncated, and the new supervisor.log starts with the carried state
+    lines, then the supervisor's LOG_ROTATED marker (as Supervisor._rotate_logs_if_due
+    writes it). T-6's tailer replays nothing from an archive, its filter takes the
+    carried copies out of the OPS restart counts, and the phone never gets a line twice."""
+    from collections import Counter
+    from datetime import time
+    import os
+
+    from trading.operations import notify_service
+    from trading.operations.notify_service import LogTailer, collect_ops, without_carried
+    from trading.operations.supervisor import LogRotation, SupervisorLog, iso_utc, open_private_append
+
+    paths = await _notify_day(tmp_path, monkeypatch)
+    _write_bridge_state(paths, {})
+    logs = paths.log_directory
+    for name in ("supervisor.log", "screener.log"):
+        (logs / name).unlink()
+    written: dict[str, list[str]] = {name: [] for name in ("supervisor", "screener", "telegram", "launchd")}
+    supervisor_log = SupervisorLog(logs / "supervisor.log")
+
+    def supervisor(*lines: str) -> Callable[[], None]:
+        def action() -> None:
+            for line in lines:
+                supervisor_log(line)
+                written["supervisor"].append(line)
+        return action
+
+    # The children's logs, held open with O_APPEND like the real writers (launchd,
+    # the running assistant); the idle screener's is appended to and closed.
+    held = {name: open_private_append(logs / f"{name}.log") for name in ("telegram", "launchd.stdout")}
+    (logs / "screener.log").touch()
+
+    def child(name: str, *lines: str) -> Callable[[], None]:
+        def action() -> None:
+            data = "".join(f"{line}\n" for line in lines).encode()
+            if name == "screener":
+                with (logs / "screener.log").open("ab") as stream:
+                    stream.write(data)
+            else:
+                os.write(held["launchd.stdout" if name == "launchd" else name], data)
+            written[name].extend(lines)
+        return action
+
+    # The test's own tailers, one per rotation kind, from the files' (empty) start.
+    tailers = {
+        "supervisor": LogTailer(logs / "supervisor.log"),
+        "screener": LogTailer(logs / "screener.log"),
+        "telegram": LogTailer(logs / "telegram.log"),
+        "launchd": LogTailer(logs / "launchd.stdout.log"),
+    }
+    for tailer in tailers.values():
+        tailer.start(None)
+    read: dict[str, list[str]] = {name: [] for name in tailers}
+
+    def poll(*names: str) -> Callable[[], None]:
+        def action() -> None:
+            for name in names or tuple(tailers):
+                read[name].extend(tailers[name].poll())
+        return action
+
+    def at(hour: int, minute: int, second: int = 0) -> str:
+        return iso_utc(_et(hour, minute, second))
+
+    # The day before the notifier starts (it follows supervisor.log from its end).
+    supervisor(
+        f"{at(7, 50)} SUPERVISOR_START pid=4321 mode=daily",
+        f"{at(7, 50)} CHILD_START telegram pid=4400",
+        f"{at(7, 55)} SESSION_START date=2026-10-13",
+        f"{at(7, 55)} CHILD_START screener pid=4500",
+        f"{at(16, 0)} CHILD_EXIT screener code=0 restart_in=none",
+        f"{at(16, 10)} SESSION_END date=2026-10-13",
+        f"{at(16, 10)} SESSION_WAIT date=2026-10-14 until=2026-10-14T11:55:00+00:00",
+    )()
+    child("screener", "screener day line")()
+    child("launchd", *(f"launchd before {n} {'x' * 40}" for n in range(6)))()
+    clock = FakeTime(_et(17, 0))
+    clock.at(_et(17, 0, 30), poll())
+    clock.at(_et(17, 1), child("telegram", *(f"{at(17, 1)} telegram before {n}" for n in range(3))))
+    clock.at(_et(17, 5), supervisor(
+        f"{at(17, 5)} CHILD_EXIT telegram code=1 restart_in=15",
+        f"{at(17, 5, 15)} CHILD_START telegram pid=4401",
+    ))
+    clock.at(_et(17, 10), supervisor(f"{at(17, 10)} CHILD_EXIT replay code=1 restart_in=none"))
+    clock.at(_et(18, 0), poll())
+    # Unread at the rotation: the renamed logs' tails are still read, once (a
+    # copied-then-truncated file's unread lines are only in its archive, so the
+    # held-open ones are read just before).
+    clock.at(_et(18, 30), child("screener", "screener line before the rotation"))
+    clock.at(_et(18, 34, 59), poll("telegram", "launchd"))
+
+    def rotate() -> None:
+        # What Supervisor._rotate_logs_if_due does at the boundary (telegram running).
+        now = _et(18, 35)
+        lines = LogRotation(logs, supervisor_log).rotate(now, held_open={"telegram"})
+        for line in lines:
+            supervisor_log(f"{iso_utc(now)} {line}")
+            written["supervisor"].append(f"{iso_utc(now)} {line}")
+
+    clock.at(_et(18, 35), rotate)
+    # Copied then truncated: the assistant's log regrows past its old offset before
+    # the next read (only its first bytes tell); launchd's stays shorter than it.
+    clock.at(_et(18, 36), child("telegram", *(f"{at(18, 36)} telegram after {n} {'y' * 30}" for n in range(8))))
+    clock.at(_et(18, 37), child("launchd", "launchd after"))
+    clock.at(_et(18, 38), child("screener", "screener line after the rotation"))
+    clock.at(_et(18, 40), supervisor(
+        f"{at(18, 40)} CHILD_EXIT telegram code=2 restart_in=15",
+        f"{at(18, 40, 15)} CHILD_START telegram pid=4402",
+    ))
+    clock.at(_et(18, 45), poll())
+    monkeypatch.setattr(notify_service, "SESSION_END", time(18, 50))
+    telegram = FakeTelegram()
+    try:
+        assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+    finally:
+        supervisor_log.close()
+        for descriptor in held.values():
+            os.close(descriptor)
+
+    # The rotation as T-3 wrote it (supervisor.log and screener.log renamed, the empty
+    # bridge.log left alone): five state lines carried, then the marker.
+    current = (logs / "supervisor.log").read_text(encoding="utf-8").splitlines()
+    assert current[5].endswith(" LOG_ROTATED date=2026-10-13 renamed=2 truncated=2 pruned=0 carried=5")
+    carried = current[:5]
+    assert all(line in written["supervisor"][:10] for line in carried)
+    assert (logs / "supervisor.log.2026-10-13").read_text(encoding="utf-8").splitlines() == (
+        written["supervisor"][:10]
+    )
+
+    # The tailer: no archive replayed. Renamed or truncated, every line once; the
+    # new supervisor.log adds exactly the carried copies, which the filter removes.
+    assert Counter(read["supervisor"]) - Counter(written["supervisor"]) == Counter(carried)
+    assert without_carried(read["supervisor"]) == [
+        line for line in written["supervisor"] if " LOG_ROTATED " not in line
+    ]
+    for name in ("screener", "telegram", "launchd"):
+        assert read[name] == written[name], name
+
+    # The OPS counts after the rotation (the phone's /report): the archive and the
+    # new file, each start once. telegram started 07:50, 17:05:15 and 18:40:15.
+    ops = await collect_ops(SESSION, paths, None, now=_et(18, 50))
+    assert ops.restarts == "telegram=2 (starts after each child's first today)"
+
+    # The phone: each child line once. The carried copies (the 17:10 replay exit,
+    # past its half-hour limit at 18:35; the 16:00 screener exit, never news)
+    # are not forwarded again.
+    children = [text for text in telegram.sent() if text.startswith("⚙️")]
+    assert children == [
+        "⚙️ telegram exited (code 1), restarting in 15 s",
+        "⚙️ replay exited (code 1), not restarting",
+        "⚙️ telegram exited (code 2), restarting in 15 s",
+    ]
+    # Nothing else twice either (no screener runs here: the Gateway alert repeats
+    # every half hour by design and is not under test).
+    others = [text for text in telegram.sent() if "IB Gateway" not in text]
+    assert len(set(others)) == len(others)

@@ -957,7 +957,9 @@ def _supervise_command(arguments: argparse.Namespace) -> int:
         return supervisor.run_supervisor(session_date=arguments.date)
     try:
         report = supervisor.dry_run_report(
-            session_date=arguments.date, clock_start=arguments.clock_start
+            session_date=arguments.date,
+            clock_start=arguments.clock_start,
+            heartbeat_url=supervisor.heartbeat_url_from_keychain,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -73,8 +73,9 @@ Every followed log survives the 18:35 ET rotation (a rename and a new file,
 or a copy then a truncate): a new file identity, a file shorter than the read
 offset, or one whose first 64 bytes changed is read again from its start, and
 the archive is never replayed. The state lines the rotation carries into the
-new supervisor.log (after its LOG_ROTATED marker) are neither forwarded again
-nor counted twice in the OPS lines.
+new supervisor.log (T-3 writes them just before its LOG_ROTATED marker; lines
+after it, dated before it, count too) are neither forwarded again nor counted
+twice in the OPS lines (one rule: ``rotation_carried``).
 """
 from __future__ import annotations
 
@@ -218,7 +219,7 @@ PREFLIGHT_REFUSED = "preflight_refused"
 _PREFLIGHT_REFUSED = re.compile(r"\bPREFLIGHT_REFUSED\b")
 # The 18:35 ET rotation (T-3) renames supervisor.log to supervisor.log.<D>,
 # then copies its newest state lines verbatim (original timestamps) into the
-# new file, marked by ``<ISO> LOG_ROTATED date=<D> renamed=<n> truncated=<n>
+# new file, followed by ``<ISO> LOG_ROTATED date=<D> renamed=<n> truncated=<n>
 # pruned=<n> carried=<n>``. Carried lines were news when first written: they
 # are never forwarded again nor counted twice.
 _LOG_ROTATED = re.compile(r"\bLOG_ROTATED\b(?:.*?\bcarried=(?P<carried>\d+))?")
@@ -1917,30 +1918,47 @@ def _line_time(line: str) -> datetime | None:
     return _parse_time(line.strip().partition(" ")[0])
 
 
-def without_carried(lines: Sequence[str]) -> list[str]:
-    """``supervisor.log`` lines less each ``LOG_ROTATED`` marker and the lines the
-    rotation carried next to it (up to ``carried`` lines on either side of the
-    marker, none newer than it): their originals are in the archive."""
-    dropped: set[int] = set()
+def rotation_carried(lines: Sequence[str]) -> dict[int, tuple[tuple[int, ...], tuple[int, ...]]]:
+    """Each ``LOG_ROTATED`` marker's index in ``supervisor.log`` lines, with the
+    indices of the lines the rotation carried next to it: up to ``carried`` lines
+    on either side, none newer than the marker (T-3 writes them just before it).
+    The one rule for the OPS counts and for what the notifier forwards."""
+    markers: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
     for index, line in enumerate(lines):
         rotated = _LOG_ROTATED.search(line)
         if rotated is None:
             continue
-        dropped.add(index)
         at = _line_time(line)
         count = int(rotated.group("carried") or 0)
         if at is None:
+            markers[index] = ((), ())
             continue
-        before = range(max(index - count, 0), index)
-        after = range(index + 1, min(index + 1 + count, len(lines)))
-        for neighbour in before:
-            stamp = _line_time(lines[neighbour])
-            if stamp is not None and stamp <= at:
-                dropped.add(neighbour)
-        for neighbour in after:
-            stamp = _line_time(lines[neighbour])
-            if stamp is not None and stamp < at:
-                dropped.add(neighbour)
+        markers[index] = (
+            _dated_by(lines, range(max(index - count, 0), index), at, inclusive=True),
+            _dated_by(lines, range(index + 1, min(index + 1 + count, len(lines))), at, inclusive=False),
+        )
+    return markers
+
+
+def _dated_by(lines: Sequence[str], indices: range, at: datetime, *, inclusive: bool) -> tuple[int, ...]:
+    """The indices whose line is dated before ``at`` (or at it, if ``inclusive``)."""
+    kept: list[int] = []
+    for index in indices:
+        stamp = _line_time(lines[index])
+        if stamp is not None and (stamp < at or (inclusive and stamp == at)):
+            kept.append(index)
+    return tuple(kept)
+
+
+def without_carried(lines: Sequence[str]) -> list[str]:
+    """``supervisor.log`` lines less each ``LOG_ROTATED`` marker and the lines the
+    rotation carried next to it (``rotation_carried``): their originals are in the
+    archive."""
+    dropped = {
+        index
+        for marker, (before, after) in rotation_carried(lines).items()
+        for index in (marker, *before, *after)
+    }
     return [line for index, line in enumerate(lines) if index not in dropped]
 
 
@@ -2473,8 +2491,20 @@ class _NotifierSession:
 
     def _poll_logs(self) -> None:
         for name, tailer in self._tailers.items():
-            for line in tailer.poll():
+            lines = tailer.poll()
+            # T-3 writes the carried state lines into the new supervisor.log just
+            # before its LOG_ROTATED marker, in one instant, so they come in the
+            # marker's poll: dropped here by the OPS lines' rule (P1-B; T-6 alone
+            # dropped only lines after the marker and forwarded these again).
+            markers = rotation_carried(lines) if name == "supervisor" else {}
+            before = {index for carried, _after in markers.values() for index in carried}
+            for index, line in enumerate(lines):
+                if index in before:
+                    continue
                 self._handle_line(name, line)
+                if index in markers:
+                    # The marker's count covers these: fewer can follow it.
+                    self._carried_left = max(self._carried_left - len(markers[index][0]), 0)
 
     async def _check_schema(self) -> None:
         """Read-only ledger check; never migrates. One alert per session date."""
@@ -3225,5 +3255,6 @@ __all__ = [
     "state_file",
     "supervisor_event_text",
     "supervisor_ops",
+    "rotation_carried",
     "without_carried",
 ]
