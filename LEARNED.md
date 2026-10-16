@@ -59,3 +59,14 @@
 
 ## Test through the production path
 - A value threaded through a constructor is only proven when a test drives the path production uses. The identity size factor passed every unit test of `ShadowPipeline` and four reviews, yet `RepositoryBackedShadowRunner.open_session` rebuilt the pipeline without it (found 2026-10-16, before v7b sent anything). The dropped keyword also bypassed the fail-closed missing-row block (`identity_sizing_missing`) on v7a and v7b; only the launch preflight `registry_problems` held the line. Copy objects with a method tied to the constructor's signature, and replay a recorded day through the runner. A copy test ties the copy to the signature only when its fixture sets every argument off its default: v7b.1's test did not, v7b.2's does for every argument.
+
+## A stop must never be lost (Python 3.11 asyncio)
+- On Python 3.11 `asyncio.wait_for` runs its awaitable in its own task; a cancel
+  that lands just as that task finishes is dropped and the result returned
+  (gh-86296, fixed in 3.12). A background loop built on it can survive its own
+  shutdown: on 2026-10-17 the T-4 overnight watch kept running after the
+  Telegram poll loop had stopped on a 401, so the telegram child neither polled
+  nor exited. In code that is cancelled at shutdown use `asyncio.timeout` (it
+  runs in the caller's task), check `Task.cancelling()` before sleeping, and
+  have `stop()` re-cancel a task that is still running. A test that fails only
+  "sometimes" by timing out is evidence of this kind of race, not noise.
