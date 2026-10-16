@@ -1012,13 +1012,41 @@ _BRIDGE_2110 = (
 _CHILD_TRACEBACK = "trading.market.tws_actor.TWSConnectionError: TWS PAPER handshake failed"
 _CHILD_FAILED = "error: shadow run --strategy orb-v2 failed: TWSConnectionError: TWS PAPER handshake failed"
 _SWEEP_LINE = "2026-10-13 15:10:02,263 INFO sweep 2026-10-13: qualified=396 quoted=396 errors=0 hot=35 seconds=89.8"
-# The two alert wordings (review P1-A.1 L-3): the Gateway does not answer (a failed
-# connect, no first sweep), or it is logged in and its link to IBKR is down (TWS 1100/2110).
+# The alert wordings (review P1-A.1 L-3, P1-A.3): the Gateway does not answer (a
+# failed connect, no first sweep), it is logged in and its link to IBKR is down (TWS
+# 1100/2110), or it is connected and IBKR refuses the data (daily-history timeouts, a
+# failed sweep). The IBKR-side two give the owner's two steps of GW-HMDS-1016, in
+# that order (live 2026-10-16: logging out of the app restored the orders, only a
+# Gateway restart restored the price history), and say "restart now" once the
+# outage has lasted 15 minutes. Spelled out here, not imported, so a wording change
+# in the module fails these tests.
 _GATEWAY_ALERT = "⛔ IB Gateway unreachable since {since} ET — log in; the bot has no market data"
 _IBKR_LOST_ALERT = (
     "⛔ IBKR connectivity lost since {since} ET — the Gateway is still logged in;"
-    " do not log in again; it reconnects by itself (check IBKR status if it lasts)"
+    " 1) log out of the IBKR app and website, 2) if it lasts, restart IB Gateway:"
+    " File → Exit, reopen, log in"
 )
+_DATA_REFUSED_ALERT = (
+    "⛔ IBKR is refusing prices since {since} ET (Gateway connected) —"
+    " 1) log out of the IBKR app and website, 2) if it lasts, restart IB Gateway:"
+    " File → Exit, reopen, log in"
+)
+_RESTART_NOW_ALERT = (
+    "⛔ IBKR still refusing prices since {since} ET — restart IB Gateway now: File → Exit, reopen, log in"
+)
+# Live screener.log 2026-10-16 (GW-HMDS-1016), times as logged (the Mac's local
+# time, ET+7): every universe qualification timed out after the 20-second TWS
+# request timeout; the progress line counts attempts, not successes.
+_HISTORY_TIMEOUT = "2026-10-16 15:00:20,048 WARNING qualification of A failed: error: TWS daily-history request timed out"
+_QUALIFIED_PROGRESS = "2026-10-16 15:16:40,594 INFO qualified 50/503 instruments"
+_SWEEP_FAILED = (
+    "2026-10-14 21:33:48,864 ERROR screener sweep failed: 25 consecutive snapshot failures; last:"
+    " TWS market snapshot timed out without real-time confirmation, a last trade or bid/ask, prior close"
+)
+
+
+def _timeout_line(symbol: str) -> str:
+    return _HISTORY_TIMEOUT.replace("qualification of A ", f"qualification of {symbol} ")
 
 
 def test_broker_evidence_classifies_the_live_lines():
@@ -1661,7 +1689,9 @@ def test_the_alert_wording_follows_the_newest_failure_and_pages_at_six_minutes_a
     assert watch.alert_text() == _IBKR_LOST_ALERT.format(since="10:10")
 
     # A notifier restarted mid-session with no sweep yet: the first-sweep deadline
-    # passes during a known IBKR loss, which explains it; the wording stays.
+    # passes during a known IBKR loss, which explains it; the IBKR-side wording
+    # stays, never "log in" (by 10:30 the loss has lasted 25 minutes: "restart now",
+    # P1-A.3).
     restarted = BrokerWatch(SESSION)
     restarted.session_started(_et(10, 0))
     restarted.observe("bridge", _BRIDGE_1100.replace("14:32:16", "10:05:00"), _et(10, 5))
@@ -1669,7 +1699,7 @@ def test_the_alert_wording_follows_the_newest_failure_and_pages_at_six_minutes_a
     assert restarted.alert_text() == _IBKR_LOST_ALERT.format(since="10:05")
     restarted.check(_et(10, 30))
     assert restarted.first_sweep_overdue
-    assert restarted.alert_text() == _IBKR_LOST_ALERT.format(since="10:05")
+    assert restarted.alert_text() == _RESTART_NOW_ALERT.format(since="10:05")
 
 
 @pytest.mark.anyio
@@ -1721,13 +1751,13 @@ async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_
     for n in range(7):
         clock.at(_et(14, 25, 30) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
     clock.at(_et(14, 32, 16), _append(logs / "bridge.log", _BRIDGE_1100))
-    sweep_failed = (
-        "2026-10-14 21:33:48,864 ERROR screener sweep failed: 25 consecutive snapshot failures; last:"
-        " TWS market snapshot timed out without real-time confirmation, a last trade or bid/ask, prior close"
-    )
-    for n in range(38):
-        clock.at(_et(14, 33, 48) + timedelta(seconds=83 * n), _append(
-            screener, sweep_failed, "2026-10-14 21:33:49,872 INFO screener connected to TWS"
+    # A failed sweep every ~83 s, the last at 15:24:49 as live, before the
+    # 15:24:53 restore (the cadence alone would put a 38th at 15:24:59, after it;
+    # that matters since failed sweeps are failure signals, review P1-A.2 L-1).
+    sweep_failed_at = [_et(14, 33, 48) + timedelta(seconds=83 * n) for n in range(37)]
+    for at in [*sweep_failed_at, _et(15, 24, 49)]:
+        clock.at(at, _append(
+            screener, _SWEEP_FAILED, "2026-10-14 21:33:49,872 INFO screener connected to TWS"
         ))
     clock.at(_et(15, 24, 50), _append(logs / "bridge.log", _BRIDGE_1100.replace("14:32:16", "15:24:50")))
     clock.at(_et(15, 24, 53), _append(logs / "bridge.log", _BRIDGE_1102))
@@ -1739,12 +1769,12 @@ async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_
 
     broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
     # The Gateway stayed logged in (the bridge kept its connection): the IBKR-side
-    # wording, never "log in" (review P1-A.1 L-3); the same recovery line follows.
+    # wording, never "log in" (review P1-A.1 L-3); the half-hour repeat, 32 minutes
+    # into the loss, says "restart IB Gateway now" (P1-A.3, GW-HMDS-1016); the same
+    # recovery line follows.
     assert [text for _at, text in broker] == [
-        "⛔ IBKR connectivity lost since 14:32 ET — the Gateway is still logged in;"
-        " do not log in again; it reconnects by itself (check IBKR status if it lasts)",
-        "⛔ IBKR connectivity lost since 14:32 ET — the Gateway is still logged in;"
-        " do not log in again; it reconnects by itself (check IBKR status if it lasts)",
+        _IBKR_LOST_ALERT.format(since="14:32"),
+        _RESTART_NOW_ALERT.format(since="14:32"),
         "✅ IB Gateway reconnected 15:24 ET — market data is back (unreachable since 14:32 ET)",
     ]
     assert _between(broker[0][0], _et(14, 34, 16))
@@ -1752,6 +1782,403 @@ async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_
     assert _between(broker[2][0], _et(15, 26, 53))
     # The bridge's own 1100 CRITICAL lines still go out, as before.
     assert sum(text.startswith("⚠️ CRITICAL TWS -1 1100") for _at, text in telegram.sent_at) == 2
+
+
+# --------------------------------------------------------------------------
+# IBKR refusing data with the Gateway connected (GW-HMDS-1016, P1-A.3)
+# --------------------------------------------------------------------------
+
+GW_HMDS_DAY = date(2026, 10, 16)
+_SYMBOLS = ("A", "AAPL", "ABBV", "ABNB", "ABT", "ACGL", "ACN", "ADBE", "BF B", "BRK B", "MSFT")
+
+
+def _et_on(day: date, hour: int, minute: int, second: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=MARKET_TIMEZONE).astimezone(
+        timezone.utc
+    )
+
+
+def _screener_line(at: datetime, text: str) -> str:
+    """A screener.log line as logged: the Mac's local time (Israel, ET+7 in October)."""
+    local = at.astimezone(timezone(timedelta(hours=3)))
+    return f"{local:%Y-%m-%d %H:%M:%S},000 {text}"
+
+
+def _timeout_at(at: datetime, n: int) -> str:
+    symbol = _SYMBOLS[n % len(_SYMBOLS)]
+    return _screener_line(at, f"WARNING qualification of {symbol} failed: error: TWS daily-history request timed out")
+
+
+def test_broker_evidence_reads_data_refused_with_the_gateway_connected():
+    from trading.operations.notify_service import broker_evidence
+
+    # One daily-history timeout is one piece of evidence; BrokerWatch counts the run.
+    assert broker_evidence("screener", _HISTORY_TIMEOUT) == "history_timeout"
+    assert broker_evidence("screener", _timeout_line("BF B")) == "history_timeout"
+    # The day universe's own qualification line too (it runs between sweeps only).
+    assert broker_evidence(
+        "screener",
+        "2026-10-16 15:00:20,048 WARNING day universe: qualification of XYZ failed:"
+        " error: TWS daily-history request timed out",
+    ) == "history_timeout"
+    # A failed sweep (review P1-A.2 L-1), live 2026-10-14.
+    assert broker_evidence("screener", _SWEEP_FAILED) == "sweep_failed"
+    # The progress lines count attempts, not successes: neither failure nor success.
+    for line in (
+        _QUALIFIED_PROGRESS,
+        "2026-10-16 15:00:00,037 INFO qualifying 503 of 503 instruments for 2026-10-16",
+        "2026-10-16 16:59:17,504 INFO universe qualified for 2026-10-16: 388 qualified, 0 transient errors",
+        # A contract's own rejection, another error, other timeouts, another sweep failure.
+        "2026-10-16 15:00:20,048 WARNING qualification of XYZ failed: error: TWS error 200: No security definition",
+        "2026-10-14 21:32:53,364 WARNING IBKR scan HOT_BY_VOLUME failed: TWS screener scan timed out",
+        "2026-10-15 21:44:19,314 WARNING sweep snapshot errors (first 5): CPRT: TWS market snapshot timed out"
+        " without prior close",
+        "2026-10-16 15:00:20,048 ERROR screener sweep failed: no qualified instruments",
+    ):
+        assert broker_evidence("screener", line) is None, line
+    # Screener lines only.
+    assert broker_evidence("bridge", "09:00:00 ET  " + _HISTORY_TIMEOUT) is None
+    assert broker_evidence("momo", _HISTORY_TIMEOUT) is None
+
+
+def test_six_history_timeouts_in_a_run_are_one_failure_backdated_to_the_first():
+    from trading.market.tws_actor import TWSActorConfig
+    from trading.operations.hysteresis import State
+    from trading.operations.notify_service import REFUSAL_GAP, REFUSAL_RUN, BrokerWatch
+
+    assert REFUSAL_RUN == 6 and REFUSAL_GAP == timedelta(seconds=45)
+    # Back-to-back timeouts, one per TWS request timeout, chain into one run.
+    request_timeout = TWSActorConfig(account="DU1234567", client_id=1).request_timeout_seconds
+    assert timedelta(seconds=request_timeout) == timedelta(seconds=20) < REFUSAL_GAP
+
+    def watching() -> BrokerWatch:
+        watch = BrokerWatch(SESSION)
+        watch.session_started(_et(7, 55))
+        watch.observe("screener", _SWEEP_LINE, _et(9, 59))
+        return watch
+
+    start = _et(10, 0, 20)
+    watch = watching()
+    for n in range(5):
+        assert watch.observe("screener", _timeout_at(start, n), start + timedelta(seconds=20 * n)) is None
+        # The progress line neither counts nor resets the run.
+        watch.observe("screener", _QUALIFIED_PROGRESS, start + timedelta(seconds=20 * n + 1))
+    assert watch.hysteresis.state is State.CLEAR and watch.refusal_count == 5
+    # The sixth is one failure signal, backdated to the run's first timeout...
+    watch.observe("screener", _timeout_at(start, 5), start + timedelta(seconds=100))
+    assert watch.hysteresis.state is State.FAILING and watch.hysteresis.failing_since == start
+    assert not watch.unreachable
+    # ...and the seventh another: two minutes into the run, the alert opens.
+    watch.observe("screener", _timeout_at(start, 6), start + timedelta(seconds=120))
+    assert watch.unreachable_since == start
+    assert watch.alert_text() == _DATA_REFUSED_ALERT.format(since="10:00")
+
+    # Each within 45 s of the one before: one run (its sixth, backdated 3 min 45 s,
+    # opens at once). 46 s: a new run each time, never a signal.
+    chained, broken = watching(), watching()
+    for n in range(6):
+        chained.observe("screener", _timeout_at(start, n), start + timedelta(seconds=45 * n))
+        broken.observe("screener", _timeout_at(start, n), start + timedelta(seconds=46 * n))
+    assert chained.unreachable_since == start
+    assert broken.hysteresis.state is State.CLEAR and broken.refusal_count == 1
+
+    # A sweep between ends the run: five, a sweep, one more is a run of one.
+    swept = watching()
+    for n in range(5):
+        swept.observe("screener", _timeout_at(start, n), start + timedelta(seconds=20 * n))
+    swept.observe("screener", _SWEEP_LINE, start + timedelta(seconds=90))
+    swept.observe("screener", _timeout_at(start, 5), start + timedelta(seconds=100))
+    assert swept.hysteresis.state is State.CLEAR and swept.refusal_count == 1
+
+    # Every failed sweep is a failure signal: the third opens it, worded "refusing prices".
+    sweeps = watching()
+    for at in (_et(10, 0), _et(10, 1, 23), _et(10, 2, 46)):
+        sweeps.observe("screener", _SWEEP_FAILED, at)
+    assert sweeps.unreachable_since == _et(10, 0)
+    assert sweeps.alert_text() == _DATA_REFUSED_ALERT.format(since="10:00")
+
+
+def test_the_alert_wording_switches_between_connect_failure_ibkr_loss_and_data_refused():
+    """The opening names its cause; the newest failure names the alert (review
+    P1-A.1 L-3); 15 minutes into an IBKR-side outage the advice is "restart now"."""
+    from trading.operations.notify_service import RESTART_ADVICE_AFTER, BrokerWatch
+
+    def watching() -> BrokerWatch:
+        watch = BrokerWatch(SESSION)
+        watch.session_started(_et(7, 55))
+        watch.observe("screener", _SWEEP_LINE, _et(9, 59))
+        return watch
+
+    def refuse(watch: BrokerWatch, start: datetime, count: int = 7) -> None:
+        for n in range(count):
+            watch.observe("screener", _timeout_at(start, n), start + timedelta(seconds=20 * n))
+
+    # Opened by failed connects: "log in", also 40 minutes on (a Gateway that
+    # does not answer needs a login, not a restart).
+    connect = watching()
+    for at in (_et(10, 0, 0), _et(10, 0, 20), _et(10, 0, 40)):
+        connect.observe("screener", _SCREENER_FAILED, at)
+    assert connect.alert_text() == _GATEWAY_ALERT.format(since="10:00")
+    connect.observe("screener", _SCREENER_FAILED, _et(10, 40))
+    assert connect.alert_text() == _GATEWAY_ALERT.format(since="10:00")
+
+    # Opened by TWS 2110 (the bridge connected, the Gateway cut off): the two steps.
+    link = watching()
+    link.observe("bridge", _BRIDGE_2110.replace("09:25:04", "10:00:00"), _et(10, 0))
+    link.check(_et(10, 2))
+    assert link.unreachable_since == _et(10, 0)
+    assert link.alert_text() == _IBKR_LOST_ALERT.format(since="10:00")
+
+    # Opened by data refused: its own headline, the same two steps in the same order.
+    data = watching()
+    refuse(data, _et(10, 0, 0))
+    assert data.unreachable_since == _et(10, 0)
+    assert data.alert_text() == _DATA_REFUSED_ALERT.format(since="10:00")
+    # The newest failure names it: a failed connect, the run's next timeout, a
+    # 2110, a failed sweep.
+    data.observe("screener", _SCREENER_FAILED, _et(10, 2, 10))
+    assert data.alert_text() == _GATEWAY_ALERT.format(since="10:00")
+    data.observe("screener", _timeout_at(_et(10, 2, 40), 7), _et(10, 2, 40))
+    assert data.alert_text() == _DATA_REFUSED_ALERT.format(since="10:00")
+    data.observe("bridge", _BRIDGE_2110.replace("09:25:04", "10:03:00"), _et(10, 3))
+    assert data.alert_text() == _IBKR_LOST_ALERT.format(since="10:00")
+    data.observe("screener", _SWEEP_FAILED, _et(10, 3, 30))
+    assert data.alert_text() == _DATA_REFUSED_ALERT.format(since="10:00")
+
+    # 15 minutes into the outage both IBKR-side wordings say "restart IB Gateway now"
+    # (time passing: the notifier's check every cycle).
+    assert RESTART_ADVICE_AFTER == timedelta(minutes=15)
+    refused = watching()
+    refuse(refused, _et(10, 0, 0))
+    for watch, expected in ((refused, _DATA_REFUSED_ALERT), (link, _IBKR_LOST_ALERT)):
+        watch.check(_et(10, 14, 59))
+        assert watch.alert_text() == expected.format(since="10:00")
+        watch.check(_et(10, 15))
+        assert watch.alert_text() == _RESTART_NOW_ALERT.format(since="10:00")
+    link.observe("bridge", _BRIDGE_2110.replace("09:25:04", "10:16:00"), _et(10, 16))
+    assert link.alert_text() == _RESTART_NOW_ALERT.format(since="10:00")
+    # A failed connect inside it is the Gateway itself: "log in", whatever the age.
+    link.observe("screener", _SCREENER_FAILED, _et(10, 17))
+    assert link.alert_text() == _GATEWAY_ALERT.format(since="10:00")
+
+    # The first-sweep grace runs out during a refusal before any sweep: the refusal
+    # explains it, the wording stays (not "log in").
+    morning = BrokerWatch(SESSION)
+    morning.session_started(_et(7, 55))
+    refuse(morning, _et(8, 25), count=16)
+    assert morning.alert_text() == _DATA_REFUSED_ALERT.format(since="08:25")
+    morning.check(_et(8, 30))
+    assert morning.first_sweep_overdue
+    assert morning.alert_text() == _DATA_REFUSED_ALERT.format(since="08:25")
+
+    # No wording ever tells the owner to wait for a reconnect.
+    for text in (_GATEWAY_ALERT, _IBKR_LOST_ALERT, _DATA_REFUSED_ALERT, _RESTART_NOW_ALERT):
+        assert "reconnects by itself" not in text and "do not log in" not in text
+
+
+@pytest.mark.anyio
+async def test_owner_a_replay_of_the_1016_refusal_pages_data_refused_by_0803(tmp_path, monkeypatch, caplog):
+    """Owner test (a), GW-HMDS-1016. Live 2026-10-16 the Gateway's port was open and
+    the screener connected at 08:00 ET, but from 08:00:20 every universe
+    qualification timed out, one line every ~20 s; "qualified 50/503" still came at
+    08:16:40, and no sweep came until a Gateway restart at 09:51. 904af38 paged
+    "unreachable since 07:55 ET — log in" at 08:15; P1-A.2 would have waited for the
+    first-sweep grace (08:30) and said "log in" too."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 40))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et_on(GW_HMDS_DAY, 7, 55))
+    clock.at(_et_on(GW_HMDS_DAY, 7, 55, 1), _append(
+        logs / "supervisor.log", "2026-10-16T11:55:00+00:00 SESSION_START date=2026-10-16"
+    ))
+    opened = _et_on(GW_HMDS_DAY, 8, 0)
+    clock.at(opened, _append(
+        screener,
+        _screener_line(opened, "INFO screener connected to TWS"),
+        _screener_line(opened, "INFO qualifying 503 of 503 instruments for 2026-10-16"),
+    ))
+    first = _et_on(GW_HMDS_DAY, 8, 0, 20)
+    end = _et_on(GW_HMDS_DAY, 8, 40)
+    timeouts = [first + timedelta(seconds=20 * n) for n in range(int((end - first) / timedelta(seconds=20)))]
+    for n, at in enumerate(timeouts):
+        lines = [_timeout_at(at, n)]
+        if (n + 1) % 50 == 0:
+            lines.append(_screener_line(at, f"INFO qualified {n + 1}/503 instruments"))
+        clock.at(at, _append(screener, *lines))
+    assert timeouts[49] == _et_on(GW_HMDS_DAY, 8, 16, 40)  # "qualified 50/503", as live
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=GW_HMDS_DAY, env=_environment(paths, telegram, clock)) == 0
+
+    broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+    assert [text for _at, text in broker] == [
+        _DATA_REFUSED_ALERT.format(since="08:00"),
+        # The half-hour repeat, 32 minutes in: restart now.
+        _RESTART_NOW_ALERT.format(since="08:00"),
+    ]
+    paged_at = broker[0][0]
+    assert paged_at <= _et_on(GW_HMDS_DAY, 8, 3)
+    # At the run's seventh timeout, two minutes after its first.
+    assert _between(paged_at, _et_on(GW_HMDS_DAY, 8, 2, 20))
+    assert _between(broker[1][0], _et_on(GW_HMDS_DAY, 8, 32, 20))
+    # The 08:30 first-sweep grace changed nothing: no "log in", no extra page.
+    assert not any("log in; the bot has no market data" in text for text in telegram.sent())
+    assert _queued_alerts(caplog) == ["broker_unreachable", "broker_unreachable"]
+
+
+# Offsets in seconds from 08:30:20 ET: the timeouts, then the sweeps after them.
+_BLIPS = {
+    "three timeouts": ([0, 20, 40], [140]),
+    "five timeouts": ([0, 20, 40, 60, 80], [160]),
+    # A sweep between (data flowed): two blips, not one run of ten.
+    "five, a sweep, five": ([0, 20, 40, 60, 80, 120, 140, 160, 180, 200], [100, 250]),
+    # A 50-second gap (some 30 healthy names): two runs of four.
+    "four, a 50-second gap, four": ([0, 20, 40, 60, 110, 130, 150, 170], [250]),
+    # Sporadic timeouts a minute apart: never a run.
+    "eight, a minute apart": ([60 * n for n in range(8)], [460]),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blip", sorted(_BLIPS))
+async def test_owner_b_a_short_refusal_blip_that_recovers_by_itself_sends_nothing(
+    blip, tmp_path, monkeypatch, caplog
+):
+    """Owner test (b): 3 to 5 daily-history timeouts, then a sweep within two
+    minutes, send nothing; so do runs that a sweep or a long gap breaks up. The
+    screener restarted at 08:30 and re-qualifies the names it lacks (as live at
+    09:48 ET on 2026-10-16)."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 45))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(8, 25))
+    for n in range(4):
+        clock.at(_et(8, 26) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    clock.at(_et(8, 30), _append(
+        screener,
+        _screener_line(_et(8, 30), "INFO screener connected to TWS"),
+        _screener_line(_et(8, 30), "INFO qualifying 40 of 503 instruments for 2026-10-13"),
+    ))
+    timeouts, sweeps = _BLIPS[blip]
+    start = _et(8, 30, 20)
+    for n, offset in enumerate(timeouts):
+        at = start + timedelta(seconds=offset)
+        clock.at(at, _append(screener, _timeout_at(at, n)))
+    for offset in sweeps:
+        clock.at(start + timedelta(seconds=offset), _append(screener, _SWEEP_LINE))
+    after = start + timedelta(seconds=sweeps[-1])
+    while (after := after + timedelta(seconds=65)) < _et(8, 45):
+        clock.at(after, _append(screener, _SWEEP_LINE))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert telegram.sent() == [startup_text(SESSION)]
+    assert _queued_alerts(caplog) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("signal", ["history timeouts", "failed sweeps"])
+async def test_owner_c_a_real_refusal_after_an_announced_blip_pages_within_the_sustain_limit(
+    signal, tmp_path, monkeypatch, caplog
+):
+    """Owner test (c), the F-1 pattern (review P1-A: a real outage held 30 minutes
+    behind an announced blip's pair). A refusal blip at 08:00 opens and is announced,
+    a sweep at 08:04 recovers it (its pair goes out); IBKR refuses again from 08:10
+    (re-qualification timeouts, or failed sweeps as on 2026-10-14). The page comes
+    at the sustain limit (08:15), not when the pair budget frees (08:32)."""
+    from datetime import time
+
+    from trading.operations.hysteresis import SUSTAIN_LIMIT
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 50))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    blip = _et(8, 0, 20)
+    for n in range(9):  # 08:00:20-08:03:00
+        at = blip + timedelta(seconds=20 * n)
+        clock.at(at, _append(screener, _timeout_at(at, n)))
+    for n in range(6):  # the first sweep at 08:04, then every 65 s
+        clock.at(_et(8, 4) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    refusal = _et(8, 10)
+    timeouts = signal == "history timeouts"
+    every = timedelta(seconds=20 if timeouts else 83)
+    if timeouts:
+        clock.at(refusal - timedelta(seconds=5), _append(
+            screener, _screener_line(refusal, "INFO qualifying 37 of 503 instruments for 2026-10-13")
+        ))
+
+    def lines(at: datetime, n: int) -> tuple[str, ...]:
+        if timeouts:
+            return (_timeout_at(at, n),)
+        return (_SWEEP_FAILED, _screener_line(at, "INFO screener connected to TWS"))
+
+    at, n = refusal, 0
+    while at < _et(8, 50):
+        clock.at(at, _append(screener, *lines(at, n)))
+        at, n = at + every, n + 1
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+    assert [text for _at, text in broker] == [
+        _DATA_REFUSED_ALERT.format(since="08:00"),
+        "✅ IB Gateway reconnected 08:04 ET — market data is back (unreachable since 08:00 ET)",
+        _DATA_REFUSED_ALERT.format(since="08:10"),
+        _RESTART_NOW_ALERT.format(since="08:10"),
+    ]
+    # The blip's pair goes out at once.
+    assert _between(broker[0][0], _et(8, 2, 20)) and _between(broker[1][0], _et(8, 6))
+    # The real refusal pages at the first failure five minutes into its unbroken
+    # run (08:15:00 for timeouts every 20 s, 08:15:32 for failed sweeps every 83 s),
+    # not at 08:32:20 when the pair budget would free.
+    assert SUSTAIN_LIMIT == timedelta(minutes=5)
+    expected = _et(8, 15) if signal == "history timeouts" else _et(8, 15, 32)
+    assert _between(broker[2][0], expected) and broker[2][0] <= _et(8, 16)
+    assert broker[2][0] - refusal <= SUSTAIN_LIMIT + every + timedelta(seconds=5)
+    # Its half-hour repeat, 35 minutes in: restart now.
+    assert _between(broker[3][0], expected + timedelta(minutes=30))
+    assert _queued_alerts(caplog) == [
+        "broker_unreachable", "broker_reconnected", "broker_unreachable", "broker_unreachable",
+    ]
+
+
+@pytest.mark.anyio
+async def test_owner_d_the_1013_slow_morning_without_timeouts_stays_silent(tmp_path, monkeypatch, caplog):
+    """Owner test (d): live 2026-10-13 the screener qualified 503 names 08:00:00-08:08:24
+    (a progress line every ~50 s, no timeout) and swept first at 08:10:02."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 45))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    clock.at(_et(8, 0), _append(
+        screener,
+        _screener_line(_et(8, 0), "INFO screener connected to TWS"),
+        _screener_line(_et(8, 0), "INFO qualifying 503 of 503 instruments for 2026-10-13"),
+    ))
+    for n in range(1, 11):
+        at = _et(8, 0) + timedelta(seconds=50 * n)
+        clock.at(at, _append(screener, _screener_line(at, f"INFO qualified {50 * n}/503 instruments")))
+    clock.at(_et(8, 8, 24), _append(screener, _screener_line(
+        _et(8, 8, 24), "INFO universe qualified for 2026-10-13: 391 qualified, 0 transient errors"
+    )))
+    for n in range(26):
+        clock.at(_et(8, 10, 2) + timedelta(seconds=80 * n), _append(screener, _SWEEP_LINE))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert telegram.sent() == [startup_text(SESSION)]
+    assert _queued_alerts(caplog) == []
 
 
 @pytest.mark.anyio

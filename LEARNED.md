@@ -42,6 +42,18 @@
 - 2026-10-14: usage limits cut agents off mid-task; commit per slice and resume
   from `git status`/`git log`, never from memory of what was "about to" land.
 
+## Operations lessons (2026-10-15/16)
+- 2026-10-15 MAC-SLEEP-1015: `caffeinate` prevents idle sleep, not lid-close
+  sleep on battery. Keep the Mac on AC power with the lid open on every session day.
+- 2026-10-16 GW-HMDS-1016: a connected IB Gateway can refuse all data for hours
+  (TWS 2110, data farms broken) while its port is open: every screener
+  qualification timed out from 08:00 ET and no sweep came until 10:00. The fix, in
+  order: log out of the IBKR app and website (the orders came back), then restart
+  IB Gateway (the price history came back). IB Gateway 10.46 reads AutoRestart
+  from the jts.ini `[u:<userDirname>]` section, not the settings-folder section;
+  the only reliable way to set it is Configure → Settings → Lock and Exit. Verify
+  with "Daily auto-restart is enabled." in launcher.log.
+
 ## Read-only SQLite opens in the data directory
 - `mode=ro` is safe on the live WAL database in its writable data directory: SQLite recreates a missing `-shm`. `immutable=1` returns a stale view of a WAL database with an un-checkpointed `-wal` ("no such table" on an existing table): use it only on a checkpointed copy.
 
