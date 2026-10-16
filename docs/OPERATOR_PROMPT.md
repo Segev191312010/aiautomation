@@ -149,13 +149,18 @@ launchd  (LaunchAgent com.maccabi.autotrader-v1.shadow)
     ├── manager            AI day manager (narrow-only, momo-ap)
     ├── recorder           evening recording (16:20–17:30)
     ├── replay             night replay of the day through the pipeline (17:35–18:30)
-    └── heartbeat          [PLANNED] external dead-man's ping (always-on)
+    └── heartbeat          always-on (only when its Keychain item exists): pings the external
+                           dead-man's switch every 60 s (T-3, Part 4.12)
 ```
 
 **Restart policy** (`supervisor.py`): backoff 15 → 30 → 60 → 120 → 300 s, capped at 5 min, reset after 5 min healthy.
 **Restart cap** `[NOW]`: exits are counted per child over a rolling 30 min, only while port 7497 answers (`CHILD_EXIT_UNCOUNTED <name> reason=port_closed`, or `reason=port_unknown` when the probe itself failed; always-on children always count). A scheduled child's exit 75 is the schema gate's refusal (a pending migration): never counted (`reason=schema_not_ready`); the schema alert pages it once. At 6, a scheduled child is suspended into a probe every 5 min (`CHILD_SUSPENDED`) and resumes when a probe stays up 5 min, the port reopens, its window ends, or the supervisor stops (`CHILD_RESUMED`, written before any child is signalled). The bridge and always-on children are never suspended: they page `CHILD_RESTART_STORM` and keep their backoff.
 
-**Restart-cap pages reach the phone at any hour** `[NOW]`: the notifier forwards them 07:55–16:15 ET on session days; outside that window the always-on `telegram` child tails `supervisor.log` and forwards `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` / `CHILD_RESUMED` with the same texts and the same rule (each once per child per half hour; a contradicting state always goes), plus the line's ET time. A line dated inside the notifier's window is the notifier's and is never sent twice; the 18:35 rotation's carried lines and archives are never re-sent (its read position is kept in the assistant's `state.json`). A `telegram` crash loop outside the window is sent only by a restarted `telegram` child that comes up far enough to read it (one that refuses at start, exit 78, never does): check `grep -E 'CHILD_(SUSPENDED|RESTART_STORM)' $L/supervisor.log` in the post-session report.
+**Restart-cap pages reach the phone at any hour** `[NOW]`: the notifier forwards them 07:55–16:15 ET on session days; outside that window the always-on `telegram` child tails `supervisor.log` and forwards `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` / `CHILD_RESUMED` with the same texts and the same rule (each once per child per half hour; a contradicting state always goes), plus the line's ET time. A line dated inside the notifier's window is the notifier's and is never sent twice, with one exception: the notifier's own lines (`CHILD_SUSPENDED notifier`, `CHILD_RESTART_STORM notifier`, `CHILD_RESUMED notifier`) are always the `telegram` child's, at any hour, inside the notifier's window too (a suspended notifier cannot report itself), and the notifier never forwards a line about itself. The 18:35 rotation's carried lines and archives are never re-sent (its read position is kept in the assistant's `state.json`). A `telegram` crash loop outside the window is sent only by a restarted `telegram` child that comes up far enough to read it (one that refuses at start, exit 78, never does): check the day's lines in the post-session report, archives included (the rotation's carried lines are verbatim copies of archive lines, so `sort -u` drops them; `DAY` is the session date, `YYYY-MM-DD`):
+
+```bash
+cat $L/supervisor.log* | grep -E "^${DAY}T[^ ]* CHILD_(SUSPENDED|RESTART_STORM) " | sort -u
+```
 
 | Exit code | Meaning | What happens / what you do |
 |---|---|---|
@@ -181,10 +186,12 @@ Scheduling is code-driven in **America/New_York**. Israel = ET + 7 until 2026-10
 | close − 30m | — | V2 identities last entry (15:30 on a normal day) |
 | 15:45 | 22:45 | **Flatten** all bot positions |
 | 16:00 | 23:00 | Market close |
-| 16:15 | 23:15 | Notifier ends; the `telegram` child's watch pages a closed port again (until 18:30) |
+| 16:05 | 23:05 | Notifier's daily report, with its OPS block (Part 6.5) |
+| 16:15 | 23:15 | Notifier ends; the `telegram` child's watch pages a closed port again (until 18:30), starting from the notifier's last Gateway state |
 | 16:20–17:30 | 23:20–00:30 | Recorder (a competing IBKR login in `recorder.log` is paged by the `telegram` child) |
 | 17:35–18:30 | 00:35–01:30 | Replay |
 | 18:30 | 01:30 | **Deploy window opens**; Gateway quiet hours start |
+| 18:35 | 01:35 | Log rotation (T-3, between sessions, after the replay window; inside the deploy window): `supervisor.log`, every child's `<name>.log` and launchd's two logs move to `<name>.log.<YYYY-MM-DD>` (14 days kept); one `LOG_ROTATED …` line (Part 4.6). A supervisor that was down across 18:35 makes it up at its next start |
 | — | 02:30 (local) | IB Gateway auto-restart (configured in Gateway) `[UNVERIFIED]` |
 
 On a 13:00 ET early close, every "close − N" deadline moves with it. That is why deadlines are offsets, not clock times. The watch's leads are offsets too: `PRE_SESSION_LEADS` (2 h and 15 min) before `SESSION_START`, on session days only (`market_session`); in the week Israel is ET + 6 they are 11:55 and 13:40 Israel.
@@ -378,6 +385,12 @@ EXPECT  no line containing '!!!'
         bridge       INFO fenced identities = none
         registry     sendable identities, size table and strategy registry agree
         database     schema v16 current
+        rotation     daily at 18:35 ET between sessions into <name>.log.YYYY-MM-DD, 14 days kept; …
+        heartbeat    Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url present (the child validates the URL)
+NOTE    The heartbeat line only checks that the Keychain item EXISTS; the dry run never reads the
+        secret (agents never read Keychain secrets). The other two forms are warnings, never a refusal:
+        heartbeat    not configured (no Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url)
+        heartbeat    unknown (Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url could not be checked: <ErrorType>)
 ERRORS  LAUNCH_REFUSED registry code=78 reason=<token>   → duplicate spec name / sendable set or size table mismatch
         PREFLIGHT_REFUSED caps: <names>                   → sendable identity without a caps row
         PREFLIGHT_REFUSED fences unreadable (<exc>)      → see Playbook 7.7
@@ -461,8 +474,15 @@ ERRORS  exit 2 → name not in SENDABLE_IDENTITIES (typo; names are case-sensiti
 STATUS  [NOW]
 WHO     OWNER only. AGENT+ only if the owner typed the exact identity in this session.
 EXAMPLE $CTL paper resume --identity ORB_V2 --reason "slippage explained: halted symbol"
+EFFECT  Row paper:<ID> stopped=0 with the given reason. When the row it lifts is a Sentinel fence
+        (reason "sentinel: …"), the stored reason gets the suffix " (lifts sentinel fence of YYYY-MM-DD)"
+        (the fence's ET date). The Sentinel reads that trace: an owner's resume holds for the rest of
+        that day even if the notifier's state file is lost, and the Sentinel never re-fences that
+        identity that day.
 ERRORS  exit 2 without --identity (global resume does not exist)
 ```
+
+The Sentinel never overwrites a row that is already stopped (an owner `/halt` or `paper stop`, or an earlier fence): its check-and-stop is one database transaction, and the row keeps its reason.
 
 #### 4.3.5 `/closeall` (Telegram) — emergency flatten
 ```
@@ -515,7 +535,7 @@ tail -n 50 ~/Jts/launcher.log                               # restarts, logoffs
 | `CLOSED` before 07:55 ET | Session will start blind. Owner must log in (Playbook 7.1) |
 | launcher log "Daily auto-restart is not enabled" | Auto-restart setting lost: Gateway will log off nightly |
 | Port OPEN but children log "login active elsewhere" (TWS 10197/162/165) | A phone/web IBKR login is taking the market data: log out there (Playbook 7.10) |
-| `⛔ IB Gateway is not returning prices (05:55 ET check)` (or 07:40) | Port open, but the pre-session data check's one daily-history request timed out, failed or returned no bars (GW-HMDS-1016): log out of the IBKR app and website, then restart IB Gateway (File → Exit, reopen, log in) |
+| `⛔ IB Gateway is not returning prices (05:55 ET check)` (or 07:40) | Port open, but the pre-session data check's daily-history request timed out, failed or returned no bars, and so did its one retry 30 s later on the fallback symbol (GW-HMDS-1016): log out of the IBKR app and website, then restart IB Gateway (File → Exit, reopen, log in) |
 | Sunday | Weekly 2FA login is due (owner) |
 
 TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, data lost (resubscribe) · `1102` restored, data maintained.
@@ -542,20 +562,32 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `TWS status 2103\|2105\|2157\|2110: <message>` | screener.log | The screener's opt-in status lines, one per code change (and again after a reconnect): a broken market-data / HMDS / sec-def farm, or TWS cut off from IBKR (GW-HMDS-1016). A failure signal worded "IBKR connectivity lost" (4.9), at most one per 2 min, never re-asserted, so a farm blip during the 08:00 qualification pages nothing alone. 2104/2106/2158 ("OK", every connect) are never logged |
 | `backfill stopped at <SYM>: competing_session: TWS error 10197 …` | recorder.log | A competing login during the recording: paged by the `telegram` child 16:15–17:30 ET |
 | `overnight watch: …` | telegram.log | The `telegram` child's watch: each lead's port result, every message it sends, `BrokerWatch owns the Gateway until 16:15 ET` at the handover |
-| `pre-session data check HH:MM ET: N daily bars for <SYM> (conId N); TWS status codes: …` (INFO) / `… : no_prices\|logged_in_elsewhere\|port_closed\|not_run (<detail>) …` (WARNING) | telegram.log | The 05:55 / 07:40 real-data check (T-4b): healthy (nothing sent) or why it paged; `port_closed` sends nothing (the port watch's page) |
+| `pre-session data check HH:MM ET: N daily bars for <SYM> (conId N); TWS status codes: …` (INFO) / `… : no_prices\|logged_in_elsewhere\|port_closed\|not_run (<detail>) …` (WARNING) | telegram.log | The 05:55 / 07:40 real-data check (T-4b): healthy (nothing sent) or why it paged; `port_closed` sends nothing (the port watch's page). A first failure logs `… first request failed (<detail>) for <SYM> (conId N); one more in 30 s on the fallback contract` (WARNING); healthy bars on that retry page nothing |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_closed` | supervisor.log | Exit while the Gateway port was closed: not counted toward the cap |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_unknown` | supervisor.log | The port probe itself failed (`PORT_PROBE_FAILED error=<class>` in the same pass): not counted |
 | `CHILD_EXIT_UNCOUNTED <name> reason=schema_not_ready` | supervisor.log | Exit 75 of a scheduled child: the schema gate's refusal (migration pending), not counted |
 | `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` | supervisor.log | Restart cap (Part 2.2); paged at any hour (the notifier 07:55–16:15 ET on session days, the `telegram` child outside that window) |
 | `CHILD_RESUMED <name> reason=probe_healthy\|port_open\|window_boundary\|supervisor_stop` | supervisor.log | Suspension lifted: a probe stayed up 5 min, the port reopened, the child's window or the session ended, the supervisor stopped (deploy, restart); paged at any hour, like the suspension |
+| `LOG_ROTATED date=YYYY-MM-DD renamed=<n> truncated=<n> pruned=<n> carried=<n>` | supervisor.log (new file) | The 18:35 ET rotation ran (or a missed one was made up at a start): `renamed` files moved to `<name>.log.<date>`, `truncated` files copied then emptied in place (running always-on children's logs, launchd's two files), `pruned` archives older than 14 days deleted, `carried` state lines copied to the top of the new file. Expected; not a failure |
+| `LOG_ROTATION_FAILED file=<name> error=<type>` | supervisor.log | One file could not be rotated (`file=all`: the whole rotation failed). Retried at the next boundary or start; report it |
+| `PREFLIGHT_WARNING heartbeat not configured (…)` | supervisor.log | No (valid) heartbeat Keychain item at the supervisor's start: it runs without the heartbeat child (Part 4.12) |
+| `HEARTBEAT_PING_FAILED error=<kind> state=<state> … consecutive=<n> unlogged=<n>` | heartbeat.log | A ping did not get through (at most one line per 10 min; never the URL) |
+| `WARNING heartbeat: on battery during the session — paging via the monitor` | heartbeat.log | On battery 07:40–16:15 ET on a session day: the monitor is told to page (Part 4.12) |
+| `sizing_record_failed: run <run> decision <id>` (ERROR), then once `sizing_sidecar_disabled: decision-sizing sidecar disabled for this run <run> after <ErrorType>; decisions are unaffected` (CRITICAL) | pipeline (strategy child logs) | The decision-sizing sidecar (T-8) write is bounded to 2 s, and a path that is not a regular file (a FIFO, a link) is refused before any open (`SizingFileRefused`); after a timeout or an OS error the sidecar is off for the rest of that run (the failure logged once, then the one "disabled" line). Decisions are recorded and unchanged either way |
 
 Every cap line follows the `CHILD_EXIT` line of the exit it is about (`CHILD_RESUMED reason=probe_healthy`, `PORT_PROBE_FAILED`, `CHILD_EXIT_UNCOUNTED`, `CHILD_SUSPENDED` / `CHILD_RESTART_STORM`, in that order).
+
+**Carried lines.** After a rotation the new `supervisor.log` starts with copies of the newest state lines (this run's `SUPERVISOR_START`, the newest `SESSION_*` line, each child's newest `CHILD_START` or `CHILD_EXIT`), verbatim with their original times, followed by the `LOG_ROTATED` marker; they are written in one write. They are copies of lines in `supervisor.log.<date>`: the notifier, the `telegram` watch and the heartbeat skip them. A reader of the new file alone still sees the running supervisor. Anything that counts or lists a day must read the archives (`supervisor.log*`) and drop the copies: `sort -u` does, because a carried line is byte-identical to its archive line. `DAY` is the session date (`YYYY-MM-DD`); the lines carry UTC ISO times, and a session's lines from 07:55 to 18:35 ET all have that same UTC date.
 
 ```bash
 tail -n 3  $L/supervisor.log
 grep -n 'CRITICAL' $L/bridge.log | tail
-grep -c 'CHILD_START' $L/supervisor.log           # starts; a child's restarts = its starts − 1
+DAY=<SESSION_DATE>
+cat $L/supervisor.log* | grep -E "^${DAY}T[^ ]* CHILD_START " | sort -u | awk '{print $3}' | sort | uniq -c
+cat $L/supervisor.log* | grep -E "^${DAY}T[^ ]* CHILD_(SUSPENDED|RESTART_STORM) " | sort -u
 ```
+
+The first `cat … | uniq -c` gives each child's starts that day; a child's restarts = its starts − 1. The second lists the day's suspensions and storms. A child log that spans days is read the same way, e.g. `cat $L/bridge.log* | grep …`.
 
 ### 4.7 Git and worktrees
 
@@ -612,11 +644,11 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | `/halt <IDENTITY>` + `/confirm <code>` (identity stop only, 6-character code valid 60 s; the third wrong code drops the request; no resume from the phone) | `[NOW]` |
 | Gateway unreachable alert with hysteresis (one pair per 30 min, flap count in the digest; failures unbroken for 5 min always page) | `[NOW]` |
 | Gateway alert for IBKR refusing data with the Gateway connected (daily-history timeouts, failed sweeps); IBKR-side wordings say log out, then restart IB Gateway, and "restart now" after 15 min (GW-HMDS-1016) | `[NOW]` |
-| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`) at any hour: the notifier 07:55–16:15 ET on session days, the `telegram` child outside that window | `[NOW]` |
+| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`) at any hour: the notifier 07:55–16:15 ET on session days, the `telegram` child outside that window; the notifier's own lines always the `telegram` child's | `[NOW]` |
 | Overnight Gateway watch (`telegram` child, outside 07:55–16:15 ET): 5-min port checks, quiet hours 18:30 → 05:55 ET with a morning digest, pages at 05:55 and 07:40 ET on session days, one recovery line | `[NOW]` |
 | Competing-login page 07:55–17:30 ET: at the first line, re-paged every 10 min while it is still seen (the notifier to 16:15, then the `telegram` child from `recorder.log`) | `[NOW]` |
-| Pre-session data check at 05:55 and 07:40 ET on session days (port open): one daily-history request like the screener's qualification ("2 M" of daily TRADES bars, 20 s timeout) for one universe contract (the first of AAPL, MSFT, NVDA, AMZN, GOOGL it resolved), on the assistant's own client 21; records TWS 2103/2105/2157/2110 and 10197/162/165 | `[NOW]` |
-| External dead-man's switch | `[PLANNED]` P1-B |
+| Pre-session data check at 05:55 and 07:40 ET on session days (port open): one daily-history request like the screener's qualification ("2 M" of daily TRADES bars, 20 s timeout) for one universe contract (the first of AAPL, MSFT, NVDA, AMZN, GOOGL it resolved), on the assistant's own client 21; one retry 30 s later on the fallback symbol (the next of that list it resolved) before it pages; records TWS 2103/2105/2157/2110 and 10197/162/165 | `[NOW]` |
+| External dead-man's switch (`heartbeat` child; the monitor pages, not Telegram; Part 4.12) | `[NOW]` |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
 
@@ -627,18 +659,20 @@ What the phone says:
   - data refused: `⛔ IBKR is refusing prices since HH:MM ET (Gateway connected) — 1) log out of the IBKR app and website, 2) if it lasts, restart IB Gateway: File → Exit, reopen, log in`;
   - either IBKR-side wording once the outage has lasted 15 min (so every half-hour repeat): `⛔ IBKR still refusing prices since HH:MM ET — restart IB Gateway now: File → Exit, reopen, log in`.
 
-  Live 2026-10-16 (GW-HMDS-1016) the Gateway stayed connected and did not reconnect by itself for two hours: logging out of the IBKR app and website brought the orders back, and only a Gateway restart brought the price history back. A restart drops the bridge's connection: it exits 75 and reconnects, and open brackets keep their GTC stop and target at IBKR. `✅ IB Gateway reconnected` comes 2 min after the first success (a screener sweep or TWS 1101/1102). At most one pair per 30 min: a second outage inside that half hour is held back as a flap only while its failures are younger than 5 min, then it pages anyway. While the alert is open the outage's child exits and the bridge's repeated `TWS did not answer` lines are folded into it ("N children restarting"), not sent one by one.
-- **Restart cap.** `⛔ <child> suspended after 6 restarts in 30 min (relaunch probe every 5 min)`; `✅ <child> resumed (<reason>)` for `probe_healthy`, `port_open` and `supervisor_stop` (a deploy or restart while it was suspended: it starts afresh); `✅ <child> done for today (window ended)` when the suspension ends with the child's window (it does not run again today); `⚠️ <child> restart storm: …` for the bridge and `telegram`. At any hour: outside 07:55–16:15 ET the `telegram` child sends the same text followed by `· HH:MM ET` (the line's time), e.g. `⛔ replay suspended after 6 restarts in 30 min (relaunch probe every 5 min) · 18:00 ET`.
+  Live 2026-10-16 (GW-HMDS-1016) the Gateway stayed connected and did not reconnect by itself for two hours: logging out of the IBKR app and website brought the orders back, and only a Gateway restart brought the price history back. A restart drops the bridge's connection: it exits 75 and reconnects, and open brackets keep their GTC stop and target at IBKR. The recovery line comes 2 min after the first success (a screener sweep or TWS 1101/1102): `✅ IB Gateway reconnected HH:MM ET — market data is back (unreachable since HH:MM ET)` for a Gateway that did not answer, `✅ IBKR is returning prices again HH:MM ET — market data is back (refusing prices since HH:MM ET)` for IBKR refusing data with the Gateway connected. At most one pair per 30 min: a second outage inside that half hour is held back as a flap only while its failures are younger than 5 min, then it pages anyway. The digest's `⚡ IB Gateway flapped N× since HH:MM ET (held back from separate alerts)` line counts with the OPS block's rule: a held-back outage that later paged is that outage, never also a flap. While the alert is open the outage's child exits and the bridge's repeated `TWS did not answer` lines are folded into it ("N children restarting"), not sent one by one.
+- **Restart cap.** `⛔ <child> suspended after 6 restarts in 30 min (relaunch probe every 5 min)`; `✅ <child> resumed (<reason>)` for `probe_healthy`, `port_open` and `supervisor_stop` (a deploy or restart while it was suspended: it starts afresh); `✅ <child> done for today (window ended)` when the suspension ends with the child's window (it does not run again today); `⚠️ <child> restart storm: …` for the bridge and `telegram`. At any hour: outside 07:55–16:15 ET the `telegram` child sends the same text followed by `· HH:MM ET` (the line's time), e.g. `⛔ replay suspended after 6 restarts in 30 min (relaunch probe every 5 min) · 18:00 ET`. The notifier's own lines come from the `telegram` child at any hour, the same way, e.g. `⛔ notifier suspended after 6 restarts in 30 min (relaunch probe every 5 min) · 10:12 ET`.
 - **Overnight Gateway watch** (the `telegram` child, outside 07:55–16:15 ET; port checks every 5 min through the same hysteresis as the Gateway alert: two failed checks 5 min apart open it, two clean minutes close it):
   - quiet hours (18:30 → 05:55 ET, and all of a closed day): nothing is paged; the next lead sends one line, e.g. `🌙 Overnight IB Gateway watch (quiet hours, not paged): port closed 02:45 ET–03:10 ET` or `… port closed since 02:45 ET, still closed`;
   - at 05:55 and 07:40 ET on session days, if the port is closed (a lead's first failed check is confirmed 2 min later, so a Gateway restart spanning the lead is not paged): `⛔ IB Gateway closed since HH:MM ET (its API port does not answer) — log in to IB Gateway; session starts 07:55 ET (05:55 ET check)`;
   - 05:55–07:55 and 16:15–18:30 ET: the same page (without the check) when an outage opens;
-  - once per paged outage, whenever it reopens: `✅ IB Gateway port open again HH:MM ET (closed since HH:MM ET)` (at 07:55 at the latest, if the last check before the notifier's window succeeded). Inside 07:55–16:15 the watch is silent: the Gateway alert above is the notifier's.
-- **Pre-session data check** (05:55 and 07:40 ET on session days, when the port watch found the port open; owner decision 2026-10-16: a historical-bar request, because quotes are thin at 05:55). Healthy (bars came back): nothing. Otherwise one page per check, so 07:40 pages again after a 05:55 failure:
-  - a timeout, an error or no bars (with or without TWS 2110): `⛔ IB Gateway is not returning prices (05:55 ET check) — 1) log out of the IBKR app and website, 2) restart IB Gateway: File → Exit, reopen, log in`;
-  - a competing session (TWS 10197, or 162/165 "different IP address"): `⛔ IBKR is logged in elsewhere — log out of IBKR on your phone and the website (05:55 ET check)`;
+  - when the outage began is unknown, the page says so: the watch starts looking after a `telegram` restart, at its first start, and at 16:15 when it takes over from the notifier, and if its first check then finds the port closed it says `⛔ IB Gateway closed since before HH:MM ET (its API port does not answer) — log in to IB Gateway` (HH:MM = that first check), unless it has evidence of the start: its own saved state from before a restart (kept in the assistant's `state.json`), or at 16:15 the notifier's last Gateway state for today (an announced "unreachable" outage: its start, and whether the notifier paged it). The same "since before" wording appears in the digest and the recovery line;
+  - an outage the notifier, or the watch itself before a restart, already paged is not paged again and never appears in the quiet-hours digest as "not paged"; it still gets its recovery line;
+  - once per paged outage, whenever it reopens: `✅ IB Gateway port open again HH:MM ET (closed since HH:MM ET)`. At 07:55 at the latest: if the last check before the notifier's window succeeded, at once; if it still failed, the watch checks the port once more at 07:55 before handing over, and sends the line if the port answers then. Inside 07:55–16:15 the watch is silent: the Gateway alert above is the notifier's.
+- **Pre-session data check** (05:55 and 07:40 ET on session days, when the port watch found the port open; owner decision 2026-10-16: a historical-bar request, because quotes are thin at 05:55). One request for the first pinned symbol the universe resolved (AAPL). If it fails (a timeout, an error or no bars), the check waits 30 s and makes ONE more request on the fallback symbol (MSFT: the next pinned symbol the universe resolved; the same contract if there is none). Only a second failure pages, about 75 s after the lead at worst. Healthy (bars came back on either request): nothing. Otherwise one page per check, so 07:40 pages again after a 05:55 failure:
+  - a timeout, an error or no bars twice (with or without TWS 2110): `⛔ IB Gateway is not returning prices (05:55 ET check) — 1) log out of the IBKR app and website, 2) restart IB Gateway: File → Exit, reopen, log in`;
+  - a competing session (TWS 10197, or 162/165 "different IP address"), at once, no retry: `⛔ IBKR is logged in elsewhere — log out of IBKR on your phone and the website (05:55 ET check)`;
   - the check cannot run (IBKR data not configured for the assistant, no resolved contract in the universe): `⚠️ Pre-session data check could not run (05:55 ET check): <reason>`;
-  - the port closed by the time it connects: nothing (the port watch pages it once).
+  - the port closed by the time it connects: nothing, never a page from the check (the port watch pages it once).
 - **Competing login.** `⚠️ IBKR login active elsewhere — log out of the IBKR app/website` `(seen in the <source> log)` at its first line, then every 10 min while it is still seen: `⚠️ IBKR login still active elsewhere since HH:MM ET — log out of the IBKR app/website`. IBKR says nothing when the other login ends: 10 min without a line ends it (no message). 07:55–16:15 ET from the notifier (screener, bridge, children), 16:15–17:30 ET from the `telegram` child (`recorder.log`).
 - **`/halt`.** The reply carries a 6-character code; `/confirm <code>` within 60 s writes `paper:<IDENTITY>`. A wrong code writes nothing and says how many tries are left; the third wrong code drops the request (send `/halt` again). `/halt` and a request's first `/confirm` pass the flood limit; after a wrong code `/confirm` is flood-limited like any command.
 
@@ -657,6 +691,45 @@ The ledger is the decision and evidence log. It lives **in the repo**: `docs/rev
 
 ```bash
 sntp time.apple.com      # abort any timed step if |offset| > 2 s
+```
+
+### 4.12 Heartbeat (external dead-man's switch, T-3)
+
+```
+STATUS  [NOW]
+WHO     runs as the supervisor's always-on child `heartbeat`; the Keychain item and the monitor are OWNER-only
+EFFECT  Every 60 s: GET <url>?state=<idle|session|outage> (10 s timeout) to an external
+        healthchecks-style monitor that pages the owner's phone when the pings STOP
+        (asleep, powered off, offline, supervisor gone). A watchdog on this Mac cannot report
+        this Mac dead; only the monitor can.
+STATE   outage   a CHILD_EXIT_UNCOUNTED <name> reason=port_closed line in the last 10 minutes
+                 (port_unknown and schema_not_ready are not outages)
+        session  the newest SESSION_*/SUPERVISOR_* line is SESSION_START
+        idle     otherwise
+        The state is information for the monitor; it grants nothing.
+POWER   07:40–16:15 ET on a session day, on "Battery Power": the success ping is replaced by
+        <url>/fail?reason=battery (a monitor page) at most once per 15 min, with one WARNING line;
+        the check stays down until the first ping back on AC power. Outside that window battery
+        only adds &power=battery to the normal ping.
+SECRET  Keychain service com.maccabi.autotrader-v1.heartbeat, account heartbeat-url. Whoever holds
+        the URL can fake a heartbeat: never in an env var, an argv, a log line or a chat message.
+        The child logs only the host, an error kind or an HTTP status.
+SETUP   OWNER: create the monitor check (period 1 min, grace ≤ 5 min), then store its ping URL
+        with /usr/bin/security (the binary that reads it under launchd); -w last, so it prompts
+        and the URL is never on a command line or in the shell history (-U replaces an old one):
+          /usr/bin/security add-generic-password -U -a heartbeat-url -s com.maccabi.autotrader-v1.heartbeat -w
+        The supervisor schedules the child at its next start (a deploy STEP 4, or a restart).
+        A longer grace hides a sleeping Mac: after 16:15 ET macOS dark wakes every ~15–17 min can
+        send a success ping (N15b L-13, pmset 2026-10-15). Expect one monitor page during every
+        deploy: pings stop while the supervisor is down.
+NO ITEM supervisor.log: PREFLIGHT_WARNING heartbeat not configured (…); the supervisor runs without
+        the child (a warning, never a refusal). The dry run checks only that the item exists.
+EXIT    78 HEARTBEAT_NOT_CONFIGURED (the item was removed while it ran) · 69 a `--once` ping that did
+        not get through (never 75: that is the schema gate's alone)
+LOGS    heartbeat.log: HEARTBEAT_START every=60s timeout=10s host=<host> · HEARTBEAT_OK state=<state>
+        (first good ping) · HEARTBEAT_STATE <old>-><new> · HEARTBEAT_PING_FAILED … (at most one per
+        10 min) · HEARTBEAT_RECOVERED after=<n> failed pings · HEARTBEAT_ORPHANED parent=<pid> gone
+        (it exits when its supervisor dies) · HEARTBEAT_STOP reason=<signal|orphaned|once>
 ```
 
 ---
@@ -757,13 +830,22 @@ shasum -a 256 scripts_local/paper_bridge.py    # == pin in supervisor.py
 $CTL run --dry-run --date <NEXT_SESSION>       # Part 4.1.2 expectations, no '!!!'
 
 # STEP 4 — start
-$CTL shadow agent enable; sleep 20; tail -n 3 $L/supervisor.log
-# expect SUPERVISOR_START, CHILD_START telegram, SESSION_WAIT date=<NEXT_SESSION>
+$CTL shadow agent enable; sleep 20
+grep -E 'SUPERVISOR_START|SESSION_WAIT' $L/supervisor.log | tail -2
+# expect SUPERVISOR_START, then SESSION_WAIT date=<NEXT_SESSION>
+tail -n 3 $L/supervisor.log
+# expect CHILD_START telegram (or CHILD_START heartbeat), SESSION_WAIT date=<NEXT_SESSION>,
+# and on the first start after an 18:35 ET boundary a LOG_ROTATED line last (see below)
 
 # STEP 5 — post-check, then record (outside the tree; copy into the repo ledger later)
 git -C .. rev-parse --short HEAD               # == candidate
 echo "$(date -Iseconds) DEPLOY $CANDIDATE@<sha> PREV_SHA=$PREV_SHA pin=<12hex> result=PASS" >> $L/deploys.log
 ```
+
+**STEP 4 and the log rotation.** A supervisor start whose newest 18:35 ET boundary has no `supervisor.log.<date>` archive yet rotates the logs at once. That is always the case for the first P1-B start, wherever it falls in the window (at 18:30–18:35 the rotation takes the previous day's date, and the 18:35 one follows a few minutes later), and for any start after a supervisor that was down across 18:35. The first rotation moves the whole multi-day `supervisor.log` and every child log into `<name>.log.<date>`. The new `supervisor.log` then holds the carried lines (`SUPERVISOR_START`, `CHILD_START telegram`, `CHILD_START heartbeat` when the heartbeat is configured, `SESSION_WAIT date=<NEXT_SESSION>`) followed by `LOG_ROTATED date=<YYYY-MM-DD> renamed=<n> truncated=<n> pruned=<n> carried=<n>`, written in one write. So `tail -n 3` may read `CHILD_START telegram … | SESSION_WAIT … | LOG_ROTATED …`, or with the heartbeat `CHILD_START heartbeat … | SESSION_WAIT … | LOG_ROTATED …`.
+- A `LOG_ROTATED` line after them is **expected** on the first start after 18:35 and is not a failure.
+- A `LOG_ROTATION_FAILED file=<name> error=<type>` line (it follows the marker) **is** a failure: stop and report it to the owner (the supervisor itself keeps running: a failed rotation never stops it, and it is retried at the next boundary or start).
+- STEP 1's `tail -n 1` → `SUPERVISOR_STOP reason=SIGTERM` is unchanged (the stop line is written last).
 
 ### 6.3 Rollback
 
@@ -780,12 +862,13 @@ Mid-session emergency is **never** a rollback: it is `/closeall` + `paper stop`.
 
 ### 6.4 Pre-session check (07:40 ET)
 
-The `telegram` child has already checked the port and requested real data at 05:55 and 07:40 ET; a silent phone means both passed (`grep 'pre-session data check' $L/telegram.log`). The manual check below is the agent's own:
+The `telegram` child has already checked the port and requested real data at 05:55 and 07:40 ET (each with one 30-s retry on the fallback symbol before it pages); a silent phone means both passed (`grep 'pre-session data check' $L/telegram.log`). The manual check below is the agent's own:
 
 ```bash
 nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
 $CTL paper status
-tail -n 3 $L/supervisor.log            # SESSION_WAIT for today, no LAUNCH_REFUSED
+grep -E 'SESSION_WAIT|LAUNCH_REFUSED' $L/supervisor.log | tail -2   # SESSION_WAIT for today, no LAUNCH_REFUSED
+tail -n 3 $L/supervisor.log            # a LOG_ROTATED line from last night's 18:35 rotation may be last: expected
 launchctl list | grep autotrader       # agent loaded, has a PID
 pmset -g batt | head -1                # 'AC Power'
 ```
@@ -802,10 +885,34 @@ ORDERS      sent N · filled N · skipped N (top reasons: …)
 P&L         realized $X (Y % NLV) · daily-loss block hit: no
 BY IDENTITY <ID>  trades n  P&L $x  avg R r   (one line each)
 EVIDENCE    shadow==live: ✓ / ✗ (details) · fills attributed: n/n
-OPS         restarts per child · outage minutes · refusals          [PLANNED] P1
+OPS         restarts per child · suspensions/storms · Gateway outages, minutes, flaps · refusals · fenced · close
 INCIDENTS   none | <ledger ids>
 NEXT        <one line; nothing that needs the owner unless stated>
 ```
+
+The OPS line comes from the notifier's 16:05 daily report, which closes with an OPS block `[NOW]` (T-6), e.g.:
+
+```
+OPS
+• Restarts today: bridge=9 gap-v2=8 momo=3 screener=1 vwap-v2=4 (starts after each child's first today)
+• Suspensions/storms: none
+• Gateway: 1 outage, 121 min refusing prices, 0 flaps
+• Refusals: none
+• Fenced: none
+• Close: flat at 15:50 ET
+• GAP_GO_V2: 0 trades · P&L $0.00
+• MOMO_HOD_V2: 2 trades · P&L -$1,420.68
+• ORB_V2: 0 trades · P&L $0.00
+• VWAP_PB_V2: 0 trades · P&L $0.00
+```
+
+- **Restarts / Suspensions/storms / Refusals** come from today's `supervisor.log` and, once the 18:35 rotation ran, today's archive (carried copies dropped). Refusals are `LAUNCH_REFUSED` lines and the bridge's `PREFLIGHT_REFUSED ×<n> (bridge.log)`.
+- **Gateway** is the notifier's own count (persisted per date). `N min unreachable` is time the Gateway did not answer; `N min refusing prices` is IBKR refusing data with the Gateway connected (GW-HMDS-1016); a day with both shows both. An outage still open at the report adds `; still unreachable since HH:MM ET` or `; still refusing prices since HH:MM ET`. One announced outage counts once, as an outage, never also as a flap (the digest's flap line uses the same rule). `no outage, no flaps` on a clean day. A report built outside the notifier (the phone's `/report`) says `not counted here (the notifier's 16:05 report has it)`.
+- **Fenced** lists every stopped identity row with its reason (`unknown (<error>)` when the fence table cannot be read).
+- **Close** says whether the bridge was flat at its 15:50 check and whether the 15:45 flatten ran on time (`⚠️ bridge not flat at 15:50 ET — <symbol> <n> sh; flatten …`).
+- One line per sendable identity: trades that filled and realized P&L, from the bridge state.
+
+The agent's own day counts read the archives the same way (Part 4.6).
 
 ---
 
@@ -879,9 +986,14 @@ STAGE 1  propose              [PLANNED] P1-B  the promotion rule runs nightly in
                                              the owner approves; approved steps ship as constants commits.
                                              Auto-fence (risk-reducing, Part 8.4) is allowed to the runtime.
                                              Every decision records its effective multiplier
-                                             (risk.size_multiplier_effective), so a size step never restarts
-                                             the identity's evidence; decisions before that field derive it
-                                             from the run's source_sha.
+                                             (size_multiplier_effective, in the decision-sizing sidecar
+                                             <db stem>-decision-sizing/<run>.jsonl beside the database, never
+                                             in the fingerprinted decision), so a size step never restarts
+                                             the identity's evidence; decisions before the sidecar derive it
+                                             from the run's source_sha. A sidecar write is bounded to 2 s;
+                                             after a timeout or an OS error the sidecar is off for the rest
+                                             of that run (sizing_record_failed once, then one "disabled for
+                                             this run" line). Decisions are never affected.
                                              No "up" proposal is emitted while the open-risk term (v7c)
                                              is not deployed.
 STAGE 2  auto_within_ceiling  [PLANNED]      PAPER only. Flip only after (a) one identity met the written

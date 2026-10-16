@@ -576,13 +576,15 @@ _TAIL_OPTIONAL_KEYS = ("head", "head_len")
 
 @dataclass(slots=True)
 class AssistantState:
-    """The getUpdates offset, the order statuses already reported, and the
-    overnight watch's log checkpoints (``LogTailer.checkpoint`` per log)."""
+    """The getUpdates offset, the order statuses already reported, the overnight
+    watch's log checkpoints (``LogTailer.checkpoint`` per log), and its memory
+    (``watch``: the port outage it tracks, the day it took the Gateway over)."""
 
     path: Path
     offset: int | None = None
     notified: dict[str, str] = field(default_factory=dict)
     tails: dict[str, dict[str, int]] = field(default_factory=dict)
+    watch: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> AssistantState:
@@ -598,6 +600,7 @@ class AssistantState:
         offset = _int_id(data.get("offset"))
         notified = data.get("notified")
         tails = data.get("tails")
+        watch = data.get("watch")
         return cls(
             path=path,
             offset=offset if offset is not None and offset > 0 else None,
@@ -617,6 +620,11 @@ class AssistantState:
                 if isinstance(checkpoint, dict)
                 and all(_int_id(checkpoint.get(key)) is not None for key in _TAIL_KEYS)
             },
+            watch={
+                str(key): value
+                for key, value in (watch.items() if isinstance(watch, dict) else ())
+                if isinstance(value, str)
+            },
         )
 
     def save(self) -> None:
@@ -628,6 +636,7 @@ class AssistantState:
             "offset": self.offset,
             "notified": self.notified,
             "tails": self.tails,
+            "watch": self.watch,
         }
         atomic_private_write(self.path, json.dumps(payload).encode("utf-8"))
 
@@ -1906,21 +1915,27 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
         send_api, chat_id=owner, sleep=environment.sleep, monotonic=environment.monotonic
     )
     from trading.manager.telegram import ManagerDesk
-    from trading.operations.overnight_watch import OvernightWatch
+    from trading.operations.overnight_watch import OvernightWatch, notifier_port_outage
     from trading.operations.pre_session_check import PreSessionCheck
 
     overnight = OvernightWatch(
         log_directory=environment.paths.log_directory,
         checkpoints=state.tails,
+        # The port outage it tracks survives a restart; at 16:15 it starts from the
+        # notifier's announced outage (N15b L-1).
+        memory=state.watch,
+        notifier_outage=notifier_port_outage(environment.paths),
         clock=environment.clock,
         sleep=environment.sleep,
         probe=environment.gateway_probe,
-        # T-4b: at each lead, with the port open, one real daily-history request
-        # on the assistant's own TWS data connection (client 21).
+        # T-4b: at each lead, with the port open, a real daily-history request
+        # on the assistant's own TWS data connection (client 21), confirmed once
+        # 30 s later on the fallback contract before it pages.
         lead_check=PreSessionCheck(
             session=tools.tws,
             unavailable=tools.tws_problem_text or "",
             probe=environment.gateway_probe,
+            sleep=environment.sleep,
         ),
     )
     assistant = TelegramAssistant(

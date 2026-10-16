@@ -26,20 +26,22 @@ multiplier from their run's ``source_sha`` (``trading.research.size_history``).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
 import stat
-from typing import Any
+import threading
+from typing import Any, TypeVar
 
 from trading.contracts import Decision
-from trading.operations.paths import FILE_MODE, PathSecurityError, ensure_private_directory
+from trading.operations.paths import FILE_MODE, ensure_private_directory
 
 SIZING_SCHEMA = "autotrader-v1/decision-sizing"
 SIZING_VERSION = 1
@@ -47,9 +49,23 @@ SIZING_DIRECTORY_SUFFIX = "-decision-sizing"
 SIZING_FILE_SUFFIX = ".jsonl"
 # A run's file holds one short line per decision; anything larger is not ours.
 MAX_SIZING_FILE_BYTES = 8 * 1024 * 1024
+# The pipeline waits at most this long for one sidecar line (N15a MEDIUM-1). The
+# median append is well under a millisecond, so a write still running after two
+# seconds is a fault (a FIFO or a hung volume at the path), never load: the
+# pipeline then turns the sidecar off for the run, and decisions go on unchanged.
+SIZING_RECORD_DEADLINE_S = 2.0
+# Logged once, after the first timeout or OS error, when the pipeline stops writing.
+SIZING_SIDECAR_DISABLED = "sizing_sidecar_disabled"
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+_T = TypeVar("_T")
+
+
+class SizingFileRefused(OSError):
+    """The run's sidecar path is not a regular file (a FIFO, a device, a directory or
+    a symlink): never opened, never written. An ``OSError``, so the pipeline turns the
+    sidecar off for the run instead of trying it again for every decision."""
 
 
 def _plain(value: Decimal) -> str:
@@ -198,15 +214,28 @@ def sizing_file(directory: Path, run_id: str) -> Path:
 
 
 def append_decision_sizing(directory: Path, row: DecisionSizing) -> Path:
-    """Append ``row`` as one line, durably, to its run's private file (never through a symlink)."""
+    """Append ``row`` as one line, durably, to its run's private file.
+
+    Only a regular file is ever opened, and never through a symlink: an existing
+    path is checked with ``lstat`` before the open (opening a FIFO for writing
+    blocks until a reader appears, N15a MEDIUM-1), the open itself does not block
+    (``O_NONBLOCK``) or follow a link (``O_NOFOLLOW``), and the descriptor is
+    checked again (the path could change between the two).
+    """
     ensure_private_directory(directory)
     target = sizing_file(directory, row.run_id)
     line = (json.dumps(row.payload(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        existing = os.lstat(target)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise SizingFileRefused(f"{target.name} is not a regular file")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(target, flags, FILE_MODE)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise PathSecurityError("a decision-sizing file must be a regular file")
+            raise SizingFileRefused(f"{target.name} is not a regular file")
         os.fchmod(descriptor, FILE_MODE)
         written = 0
         while written < len(line):
@@ -215,6 +244,37 @@ def append_decision_sizing(directory: Path, row: DecisionSizing) -> Path:
     finally:
         os.close(descriptor)
     return target
+
+
+async def _on_own_thread(function: Callable[..., _T], *args: object) -> _T:
+    """``function(*args)`` on a daemon thread of its own.
+
+    A write that never returns (a hung volume) then parks only that thread, and
+    the process can still exit: ``asyncio.to_thread``'s default executor is
+    joined by ``asyncio.run`` at exit, which would wait for it until SIGKILL.
+    The pipeline's deadline cancels the wait; the result is then dropped.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[_T] = loop.create_future()
+
+    def settle(outcome: Callable[[], None]) -> None:
+        if not future.done():
+            outcome()
+
+    def work() -> None:
+        try:
+            result = function(*args)
+        except Exception as exc:  # noqa: BLE001 - handed to the waiting task
+            deliver = partial(settle, partial(future.set_exception, exc))
+        else:
+            deliver = partial(settle, partial(future.set_result, result))
+        try:
+            loop.call_soon_threadsafe(deliver)
+        except RuntimeError:
+            pass  # the loop has closed: nobody waits for this line any more
+
+    threading.Thread(target=work, name="decision-sizing", daemon=True).start()
+    return await future
 
 
 async def record_decision_sizing(row: DecisionSizing) -> Path | None:
@@ -226,7 +286,7 @@ async def record_decision_sizing(row: DecisionSizing) -> Path | None:
 
     if cfg.DB_PATH == ":memory:":
         return None
-    return await asyncio.to_thread(append_decision_sizing, sizing_directory(cfg.DB_PATH), row)
+    return await _on_own_thread(append_decision_sizing, sizing_directory(cfg.DB_PATH), row)
 
 
 # --- reading it back (research, read-only) -----------------------------------------
@@ -297,9 +357,12 @@ def read_decision_sizing(directory: Path) -> SizingIndex:
 __all__ = [
     "MAX_SIZING_FILE_BYTES",
     "SIZING_DIRECTORY_SUFFIX",
+    "SIZING_RECORD_DEADLINE_S",
     "SIZING_SCHEMA",
+    "SIZING_SIDECAR_DISABLED",
     "SIZING_VERSION",
     "DecisionSizing",
+    "SizingFileRefused",
     "SizingIndex",
     "append_decision_sizing",
     "decision_sizing",

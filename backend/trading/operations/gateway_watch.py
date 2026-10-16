@@ -33,8 +33,18 @@ session calendar (no clock time is typed here):
   * the rest of the watch day: a page when the outage opens;
   * one recovery line when a paged outage closes, whenever that is (it
     answers a page the owner already has);
-  * entering the notifier's window: a paged outage whose last check succeeded
-    gets its recovery line; then everything is forgotten (BrokerWatch's turn).
+  * entering the notifier's window: a paged outage whose last check succeeded,
+    or whose port answers the handover's own check (N15b L-12), gets its
+    recovery line; then everything is forgotten (BrokerWatch's turn).
+
+An outage's start is never invented (N15b L-1). When the watch starts looking
+(the first start, a restart, 16:15 after BrokerWatch) and its first check
+already fails, the outage began at some unknown time before: "since before
+HH:MM ET", unless the caller hands it a ``KnownOutage`` (the watch's own state
+saved before a restart, or the notifier's announced outage at 16:15). A known
+outage keeps its start, and if the phone was already paged it is not paged
+again (a lead still pages, as always) and never goes into the digest as
+"not paged"; its recovery line comes when the port answers.
 
 ``CompetingLoginWatch``: a login elsewhere (TWS 10197, or 162/165 "different
 IP address") as one ``Hysteresis(open_after_count=1)``: the first line pages
@@ -149,10 +159,17 @@ def clock_text(moment: datetime, now: datetime) -> str:
 # -- the port ---------------------------------------------------------------
 
 
-def port_closed_text(since: datetime, now: datetime, *, check: datetime | None = None) -> str:
+def since_text(since: datetime, now: datetime, *, before: bool = False) -> str:
+    """``HH:MM ET``, or ``before HH:MM ET`` when the outage was already there at the first look."""
+    return f"before {clock_text(since, now)}" if before else clock_text(since, now)
+
+
+def port_closed_text(
+    since: datetime, now: datetime, *, check: datetime | None = None, before: bool = False
+) -> str:
     """The page: since when, what to do, the deadline before the session, and the lead's check."""
     text = (
-        f"⛔ IB Gateway closed since {clock_text(since, now)} (its API port does not answer)"
+        f"⛔ IB Gateway closed since {since_text(since, now, before=before)} (its API port does not answer)"
         " — log in to IB Gateway"
     )
     day = et_day(now)
@@ -163,11 +180,21 @@ def port_closed_text(since: datetime, now: datetime, *, check: datetime | None =
     return text
 
 
-def port_reopened_text(reopened_at: datetime, since: datetime, now: datetime) -> str:
+def port_reopened_text(reopened_at: datetime, since: datetime, now: datetime, *, before: bool = False) -> str:
     return (
         f"✅ IB Gateway port open again {clock_text(reopened_at, now)}"
-        f" (closed since {clock_text(since, now)})"
+        f" (closed since {since_text(since, now, before=before)})"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class KnownOutage:
+    """An outage the watch knows of from before it looked: its start (``before``:
+    already there at that first look), and whether the phone was paged."""
+
+    since: datetime
+    paged: bool
+    before: bool = False
 
 
 @dataclass(slots=True)
@@ -176,6 +203,7 @@ class Outage:
 
     since: datetime
     until: datetime | None = None
+    before: bool = False
 
 
 def digest_text(
@@ -184,17 +212,15 @@ def digest_text(
     """One line for the quiet hours; ``reopening``: the open outage's last check succeeded then."""
     parts: list[str] = []
     for outage in outages:
+        since = since_text(outage.since, now, before=outage.before)
         if outage.until is None and reopening is not None:
-            parts.append(
-                f"port closed since {clock_text(outage.since, now)},"
-                f" open again since {clock_text(reopening, now)}"
-            )
+            parts.append(f"port closed since {since}, open again since {clock_text(reopening, now)}")
         elif outage.until is None:
-            parts.append(f"port closed since {clock_text(outage.since, now)}, still closed")
+            parts.append(f"port closed since {since}, still closed")
+        elif outage.before:
+            parts.append(f"port closed since {since}, open again {clock_text(outage.until, now)}")
         else:
-            parts.append(
-                f"port closed {clock_text(outage.since, now)}–{clock_text(outage.until, now)}"
-            )
+            parts.append(f"port closed {since}–{clock_text(outage.until, now)}")
     if flaps:
         parts.append(f"{flaps} brief flap{'' if flaps == 1 else 's'} held back")
     return "🌙 Overnight IB Gateway watch (quiet hours, not paged): " + "; ".join(parts)
@@ -212,9 +238,36 @@ class PortWatch:
         self._paged = False
         self._in_digest = False
         self._outage_since: datetime | None = None
+        # The tracked outage was already there when the watch first looked.
+        self._since_unknown = False
         self._lead_pending: datetime | None = None
         self._digest: list[Outage] = []
         self._quiet_flaps = 0
+        # Evidence from before this watch looked (N15b L-1), until a check settles it.
+        self._known: KnownOutage | None = None
+        # Whether any check since the watch began looking found the port open.
+        self._seen_open = False
+
+    def carry(self, known: KnownOutage) -> None:
+        """An outage known from before this watch looked (its own state before a
+        restart, the notifier's at 16:15); ignored while one is tracked already."""
+        if self._outage_since is None and not self.hysteresis.is_open:
+            self._known = known
+
+    def record(self) -> KnownOutage | None:
+        """The outage to remember across a restart: the tracked one (paged or in the
+        digest), else the evidence not settled yet; None when there is none."""
+        if self._outage_since is not None and (self._paged or self._in_digest):
+            return KnownOutage(since=self._outage_since, paged=self._paged, before=self._since_unknown)
+        return self._known
+
+    @property
+    def owes_recovery(self) -> bool:
+        """A paged outage whose last check still failed (a known one not settled yet
+        included): the handover checks the port once more (N15b L-12)."""
+        if self._known is not None:
+            return self._known.paged
+        return self._paged and self.hysteresis.recovering_since is None
 
     @property
     def lead_pending(self) -> datetime | None:
@@ -257,16 +310,24 @@ class PortWatch:
         self._quiet_flaps = 0
         return text
 
-    def handover(self, now: datetime) -> list[str]:
-        """Entering the notifier's window: the recovery line a paged outage still
-        owes (its last check succeeded), anything left in the digest, then forget."""
+    def handover(self, now: datetime, port_open: bool | None = None) -> list[str]:
+        """Entering the notifier's window: anything left in the digest, the recovery
+        line a paged outage still owes (its last check succeeded, or ``port_open``:
+        the handover's own check, N15b L-12), then forget."""
         messages: list[str] = []
         digest = self.take_digest(now)
         if digest:
             messages.append(digest)
         recovering = self.hysteresis.recovering_since
-        if self._paged and recovering is not None and self._outage_since is not None:
-            messages.append(port_reopened_text(recovering, self._outage_since, now))
+        known = self._known
+        if self._paged and self._outage_since is not None:
+            reopened = recovering or (now if port_open else None)
+            if reopened is not None:
+                messages.append(
+                    port_reopened_text(reopened, self._outage_since, now, before=self._since_unknown)
+                )
+        elif known is not None and known.paged and port_open:
+            messages.append(port_reopened_text(now, known.since, now, before=known.before))
         self.reset()
         return messages
 
@@ -278,7 +339,20 @@ class PortWatch:
         event = self.hysteresis.success(now) if port_open else self.hysteresis.failure(now)
         if self.hysteresis.flaps > flaps and is_quiet(now):
             self._quiet_flaps += self.hysteresis.flaps - flaps
-        return self._apply(event, now, recovering, lead_at=lead_at)
+        messages = self._settle_known(now) if port_open else []
+        if port_open:
+            self._seen_open = True
+        return messages + self._apply(event, now, recovering, lead_at=lead_at)
+
+    def _settle_known(self, now: datetime) -> list[str]:
+        """The port answers while a known outage is not settled: it is over."""
+        known, self._known = self._known, None
+        if known is None or self.hysteresis.is_open:
+            return []
+        if known.paged:
+            return [port_reopened_text(now, known.since, now, before=known.before)]
+        self._digest.append(Outage(known.since, until=now, before=known.before))
+        return []
 
     def _apply(
         self,
@@ -290,10 +364,17 @@ class PortWatch:
     ) -> list[str]:
         messages: list[str] = []
         if event is not None and event.kind is OPEN:
-            self._outage_since = event.since
+            known, self._known = self._known, None
             check = lead_at or self._lead_pending
-            if check is None and is_quiet(now):
-                self._digest.append(Outage(event.since))
+            if known is not None:
+                # The evidence's start, never this watch's first failed check (N15b L-1).
+                self._outage_since, self._since_unknown = known.since, known.before
+            else:
+                self._outage_since, self._since_unknown = event.since, not self._seen_open
+            if known is not None and known.paged and check is None:
+                self._paged = True  # the phone has this outage already: no second page
+            elif check is None and is_quiet(now):
+                self._digest.append(Outage(self._outage_since, before=self._since_unknown))
                 self._in_digest = True
             else:
                 messages.append(self._page(now, check))
@@ -305,13 +386,14 @@ class PortWatch:
                 reopened = reopened or recovering or now
                 since = self._outage_since or reopened
                 if self._paged:
-                    messages.append(port_reopened_text(reopened, since, now))
+                    messages.append(port_reopened_text(reopened, since, now, before=self._since_unknown))
                 else:
                     for outage in self._digest:
                         if outage.until is None:
                             outage.until = reopened
                 self._paged = self._in_digest = False
                 self._outage_since = None
+                self._since_unknown = False
         return messages
 
     def _page(self, now: datetime, check: datetime | None) -> str:
@@ -319,7 +401,7 @@ class PortWatch:
         self._outage_since = since
         self._paged = True
         self._lead_pending = None
-        return port_closed_text(since, now, check=check)
+        return port_closed_text(since, now, check=check, before=self._since_unknown)
 
     @staticmethod
     def _paged_by(messages: list[str]) -> bool:
@@ -409,6 +491,7 @@ __all__ = [
     "CompetingDecision",
     "CompetingKind",
     "CompetingLoginWatch",
+    "KnownOutage",
     "Outage",
     "PORT_CHECK_INTERVAL",
     "PRE_SESSION_LEADS",
@@ -426,5 +509,6 @@ __all__ = [
     "port_reopened_text",
     "pre_session_leads",
     "session_start",
+    "since_text",
     "watch_day",
 ]

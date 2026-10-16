@@ -62,12 +62,17 @@ def _two_strategy_schedule(request, monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_real_keychain(monkeypatch):
     """The dead-man's switch URL is read from the real Keychain only by the real
-    CLI: a test that reaches that reader without injecting a fake fails."""
+    supervisor, and the item's presence looked up only by the real CLI dry run:
+    a test that reaches either without injecting a fake fails."""
 
     def refuse() -> str | None:
         pytest.fail("a test reached the real Keychain read of the heartbeat URL")
 
+    def refuse_presence() -> bool:
+        pytest.fail("a test reached the real Keychain lookup of the heartbeat item")
+
     monkeypatch.setattr(supervisor_module, "heartbeat_url_from_keychain", refuse)
+    monkeypatch.setattr(supervisor_module, "heartbeat_item_present", refuse_presence)
 
 
 ET = ZoneInfo("America/New_York")
@@ -1044,14 +1049,15 @@ def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsy
 
     monkeypatch.setattr(supervisor_module, "run_supervisor", lambda **_kwargs: pytest.fail("ran"))
     monkeypatch.setattr(supervisor_module, "run_bridge_preflight", _PREFLIGHT_OK)
-    # The CLI's dry run asks the Keychain reader (a fake here) for the heartbeat URL.
-    keychain_reads: list[str] = []
+    # The CLI's dry run asks only whether the heartbeat's Keychain item exists (a
+    # fake here); the URL itself is never read (the autouse guard fails on a read).
+    keychain_lookups: list[str] = []
 
-    def fake_keychain() -> str | None:
-        keychain_reads.append("read")
-        return None
+    def fake_presence() -> bool:
+        keychain_lookups.append("exists?")
+        return False
 
-    monkeypatch.setattr(supervisor_module, "heartbeat_url_from_keychain", fake_keychain)
+    monkeypatch.setattr(supervisor_module, "heartbeat_item_present", fake_presence)
 
     # A fixed simulated clock: on the session's own date the default clock
     # start is "now", which would make this test depend on the time of day.
@@ -1059,7 +1065,7 @@ def test_cli_dry_run_prints_the_timeline_and_launches_nothing(monkeypatch, capsy
     output = capsys.readouterr().out
     assert output.startswith("DRY RUN: nothing is launched")
     assert "07:55:00  CHILD_START screener pid=1" in output
-    assert keychain_reads == ["read"]
+    assert keychain_lookups == ["exists?"]
     assert (
         "heartbeat    not configured (no Keychain item"
         " com.maccabi.autotrader-v1.heartbeat/heartbeat-url)"
@@ -2583,23 +2589,35 @@ def test_run_supervisor_schedules_the_heartbeat_only_when_its_url_is_configured(
     assert isinstance(captured["rotation"], supervisor_module.LogRotation)
 
 
-def test_dry_run_reports_the_heartbeat_by_host_never_its_url():
-    configured = dry_run_report(
-        session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK, heartbeat_url=lambda: HEARTBEAT_URL
-    )
-    missing = dry_run_report(
-        session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK, heartbeat_url=lambda: None
-    )
+def test_dry_run_reports_only_whether_the_heartbeat_item_exists():
+    """N15b L-8: the dry run is run by agents, who never read a Keychain secret:
+    it shows the item's presence, never the URL or its host."""
+
+    def broken() -> bool:
+        raise RuntimeError("security failed")
+
+    def report(present):
+        return dry_run_report(session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK, heartbeat_present=present)
+
+    configured, missing, unknown = report(lambda: True), report(lambda: False), report(broken)
     unchecked = dry_run_report(session_date=TUESDAY, unsupervised=list, preflight=_PREFLIGHT_OK)
 
-    assert "heartbeat    every 60 s to hc-ping.example" in configured.splitlines()
+    assert (
+        f"heartbeat    Keychain item {HEARTBEAT_ITEM} present (the child validates the URL)"
+        in configured.splitlines()
+    )
     assert "heartbeat always-on" in configured
     assert "-m trading.operations.heartbeat" in configured
-    assert HEARTBEAT_TOKEN not in configured
+    assert "hc-ping.example" not in configured and HEARTBEAT_TOKEN not in configured
     assert f"heartbeat    not configured (no Keychain item {HEARTBEAT_ITEM})" in missing.splitlines()
     assert "heartbeat always-on" not in missing
+    assert (
+        f"heartbeat    unknown (Keychain item {HEARTBEAT_ITEM} could not be checked: RuntimeError)"
+        in unknown.splitlines()
+    )
+    assert "heartbeat always-on" not in unknown
     assert "heartbeat    not checked (no Keychain reader given)" in unchecked.splitlines()
-    for report in (configured, missing, unchecked):
+    for report in (configured, missing, unknown, unchecked):
         # A missing switch is a warning, never a refusal.
         assert not any(row.startswith("!!!") and "heartbeat" in row for row in report.splitlines())
         assert "CHILD_START heartbeat" not in report  # the timeline shows session children only

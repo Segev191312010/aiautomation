@@ -38,6 +38,7 @@ from trading.operations.supervisor import (
     LogRotation,
     Supervisor,
     SupervisorLog,
+    iso_utc,
     open_private_append,
 )
 from trading.operations.telegram_tools import last_child_events, supervisor_state
@@ -229,7 +230,12 @@ def test_one_rotation_renames_idle_logs_and_truncates_held_ones(tmp_path):
             os.close(descriptor)
         log.close()
 
-    assert lines == ["LOG_ROTATED date=2026-10-13 renamed=4 truncated=2 pruned=1 carried=1"]
+    # The marker is already in the new file, after the carried line: nothing left to log.
+    assert lines == []
+    assert (tmp_path / "supervisor.log").read_text().splitlines() == [
+        f"{et(TUESDAY, 7, 0).isoformat()} SUPERVISOR_START pid=500 mode=daily",
+        f"{iso_utc(et(TUESDAY, 18, 35))} LOG_ROTATED date=2026-10-13 renamed=4 truncated=2 pruned=1 carried=1",
+    ]
     for name in ("bridge", "replay", "momo"):
         assert (tmp_path / f"{name}.log.2026-10-13").read_text() == f"{name} lines\n"
         assert (tmp_path / f"{name}.log").read_text() == ""
@@ -259,11 +265,64 @@ def test_a_rotation_failure_is_one_line_and_the_rest_still_rotates(tmp_path):
     finally:
         log.close()
 
-    assert lines == [
-        "LOG_ROTATED date=2026-10-13 renamed=2 truncated=0 pruned=0 carried=0",
-        "LOG_ROTATION_FAILED file=screener.log error=PathSecurityError",
+    assert lines == ["LOG_ROTATION_FAILED file=screener.log error=PathSecurityError"]
+    assert (tmp_path / "supervisor.log").read_text().splitlines() == [
+        f"{iso_utc(et(TUESDAY, 18, 35))} LOG_ROTATED date=2026-10-13 renamed=2 truncated=0 pruned=0 carried=0",
     ]
     assert (tmp_path / "bridge.log.2026-10-13").read_text() == "bridge\n"
+
+
+def test_a_supervisor_log_that_cannot_rotate_hands_its_marker_back_to_be_logged(tmp_path, monkeypatch):
+    log = SupervisorLog(tmp_path / "supervisor.log")
+    (tmp_path / "bridge.log").write_text("bridge\n")
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(log, "rotate", refuse)
+    try:
+        lines = LogRotation(tmp_path, log).rotate(et(TUESDAY, 18, 35))
+    finally:
+        log.close()
+
+    assert lines == [
+        "LOG_ROTATED date=2026-10-13 renamed=1 truncated=0 pruned=0 carried=0",
+        "LOG_ROTATION_FAILED file=supervisor.log error=OSError",
+    ]
+
+
+def test_the_rotation_writes_its_carried_lines_and_its_marker_in_one_write(tmp_path, monkeypatch):
+    """N15b L-5: a follower polling at any moment sees the carried copies only
+    with the LOG_ROTATED marker that counts them: they go to the new file in
+    one write, after every other file has rotated and been pruned."""
+    path = tmp_path / "supervisor.log"
+    log = SupervisorLog(path)
+    old = [
+        f"{iso_utc(et(TUESDAY, 2, 0))} SUPERVISOR_START pid=500 mode=daily",
+        f"{iso_utc(et(TUESDAY, 2, 0))} CHILD_START telegram pid=501",
+        f"{iso_utc(et(TUESDAY, 18, 30))} SESSION_WAIT date=2026-10-14 until=2026-10-14T11:55:00+00:00",
+    ]
+    for line in old:
+        log(line)
+    archive_path(tmp_path / "bridge.log", TUESDAY - timedelta(days=14)).write_text("old\n")
+    writes: list[bytes] = []
+    real_write = os.write
+
+    def spy(descriptor: int, data: bytes) -> int:
+        writes.append(bytes(data))
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(os, "write", spy)
+    try:
+        assert LogRotation(tmp_path, log).rotate(et(TUESDAY, 18, 35)) == []
+    finally:
+        monkeypatch.undo()
+        log.close()
+
+    marker = f"{iso_utc(et(TUESDAY, 18, 35))} LOG_ROTATED date=2026-10-13 renamed=1 truncated=0 pruned=1 carried=3"
+    block = "".join(f"{line}\n" for line in [*old, marker]).encode("utf-8")
+    assert [data for data in writes if b"LOG_ROTATED" in data or b"SUPERVISOR_START" in data] == [block]
+    assert path.read_bytes() == block
 
 
 def test_the_new_supervisor_log_carries_the_running_state(tmp_path):

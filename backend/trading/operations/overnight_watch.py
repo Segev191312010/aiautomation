@@ -9,13 +9,21 @@ schedule); this module probes, reads the logs and sends:
     pre-session lead a check on the lead itself (again one ``open_after``
     later when it is the streak's first failure), and then, with the port
     open, the lead hook (T-4b's real-data check). Inside the window nothing is
-    probed or said (``PortWatch.handover`` at its start);
+    probed or said: at its start ``PortWatch.handover``, after one more port
+    check when a paged outage's last check still failed (N15b L-12). At 16:15,
+    taking the Gateway over from the notifier, the watch starts from the
+    notifier's announced outage of the day (``notify_service.
+    notifier_gateway_outage``: its start, and whether it was paged), never
+    from its own first failed check (N15b L-1);
   * F-2, ``supervisor.log`` on any day: the restart cap's lines
     (``CHILD_SUSPENDED``, ``CHILD_RESTART_STORM``, ``CHILD_RESUMED``) dated
     outside the notifier's window, with notify_service's own texts and
     timing rule (each once per child per half hour; a state that contradicts
     the last one sent always goes), plus the line's ET time. A line dated
-    inside the window is the notifier's: read and dropped, never sent twice.
+    inside the window is the notifier's: read and dropped, never sent twice,
+    except the lines about the notifier itself, which are this watch's at any
+    hour (a suspended or crash-looping notifier cannot report itself; the
+    notifier never forwards them, N15b L-3).
     The rotation's marker and carried lines are dropped by ``log_tailer``'s
     one rule, and the archive is never read again;
   * ``recorder.log`` from the notifier's end to the recorder's (16:15-17:30
@@ -28,20 +36,23 @@ for it; Python 3.11's ``asyncio.wait_for`` runs its awaitable in a task of its
 own and drops a cancellation that lands just as that task finishes (gh-86296),
 so the timeouts here are ``asyncio.timeout`` (the caller's own task), and the
 loop checks for a pending cancellation before every sleep in case a library
-swallowed one (live flake 2026-10-17: the watch paged on while stop() waited).
+swallowed one (2026-10-17, in the composition-root test, not live: the watch
+paged on while stop() waited).
 
 Both logs are followed by ``LogTailer``s whose checkpoints live in the
 assistant's state file: a restart neither resends nor skips, and the first
-start follows each log from its end. The digest of the quiet hours and the
-competing-login state are in memory: a restart forgets them (the next lead's
-own check still pages a closed port). Nothing here can place, change or
-cancel an order; it sends Telegram text only.
+start follows each log from its end. The port outage the watch tracks (its
+start, whether it was paged) is kept there too (``memory``), so a restart
+neither invents a new start nor files a paged outage as "not paged" (N15b
+L-1). The digest's other entries and the competing-login state are in memory:
+a restart forgets them (the next lead's own check still pages a closed port).
+Nothing here can place, change or cancel an order; it sends Telegram text only.
 """
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, MutableMapping
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import logging
 from pathlib import Path
 
@@ -50,6 +61,7 @@ from trading.operations.gateway_watch import (
     CompetingDecision,
     CompetingKind,
     CompetingLoginWatch,
+    KnownOutage,
     PortWatch,
     after_notifier_competing_window,
     clock_text,
@@ -59,17 +71,20 @@ from trading.operations.gateway_watch import (
     pre_session_leads,
 )
 from trading.operations.hysteresis import State
-from trading.operations.log_tailer import LogTailer, RotationCarried, line_time
+from trading.operations.log_tailer import LogTailer, RotationCarried, line_time, parse_iso
 from trading.operations.notify_service import (
     CHILD_EXIT_ALERT_INTERVAL,
     CHILD_RESUMED,
     CHILD_SUSPENDED,
+    GATEWAY_DOWN,
     competing_login_repage_text,
     ibkr_alert_text,
     ibkr_session_problem,
+    notifier_gateway_outage,
     restart_cap_event,
 )
-from trading.operations.supervisor import PORT_PROBE_TIMEOUT_S, SUPERVISOR_LOG_NAME
+from trading.operations.paths import UserPaths
+from trading.operations.supervisor import NOTIFIER_CHILD, PORT_PROBE_TIMEOUT_S, SUPERVISOR_LOG_NAME
 
 logger = logging.getLogger("autotrader.shadow.telegram")
 
@@ -84,6 +99,13 @@ MIN_WAIT_SECONDS = 1.0
 LEAD_GRACE = PORT_CHECK_INTERVAL
 # The probe bounds itself (PORT_PROBE_TIMEOUT_S); this bounds the worker thread too.
 PROBE_DEADLINE_S = 2 * PORT_PROBE_TIMEOUT_S
+# What the watch keeps in the assistant's state file (``memory``): the port
+# outage it tracks, and the session date it last took the Gateway over from
+# the notifier (once a day, at the notifier's end).
+OUTAGE_SINCE_KEY = "port_outage_since"
+OUTAGE_PAGED_KEY = "port_outage_paged"
+OUTAGE_BEFORE_KEY = "port_outage_before"
+TOOK_OVER_KEY = "took_over"
 
 Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -92,6 +114,22 @@ Save = Callable[[], None]
 PortProbe = Callable[[], Awaitable[bool]]
 # (now, the lead's scheduled time) -> the page to send, or None (healthy).
 LeadCheck = Callable[[datetime, datetime], Awaitable[str | None]]
+# The notifier's announced Gateway outage of a session date, as port evidence.
+NotifierOutage = Callable[[date], KnownOutage | None]
+
+
+def notifier_port_outage(paths: UserPaths) -> NotifierOutage:
+    """The notifier's announced outage of a date, when it is the Gateway not
+    answering (``GATEWAY_DOWN``): the port watch's evidence at 16:15. IBKR-side
+    outages (data refused, the link lost) leave the port open: not evidence."""
+
+    def read(day: date) -> KnownOutage | None:
+        outage = notifier_gateway_outage(paths, day)
+        if outage is None or outage.kind != GATEWAY_DOWN:
+            return None
+        return KnownOutage(since=outage.since, paged=outage.paged)
+
+    return read
 
 
 def _utc_now() -> datetime:
@@ -149,6 +187,8 @@ class OvernightWatch:
         probe: PortProbe | None = None,
         lead_check: LeadCheck | None = None,
         tick_seconds: float = WATCH_TICK_SECONDS,
+        memory: MutableMapping[str, str] | None = None,
+        notifier_outage: NotifierOutage | None = None,
     ) -> None:
         self._tailers = {
             SUPERVISOR_LOG: LogTailer(log_directory / SUPERVISOR_LOG_NAME),
@@ -160,6 +200,8 @@ class OvernightWatch:
         self._probe_fn = probe or _default_probe
         self._lead_check = lead_check
         self._tick = tick_seconds
+        self._memory: MutableMapping[str, str] = {} if memory is None else memory
+        self._notifier_outage = notifier_outage
         self._rotation = RotationCarried()
         self.port = PortWatch()
         self.competing = CompetingLoginWatch()
@@ -172,12 +214,22 @@ class OvernightWatch:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Resume each log at its checkpoint (the first start: from its end)."""
+        """Resume each log at its checkpoint (the first start: from its end), and the
+        port outage the watch was tracking before a restart."""
         if self._started:
             return
         self._started = True
         for name, tailer in self._tailers.items():
             tailer.start(self._checkpoints.get(name))
+        since = parse_iso(self._memory.get(OUTAGE_SINCE_KEY))
+        if since is not None:
+            self.port.carry(
+                KnownOutage(
+                    since=since,
+                    paged=self._memory.get(OUTAGE_PAGED_KEY) == "1",
+                    before=self._memory.get(OUTAGE_BEFORE_KEY) == "1",
+                )
+            )
 
     def close(self) -> None:
         for tailer in self._tailers.values():
@@ -202,9 +254,33 @@ class OvernightWatch:
     async def step(self, send: Send, save: Save) -> None:
         self.start()
         now = self._clock()
+        remembered = dict(self._memory)
         self._follow_logs(now, send, save)
         self._follow_competing(now, send)
-        await self._follow_port(now, send)
+        try:
+            await self._follow_port(now, send)
+        finally:
+            self._remember()
+            if dict(self._memory) != remembered:
+                save()
+
+    def _remember(self) -> None:
+        """The port outage the watch tracks now, in the assistant's state file."""
+        record = self.port.record()
+        wanted = (
+            {}
+            if record is None
+            else {
+                OUTAGE_SINCE_KEY: record.since.isoformat(),
+                OUTAGE_PAGED_KEY: "1" if record.paged else "0",
+                OUTAGE_BEFORE_KEY: "1" if record.before else "0",
+            }
+        )
+        for key in (OUTAGE_SINCE_KEY, OUTAGE_PAGED_KEY, OUTAGE_BEFORE_KEY):
+            if key in wanted:
+                self._memory[key] = wanted[key]
+            else:
+                self._memory.pop(key, None)
 
     # -- logs ----------------------------------------------------------------
 
@@ -231,9 +307,9 @@ class OvernightWatch:
         if capped is None:
             return
         at = line_time(line) or now
-        if in_notifier_window(at):
-            return  # the notifier's line: it was (or is being) sent from there
         kind, name, text = capped
+        if in_notifier_window(at) and name != NOTIFIER_CHILD:
+            return  # the notifier's line: it was (or is being) sent from there
         if not self._gate.allowed(kind, name, now):
             return
         logger.info("overnight watch: forwarded %s %s", kind, name)
@@ -282,10 +358,14 @@ class OvernightWatch:
                 logger.info(
                     "overnight watch: BrokerWatch owns the Gateway until %s", clock_text(window[1], now)
                 )
-                self._send_all(self.port.handover(now), send)
+                # A paged outage whose last check still failed: one more check, so a
+                # port that reopened since gets its recovery line (N15b L-12).
+                port_open = await self._probe() if self.port.owes_recovery else None
+                self._send_all(self.port.handover(now, port_open), send)
             self._next_check = None
             return
         self._in_notifier_window = False
+        self._take_over(now)
         lead = self._due_lead(now)
         if lead is not None:
             port_open = await self._probe()
@@ -309,6 +389,28 @@ class OvernightWatch:
                 self._send_all(self.port.check(now, port_open), send)
             self._schedule_check(now)
         self._send_all(self.port.tick(now), send)
+
+    def _take_over(self, now: datetime) -> None:
+        """Once a session day, after the notifier's window: its announced outage is
+        the watch's evidence, so a closed port is never "closed since 16:15"."""
+        day = et_day(now)
+        window = notifier_window(day)
+        if window is None or now < window[1] or self._memory.get(TOOK_OVER_KEY) == day.isoformat():
+            return
+        self._memory[TOOK_OVER_KEY] = day.isoformat()
+        if self._notifier_outage is None or self.port.record() is not None:
+            return
+        try:
+            known = self._notifier_outage(day)
+        except Exception as exc:  # noqa: BLE001 - no evidence: "since before HH:MM" instead
+            logger.warning("overnight watch: the notifier's Gateway state unreadable (%s)", type(exc).__name__)
+            return
+        if known is not None:
+            logger.info(
+                "overnight watch: the notifier's Gateway outage since %s (%s) carried over",
+                clock_text(known.since, now), "paged" if known.paged else "not paged",
+            )
+            self.port.carry(known)
 
     def _schedule_check(self, now: datetime) -> None:
         # A lead's first failure is confirmed as soon as the hysteresis can open on it.
@@ -353,9 +455,15 @@ class OvernightWatch:
 
 __all__ = [
     "LEAD_GRACE",
+    "OUTAGE_BEFORE_KEY",
+    "OUTAGE_PAGED_KEY",
+    "OUTAGE_SINCE_KEY",
+    "TOOK_OVER_KEY",
     "LeadCheck",
+    "NotifierOutage",
     "OvernightWatch",
     "PortProbe",
     "RestartCapGate",
     "WATCH_TICK_SECONDS",
+    "notifier_port_outage",
 ]

@@ -468,7 +468,15 @@ async def _execute(arguments: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            await kill_store.resume(reason=arguments.reason, identity=identity)
+            from trading.operations.sentinel import owner_resume_reason
+
+            # Lifting a Sentinel fence leaves its date in the reason: the Sentinel
+            # then never re-fences that identity that day, state file or not.
+            await kill_store.resume(
+                reason=arguments.reason,
+                identity=identity,
+                annotate=lambda lifted: owner_resume_reason(arguments.reason, lifted),
+            )
             print(f"PAPER identity fence {identity}: RESUMED")
             return 0
         stopped = await kill_store.is_stopped()
@@ -959,7 +967,8 @@ def _supervise_command(arguments: argparse.Namespace) -> int:
         report = supervisor.dry_run_report(
             session_date=arguments.date,
             clock_start=arguments.clock_start,
-            heartbeat_url=supervisor.heartbeat_url_from_keychain,
+            # Presence only: the dry run is an agent's, and agents never read secrets.
+            heartbeat_present=supervisor.heartbeat_item_present,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)

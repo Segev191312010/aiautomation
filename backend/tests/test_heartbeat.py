@@ -661,6 +661,38 @@ def test_the_url_is_read_from_its_own_keychain_item():
     assert url_from_keychain(MacOSKeychainReader(command_runner=missing)) is None
 
 
+def test_the_presence_check_never_asks_the_keychain_for_the_secret():
+    """N15b L-8: the agent-run dry run asks only whether the item exists:
+    find-generic-password without -w (or -g), its output discarded."""
+    commands: list[tuple[str, ...]] = []
+
+    def answer(code: int, stdout: str = ""):
+        def runner(command):
+            commands.append(tuple(command))
+            return subprocess.CompletedProcess(command, code, stdout=stdout, stderr="")
+        return runner
+
+    attributes = 'keychain: "login.keychain-db"\nclass: "genp"\nattributes:\n    "svce"<blob>="com.maccabi.autotrader-v1.heartbeat"\n'
+    assert heartbeat.item_present(MacOSKeychainReader(command_runner=answer(0, attributes))) is True
+    assert heartbeat.item_present(MacOSKeychainReader(command_runner=answer(44))) is False
+    with pytest.raises(heartbeat.KeychainReadError):
+        heartbeat.item_present(MacOSKeychainReader(command_runner=answer(51)))
+    assert set(commands) == {
+        ("/usr/bin/security", "find-generic-password", "-a", "heartbeat-url", "-s", "com.maccabi.autotrader-v1.heartbeat")
+    }
+    assert not any(flag in command for command in commands for flag in ("-w", "-g"))
+
+    def broken() -> bool:
+        raise heartbeat.KeychainReadError("locked")
+
+    item = "com.maccabi.autotrader-v1.heartbeat/heartbeat-url"
+    assert heartbeat.presence_detail(lambda: True) == (True, f"Keychain item {item} present (the child validates the URL)")
+    assert heartbeat.presence_detail(lambda: False) == (False, f"not configured (no Keychain item {item})")
+    assert heartbeat.presence_detail(broken) == (
+        False, f"unknown (Keychain item {item} could not be checked: KeychainReadError)"
+    )
+
+
 # --- lifecycle ---------------------------------------------------------------------------
 
 

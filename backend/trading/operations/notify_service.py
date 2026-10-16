@@ -90,6 +90,7 @@ Telegram child's after-hours forwarder in ``trading.operations.log_tailer``).
 from __future__ import annotations
 
 import asyncio
+import bisect
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -162,7 +163,7 @@ from trading.operations.sentinel import (
     read_bridge_heartbeat_at,
     resume_command,
 )
-from trading.operations.supervisor import bridge_window
+from trading.operations.supervisor import NOTIFIER_CHILD, bridge_window
 from trading.operations.telegram_tools import child_starts_on, read_log_tail, restarts_text
 from trading.research.live_ledger import bridge_state_directory
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
@@ -237,7 +238,16 @@ FLATTEN_SEEN_KEY = "ops_flatten_seen_at"
 # What the notifier itself counts for the OPS lines (persisted per date).
 GATEWAY_OUTAGES = "gateway_outages"
 GATEWAY_UNREACHABLE_SECONDS = "gateway_unreachable_seconds"
+# The part of the unreachable seconds that was IBKR refusing prices with the
+# Gateway connected (an outage opened by data refused, N15b L-10).
+GATEWAY_REFUSED_SECONDS = "gateway_refused_seconds"
 GATEWAY_FLAPS = "gateway_flaps"
+# The announced Gateway outage as the notifier last saw it (its first failure
+# and the kind that opened it), kept in the per-date alerts map: the Telegram
+# watch's evidence when it takes the Gateway over at 16:15 (N15b L-1). Paged:
+# BROKER_UNREACHABLE's alert time is there too.
+GATEWAY_OUTAGE_SINCE_KEY = "gateway_outage_since"
+GATEWAY_OUTAGE_KIND_KEY = "gateway_outage_kind"
 PREFLIGHT_REFUSED = "preflight_refused"
 _PREFLIGHT_REFUSED = re.compile(r"\bPREFLIGHT_REFUSED\b")
 _REGIME_LABELS = {"risk_on": "RISK-ON", "neutral": "NEUTRAL", "risk_off": "RISK-OFF"}
@@ -458,6 +468,42 @@ def _json_object(value: object) -> dict[str, Any] | None:
 
 def state_file(paths: UserPaths, session_date: date) -> Path:
     return paths.data_directory / "notify" / f"{session_date.isoformat()}.json"
+
+
+# The per-date state file is small; anything larger is not the notifier's.
+MAX_STATE_FILE_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayOutage:
+    """The notifier's announced Gateway outage for a date, as its state file has it."""
+
+    since: datetime
+    kind: str
+    paged: bool
+
+
+def notifier_gateway_outage(paths: UserPaths, session_date: date) -> GatewayOutage | None:
+    """The announced outage the notifier last saw on ``session_date`` (N15b L-1),
+    read-only and never through a link; None when there is none, or when the
+    file is missing, unreadable or not this date's."""
+    path = state_file(paths, session_date)
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_STATE_FILE_BYTES:
+            return None
+        raw = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(raw, dict) or raw.get("session_date") != session_date.isoformat():
+        return None
+    alerts = raw.get("alerts")
+    if not isinstance(alerts, dict):
+        return None
+    since = _parse_time(alerts.get(GATEWAY_OUTAGE_SINCE_KEY))
+    kind = alerts.get(GATEWAY_OUTAGE_KIND_KEY)
+    if since is None or not isinstance(kind, str):
+        return None
+    return GatewayOutage(since=since, kind=kind, paged=isinstance(alerts.get(BROKER_UNREACHABLE), str))
 
 
 @dataclass(slots=True)
@@ -1024,11 +1070,19 @@ class BrokerWatch:
     swept_since_alert: bool = False
     flaps_seen: int = 0
     flaps_reported: int = 0
-    flaps_from: datetime | None = None
+    # The flaps the digest has not reported yet, by time (oldest first), counted
+    # by the OPS rule (N15b L-10): a held-back open waits in ``held_flap_at``
+    # until it settles, a flap if it closes unannounced, gone if announced.
+    flap_times: list[datetime] = field(default_factory=list)
+    held_flap_at: datetime | None = None
     # Announced outages and their length (first failure to the first success
-    # of the stretch that closed it), for the report's OPS lines.
+    # of the stretch that closed it), for the report's OPS lines; the part of
+    # it that was data refused (an outage opened by DATA_REFUSED) besides.
     outages: int = 0
     unreachable_seconds: float = 0.0
+    refused_seconds: float = 0.0
+    # The kind that opened the announced outage: its recovery line's wording.
+    outage_kind: str = GATEWAY_DOWN
     # The OPS lines count one outage once (P1-B): an open the pair budget held
     # back is a flap to the hysteresis even when the sustain limit or the window
     # announces it later (the digest's flap line keeps that). ``holding_back``:
@@ -1058,7 +1112,7 @@ class BrokerWatch:
 
     @property
     def flaps_pending(self) -> bool:
-        return self.hysteresis.flaps > self.flaps_reported
+        return bool(self.flap_times)
 
     @property
     def ops_flaps(self) -> int:
@@ -1224,42 +1278,59 @@ class BrokerWatch:
 
     def _apply(self, event: HysteresisEvent | None, now: datetime) -> str | None:
         flaps = self.hysteresis.flaps
-        if flaps > self.flaps_seen:
+        new = flaps - self.flaps_seen
+        if new > 0:
             self.flaps_seen = flaps
-            if self.flaps_from is None:
-                self.flaps_from = now
+            self.flap_times.extend([now] * new)
             logger.info("%s flap %d held back from the phone", BROKER_UNREACHABLE, flaps)
-        if event is not None and event.kind is HYSTERESIS_OPEN and self.holding_back:
+        holding = self.holding_back
+        if event is not None and event.kind is HYSTERESIS_OPEN and holding:
             # Held back by the pair budget, announced now by the sustain limit or
-            # the window: the OPS lines count it as this outage, not also a flap.
+            # the window: one outage, never also a flap (OPS lines and digest alike).
             self.flaps_announced += 1
+            self.held_flap_at = None
         self.holding_back = self.hysteresis.is_open and not self.hysteresis.announced
+        if self.holding_back and not holding and new > 0 and self.flap_times:
+            # The open the budget just held back: not a flap yet, it may still be announced.
+            self.held_flap_at = self.flap_times.pop()
+        elif holding and not self.holding_back and self.held_flap_at is not None:
+            # Closed without being announced: a flap after all.
+            bisect.insort(self.flap_times, self.held_flap_at)
+            self.held_flap_at = None
         if event is None:
             return None
         self.alerted = False
         self.swept_since_alert = False
         if event.kind is HYSTERESIS_OPEN:
             self.unreachable_since = event.since
+            self.outage_kind = self.failure_kind
             self.outages += 1
             return None
         self.unreachable_since = None
         assert event.recovered_at is not None
-        self.unreachable_seconds += max((event.recovered_at - event.since).total_seconds(), 0.0)
+        lasted = max((event.recovered_at - event.since).total_seconds(), 0.0)
+        self.unreachable_seconds += lasted
+        if self.outage_kind == DATA_REFUSED:
+            # The Gateway answered all along: IBKR refused the prices (N15b L-10).
+            self.refused_seconds += lasted
+            return (
+                f"✅ IBKR is returning prices again {_et_hhmm(event.recovered_at)} ET — market data is back"
+                f" (refusing prices since {_et_hhmm(event.since)} ET)"
+            )
         return (
             f"✅ IB Gateway reconnected {_et_hhmm(event.recovered_at)} ET — market data is back"
             f" (unreachable since {_et_hhmm(event.since)} ET)"
         )
 
     def take_flap_line(self) -> str | None:
-        """The digest's line for the flaps not reported yet (they now count as reported)."""
-        pending = self.hysteresis.flaps - self.flaps_reported
-        if pending <= 0:
+        """The digest's line for the settled flaps not reported yet, counted by the
+        OPS lines' rule (``ops_flaps``): one announced outage is never also a flap."""
+        if not self.flap_times:
             return None
-        since = self.flaps_from
-        self.flaps_reported = self.hysteresis.flaps
-        self.flaps_from = None
-        start = f" since {_et_hhmm(since)} ET" if since is not None else ""
-        return f"⚡ IB Gateway flapped {pending}×{start} (held back from separate alerts)"
+        pending, since = len(self.flap_times), self.flap_times[0]
+        self.flap_times.clear()
+        self.flaps_reported += pending
+        return f"⚡ IB Gateway flapped {pending}× since {_et_hhmm(since)} ET (held back from separate alerts)"
 
     def alert_text(self) -> str:
         """The alert for the newest failure kind, as of the latest observe/check."""
@@ -1655,8 +1726,12 @@ class OpsCounters:
 
     gateway_outages: int = 0
     gateway_unreachable_seconds: int = 0
+    # The part of it that was IBKR refusing prices (the Gateway connected).
+    gateway_refused_seconds: int = 0
     gateway_flaps: int = 0
     gateway_down_since: datetime | None = None
+    # The outage open at the report was opened by data refused.
+    gateway_down_refused: bool = False
     preflight_refused: int = 0
     # The bridge state as the notifier saw it during the day (HELD_AT_VERIFY_KEY,
     # FLATTEN_SEEN_KEY): None when it did not look then.
@@ -2027,13 +2102,19 @@ def _gateway_line(counters: OpsCounters | None) -> str:
         return "• Gateway: not counted here (the notifier's 16:05 report has it)"
     if not counters.gateway_outages and not counters.gateway_flaps:
         return "• Gateway: no outage, no flaps"
-    minutes = -(-counters.gateway_unreachable_seconds // 60)
-    text = (
-        f"• Gateway: {_plural(counters.gateway_outages, 'outage')}, {minutes} min unreachable,"
-        f" {_plural(counters.gateway_flaps, 'flap')}"
-    )
+    refused = min(counters.gateway_refused_seconds, counters.gateway_unreachable_seconds)
+    unreachable = -(-(counters.gateway_unreachable_seconds - refused) // 60)
+    refusing = -(-refused // 60)
+    parts = [_plural(counters.gateway_outages, "outage")]
+    if unreachable or not refusing:
+        parts.append(f"{unreachable} min unreachable")
+    if refusing:
+        # The Gateway answered: IBKR refused the prices (N15b L-10).
+        parts.append(f"{refusing} min refusing prices")
+    text = f"• Gateway: {', '.join(parts)}, {_plural(counters.gateway_flaps, 'flap')}"
     if counters.gateway_down_since is not None:
-        text += f"; still unreachable since {_et_hhmm(counters.gateway_down_since)} ET"
+        state = "refusing prices" if counters.gateway_down_refused else "unreachable"
+        text += f"; still {state} since {_et_hhmm(counters.gateway_down_since)} ET"
     return text
 
 
@@ -2196,7 +2277,7 @@ class _NotifierSession:
         # A login elsewhere: paged at its first line, re-paged while it lasts.
         self._competing = CompetingLoginWatch()
         # The broker counts already added to the persisted OPS counters.
-        self._gateway_synced = (0, 0, 0)
+        self._gateway_synced = (0, 0, 0, 0)
         # What the phone last heard per child from the restart cap (suspended or
         # resumed); rebuilt from the persisted alert times after a restart.
         self._child_told: dict[str, str] = {}
@@ -2359,23 +2440,52 @@ class _NotifierSession:
         """Add the broker's new outages, unreachable seconds and flaps to the day's
         counters; an outage counts once, as an outage (``BrokerWatch.ops_flaps``)."""
         broker = self._broker
-        current = (broker.outages, int(broker.unreachable_seconds), broker.ops_flaps)
+        current = (
+            broker.outages, int(broker.unreachable_seconds), int(broker.refused_seconds), broker.ops_flaps
+        )
         for key, now, before in zip(
-            (GATEWAY_OUTAGES, GATEWAY_UNREACHABLE_SECONDS, GATEWAY_FLAPS), current, self._gateway_synced
+            (GATEWAY_OUTAGES, GATEWAY_UNREACHABLE_SECONDS, GATEWAY_REFUSED_SECONDS, GATEWAY_FLAPS),
+            current,
+            self._gateway_synced,
         ):
             self._state.count(key, now - before)
         self._gateway_synced = current
+        self._sync_gateway_outage()
+
+    def _sync_gateway_outage(self) -> None:
+        """The announced outage's start and kind in the per-date alerts map (N15b
+        L-1): after 16:15 the Telegram watch starts from them, never from its own
+        first failed check."""
+        alerts, since = self._state.alerts, self._broker.unreachable_since
+        wanted = (
+            {}
+            if since is None
+            else {GATEWAY_OUTAGE_SINCE_KEY: since.isoformat(), GATEWAY_OUTAGE_KIND_KEY: self._broker.outage_kind}
+        )
+        for key in (GATEWAY_OUTAGE_SINCE_KEY, GATEWAY_OUTAGE_KIND_KEY):
+            if alerts.get(key) != wanted.get(key):
+                if key in wanted:
+                    alerts[key] = wanted[key]
+                else:
+                    alerts.pop(key, None)
+                self._state.dirty = True
 
     def _ops_counters(self) -> OpsCounters:
         self._sync_gateway_counts()
         counters = self._state.counters
         seconds = counters.get(GATEWAY_UNREACHABLE_SECONDS, 0)
+        refused = counters.get(GATEWAY_REFUSED_SECONDS, 0)
         since = self._broker.unreachable_since
+        down_refused = since is not None and self._broker.outage_kind == DATA_REFUSED
         if since is not None:
-            seconds += max(int((self._environment.clock() - since).total_seconds()), 0)
+            lasting = max(int((self._environment.clock() - since).total_seconds()), 0)
+            seconds += lasting
+            refused += lasting if down_refused else 0
         return OpsCounters(
             gateway_outages=counters.get(GATEWAY_OUTAGES, 0),
             gateway_unreachable_seconds=seconds,
+            gateway_refused_seconds=refused,
+            gateway_down_refused=down_refused,
             # An open still held back at the report is a flap as of now (persisted
             # only once it settles: closed unannounced, a flap; announced, an outage).
             gateway_flaps=counters.get(GATEWAY_FLAPS, 0) + int(self._broker.holding_back),
@@ -2485,7 +2595,9 @@ class _NotifierSession:
             capped = restart_cap_event(line)
             if capped is not None:
                 kind, name, text = capped
-                if self._restart_cap_allowed(kind, name):
+                # Lines about the notifier itself are the Telegram child's, at any
+                # hour (N15b L-3): read late after its own restart, they would repeat.
+                if name != NOTIFIER_CHILD and self._restart_cap_allowed(kind, name):
                     self._send_alert(f"{kind}:{name}", text)
                 return
             name = supervisor_child_name(line) or "unknown"
@@ -3056,7 +3168,9 @@ __all__ = [
     "SENTINEL_CHECK_SECONDS",
     "SignalDecision",
     "bridge_event_text",
+    "GatewayOutage",
     "bridge_state_files",
+    "notifier_gateway_outage",
     "child_exit_code",
     "manager_tripwire",
     "supervisor_child_name",

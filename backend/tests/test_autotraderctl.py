@@ -163,6 +163,44 @@ def test_paper_resume_lifts_an_identity_fence_and_never_the_global_stop(tmp_path
     assert capsys.readouterr().out.splitlines()[0] == "PAPER kill switch: ACTIVE"
 
 
+def test_paper_resume_of_a_sentinel_fence_leaves_the_fences_date_in_its_reason(tmp_path, capsys):
+    """N15a LOW-5: the trace the Sentinel reads from the table alone, so an owner's
+    resume holds for the day even when the notifier's state file is lost."""
+    from datetime import datetime, timezone
+
+    from trading.operations.sentinel import owner_resumed_on
+    from trading.scheduler.sessions import MARKET_TIMEZONE
+    from trading.storage.runtime_fence import FenceRow
+
+    database_path = migrate_database(tmp_path / "paper.db")
+    assert main(["paper", "stop", "--db-path", str(database_path), "--identity", "ORB_V2",
+                 "--reason", "sentinel: daily loss 1.30 R > 1.25 R (realized -$130.00)"]) == 0
+    with sqlite3.connect(database_path) as database:
+        (fenced_at,) = database.execute(
+            "SELECT updated_at FROM autotrader_execution_fences WHERE name='paper:ORB_V2'"
+        ).fetchone()
+    day = datetime.fromisoformat(fenced_at).astimezone(MARKET_TIMEZONE).date()
+    assert main(["paper", "resume", "--db-path", str(database_path), "--identity", "ORB_V2",
+                 "--reason", "owner: checked"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "PAPER identity fence ORB_V2: RESUMED"
+    with sqlite3.connect(database_path) as database:
+        stopped, reason, resumed_at = database.execute(
+            "SELECT stopped, reason, updated_at FROM autotrader_execution_fences WHERE name='paper:ORB_V2'"
+        ).fetchone()
+    assert (stopped, reason) == (0, f"owner: checked (lifts sentinel fence of {day.isoformat()})")
+    resumed_day = datetime.fromisoformat(resumed_at).astimezone(MARKET_TIMEZONE).date()
+    assert owner_resumed_on(FenceRow(False, reason, resumed_at), day) is (resumed_day == day)
+    assert datetime.fromisoformat(resumed_at).tzinfo == timezone.utc
+
+    # Resuming a row that is not stopped, or an owner's own stop, keeps the reason as typed.
+    assert main(["paper", "resume", "--db-path", str(database_path), "--identity", "ORB_V2",
+                 "--reason", "again"]) == 0
+    with sqlite3.connect(database_path) as database:
+        assert database.execute(
+            "SELECT reason FROM autotrader_execution_fences WHERE name='paper:ORB_V2'"
+        ).fetchone() == ("again",)
+
+
 @pytest.mark.parametrize("action", ["stop", "resume"])
 @pytest.mark.parametrize("identity", ["AAPL", "ORB_V1", "momo_hod_v2", "AP_MOMO_HOD_V1"])
 def test_paper_identity_commands_refuse_names_that_are_not_sendable(tmp_path, capsys, action, identity):

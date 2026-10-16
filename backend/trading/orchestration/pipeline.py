@@ -650,7 +650,18 @@ class ShadowPipeline:
         overlay's answer for a PROPOSE review (0 skips the setup), else 1.
         The identity factor is this pipeline's own; ``None`` (a sendable
         identity with no row) is recorded as no multiplier at all.
+
+        The write is bounded by ``SIZING_RECORD_DEADLINE_S`` (N15a MEDIUM-1): a
+        stalled sidecar must never hold up the next candidate. After a timeout
+        or an OS error the sidecar is off for this pipeline (the run): logged
+        once, then never tried again, so no further write can stall or pile up.
         """
+        import asyncio
+
+        from trading.storage import decision_sizing as sidecar
+
+        if getattr(self, "_sizing_disabled", False):
+            return
         try:
             name = strategy.spec.name
             row = decision_sizing(
@@ -660,12 +671,19 @@ class ShadowPipeline:
                 identity_factor=self._identity_multiplier,
                 managed_factor=managed_factor,
             )
-            await self._sizing_recorder(row)
-        except Exception:  # noqa: BLE001 - evidence must never block or alter a decision
+            async with asyncio.timeout(sidecar.SIZING_RECORD_DEADLINE_S):
+                await self._sizing_recorder(row)
+        except Exception as exc:  # noqa: BLE001 - evidence must never block or alter a decision
             logger.error(
                 "%s: run %s decision %s", SIZING_RECORD_FAILED, decision.run_id, decision.id,
                 exc_info=True,
             )
+            if isinstance(exc, OSError):  # TimeoutError is an OSError
+                self._sizing_disabled = True
+                logger.critical(
+                    "%s: decision-sizing sidecar disabled for this run %s after %s; decisions are unaffected",
+                    sidecar.SIZING_SIDECAR_DISABLED, decision.run_id, type(exc).__name__,
+                )
 
     async def _persist_setup(
         self,

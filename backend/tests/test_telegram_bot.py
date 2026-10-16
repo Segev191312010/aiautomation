@@ -2242,8 +2242,9 @@ async def test_end_to_end_the_composition_root_runs_the_overnight_watch(tmp_path
 
     clock = CeilingClock(monday, ceiling=monday + timedelta(minutes=6))
 
+    # Closed at the child's first look: started before it (N15b L-1).
     page = (
-        "⛔ IB Gateway closed since 05:50 ET (its API port does not answer) — log in to IB Gateway;"
+        "⛔ IB Gateway closed since before 05:50 ET (its API port does not answer) — log in to IB Gateway;"
         " session starts 07:55 ET (05:55 ET check)"
     )
 

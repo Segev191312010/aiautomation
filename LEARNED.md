@@ -64,9 +64,11 @@
 - On Python 3.11 `asyncio.wait_for` runs its awaitable in its own task; a cancel
   that lands just as that task finishes is dropped and the result returned
   (gh-86296, fixed in 3.12). A background loop built on it can survive its own
-  shutdown: on 2026-10-17 the T-4 overnight watch kept running after the
-  Telegram poll loop had stopped on a 401, so the telegram child neither polled
-  nor exited. In code that is cancelled at shutdown use `asyncio.timeout` (it
+  shutdown: on 2026-10-17, in the composition-root test
+  (`test_end_to_end_the_composition_root_runs_the_check_at_the_lead`; T-4 has
+  not run live yet), the T-4 overnight watch kept running after the Telegram
+  poll loop had stopped on a 401, so the telegram child neither polled nor
+  exited. In code that is cancelled at shutdown use `asyncio.timeout` (it
   runs in the caller's task), check `Task.cancelling()` before sleeping, and
   have `stop()` re-cancel a task that is still running. A test that fails only
   "sometimes" by timing out is evidence of this kind of race, not noise.

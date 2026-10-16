@@ -160,8 +160,11 @@ from typing import Protocol, TextIO
 from trading.operations.heartbeat import (
     HEARTBEAT_CHILD,
     HEARTBEAT_MODULE,
+    PresenceSource as HeartbeatPresenceSource,
     UrlSource as HeartbeatUrlSource,
+    item_present as heartbeat_item_present,
     load_target as load_heartbeat_target,
+    presence_detail as heartbeat_presence_detail,
     url_from_keychain as heartbeat_url_from_keychain,
 )
 from trading.operations.logging import (
@@ -193,6 +196,9 @@ VENV_PYTHON = BACKEND_DIR / ".venv" / "bin" / "python"
 
 SCREENER_WINDOW = (time(7, 55), time(16, 0))
 NOTIFIER_WINDOW = (time(7, 55), time(16, 15))
+# The notifier's own restart-cap lines are the Telegram child's to forward, at any
+# hour: a suspended notifier cannot report its own suspension (N15b L-3).
+NOTIFIER_CHILD = "notifier"
 # The notifier's 16:05 daily report; a clean exit after it is final.
 NOTIFIER_FINISH = time(16, 5)
 # paper_bridge.py exits 0 by itself five minutes before the close when flat,
@@ -509,7 +515,7 @@ def plan_session(
             base_backoff=SERVICE_BACKOFF,
         ),
         ChildPlan(
-            name="notifier",
+            name=NOTIFIER_CHILD,
             argv=(interpreter, control, "notify", "run", "--date", iso),
             starts_at=at(NOTIFIER_WINDOW[0]),
             ends_at=at(NOTIFIER_WINDOW[1]),
@@ -1459,9 +1465,13 @@ class SupervisorLog:
             except (OSError, ValueError):
                 self._echo = None  # the terminal went away; the log file remains
 
-    def rotate(self, day: date) -> int:
+    def rotate(self, day: date, *, marker: Callable[[int], str] | None = None) -> int:
         """Rename the log to its archive for ``day``, reopen a new file at the same
         path, and copy the newest state lines into it; how many were copied.
+
+        ``marker(carried)`` is the full ``LOG_ROTATED`` line: it is written with
+        the carried lines in ONE write (N15b L-5), so a follower never reads the
+        carried copies without the marker that tells it they are copies.
 
         If the new file cannot be opened, the old handle (now the archive's)
         stays in use, so no line is lost, and the error is raised.
@@ -1472,9 +1482,19 @@ class SupervisorLog:
         previous, self._stream = self._stream, stream
         previous.close()
         carried = self._carried.lines()
-        for line in carried:
-            self._stream.write(line + "\n")
-        self._stream.flush()
+        block = [*carried, *([marker(len(carried))] if marker is not None else [])]
+        if block:
+            # The new stream's buffer is empty: one raw append holds the whole block.
+            data = "".join(f"{line}\n" for line in block).encode("utf-8")
+            descriptor = self._stream.fileno()
+            written = 0
+            while written < len(data):
+                written += os.write(descriptor, data[written:])
+        if marker is not None and self._echo is not None:
+            try:
+                print(block[-1], file=self._echo, flush=True)
+            except (OSError, ValueError):
+                self._echo = None
         return len(carried)
 
     def close(self) -> None:
@@ -1486,7 +1506,7 @@ def rotated_child_names() -> tuple[str, ...]:
     each always-on child's (a test pins this to the plans)."""
     names = (
         "screener",
-        "notifier",
+        NOTIFIER_CHILD,
         BRIDGE_CHILD,
         *STRATEGY_STARTS,
         MANAGER_CHILD,
@@ -1538,14 +1558,17 @@ class LogRotation:
         return boundary
 
     def rotate(self, now: datetime, *, held_open: Collection[str] = ()) -> list[str]:
-        """Rotate everything for the newest boundary's date; the lines to log.
+        """Rotate everything for the newest boundary's date; the lines still to log.
 
         ``held_open`` names the children running now (their files are copied
         then truncated). ``supervisor.log`` goes last: its archive marks the
-        day as done.
+        day as done, and the new file starts with the carried lines and the
+        ``LOG_ROTATED`` marker, written together (N15b L-5). What is returned is
+        for the caller to log after them: each ``LOG_ROTATION_FAILED``, and the
+        marker itself only when ``supervisor.log`` could not be rotated.
         """
         day = latest_rotation_boundary(now).date()
-        renamed = truncated = carried = pruned = 0
+        renamed = truncated = pruned = 0
         failures: list[str] = []
 
         def attempt(name: str, action: Callable[[], object]) -> object:
@@ -1564,20 +1587,27 @@ class LogRotation:
         for name in LAUNCHD_LOG_NAMES:
             path = self._directory / name
             truncated += bool(attempt(name, partial(rotate_by_copy_truncate, path, day)))
-        copied = attempt(SUPERVISOR_LOG_NAME, partial(self._log.rotate, day))
-        if isinstance(copied, int):
-            renamed += 1
-            carried = copied
+        # Pruned before supervisor.log rotates: the marker written with the carried
+        # lines then has its final counts.
         for name in (*(f"{child}.log" for child in self._children), *LAUNCHD_LOG_NAMES, SUPERVISOR_LOG_NAME):
             removed = attempt(
                 name, partial(prune_archives, self._directory / name, day, keep_days=self._keep_days)
             )
             pruned += len(removed) if isinstance(removed, list) else 0
-        return [
-            f"LOG_ROTATED date={day.isoformat()} renamed={renamed} truncated={truncated}"
-            f" pruned={pruned} carried={carried}",
-            *failures,
-        ]
+
+        def marker(renamed_files: int, carried_lines: int) -> str:
+            return (
+                f"LOG_ROTATED date={day.isoformat()} renamed={renamed_files} truncated={truncated}"
+                f" pruned={pruned} carried={carried_lines}"
+            )
+
+        written = attempt(
+            SUPERVISOR_LOG_NAME,
+            partial(self._log.rotate, day, marker=lambda lines: f"{iso_utc(now)} {marker(renamed + 1, lines)}"),
+        )
+        if isinstance(written, int):
+            return failures
+        return [marker(renamed, 0), *failures]
 
 
 class AlreadyRunning(RuntimeError):
@@ -1982,14 +2012,16 @@ def dry_run_report(
     database: str | Path | None = None,
     registry: Callable[[], Sequence[str]] | None = None,
     preflight: BridgePreflight | None = None,
-    heartbeat_url: HeartbeatUrlSource | None = None,
+    heartbeat_present: HeartbeatPresenceSource | None = None,
 ) -> str:
     """The planned child timeline for one session, simulated; launches and writes nothing.
 
     The bridge's own ``--preflight`` is the one subprocess it runs (read-only,
     no TWS), after the pin check, with the launch's interpreter, env and cwd.
-    ``heartbeat_url`` reads the dead-man's switch URL (``autotraderctl run
-    --dry-run`` passes the Keychain read); without one it is not checked.
+    ``heartbeat_present`` asks whether the dead-man's switch's Keychain item
+    exists (``autotraderctl run --dry-run`` passes the presence lookup, which
+    never reads the secret: agents run the dry run, N15b L-8); without one it
+    is not checked. The child validates the URL itself.
     """
     if database is None:
         from config import cfg
@@ -1998,12 +2030,11 @@ def dry_run_report(
     schema = schema_lines(database)
     registry_problems = tuple((registry_refusals if registry is None else registry)())
     registry_report = registry_lines(registry_problems)
-    if heartbeat_url is None:
+    if heartbeat_present is None:
         heartbeat_scheduled = False
         heartbeat_detail = "not checked (no Keychain reader given)"
     else:
-        target, heartbeat_detail = load_heartbeat_target(heartbeat_url)
-        heartbeat_scheduled = target is not None
+        heartbeat_scheduled, heartbeat_detail = heartbeat_presence_detail(heartbeat_present)
     current = now or _utc_now()
     planner = partial(plan_session, python=python, backend=backend)
     if session_date is None:
@@ -2124,6 +2155,7 @@ __all__ = [
     "exit_status",
     "file_sha256",
     "gateway_port_open",
+    "heartbeat_item_present",
     "heartbeat_url_from_keychain",
     "missing_entry_points",
     "open_private_append",

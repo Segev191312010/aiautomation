@@ -79,6 +79,7 @@ from trading.operations.keychain import (
     HEARTBEAT_KEYCHAIN_SERVICE,
     KeychainReadError,
     MacOSKeychainReader,
+    heartbeat_item_exists,
     read_heartbeat_url,
 )
 from trading.operations.paths import UserPaths
@@ -184,6 +185,27 @@ def url_from_keychain(reader: MacOSKeychainReader | None = None) -> str | None:
         return read_heartbeat_url(reader)
     except KeychainReadError:
         return None
+
+
+# The dry run's question: is the item there? (never its secret)
+PresenceSource = Callable[[], bool]
+
+
+def item_present(reader: MacOSKeychainReader | None = None) -> bool:
+    """The ping URL's Keychain item exists; the URL itself is not read."""
+    return heartbeat_item_exists(reader)
+
+
+def presence_detail(source: PresenceSource) -> tuple[bool, str]:
+    """``(scheduled, detail)`` for the agent-run dry run (N15b L-8): the item's
+    presence only. The child reads and validates the URL itself at start."""
+    try:
+        present = source()
+    except Exception as exc:  # noqa: BLE001 - a failed lookup is reported, never raised
+        return False, f"unknown (Keychain item {KEYCHAIN_ITEM} could not be checked: {type(exc).__name__})"
+    if not present:
+        return False, f"not configured (no Keychain item {KEYCHAIN_ITEM})"
+    return True, f"Keychain item {KEYCHAIN_ITEM} present (the child validates the URL)"
 
 
 def load_target(source: UrlSource) -> tuple[PingTarget | None, str]:
@@ -671,8 +693,10 @@ __all__ = [
     "failure_kind",
     "in_power_window",
     "is_session_day",
+    "item_present",
     "load_target",
     "main",
+    "presence_detail",
     "parse_power_source",
     "ping_url",
     "power_source",

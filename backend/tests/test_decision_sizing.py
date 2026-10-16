@@ -31,6 +31,7 @@ from tests.test_setup_persistence import (
     _orb_input,
     _orb_strategy,
     _OrbReviewer,
+    _assert_golden_momo,
     _replay_momo_session,
 )
 from trading.contracts import Decision, PortfolioSnapshot, RiskPolicy
@@ -38,7 +39,9 @@ from trading.orchestration.pipeline import SIZING_RECORD_FAILED, ShadowPipeline
 from trading.rules.momo import MomoStrategy
 from trading.storage import decision_sizing as sidecar
 from trading.storage.decision_sizing import (
+    SIZING_SIDECAR_DISABLED,
     DecisionSizing,
+    SizingFileRefused,
     append_decision_sizing,
     read_decision_sizing,
     record_decision_sizing,
@@ -376,25 +379,247 @@ async def test_a_failed_sidecar_write_never_changes_a_decision_on_the_production
     assert bad["BF B"].risk is not None and bad["BF B"].risk.intent is not None
     assert bad["BF B"].risk.intent.quantity == 931  # floor(3726 x 0.25), as with a working sidecar
     assert bad_rows == good_rows and len(bad_rows) == 2
-    # Asked once per decision, in the working run's order: nothing skipped or repeated.
+    # Asked once per decision, in the working run's order: nothing repeated. An OS
+    # error turns the sidecar off for the run (N15a MEDIUM-1): asked once, then never.
+    disabled = failure == "every write"
     good_keys = {decision.id: decision.decision_key for decision in good.values()}
     bad_keys = {decision.id: decision.decision_key for decision in bad.values()}
-    assert [bad_keys[decision_id] for decision_id in asked] == [good_keys[row.decision_id] for row in working.rows]
-    assert len(asked) == 2
+    expected = [good_keys[row.decision_id] for row in working.rows]
+    assert [bad_keys[decision_id] for decision_id in asked] == (expected[:1] if disabled else expected)
+    assert len(asked) == (1 if disabled else 2)
     logged = [record for record in caplog.records if record.getMessage().startswith(SIZING_RECORD_FAILED)]
-    assert len(logged) == (1 if failure == "the first write only" else 2)
+    assert len(logged) == (2 if failure == "a writer that is not async" else 1)
+    off = [record for record in caplog.records if record.getMessage().startswith(SIZING_SIDECAR_DISABLED)]
+    assert len(off) == (1 if disabled else 0)
 
     # The same pipeline after its failed write: BF B decided again, as a working one decides it.
     reference = (await _assess(_pipeline(_Capture(), identity_multiplier=Decimal("0.25")))).decision
     writer, again = failing_writer()
     pipeline = _pipeline(writer, identity_multiplier=Decimal("0.25"))  # type: ignore[arg-type]
     first, second = [(await _assess(pipeline)).decision for _ in range(2)]
-    assert len(again) == 2
+    assert len(again) == (1 if disabled else 2)
     for decision in (first, second):
         assert decision is not None and reference is not None
         assert _digest(decision) == _digest(reference)
         assert decision.risk is not None and decision.risk.intent is not None
         assert decision.risk.intent.quantity == 931
+
+
+# --------------------------------------------------------------------------
+# A stalled sidecar never holds up a decision (N15a MEDIUM-1, LOW-1)
+# --------------------------------------------------------------------------
+
+# A stall fails these tests at this bound, never hangs the test process.
+TEST_BOUND_S = 10.0
+
+
+def _sizing_row(run_id: str = "run-1") -> DecisionSizing:
+    return DecisionSizing(
+        decision_id="decision-1", run_id=run_id, candidate_id="c-1", strategy_id="s-1",
+        strategy_version=1, strategy_name="ORB_V2", sendable=True, outcome="shadow_accepted",
+        identity_factor=Decimal("0.25"), managed_factor=Decimal("1"),
+        decided_at=datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.anyio
+async def test_a_sidecar_that_never_returns_is_cut_off_at_the_deadline_and_the_day_goes_on(
+    tmp_path, monkeypatch, caplog
+):
+    """A recorder that never returns, on the recorded MOMO day through the
+    repository runner: every decision is the working sidecar's, the later
+    candidate is still assessed, and the sidecar is off for the rest of the run
+    (one failure line, one CRITICAL "disabled" line, never asked again)."""
+    import asyncio
+
+    from config import cfg
+    from db.core import init_db
+
+    monkeypatch.setattr(sidecar, "SIZING_RECORD_DEADLINE_S", 0.05)
+    asked: list[str] = []
+
+    async def never_returns(row: DecisionSizing) -> None:
+        asked.append(row.decision_id)
+        await asyncio.Event().wait()
+
+    async def replay(name: str, recorder) -> dict[str, Decision]:
+        database = tmp_path / f"{name}.db"
+        monkeypatch.setattr(cfg, "DB_PATH", str(database))
+        await init_db()
+        async with asyncio.timeout(TEST_BOUND_S):
+            decisions, _ = await _replay_momo_session(
+                database, monkeypatch, identity_multiplier=Decimal("0.25"), sizing_recorder=recorder
+            )
+        return decisions
+
+    good = await replay("working", _Capture())
+    with caplog.at_level(logging.ERROR, logger="autotrader.shadow.pipeline"):
+        bad = await replay("hung", never_returns)
+
+    assert set(bad) == set(good) == {"BF B", "FIGS"}
+    for symbol, decision in good.items():
+        assert _digest(bad[symbol]) == _digest(decision), symbol
+    assert bad["BF B"].risk is not None and bad["BF B"].risk.intent is not None
+    assert bad["BF B"].risk.intent.quantity == 931
+    assert len(asked) == 1  # the later decision's line is never asked for
+    failed = [r for r in caplog.records if r.getMessage().startswith(SIZING_RECORD_FAILED)]
+    off = [r for r in caplog.records if r.getMessage().startswith(SIZING_SIDECAR_DISABLED)]
+    assert len(failed) == 1 and failed[0].exc_info is not None and failed[0].exc_info[0] is TimeoutError
+    assert len(off) == 1 and off[0].levelno == logging.CRITICAL
+    assert "sidecar disabled for this run run-golden-momo after TimeoutError" in off[0].getMessage()
+
+
+@pytest.mark.anyio
+async def test_a_fifo_at_the_runs_sidecar_path_is_refused_at_once_and_the_day_goes_on(
+    tmp_path, monkeypatch, caplog
+):
+    """The reviewer's probe on the production recorder: a FIFO at the run's
+    sidecar path blocked the open in the kernel until a reader came, and every
+    later candidate with it. Now it is refused before any open: the golden
+    decisions, the later candidate assessed, nothing written into the FIFO."""
+    import asyncio
+
+    from config import cfg
+    from db.core import init_db
+
+    database = tmp_path / "momo.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    directory = sizing_directory(database)
+    directory.mkdir(mode=0o700)
+    fifo = directory / "run-golden-momo.jsonl"
+    os.mkfifo(fifo, 0o600)
+    try:
+        with caplog.at_level(logging.ERROR, logger="autotrader.shadow.pipeline"):
+            async with asyncio.timeout(TEST_BOUND_S):
+                decisions, _ = await _replay_momo_session(database, monkeypatch)
+    finally:
+        # A writer parked in open() (the defect) is released by any reader, so a
+        # failing run never leaves a thread blocked behind the test.
+        os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+
+    _assert_golden_momo(decisions, database)
+    assert stat_is_fifo(fifo)
+    failed = [r for r in caplog.records if r.getMessage().startswith(SIZING_RECORD_FAILED)]
+    off = [r for r in caplog.records if r.getMessage().startswith(SIZING_SIDECAR_DISABLED)]
+    assert len(failed) == 1 and failed[0].exc_info is not None
+    assert failed[0].exc_info[0] is SizingFileRefused
+    assert len(off) == 1 and "after SizingFileRefused" in off[0].getMessage()
+
+
+def stat_is_fifo(path: Path) -> bool:
+    import stat
+
+    return stat.S_ISFIFO(os.lstat(path).st_mode)
+
+
+def test_a_sizing_path_that_is_not_a_regular_file_is_never_opened(tmp_path, monkeypatch):
+    """lstat before open: a FIFO with a reader waiting (an open would succeed and
+    the line would land in it), a directory and a symlink are refused before any
+    open; a regular file is appended to as before."""
+    directory = tmp_path / "autotrader-decision-sizing"
+    directory.mkdir(mode=0o700)
+    row = _sizing_row()
+    target = sizing_file(directory, row.run_id)
+    opened: list[str] = []
+    real_open = os.open
+
+    def spy(path, *args, **kwargs):
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    os.mkfifo(target, 0o600)
+    reader = real_open(target, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        monkeypatch.setattr(os, "open", spy)
+        with pytest.raises(SizingFileRefused):
+            append_decision_sizing(directory, row)
+        assert str(target) not in opened
+        try:
+            data = os.read(reader, 4096)
+        except BlockingIOError:
+            data = b""
+        assert data == b""
+    finally:
+        os.close(reader)
+    target.unlink()
+
+    for make in (lambda: target.mkdir(), lambda: target.symlink_to(tmp_path / "elsewhere.jsonl")):
+        make()
+        with pytest.raises(SizingFileRefused):
+            append_decision_sizing(directory, row)
+        assert str(target) not in opened and not (tmp_path / "elsewhere.jsonl").exists()
+        target.rmdir() if target.is_dir() and not target.is_symlink() else target.unlink()
+
+    assert append_decision_sizing(directory, row) == target
+    assert opened == [str(target)] and len(target.read_text().splitlines()) == 1
+
+
+@pytest.mark.anyio
+async def test_the_default_recorder_writes_on_a_daemon_thread_of_its_own(tmp_path, monkeypatch):
+    """A write that never returns parks only its own daemon thread: the pipeline's
+    deadline cuts the wait off, and the process can still exit (the default
+    executor is joined by asyncio.run at exit)."""
+    import asyncio
+    import threading
+
+    from config import cfg
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(tmp_path / "autotrader.db"))
+    release = threading.Event()
+    threads: list[threading.Thread] = []
+
+    def stuck(directory: Path, row: DecisionSizing) -> Path:
+        threads.append(threading.current_thread())
+        release.wait(TEST_BOUND_S)
+        return directory
+
+    monkeypatch.setattr(sidecar, "append_decision_sizing", stuck)
+    try:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await record_decision_sizing(_sizing_row())
+        [thread] = threads
+        assert thread.daemon and thread.name == "decision-sizing"
+        assert thread is not threading.main_thread()
+    finally:
+        release.set()
+    thread.join(TEST_BOUND_S)
+    await asyncio.sleep(0)  # its late result is dropped, never raised
+
+
+@pytest.mark.anyio
+async def test_every_decision_is_recorded_before_its_sidecar_line_on_every_path():
+    """LOW-1 (mutation M1): on the main path, the terminal path and
+    record_data_blocked, the decision is written first, then its sidecar line."""
+    events: list[tuple[str, str]] = []
+
+    async def record(*, decision: Decision, owner_id: str) -> None:
+        events.append(("decision", decision.id))
+
+    async def sizing(row: DecisionSizing) -> None:
+        events.append(("sizing", row.decision_id))
+
+    pipeline = ShadowPipeline(
+        proposal_provider=_Provider(), strategy=MomoStrategy(), decision_recorder=record,
+        setup_recorder=_setups, sizing_recorder=sizing, identity_multiplier=Decimal("0.25"),
+    )
+    accepted = (await _assess(pipeline)).decision  # the main path (risk engine)
+    late = datetime(2026, 10, 12, 21, 0, tzinfo=timezone.utc)  # after the entry cutoff
+    rejected = (
+        await pipeline.assess_one(
+            run_id="run-replay", strategy=RECORD,
+            item=_bf_b_without_quote(), portfolio=PortfolioSnapshot(observed_at=late, net_liquidation="665000"),
+            policy=RiskPolicy(), session_date=late, admitted_symbols=frozenset({"BF B"}), now=late,
+        )
+    ).decision  # the terminal path
+    blocked = await pipeline.record_data_blocked(run_id="run-replay", strategy=RECORD, candidate=BF_B.candidate())
+
+    assert accepted is not None and accepted.outcome.value == "shadow_accepted"
+    assert rejected is not None and rejected.outcome.value in {"rule_rejected", "data_blocked"}
+    ids = [accepted.id, rejected.id, blocked.id]
+    assert len(set(ids)) == 3
+    assert events == [event for decision_id in ids for event in (("decision", decision_id), ("sizing", decision_id))]
 
 
 def test_the_sidecar_module_reads_no_decision_back_and_touches_no_authority():

@@ -23,7 +23,13 @@ the evidence for the paper promotion rule, in this order:
 Step 4 is a hook today: nothing yet replays a live run's decisions (see
 ``PARITY_NOT_COMPARED_NOTE``), so ``NightlyEnvironment.compare_decisions`` is
 None and the report says ``not_compared``. A comparer, once one exists,
-returns one ``trading.replay.ReplayEqualityReport`` per identity.
+returns one ``trading.replay.ReplayEqualityReport`` per identity. Only a
+decision the replay made differently (``fingerprint_mismatch``) or made
+without a recorded one (``unexpected_in_replay``) is a mismatch; a recorded
+decision the replay lacks (``missing_from_replay``: stored bars incomplete)
+is missing data, reported as ``not_compared`` for its identity and never
+fenced (N15a LOW-3). The fence is written only to the database the promoter
+reads its fences from, ``fence_database`` (N15a LOW-4).
 
 The reports land next to the replay's (``evidence.json``, ``windows.json``,
 ``live-r.json``, ``proposals.json``, ``evidence.txt``). Nothing here can place
@@ -36,7 +42,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import json
@@ -82,6 +88,12 @@ DecisionComparer = Callable[[Sequence[ReplayResult]], Mapping[str, ReplayEqualit
 
 PARITY_NOT_COMPARED = "not_compared"
 PARITY_COMPARED = "compared"
+# The fence store's database is not the evidence database: nothing is written.
+PARITY_FENCE_DATABASE_MISMATCH = "failed_fence_database_mismatch"
+# The decision mismatches that fence (trading.replay.equality's reasons). A
+# recorded decision the replay lacks is missing data, never a mismatch.
+DECISION_MISMATCH_REASONS = frozenset({"fingerprint_mismatch", "unexpected_in_replay"})
+MISSING_FROM_REPLAY = "missing_from_replay"
 # What is missing before step 4 can compare anything (2026-10-15): the
 # research replay walks stored bars with synthetic quotes over every stored
 # contract and never reads the live decisions, and nothing re-evaluates a
@@ -117,6 +129,22 @@ class NightlyEnvironment:
         return cls(database=Path(cfg.DB_PATH).expanduser(), bridge_directory=bridge_state_directory())
 
 
+def fence_database(environment: NightlyEnvironment) -> Path:
+    """The one database file of the nightly fences (N15a LOW-4): the promoter reads
+    them from it, and the replay-mismatch fence is written only when the fence
+    store's database is this file, so a fence written tonight holds tonight's
+    proposal for that identity."""
+    return Path(environment.database).expanduser().resolve()
+
+
+def _store_database() -> Path:
+    """The file ``SQLitePaperKillStore`` writes: ``db.core`` opens ``cfg.DB_PATH``
+    as given (no ``~`` expansion), relative to the working directory."""
+    from config import cfg
+
+    return Path(cfg.DB_PATH).resolve()
+
+
 @dataclass(frozen=True, slots=True)
 class LiveHour:
     hour: int
@@ -138,6 +166,8 @@ class DecisionParity:
     already_fenced: tuple[str, ...] = ()
     failed: Mapping[str, str] = field(default_factory=dict)
     note: str = ""
+    # Recorded decisions the replay lacks, per identity: missing data, not compared.
+    not_compared: Mapping[str, int] = field(default_factory=dict)
 
     def payload(self) -> dict[str, object]:
         return {
@@ -147,6 +177,7 @@ class DecisionParity:
             "already_fenced": list(self.already_fenced),
             "failed": dict(self.failed),
             "note": self.note,
+            "not_compared": dict(self.not_compared),
         }
 
 
@@ -154,13 +185,24 @@ def _not_compared() -> DecisionParity:
     return DecisionParity(status=PARITY_NOT_COMPARED, note=PARITY_NOT_COMPARED_NOTE)
 
 
-def decision_mismatches(reports: Mapping[str, ReplayEqualityReport]) -> dict[str, int]:
-    """Mismatched decisions per identity: the ``decisions`` category only."""
+def _decision_counts(reports: Mapping[str, ReplayEqualityReport], reasons: frozenset[str]) -> dict[str, int]:
     counts = {
-        identity: sum(1 for item in report.mismatches if item.category == "decisions")
+        identity: sum(1 for item in report.mismatches if item.category == "decisions" and item.reason in reasons)
         for identity, report in reports.items()
     }
     return {identity: count for identity, count in sorted(counts.items()) if count > 0}
+
+
+def decision_mismatches(reports: Mapping[str, ReplayEqualityReport]) -> dict[str, int]:
+    """Mismatched decisions per identity: the ``decisions`` category, and only a
+    decision made differently or made without a recorded one; never one the
+    replay lacks (missing data is never a mismatch)."""
+    return _decision_counts(reports, DECISION_MISMATCH_REASONS)
+
+
+def decisions_not_compared(reports: Mapping[str, ReplayEqualityReport]) -> dict[str, int]:
+    """Recorded decisions per identity that the replay lacks (``missing_from_replay``)."""
+    return _decision_counts(reports, frozenset({MISSING_FROM_REPLAY}))
 
 
 async def fence_replay_mismatches(
@@ -206,15 +248,27 @@ def check_decision_parity(
     """Step 4: compare (when a comparer exists) and fence what does not match."""
     if environment.compare_decisions is None:
         return _not_compared()
-    mismatches = decision_mismatches(environment.compare_decisions(results))
+    reports = environment.compare_decisions(results)
+    mismatches = decision_mismatches(reports)
+    missing = decisions_not_compared(reports)
     if not mismatches:
-        return DecisionParity(status=PARITY_COMPARED)
+        return DecisionParity(status=PARITY_COMPARED, not_compared=missing)
     store = environment.fence_store
     if store is None:
         from trading.storage.runtime_fence import SQLitePaperKillStore
 
+        if _store_database() != fence_database(environment):
+            # A fence the promoter would not read is no fence: refuse, loudly.
+            logger.error(
+                "replay mismatch fences NOT written: the fence store's database is not %s",
+                fence_database(environment).name,
+            )
+            return DecisionParity(
+                status=PARITY_FENCE_DATABASE_MISMATCH, mismatches=mismatches, not_compared=missing
+            )
         store = SQLitePaperKillStore()
-    return asyncio.run(fence_replay_mismatches(mismatches, store=store))
+    parity = asyncio.run(fence_replay_mismatches(mismatches, store=store))
+    return replace(parity, not_compared=missing)
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,7 +369,7 @@ def collect_evidence(
     try:
         # After step 4 on purpose: a mismatch fence written tonight holds
         # tonight's proposal for that identity (the promoter reads the fences).
-        proposals = collect_proposals(database=environment.database, ledger=live_r, live=live, as_of=as_of)
+        proposals = collect_proposals(database=fence_database(environment), ledger=live_r, live=live, as_of=as_of)
     except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("promotion proposals failed")
         proposals = PromotionProposals(as_of=as_of, readable=False, note=_failed(exc))
@@ -406,7 +460,10 @@ def write_evidence(
 
 
 __all__ = [
+    "DECISION_MISMATCH_REASONS",
+    "MISSING_FROM_REPLAY",
     "PARITY_COMPARED",
+    "PARITY_FENCE_DATABASE_MISMATCH",
     "PARITY_NOT_COMPARED",
     "PARITY_NOT_COMPARED_NOTE",
     "REPLAY_WINDOW",
@@ -419,6 +476,8 @@ __all__ = [
     "check_decision_parity",
     "collect_evidence",
     "decision_mismatches",
+    "decisions_not_compared",
+    "fence_database",
     "fence_replay_mismatches",
     "sweep_allowed",
     "week_start",

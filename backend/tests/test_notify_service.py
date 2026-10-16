@@ -1007,6 +1007,22 @@ async def test_the_1605_report_ends_with_an_ops_section(tmp_path, monkeypatch):
     lines = format_daily_report(replace(report, ops=replace(report.ops, counters=still_down))).splitlines()
     assert "• Gateway: 1 outage, 10 min unreachable, 0 flaps; still unreachable since 15:55 ET" in lines
 
+    # N15b L-10: IBKR refusing prices with the Gateway connected is never "unreachable"
+    # (live 2026-10-16: 121 min of data refused); a day with both says both.
+    def gateway(**values) -> str:
+        changed = replace(report, ops=replace(report.ops, counters=replace(counters, **values)))
+        (line,) = [row for row in format_daily_report(changed).splitlines() if row.startswith("• Gateway:")]
+        return line
+
+    assert gateway(gateway_outages=1, gateway_unreachable_seconds=7220, gateway_refused_seconds=7220,
+                   gateway_flaps=0) == "• Gateway: 1 outage, 121 min refusing prices, 0 flaps"
+    assert gateway(gateway_outages=2, gateway_unreachable_seconds=7520, gateway_refused_seconds=7220,
+                   gateway_flaps=1) == "• Gateway: 2 outages, 5 min unreachable, 121 min refusing prices, 1 flap"
+    assert gateway(gateway_outages=1, gateway_unreachable_seconds=600, gateway_refused_seconds=600, gateway_flaps=0,
+                   gateway_down_since=_et(15, 55), gateway_down_refused=True) == (
+        "• Gateway: 1 outage, 10 min refusing prices, 0 flaps; still refusing prices since 15:55 ET"
+    )
+
 
 # --------------------------------------------------------------------------
 # The running notifier
@@ -1599,6 +1615,40 @@ _FLAP_LINE = re.compile(r"^⚡ IB Gateway flapped (?P<count>\d+)× since \d\d:\d
 
 
 @pytest.mark.anyio
+async def test_the_announced_outage_is_kept_for_the_telegram_watch_and_cleared_when_it_ends(
+    tmp_path, monkeypatch, caplog
+):
+    """N15b L-1: the notifier keeps its announced outage (start, kind, paged) in its
+    per-date state, which the Telegram watch reads when it takes over at 16:15."""
+    from datetime import time
+
+    from trading.operations import notify_service
+    from trading.operations.notify_service import GatewayOutage, notifier_gateway_outage
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 20))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(paths.log_directory / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    for at in (_et(8, 0, 10), _et(8, 0, 25), _et(8, 0, 45)):
+        clock.at(at, _append(screener, _SCREENER_FAILED))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert notifier_gateway_outage(paths, SESSION) == GatewayOutage(since=_et(8, 0, 10), kind="gateway_down", paged=True)
+    assert notifier_gateway_outage(paths, date(2026, 10, 14)) is None  # another date's file: none
+
+    # The record mirrors the notifier's own watch: with the Gateway back, it is gone.
+    clock = FakeTime(_et(8, 21))
+    clock.at(_et(8, 21, 30), _append(screener, _SWEEP_LINE))
+    monkeypatch.setattr(notify_service, "SESSION_END", time(8, 26))
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, FakeTelegram(), clock)) == 0
+    assert notifier_gateway_outage(paths, SESSION) is None
+    saved = json.loads(state_file(paths, SESSION).read_text(encoding="utf-8"))
+    assert "gateway_outage_since" not in saved["alerts"] and "gateway_outage_kind" not in saved["alerts"]
+
+
+@pytest.mark.anyio
 async def test_a_flapping_gateway_sends_one_pair_and_a_flap_count_in_the_digest(
     tmp_path, monkeypatch, caplog
 ):
@@ -1976,8 +2026,9 @@ def test_the_alert_wording_follows_the_newest_failure_and_pages_at_six_minutes_a
         watch.check(moment)
         assert not watch.unreachable, moment
         moment += timedelta(seconds=1)
-    # Opened (held back by the pair budget) at T+2; still held at T+4.
-    assert watch.hysteresis.is_open and watch.flaps_pending
+    # Opened (held back by the pair budget) at T+2; still held at T+4. Not a flap
+    # for the digest yet: it settles as one only if it closes unannounced (L-10).
+    assert watch.hysteresis.is_open and watch.holding_back and not watch.flaps_pending
     watch.check(lost_at + timedelta(minutes=6))
     assert SUSTAIN_LIMIT == timedelta(minutes=5)
     assert watch.unreachable_since == lost_at
@@ -2436,7 +2487,8 @@ async def test_owner_c_a_real_refusal_after_an_announced_blip_pages_within_the_s
     broker = [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
     assert [text for _at, text in broker] == [
         _DATA_REFUSED_ALERT.format(since="08:00"),
-        "✅ IB Gateway reconnected 08:04 ET — market data is back (unreachable since 08:00 ET)",
+        # Data refused, the Gateway connected: never "unreachable" (N15b L-10).
+        "✅ IBKR is returning prices again 08:04 ET — market data is back (refusing prices since 08:00 ET)",
         _DATA_REFUSED_ALERT.format(since="08:10"),
         _RESTART_NOW_ALERT.format(since="08:10"),
     ]
@@ -2615,6 +2667,34 @@ async def test_restart_cap_lines_reach_the_phone_once_per_child_per_half_hour(tm
     assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, clock)) == 0
     assert phone(restarted) == ["✅ momo resumed (port_open)"]
     assert _queued_alerts(caplog) == ["child_resumed:momo"]
+
+
+async def test_the_notifier_never_forwards_restart_cap_lines_about_itself(tmp_path, monkeypatch, caplog):
+    """N15b L-3: the Telegram child forwards the notifier's own lines at any hour;
+    read here (late, after the notifier's own restart) they would only repeat."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(10, 20))
+    supervisor_log = paths.log_directory / "supervisor.log"
+
+    def line(at: datetime, event: str) -> None:
+        clock.at(at, _append(supervisor_log, f"{at.isoformat(timespec='seconds')} {event}"))
+
+    clock = FakeTime(_et(10, 0))
+    for minute in (0, 15):
+        clock.at(_et(10, minute, 30), _append(paths.log_directory / "screener.log", _SWEEP_LINE))
+    line(_et(10, 0, 5), "CHILD_RESTART_STORM notifier count=6 window=30m")
+    line(_et(10, 0, 6), "CHILD_SUSPENDED notifier count=6 window=30m")
+    line(_et(10, 5), "CHILD_RESUMED notifier reason=probe_healthy")
+    line(_et(10, 6), "CHILD_SUSPENDED momo count=6 window=30m")
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    sent = [text for text in telegram.sent() if not text.startswith("⚠️ AI day manager")]
+    assert not any(text.startswith(("⛔ notifier", "⚠️ notifier", "✅ notifier")) for text in sent), sent
+    assert "⛔ momo suspended after 6 restarts in 30 min (relaunch probe every 5 min)" in sent
+    assert _queued_alerts(caplog) == ["child_suspended:momo"]
 
 
 def test_real_decisions_are_exactly_the_sendable_identities(monkeypatch):
@@ -2914,8 +2994,10 @@ def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_coun
 
     assert watch.outages == (2 if after_blip else 1)
     assert watch.ops_flaps == 0 and not watch.holding_back
-    # The digest's flap line still reports what the budget held back from the phone.
+    # The hysteresis counted the hold-back; the digest uses the OPS rule (N15b L-10):
+    # one announced outage is not also a flap, so no flap line.
     assert watch.hysteresis.flaps == (1 if after_blip else 0)
+    assert not watch.flaps_pending and watch.take_flap_line() is None
 
 
 def test_a_held_back_open_that_closes_unannounced_is_a_flap_in_the_ops_counts():
@@ -2936,6 +3018,9 @@ def test_a_held_back_open_that_closes_unannounced_is_a_flap_in_the_ops_counts():
     assert watch.check(_et(8, 28, 30)) is None  # its close is silent too
     assert not watch.hysteresis.is_open and not watch.holding_back
     assert (watch.outages, watch.ops_flaps, watch.hysteresis.flaps) == (1, 1, 1)
+    # The digest counts it the same way, from the moment it was held back.
+    assert watch.take_flap_line() == "⚡ IB Gateway flapped 1× since 08:26 ET (held back from separate alerts)"
+    assert watch.take_flap_line() is None
 
 
 @pytest.mark.anyio
@@ -2983,8 +3068,15 @@ async def test_the_ops_gateway_line_counts_a_sustained_outage_after_a_blip_once(
     assert any(" since 08:10 ET" in text for text in broker)
     (report,) = [text for text in telegram.sent() if text.startswith("📊 Daily report")]
     (gateway,) = [line for line in report.splitlines() if line.startswith("• Gateway:")]
-    # 08:00:20-08:04:00 (220 s) plus 08:10:00 to the 08:45 report (2100 s): 39 min.
-    assert gateway == "• Gateway: 2 outages, 39 min unreachable, 0 flaps; still unreachable since 08:10 ET"
+    # 08:00:20-08:04:00 (220 s) plus 08:10:00 to the 08:45 report (2100 s): 39 min,
+    # all of it IBKR refusing prices unless the 08:10 one is the IBKR link (N15b L-10).
+    if cause == "ibkr link loss":
+        assert gateway == (
+            "• Gateway: 2 outages, 35 min unreachable, 4 min refusing prices, 0 flaps;"
+            " still unreachable since 08:10 ET"
+        )
+    else:
+        assert gateway == "• Gateway: 2 outages, 39 min refusing prices, 0 flaps; still refusing prices since 08:10 ET"
     saved = json.loads(state_file(paths, SESSION).read_text(encoding="utf-8"))
     assert saved["counters"]["gateway_outages"] == 2
     assert saved["counters"].get("gateway_flaps", 0) == 0
@@ -3198,6 +3290,10 @@ async def test_the_real_1835_rotation_is_read_once_counted_once_and_forwarded_on
         # What Supervisor._rotate_logs_if_due does at the boundary (telegram running).
         now = _et(18, 35)
         lines = LogRotation(logs, supervisor_log).rotate(now, held_open={"telegram"})
+        # The marker went into the new file with the carried lines, in one write (L-5).
+        written["supervisor"].extend(
+            line for line in (logs / "supervisor.log").read_text().splitlines() if " LOG_ROTATED " in line
+        )
         for line in lines:
             supervisor_log(f"{iso_utc(now)} {line}")
             written["supervisor"].append(f"{iso_utc(now)} {line}")

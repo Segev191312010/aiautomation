@@ -29,17 +29,20 @@ from trading.operations.sentinel import (
     Sentinel,
     blind_text,
     bracket_r,
+    daily_loss,
     daily_loss_trigger,
     fence_identity,
     fence_text,
     loss_limit,
+    owner_resume_reason,
+    owner_resumed_on,
     read_bridge_state,
     streak_triggers,
 )
 from trading.research.live_ledger import read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.sendable_identities import SENDABLE_IDENTITIES
-from trading.storage.runtime_fence import SQLitePaperKillStore
+from trading.storage.runtime_fence import FenceRow, SQLitePaperKillStore
 
 FRIDAY = date(2026, 10, 9)
 MONDAY = date(2026, 10, 12)
@@ -138,14 +141,13 @@ class RecordingStore:
         self.stops: list[tuple[str | None, str]] = []
         self.stopped: set[str] = set()
 
-    async def is_stopped(self, *, identity: str | None = None) -> bool:
-        assert identity is not None, "the Sentinel never reads the global row"
-        return identity in self.stopped
-
-    async def stop(self, *, reason: str, identity: str | None = None) -> None:
+    async def stop_identity(self, *, reason: str, identity: str, unless=None) -> FenceRow | None:
         assert identity is not None, "the Sentinel wrote the global paper row"
+        if identity in self.stopped:
+            return FenceRow(stopped=True, reason="kept", updated_at=_et(9, 0).isoformat())
         self.stops.append((identity, reason))
         self.stopped.add(identity)
+        return None
 
     async def resume(self, **_kwargs) -> None:  # pragma: no cover - must never run
         raise AssertionError("the Sentinel resumed a fence")
@@ -251,6 +253,23 @@ def test_only_sendable_identities_count_and_skipped_or_shapeless_brackets_never_
     assert bracket_r({"qty": 0, "entry": "50", "stop": "49"}) is None
     assert bracket_r({"qty": 100, "entry": "49", "stop": "50"}) is None
     assert bracket_r({"qty": 100, "entry": "50.00", "stop": "49.50"}) == Decimal("50.0000")
+
+
+def test_a_bracket_without_a_usable_r_is_measured_in_the_identitys_largest_r_today():
+    """N15a LOW-6 (mutation M16): the lenient unit. VWAP_PB_V2 (2.5 R) with a $100 R
+    and a $40 R bracket, and a $150 loss on a bracket with no entry: in the larger
+    R it is 1.5 R (2.0 R in all: no fence); in the smaller it would be 3.75 R."""
+    brackets = _submitted([
+        _bracket("big", "VWAP_PB_V2", status="closed", realized_pnl="-50.00"),  # 1 R = $100
+        _bracket("small", "VWAP_PB_V2", status="closed", realized_pnl="0", qty=40, entry="20.00", stop="19.00"),
+        _bracket("shapeless", "VWAP_PB_V2", status="closed", realized_pnl="-150.00", entry=None),
+    ])
+    assert bracket_r(brackets["small"]) == Decimal("40.00") and bracket_r(brackets["shapeless"]) is None
+    assert daily_loss("VWAP_PB_V2", brackets) == (Decimal("2.0"), Decimal("-200.00"))
+    assert daily_loss_trigger("VWAP_PB_V2", brackets) is None
+    # Only a shapeless bracket: nothing to measure it in, never a guess.
+    alone = _submitted([_bracket("shapeless", "VWAP_PB_V2", status="closed", realized_pnl="-150.00", entry=None)])
+    assert daily_loss("VWAP_PB_V2", alone) is None
 
 
 # --------------------------------------------------------------------------
@@ -392,6 +411,112 @@ async def test_an_identity_the_owner_already_stopped_keeps_its_reason(tmp_path, 
     assert _rows(fences)["paper:GAP_GO_V2"][:2] == (1, "telegram /halt by owner")
 
 
+async def test_the_check_and_the_stop_are_one_transaction_holding_the_write_lock(tmp_path, fences):
+    """N15a LOW-5: while the auto-fence decides, the row is write-locked: an owner's
+    /halt (or resume) from another connection cannot land between its check and
+    its stop, so the Sentinel never overwrites a row stopped in that moment."""
+    await SQLitePaperKillStore().resume(reason="owner: yesterday's check", identity="ORB_V2")
+    tried: list[str] = []
+
+    def owner_writes_meanwhile(row: FenceRow) -> bool:
+        assert not row.stopped
+        with sqlite3.connect(fences, timeout=0.05) as other:
+            try:
+                other.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                tried.append(str(exc))
+            else:  # pragma: no cover - the defect: the lock was not held
+                other.execute(
+                    "UPDATE autotrader_execution_fences SET stopped=1, reason='telegram /halt by owner'"
+                    " WHERE name='paper:ORB_V2'"
+                )
+                other.commit()
+                tried.append("written")
+        return False
+
+    kept = await SQLitePaperKillStore().stop_identity(
+        reason="sentinel: daily loss 2.00 R > 1.25 R (realized -$200.00)", identity="ORB_V2",
+        unless=owner_writes_meanwhile,
+    )
+
+    assert kept is None and tried == ["database is locked"]
+    assert _rows(fences)["paper:ORB_V2"][:2] == (1, "sentinel: daily loss 2.00 R > 1.25 R (realized -$200.00)")
+    # A stopped row is returned as it is, never rewritten.
+    assert (await SQLitePaperKillStore().stop_identity(reason="sentinel: x", identity="ORB_V2")) == FenceRow(
+        True, "sentinel: daily loss 2.00 R > 1.25 R (realized -$200.00)", _rows(fences)["paper:ORB_V2"][2]
+    )
+    with pytest.raises(ValueError):
+        await SQLitePaperKillStore().stop_identity(reason="sentinel: x", identity=None)  # type: ignore[arg-type]
+
+
+async def test_an_owner_resume_holds_from_the_fence_table_when_the_notifier_state_is_lost(
+    tmp_path, fences, monkeypatch
+):
+    """N15a LOW-5: the owner resumes today's auto-fence, then the notifier restarts
+    with an unreadable state file (no memory): the fence table alone says the
+    owner lifted today's fence, so the Sentinel never fences it again that day."""
+    from trading.operations.notify_service import NotifyState
+    from trading.storage import runtime_fence
+
+    # The store stamps its rows with the wall clock: here the simulated session's.
+    wall = {"at": _et(10, 0, 30)}
+    monkeypatch.setattr(runtime_fence, "_now", lambda: wall["at"].isoformat())
+    directory = tmp_path / "bridge"
+    _save(directory, TODAY, [_bracket("orb", status="closed", realized_pnl="-130.00")], written_at=_et(10, 0))
+    (message,) = await _sentinel(directory, {}, heartbeat=Heartbeat(_et(10, 0))).check(_et(10, 0, 30))
+    assert message[1].startswith("⛔ auto-fence ORB_V2: daily loss 1.30 R")
+
+    # 11:30, the owner's `paper resume --identity ORB_V2` (the CLI passes this annotate).
+    wall["at"] = _et(11, 30)
+    await SQLitePaperKillStore().resume(
+        reason="owner: checked", identity="ORB_V2",
+        annotate=lambda lifted: owner_resume_reason("owner: checked", lifted),
+    )
+    stopped, reason, _at = _rows(fences)["paper:ORB_V2"]
+    assert (stopped, reason) == (0, "owner: checked (lifts sentinel fence of 2026-10-14)")
+
+    # The notifier restarts on a corrupt state file: a fresh, empty memory.
+    state_path = tmp_path / "notify" / "2026-10-14.json"
+    state_path.parent.mkdir(mode=0o700)
+    state_path.write_text("{not json", encoding="utf-8")
+    state_path.chmod(0o600)
+    memory = NotifyState.load(state_path, TODAY).alerts
+    assert memory == {}
+    restarted = _sentinel(directory, memory, heartbeat=Heartbeat(_et(12, 0)))
+    assert await restarted.check(_et(12, 0, 5)) == []
+    assert _rows(fences)["paper:ORB_V2"][:2] == (0, "owner: checked (lifts sentinel fence of 2026-10-14)")
+    assert "sentinel_fence:ORB_V2" in memory  # remembered again: not even asked next check
+    assert await restarted.check(_et(12, 1)) == []
+
+    # The trace is today's only: the next session day fences on a new loss.
+    tomorrow = date(2026, 10, 15)
+    wall["at"] = _et(10, 0, 30, day=tomorrow)
+    _save(directory, tomorrow, [_bracket("orb2", status="closed", realized_pnl="-200.00")],
+          written_at=_et(10, 0, day=tomorrow))
+    (fenced,) = await _sentinel(directory, {}, heartbeat=Heartbeat(_et(10, 0, day=tomorrow)), day=tomorrow).check(
+        _et(10, 0, 30, day=tomorrow)
+    )
+    assert fenced[1].startswith("⛔ auto-fence ORB_V2: daily loss 2.00 R")
+
+
+def test_the_resume_trace_names_the_lifted_fences_own_date_and_only_a_sentinel_fence():
+    fence = FenceRow(True, "sentinel: losing streak 3 losing trades in a row", _et(15, 0, day=TUESDAY).isoformat())
+    assert owner_resume_reason("ok", fence) == "ok (lifts sentinel fence of 2026-10-13)"
+    # An owner's own stop, a row already resumed, or no row: the reason as typed.
+    assert owner_resume_reason("ok", FenceRow(True, "telegram /halt by owner", fence.updated_at)) == "ok"
+    assert owner_resume_reason("ok", FenceRow(False, fence.reason, fence.updated_at)) == "ok"
+    assert owner_resume_reason("ok", None) == "ok"
+    resumed_today = FenceRow(False, "ok (lifts sentinel fence of 2026-10-14)", _et(9, 0).isoformat())
+    assert owner_resumed_on(resumed_today, TODAY)
+    # Yesterday's fence lifted this morning: today's Sentinel still fences on a new loss.
+    lifted_yesterday = FenceRow(False, "ok (lifts sentinel fence of 2026-10-13)", _et(9, 0).isoformat())
+    assert not owner_resumed_on(lifted_yesterday, TODAY)
+    # Resumed yesterday, or stopped again since: not today's resume.
+    assert not owner_resumed_on(replace(resumed_today, updated_at=_et(23, 0, day=TUESDAY).isoformat()), TODAY)
+    assert not owner_resumed_on(replace(resumed_today, stopped=True), TODAY)
+    assert not owner_resumed_on(FenceRow(False, "owner: checked", _et(9, 0).isoformat()), TODAY)
+
+
 async def test_a_fence_that_cannot_be_written_is_paged_and_retried(tmp_path):
     directory = tmp_path / "bridge"
     _save(directory, TODAY, [_bracket("o", status="closed", realized_pnl="-200.00")], written_at=_et(10, 0))
@@ -399,10 +524,10 @@ async def test_a_fence_that_cannot_be_written_is_paged_and_retried(tmp_path):
     class LockedStore(RecordingStore):
         locked = True
 
-        async def stop(self, *, reason: str, identity: str | None = None) -> None:
+        async def stop_identity(self, *, reason: str, identity: str, unless=None) -> FenceRow | None:
             if self.locked:
                 raise sqlite3.OperationalError("database is locked")
-            await super().stop(reason=reason, identity=identity)
+            return await super().stop_identity(reason=reason, identity=identity, unless=unless)
 
     store = LockedStore()
     memory: dict[str, str] = {}

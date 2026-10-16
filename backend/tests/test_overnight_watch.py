@@ -252,8 +252,9 @@ async def test_inside_the_notifier_window_the_watch_says_nothing_and_checks_noth
     assert not any(window_start <= moment < window_end for moment in port.checks)
     # BrokerWatch's day; the watch resumes at 16:15 with a fresh streak and pages
     # once it opens (the evening is not quiet hours: the recorder needs the Gateway).
+    # With no evidence from the notifier, the start is not invented (N15b L-1).
     assert sent == [
-        "⛔ IB Gateway closed since 16:15 ET (its API port does not answer) — log in to IB Gateway"
+        "⛔ IB Gateway closed since before 16:15 ET (its API port does not answer) — log in to IB Gateway"
     ]
 
 
@@ -268,11 +269,124 @@ async def test_a_paged_outage_that_recovers_by_0755_gets_its_recovery_line_at_th
     sent = await drive(watch)
 
     assert port.checks == [et(MONDAY, 7, 41), et(MONDAY, 7, 43), et(MONDAY, 7, 48), et(MONDAY, 7, 53)]
+    # Closed at its first look: the outage began before it (N15b L-1).
     assert sent == [
-        "⛔ IB Gateway closed since 07:41 ET (its API port does not answer) — log in to IB Gateway;"
+        "⛔ IB Gateway closed since before 07:41 ET (its API port does not answer) — log in to IB Gateway;"
         " session starts 07:55 ET (07:40 ET check)",
-        "✅ IB Gateway port open again 07:53 ET (closed since 07:41 ET)",
+        "✅ IB Gateway port open again 07:53 ET (closed since before 07:41 ET)",
     ]
+
+
+# --------------------------------------------------------------------------
+# An outage's start is never invented (N15b L-1, L-12)
+# --------------------------------------------------------------------------
+
+
+def _notifier_state(paths, day: date, alerts: dict[str, str]) -> None:
+    import json
+
+    from trading.operations.notify_service import state_file
+
+    path = state_file(paths, day)
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text(json.dumps({"version": 1, "session_date": day.isoformat(), "alerts": alerts}))
+    path.chmod(0o600)
+
+
+async def test_at_1615_the_watch_starts_from_the_notifiers_announced_outage(tmp_path):
+    """The notifier announced (and paged) "unreachable since 16:00" and its window
+    ends: the watch neither pages it again nor calls it "closed since 16:15", and
+    the port's return answers the notifier's page."""
+    from trading.operations.notify_service import (
+        BROKER_UNREACHABLE,
+        GATEWAY_OUTAGE_KIND_KEY,
+        GATEWAY_OUTAGE_SINCE_KEY,
+    )
+    from trading.operations.overnight_watch import TOOK_OVER_KEY, notifier_port_outage
+    from trading.operations.paths import UserPaths
+
+    paths = UserPaths(home=tmp_path / "home")
+    _notifier_state(paths, MONDAY, {
+        GATEWAY_OUTAGE_SINCE_KEY: et(MONDAY, 16, 0).isoformat(),
+        GATEWAY_OUTAGE_KIND_KEY: "gateway_down",
+        BROKER_UNREACHABLE: et(MONDAY, 16, 2).isoformat(),
+    })
+    clock = Time(et(MONDAY, 16, 10), et(MONDAY, 17, 0))
+    port = Port(clock, [(et(MONDAY, 15, 58), et(MONDAY, 16, 40))])
+    memory: dict[str, str] = {}
+    watch, _ = make_watch(tmp_path, clock, port, memory=memory, notifier_outage=notifier_port_outage(paths))
+
+    assert await drive(watch) == ["✅ IB Gateway port open again 16:40 ET (closed since 16:00 ET)"]
+    assert memory[TOOK_OVER_KEY] == "2026-10-19"
+
+    # Announced but not paged yet when the notifier stopped: the watch pages it, with its start.
+    _notifier_state(UserPaths(home=tmp_path / "unpaged"), MONDAY, {
+        GATEWAY_OUTAGE_SINCE_KEY: et(MONDAY, 16, 0).isoformat(), GATEWAY_OUTAGE_KIND_KEY: "gateway_down",
+    })
+    clock = Time(et(MONDAY, 16, 10), et(MONDAY, 16, 30))
+    watch, _ = make_watch(
+        tmp_path / "b", clock, Port(clock, [(et(MONDAY, 15, 58), et(MONDAY, 23, 0))]),
+        notifier_outage=notifier_port_outage(UserPaths(home=tmp_path / "unpaged")),
+    )
+    assert await drive(watch) == [
+        "⛔ IB Gateway closed since 16:00 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+
+    # IBKR refusing prices (the port open all along) is no port evidence: no start is borrowed.
+    _notifier_state(UserPaths(home=tmp_path / "refused"), MONDAY, {
+        GATEWAY_OUTAGE_SINCE_KEY: et(MONDAY, 8, 0).isoformat(), GATEWAY_OUTAGE_KIND_KEY: "data_refused",
+        BROKER_UNREACHABLE: et(MONDAY, 8, 2).isoformat(),
+    })
+    assert notifier_port_outage(UserPaths(home=tmp_path / "refused"))(MONDAY) is None
+    assert notifier_port_outage(UserPaths(home=tmp_path / "nobody"))(MONDAY) is None
+
+
+async def test_a_telegram_restart_keeps_the_outage_start_and_that_it_was_paged(tmp_path):
+    """Replay 2026-10-14: paged at 16:50 ET, then the deploy restarted the child at
+    19:28. The 05:55 page said "closed since Tue 19:29" and the digest "not paged".
+    Now the saved state carries the start and the page across the restart."""
+    from trading.operations.telegram_bot import AssistantState
+
+    closed = [(et(MONDAY, 16, 45), et(date(2026, 10, 20), 9, 0))]
+    state = AssistantState.load(tmp_path / "telegram" / "state.json")
+    clock = Time(et(MONDAY, 16, 30), et(MONDAY, 17, 0))
+    watch, _ = make_watch(tmp_path, clock, Port(clock, closed), checkpoints=state.tails, memory=state.watch)
+    assert await drive(watch) == [
+        "⛔ IB Gateway closed since 16:45 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+    state.save()
+
+    restarted = AssistantState.load(tmp_path / "telegram" / "state.json")
+    clock = Time(et(MONDAY, 19, 28), et(date(2026, 10, 20), 5, 56))
+    watch, _ = make_watch(
+        tmp_path, clock, Port(clock, closed), checkpoints=restarted.tails, memory=restarted.watch
+    )
+    assert await drive(watch) == [
+        "⛔ IB Gateway closed since Mon 16:45 ET (its API port does not answer) — log in to IB Gateway;"
+        " session starts 07:55 ET (05:55 ET check)"
+    ]
+
+
+async def test_a_port_that_reopens_after_the_last_check_gets_its_recovery_at_the_handover(tmp_path):
+    """N15b L-12: paged at the 07:40 lead, the 07:50 check still closed, the port
+    back at 07:52: at 07:55 one more check before the notifier's window, and the
+    recovery line, so the owner's last word is not "closed"."""
+    clock = Time(et(MONDAY, 7, 36), et(MONDAY, 8, 30))
+    port = Port(clock, [(et(MONDAY, 7, 0), et(MONDAY, 7, 52))])
+    watch, _ = make_watch(tmp_path, clock, port)
+
+    sent = await drive(watch)
+
+    assert sent[-1] == "✅ IB Gateway port open again 07:55 ET (closed since before 07:36 ET)"
+    assert sent[:-1] and all(text.startswith("⛔ IB Gateway closed since before 07:36 ET") for text in sent[:-1])
+    window = (et(MONDAY, 7, 55), et(MONDAY, 16, 15))
+    assert [moment for moment in port.checks if window[0] <= moment < window[1]] == [et(MONDAY, 7, 55)]
+
+    # Still closed at the handover: no recovery line, and nothing else is checked.
+    clock = Time(et(MONDAY, 7, 36), et(MONDAY, 8, 30))
+    port = Port(clock, [(et(MONDAY, 7, 0), et(MONDAY, 9, 0))])
+    watch, _ = make_watch(tmp_path / "closed", clock, port)
+    assert not any(text.startswith("✅") for text in await drive(watch))
 
 
 @pytest.mark.parametrize("day", [SATURDAY, THANKSGIVING])
@@ -390,6 +504,35 @@ async def test_a_restart_resumes_at_the_saved_checkpoint_and_resends_nothing(tmp
     clock = Time(et(MONDAY, 17, 12), et(MONDAY, 17, 20))
     again, _ = make_watch(tmp_path, clock, Port(clock), checkpoints=reloaded.tails)
     assert await drive(again) == ["✅ recorder resumed (probe_healthy) · 17:12 ET"]
+
+
+async def test_the_notifiers_own_restart_cap_lines_are_forwarded_inside_its_window(tmp_path):
+    """N15b L-3: a crash-looping or suspended notifier cannot report itself, so its
+    own restart-cap lines are the watch's at any hour, inside the notifier's window
+    too; every other child's line there is still the notifier's."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    path = logs / "supervisor.log"
+    path.write_text("")
+    clock = Time(et(MONDAY, 9, 55), et(MONDAY, 10, 40))
+    clock.at(et(MONDAY, 10, 0), append(
+        path,
+        f"{iso_utc(et(MONDAY, 10, 0))} CHILD_RESTART_STORM notifier count=6 window=30m",
+        f"{iso_utc(et(MONDAY, 10, 0, 5))} CHILD_SUSPENDED notifier count=6 window=30m",
+        f"{iso_utc(et(MONDAY, 10, 1))} CHILD_SUSPENDED momo count=6 window=30m",
+    ))
+    clock.at(et(MONDAY, 10, 30), append(path, f"{iso_utc(et(MONDAY, 10, 30))} CHILD_RESUMED notifier reason=probe_healthy"))
+    port = Port(clock)
+    watch, _ = make_watch(tmp_path, clock, port)
+
+    sent = await drive(watch)
+
+    assert sent == [
+        "⚠️ notifier restart storm: 6 in 30 min (positions protected at IB; backoff continues) · 10:00 ET",
+        "⛔ notifier suspended after 6 restarts in 30 min (relaunch probe every 5 min) · 10:00 ET",
+        "✅ notifier resumed (probe_healthy) · 10:30 ET",
+    ]
+    assert port.checks == []  # still BrokerWatch's Gateway: nothing probed in the window
 
 
 def test_the_after_hours_gate_is_the_notifiers_rule():

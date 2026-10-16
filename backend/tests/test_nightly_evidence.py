@@ -294,7 +294,7 @@ def test_without_a_comparer_the_parity_step_says_not_compared_and_fences_nothing
     evidence = json.loads((night["root"] / "reports" / "2026-10-12" / "evidence.json").read_text())
     assert evidence["decision_parity"] == {
         "status": "not_compared", "mismatches": {}, "fenced": [], "already_fenced": [], "failed": {},
-        "note": PARITY_NOT_COMPARED_NOTE,
+        "note": PARITY_NOT_COMPARED_NOTE, "not_compared": {},
     }
     assert _fence_rows(fence_db) == {}
 
@@ -326,7 +326,7 @@ def test_a_replay_mismatch_fences_the_sendable_identity_once_and_the_report_reco
     report = night["root"] / "reports" / "2026-10-12" / "evidence.json"
     assert json.loads(report.read_text())["decision_parity"] == {
         "status": "compared", "mismatches": {"ORB_V1": 1, "ORB_V2": 2}, "fenced": ["ORB_V2"],
-        "already_fenced": [], "failed": {}, "note": "",
+        "already_fenced": [], "failed": {}, "note": "", "not_compared": {},
     }
 
     # A restart inside the window finds the row already stopped: kept, not rewritten.
@@ -338,6 +338,105 @@ def test_a_replay_mismatch_fences_the_sendable_identity_once_and_the_report_reco
     assert (parity["fenced"], parity["already_fenced"]) == ([], ["ORB_V2"])
     # Never the global row.
     assert "paper" not in _fence_rows(fence_db)
+
+
+def _decisions(*reasons: str):
+    from trading.replay import ReplayEqualityReport, ReplayMismatch
+
+    return ReplayEqualityReport(
+        recorded_fingerprint="a" * 64,
+        replayed_fingerprint="b" * 64,
+        mismatches=tuple(
+            ReplayMismatch(category="decisions", identity=f"candidate-{index}", reason=reason)
+            for index, reason in enumerate(reasons)
+        ),
+    )
+
+
+def test_a_decision_missing_from_the_replay_is_not_compared_and_never_fenced(night, fence_db):
+    """N15a LOW-3: incomplete stored bars leave the replay without a recorded
+    decision. That is missing data, never a mismatch: reported as not compared
+    for its identity, and no identity is fenced for it."""
+    from trading.research.nightly import decision_mismatches, decisions_not_compared
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    reports = {
+        "ORB_V2": _decisions("missing_from_replay", "missing_from_replay"),
+        "GAP_GO_V2": _decisions("fingerprint_mismatch", "missing_from_replay"),
+        "VWAP_PB_V2": _decisions("unexpected_in_replay"),
+    }
+    assert decision_mismatches(reports) == {"GAP_GO_V2": 1, "VWAP_PB_V2": 1}
+    assert decisions_not_compared(reports) == {"GAP_GO_V2": 1, "ORB_V2": 2}
+
+    environment = NightlyEnvironment(
+        database=night["database"], bridge_directory=night["bridge"], clock=lambda: _et(TUESDAY, 17, 40),
+        compare_decisions=lambda _results: reports, fence_store=SQLitePaperKillStore(),
+    )
+    assert run_replay_cli([], environment=environment) == 0
+
+    assert _fence_rows(fence_db) == {
+        "paper:GAP_GO_V2": (1, "sentinel: replay mismatch 1 decisions"),
+        "paper:VWAP_PB_V2": (1, "sentinel: replay mismatch 1 decisions"),
+    }
+    parity = json.loads((night["root"] / "reports" / "2026-10-12" / "evidence.json").read_text())["decision_parity"]
+    assert parity["mismatches"] == {"GAP_GO_V2": 1, "VWAP_PB_V2": 1}
+    assert parity["not_compared"] == {"GAP_GO_V2": 1, "ORB_V2": 2}
+
+    # A night whose only gap is missing data: compared, nothing fenced, gap named.
+    only_missing = {"ORB_V2": _decisions("missing_from_replay")}
+    environment = NightlyEnvironment(
+        database=night["database"], bridge_directory=night["bridge"], clock=lambda: _et(TUESDAY, 17, 40),
+        compare_decisions=lambda _results: only_missing, fence_store=SQLitePaperKillStore(),
+    )
+    with sqlite3.connect(fence_db) as connection:
+        connection.execute("DELETE FROM autotrader_execution_fences")
+    assert run_replay_cli([], environment=environment) == 0
+    parity = json.loads((night["root"] / "reports" / "2026-10-12" / "evidence.json").read_text())["decision_parity"]
+    assert (parity["status"], parity["mismatches"], parity["not_compared"]) == ("compared", {}, {"ORB_V2": 1})
+    assert _fence_rows(fence_db) == {}
+
+
+def test_the_fence_a_parity_step_writes_is_the_one_the_promoter_reads(night, tmp_path, monkeypatch):
+    """N15a LOW-4: one database, resolved by ``fence_database``. With the default
+    fence store (production: no store injected), tonight's mismatch fence is the
+    fence tonight's proposals show; a fence store on another file writes nothing."""
+    from config import cfg
+    from trading.research.nightly import PARITY_FENCE_DATABASE_MISMATCH, fence_database
+
+    def compare(_results):
+        return {"ORB_V2": _decisions("fingerprint_mismatch", "fingerprint_mismatch")}
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(night["database"]))  # the production layout: one file
+    environment = NightlyEnvironment(
+        database=night["database"], bridge_directory=night["bridge"], clock=lambda: _et(TUESDAY, 17, 40),
+        compare_decisions=compare,
+    )
+    assert fence_database(environment) == Path(night["database"]).resolve()
+    assert run_replay_cli([], environment=environment) == 0
+
+    reports = night["root"] / "reports" / "2026-10-12"
+    parity = json.loads((reports / "evidence.json").read_text())["decision_parity"]
+    assert (parity["status"], parity["fenced"]) == ("compared", ["ORB_V2"])
+    assert _fence_rows(night["database"])["paper:ORB_V2"] == (1, "sentinel: replay mismatch 2 decisions")
+    proposals = {item["identity"]: item for item in json.loads((reports / "proposals.json").read_text())["identities"]}
+    assert proposals["ORB_V2"]["fence"] == "sentinel: replay mismatch 2 decisions"
+    assert proposals["VWAP_PB_V2"]["fence"] is None
+
+    # The fence store on another file: the promoter would not see it, so nothing is written.
+    from db.core import init_db
+    import asyncio
+
+    elsewhere = tmp_path / "elsewhere.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(elsewhere))
+    asyncio.run(init_db())
+    with sqlite3.connect(night["database"]) as connection:
+        connection.execute("DELETE FROM autotrader_execution_fences")
+    assert run_replay_cli([], environment=environment) == 0
+    parity = json.loads((reports / "evidence.json").read_text())["decision_parity"]
+    assert (parity["status"], parity["mismatches"], parity["fenced"]) == (
+        PARITY_FENCE_DATABASE_MISMATCH, {"ORB_V2": 2}, [],
+    )
+    assert _fence_rows(elsewhere) == {} and _fence_rows(night["database"]) == {}
 
 
 def test_a_failing_comparison_is_named_and_the_rest_of_the_night_still_counts(night, fence_db):

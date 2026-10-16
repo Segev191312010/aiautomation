@@ -64,6 +64,16 @@ line shows the bridge not flat at the 15:50 check and a flatten that ran late.
 Its memory (what it fenced today, when it last said "blind") is a mapping the
 caller persists per session date (the notifier's per-date state), so a
 restart neither fences twice nor overrides an owner's resume the same day.
+The fence table holds the same facts on its own (N15a LOW-5), so a lost or
+unreadable state file cannot undo an owner's decision either:
+  * the stop is one transaction (``SQLitePaperKillStore.stop_identity``): a row
+    that is stopped already (an owner's /halt, an earlier fence) is kept with
+    its reason, and an owner's stop or resume cannot land between the check
+    and the write;
+  * an owner's resume of a Sentinel fence stores the fence's ET date in its
+    reason (``owner_resume_reason``, the CLI's ``paper resume``), and a row the
+    owner resumed today from today's fence is never fenced again that day
+    (``owner_resumed_on``).
 """
 from __future__ import annotations
 
@@ -72,10 +82,12 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, MutableMappi
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from functools import partial
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import stat
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -83,6 +95,7 @@ from typing import Any, Protocol
 from trading.research.live_ledger import STATE_SCHEMA_PREFIX, LiveLedger, LiveTrade, read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
+from trading.storage.runtime_fence import FenceRow, KeepRow
 
 logger = logging.getLogger("autotrader.shadow.sentinel")
 
@@ -128,17 +141,24 @@ SEES_AGAIN_ALERT = "sentinel_sees_again"
 
 FENCED = "fenced"
 ALREADY_FENCED = "already_fenced"
+# The owner resumed today's Sentinel fence today: the row is kept, never fenced again.
+OWNER_RESUMED = "owner_resumed"
+# The trace an owner's resume of a Sentinel fence leaves in the row's reason.
+LIFTED_SUFFIX = " (lifts sentinel fence of {day})"
+_LIFTED = re.compile(r" \(lifts sentinel fence of (?P<day>\d{4}-\d{2}-\d{2})\)$")
 
 _CENT = Decimal("0.01")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 class FenceStore(Protocol):
-    """The two calls the Sentinel may make (``SQLitePaperKillStore`` satisfies it)."""
+    """The one call the Sentinel may make (``SQLitePaperKillStore`` satisfies it):
+    stop one identity row, in one transaction, unless it is stopped already or
+    ``unless(row)`` keeps it; None when it stopped it, else the row it kept."""
 
-    async def is_stopped(self, *, identity: str | None = None) -> bool: ...
-
-    async def stop(self, *, reason: str, identity: str | None = None) -> None: ...
+    async def stop_identity(
+        self, *, reason: str, identity: str, unless: KeepRow | None = None
+    ) -> FenceRow | None: ...
 
 
 HeartbeatReader = Callable[[], Awaitable[datetime | None]]
@@ -159,9 +179,35 @@ def resume_command(identity: str) -> str:
     return f"autotraderctl paper resume --identity {identity}"
 
 
-async def fence_identity(store: FenceStore, *, identity: str, reason: str) -> str:
-    """Stop one sendable identity's new entries: ``FENCED``, or ``ALREADY_FENCED``
-    when its row is stopped already (an owner's or an earlier reason is kept).
+def owner_resume_reason(reason: str, lifted: FenceRow | None) -> str:
+    """The reason an owner's resume stores. Lifting a Sentinel fence, it ends with
+    that fence's ET date (``LIFTED_SUFFIX``): the trace ``owner_resumed_on`` reads."""
+    if lifted is None or not lifted.stopped or not lifted.reason.startswith(REASON_PREFIX):
+        return reason
+    fenced_at = _parse_time(lifted.updated_at)
+    if fenced_at is None:
+        return reason
+    return reason + LIFTED_SUFFIX.format(day=fenced_at.astimezone(MARKET_TIMEZONE).date().isoformat())
+
+
+def owner_resumed_on(row: FenceRow, day: date) -> bool:
+    """The row is the owner's resume, written on ``day`` (ET), of a Sentinel fence of ``day``."""
+    if row.stopped:
+        return False
+    resumed_at = _parse_time(row.updated_at)
+    if resumed_at is None or resumed_at.astimezone(MARKET_TIMEZONE).date() != day:
+        return False
+    found = _LIFTED.search(row.reason)
+    return found is not None and found.group("day") == day.isoformat()
+
+
+async def fence_identity(
+    store: FenceStore, *, identity: str, reason: str, resumed_on: date | None = None
+) -> str:
+    """Stop one sendable identity's new entries: ``FENCED``; ``ALREADY_FENCED``
+    when its row is stopped already (an owner's or an earlier reason is kept);
+    ``OWNER_RESUMED`` when ``resumed_on`` is given and the owner resumed that
+    day's Sentinel fence that day. Check and stop are one transaction.
 
     Only an exact sendable identity reaches the store, so the global ``paper``
     row (``identity=None``) can never be written from here, and nothing here
@@ -171,10 +217,11 @@ async def fence_identity(store: FenceStore, *, identity: str, reason: str) -> st
         raise ValueError(f"not a sendable identity: {identity!r}")
     if not reason.startswith(REASON_PREFIX):
         raise ValueError("an auto-fence reason starts with 'sentinel: '")
-    if await store.is_stopped(identity=identity):
-        return ALREADY_FENCED
-    await store.stop(reason=reason, identity=identity)
-    return FENCED
+    unless = None if resumed_on is None else partial(owner_resumed_on, day=resumed_on)
+    kept = await store.stop_identity(reason=reason, identity=identity, unless=unless)
+    if kept is None:
+        return FENCED
+    return ALREADY_FENCED if kept.stopped else OWNER_RESUMED
 
 
 # --------------------------------------------------------------------------
@@ -608,7 +655,9 @@ class Sentinel:
         if done in self._memory:
             return []  # one fence per identity per day; an owner's resume holds
         try:
-            outcome = await fence_identity(self._store, identity=identity, reason=trigger.reason)
+            outcome = await fence_identity(
+                self._store, identity=identity, reason=trigger.reason, resumed_on=self._session_date
+            )
         except Exception as exc:  # noqa: BLE001 - paged, and retried at the next check
             logger.error("sentinel: fence %s NOT written (%s): %s", identity, type(exc).__name__, trigger.reason)
             if self._due(FENCE_FAILED_KEY.format(identity=identity), now, FENCE_FAILED_REPEAT):
@@ -616,6 +665,10 @@ class Sentinel:
             return []
         self._memory[done] = now.isoformat()
         self._memory.pop(FENCE_FAILED_KEY.format(identity=identity), None)
+        if outcome == OWNER_RESUMED:
+            # The memory was lost (an unreadable state file); the table remembers.
+            logger.warning("sentinel: %s not fenced again: the owner resumed today's fence; %s", identity, trigger.reason)
+            return []
         if outcome == ALREADY_FENCED:
             logger.warning("sentinel: %s already fenced; %s", identity, trigger.reason)
             return [(FENCE_ALERT, already_fenced_text(trigger))]
@@ -655,7 +708,9 @@ __all__ = [
     "FENCE_ALERT",
     "LOSING_STREAK",
     "LOSING_STREAK_TRIGGER",
+    "LIFTED_SUFFIX",
     "MAX_ENTRIES_PER_DAY",
+    "OWNER_RESUMED",
     "REASON_PREFIX",
     "REPLAY_MISMATCH",
     "UNCAPPED_LOSS_R",
@@ -676,6 +731,8 @@ __all__ = [
     "loss_trigger",
     "losing_streak_trigger",
     "ordered_trades",
+    "owner_resume_reason",
+    "owner_resumed_on",
     "read_bridge_heartbeat_at",
     "read_bridge_state",
     "replay_mismatch_reason",

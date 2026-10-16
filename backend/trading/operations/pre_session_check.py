@@ -22,25 +22,31 @@ actor's opt-in status listener) and any competing-session error
 "different IP address"); both listeners are removed afterwards.
 
   * bars returned: healthy. Nothing is sent; one INFO line;
-  * a competing session: ``LOGGED_IN_ELSEWHERE_TEXT``;
-  * a timeout, an error, no bars (2110 or not): ``NO_PRICES_TEXT``, the fix
-    of GW-HMDS-1016 in its order (log out of the app and website, then
-    restart IB Gateway);
+  * a competing session: ``LOGGED_IN_ELSEWHERE_TEXT``, at once;
+  * a timeout, an error, no bars (2110 or not): confirmed once before it pages
+    (N15b L-4): ``RETRY_AFTER_SECONDS`` later ONE more request, on the fallback
+    contract (the next pinned symbol the universe resolved, MSFT after AAPL;
+    the same contract when there is none), so a slow first request of the day
+    or one symbol's missing bars is not a page. A second failure pages
+    ``NO_PRICES_TEXT``, the fix of GW-HMDS-1016 in its order (log out of the
+    app and website, then restart IB Gateway), still inside the lead (about
+    75 s after it at worst). The lock is not held across the wait;
   * the port closed (re-checked when the connection itself fails): nothing,
     the port watch pages it, never twice;
   * the check cannot run (no IBKR data configured for the assistant, no
     resolved contract in the universe, the universe unreadable):
     ``NOT_RUN_TEXT``, so a check that cannot see is never silent.
 
-The contract: the first of ``PRE_SESSION_CHECK_SYMBOLS`` the stored universe
-has resolved (the rows the screener qualifies, by conId), else the universe's
-first resolved row by source and symbol (any listed stock has two months of
-daily bars). Nothing here can place, change or cancel an order.
+The contracts: the first two of ``PRE_SESSION_CHECK_SYMBOLS`` the stored
+universe has resolved (the rows the screener qualifies, by conId), in that
+order, else the universe's first resolved rows by source and symbol (any
+listed stock has two months of daily bars): the first is the check's, the
+second its fallback. Nothing here can place, change or cancel an order.
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime
 import logging
@@ -63,6 +69,10 @@ PRE_SESSION_CHECK_SYMBOLS = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL")
 RECORDED_STATUS_CODES = frozenset({2103, 2105, 2110, 2157})
 # Above the actor's own request timeout: only a hung actor ever reaches it.
 DEADLINE_MARGIN_SECONDS = 5.0
+# A failed first request is confirmed once, this much later, on the fallback contract.
+RETRY_AFTER_SECONDS = 30.0
+# The check's contract and its fallback.
+CHECK_CONTRACTS = 2
 
 NO_PRICES_TEXT = (
     "⛔ IB Gateway is not returning prices ({check} ET check) — 1) log out of the IBKR app and"
@@ -74,8 +84,10 @@ LOGGED_IN_ELSEWHERE_TEXT = (
 NOT_RUN_TEXT = "⚠️ Pre-session data check could not run ({check} ET check): {reason}"
 
 Verdict = Literal["healthy", "no_prices", "logged_in_elsewhere", "port_closed", "not_run"]
-ContractFinder = Callable[[], Awaitable[tuple[str, int] | None]]
+# ``(symbol, conId)`` pairs, the check's contract first and its fallback next.
+ContractFinder = Callable[[], Awaitable[Sequence[tuple[str, int]]]]
 PortProbe = Callable[[], Awaitable[bool]]
+Sleeper = Callable[[float], Awaitable[None]]
 
 
 def actor_request_timeout() -> float:
@@ -93,8 +105,9 @@ class CheckResult:
     status_codes: tuple[int, ...] = ()
 
 
-async def universe_check_contract() -> tuple[str, int] | None:
-    """``(symbol, conId)``: the first pinned symbol the universe resolved, else its first resolved row."""
+async def universe_check_contracts(limit: int = CHECK_CONTRACTS) -> tuple[tuple[str, int], ...]:
+    """``(symbol, conId)`` pairs: the pinned symbols the universe resolved, in pin
+    order, then its other resolved rows by source and symbol; at most ``limit``."""
     from db.core import get_db
 
     order = " ".join(f"WHEN ? THEN {rank}" for rank in range(len(PRE_SESSION_CHECK_SYMBOLS)))
@@ -104,16 +117,16 @@ async def universe_check_contract() -> tuple[str, int] | None:
                 WHERE status = 'resolved' AND con_id IS NOT NULL
                 ORDER BY CASE upper(ibkr_symbol) {order} ELSE {len(PRE_SESSION_CHECK_SYMBOLS)} END,
                          source, symbol
-                LIMIT 1""",
-            PRE_SESSION_CHECK_SYMBOLS,
+                LIMIT ?""",
+            (*PRE_SESSION_CHECK_SYMBOLS, limit),
         ) as cursor:
-            row = await cursor.fetchone()
-    return None if row is None else (str(row[0]), int(row[1]))
+            rows = await cursor.fetchall()
+    return tuple((str(row[0]), int(row[1])) for row in rows)
 
 
-async def _stored_universe_contract() -> tuple[str, int] | None:
+async def _stored_universe_contracts() -> tuple[tuple[str, int], ...]:
     # Resolved at call time, so a test can replace the module's finder.
-    return await universe_check_contract()
+    return await universe_check_contracts()
 
 
 async def _default_probe() -> bool:
@@ -138,36 +151,46 @@ class _Seen:
 
 
 class PreSessionCheck:
-    """The lead hook of ``overnight_watch.OvernightWatch``: one real request, one verdict."""
+    """The lead hook of ``overnight_watch.OvernightWatch``: a real request, confirmed once, one verdict."""
 
     def __init__(
         self,
         *,
         session: Any | None,
         unavailable: str = "",
-        find_contract: ContractFinder | None = None,
+        find_contracts: ContractFinder | None = None,
         probe: PortProbe | None = None,
+        sleep: Sleeper = asyncio.sleep,
     ) -> None:
         self._session = session
         self._unavailable = unavailable
-        self._find_contract = find_contract or _stored_universe_contract
+        self._find_contracts = find_contracts or _stored_universe_contracts
         self._probe = probe or _default_probe
+        self._sleep = sleep
         self._deadline = actor_request_timeout() + DEADLINE_MARGIN_SECONDS
 
     async def __call__(self, now: datetime, lead_at: datetime) -> str | None:
         check = lead_at.astimezone(MARKET_TIMEZONE).strftime("%H:%M")
         result = await self.run()
+        if result.verdict == "no_prices":
+            # One slow request or one symbol's missing bars is not a page (N15b L-4).
+            logger.warning(
+                "pre-session data check %s ET: first request failed (%s) for %s;"
+                " one more in %d s on the fallback contract",
+                check, result.detail, _subject(result), round(RETRY_AFTER_SECONDS),
+            )
+            await self._sleep(RETRY_AFTER_SECONDS)
+            result = await self.run(fallback=True)
         codes = ", ".join(str(code) for code in result.status_codes) or "none"
-        subject = f"{result.symbol} (conId {result.con_id})" if result.symbol else "no contract"
         if result.verdict == "healthy":
             logger.info(
                 "pre-session data check %s ET: %d daily bars for %s; TWS status codes: %s",
-                check, result.bars, subject, codes,
+                check, result.bars, _subject(result), codes,
             )
             return None
         logger.warning(
             "pre-session data check %s ET: %s (%s) for %s; TWS status codes: %s",
-            check, result.verdict, result.detail, subject, codes,
+            check, result.verdict, result.detail, _subject(result), codes,
         )
         if result.verdict == "port_closed":
             return None  # the port watch's page, never a second one
@@ -177,16 +200,18 @@ class PreSessionCheck:
             return NOT_RUN_TEXT.format(check=check, reason=result.detail)
         return NO_PRICES_TEXT.format(check=check)
 
-    async def run(self) -> CheckResult:
+    async def run(self, *, fallback: bool = False) -> CheckResult:
+        """One request: on the check's contract, or with ``fallback`` on the next one
+        (the check's own when the universe resolved only one)."""
         if self._session is None:
             return CheckResult("not_run", self._unavailable or "IBKR data is not configured for the assistant")
         try:
-            contract = await self._find_contract()
+            contracts = tuple(await self._find_contracts())
         except Exception as exc:  # noqa: BLE001 - a check that cannot see says so
             return CheckResult("not_run", f"the universe could not be read ({type(exc).__name__})")
-        if contract is None:
+        if not contracts:
             return CheckResult("not_run", "no resolved contract in the universe")
-        symbol, con_id = contract
+        symbol, con_id = contracts[1] if fallback and len(contracts) > 1 else contracts[0]
         seen = _Seen()
 
         def result(verdict: Verdict, detail: str, bars: int = 0) -> CheckResult:
@@ -226,13 +251,18 @@ class PreSessionCheck:
             return True
 
 
+def _subject(result: CheckResult) -> str:
+    return f"{result.symbol} (conId {result.con_id})" if result.symbol else "no contract"
+
+
 __all__ = [
     "LOGGED_IN_ELSEWHERE_TEXT",
     "NOT_RUN_TEXT",
     "NO_PRICES_TEXT",
     "PRE_SESSION_CHECK_SYMBOLS",
+    "RETRY_AFTER_SECONDS",
     "CheckResult",
     "PreSessionCheck",
     "actor_request_timeout",
-    "universe_check_contract",
+    "universe_check_contracts",
 ]
