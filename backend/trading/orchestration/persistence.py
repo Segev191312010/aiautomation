@@ -311,14 +311,9 @@ class RepositoryBackedShadowRunner:
                             decision=decision, owner_id=owner_id
                         )
 
-                    pipeline = ShadowPipeline(
-                        proposal_provider=self._pipeline.proposal_provider,
-                        decision_recorder=guarded_recorder,
-                        strategy=self._pipeline.strategy,
-                        mode=self._pipeline.mode,
-                        setup_recorder=self._pipeline.setup_recorder,
-                        sizing=self._pipeline.sizing,
-                    )
+                    # Every argument of the configured pipeline, the identity
+                    # size factor included; only the recorder is wrapped.
+                    pipeline = self._pipeline.with_decision_recorder(guarded_recorder)
                     session = ShadowRunSession(
                         run=run,
                         strategy=strategy,

@@ -90,6 +90,17 @@ class LiveTrade:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveBracket:
+    """Every real bracket the bridge sent (any status), by session: when an identity
+    first ordered, and which brackets need attention or could not be read."""
+
+    session_date: date
+    decision_id: str
+    strategy: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class StrategyLiveR:
     strategy: str
     trades: int
@@ -119,6 +130,8 @@ class LiveLedger:
     skipped: int = 0
     # File names or "<file>:<decision id>" the ledger could not trust.
     unreadable: tuple[str, ...] = ()
+    # Every bracket with a quantity, dated (status "unreadable" when it could not be read).
+    brackets: tuple[LiveBracket, ...] = ()
 
     def since(self, first: date) -> LiveLedger:
         """The same ledger limited to sessions from ``first`` on (open counts are current)."""
@@ -130,6 +143,7 @@ class LiveLedger:
             unfilled=self.unfilled,
             skipped=self.skipped,
             unreadable=self.unreadable,
+            brackets=tuple(item for item in self.brackets if item.session_date >= first),
         )
 
     def by_strategy(self) -> tuple[StrategyLiveR, ...]:
@@ -255,6 +269,7 @@ def read_live_ledger(
     unfilled: dict[str, int] = defaultdict(int)
     skipped = 0
     unreadable: list[str] = []
+    brackets: list[LiveBracket] = []
     for path in sorted(folder.iterdir()):
         match = _STATE_FILE.match(path.name)
         if match is None:
@@ -282,6 +297,7 @@ def read_live_ledger(
                 filled = _whole(item.get("filled", 0), "filled")
             except ValueError:
                 unreadable.append(f"{path.name}:{decision_id}")
+                brackets.append(LiveBracket(session_date, str(decision_id), strategy, "unreadable"))
                 continue
             if status == "closed":
                 try:
@@ -289,6 +305,7 @@ def read_live_ledger(
                 except ValueError as exc:
                     logger.warning("bracket %s in %s not read: %s", decision_id, path.name, exc)
                     unreadable.append(f"{path.name}:{decision_id}")
+                    status = "unreadable"
             elif status == "needs_attention":
                 attention[strategy] += 1
             elif filled > 0:
@@ -297,6 +314,8 @@ def read_live_ledger(
                 unfilled[strategy] += 1
             else:
                 skipped += 1
+                continue
+            brackets.append(LiveBracket(session_date, str(decision_id), strategy, status))
     return LiveLedger(
         trades=tuple(sorted(trades, key=lambda trade: (trade.session_date, trade.decision_id))),
         sessions=tuple(sorted(sessions)),
@@ -305,6 +324,7 @@ def read_live_ledger(
         unfilled=dict(unfilled),
         skipped=skipped,
         unreadable=tuple(unreadable),
+        brackets=tuple(brackets),
     )
 
 
@@ -346,6 +366,7 @@ def ledger_lines(ledger: LiveLedger, *, week_start: date | None = None) -> list[
 __all__ = [
     "BRIDGE_STATE_DIRECTORY",
     "STATE_SCHEMA_PREFIX",
+    "LiveBracket",
     "LiveLedger",
     "LiveTrade",
     "StrategyLiveR",

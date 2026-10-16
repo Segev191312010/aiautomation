@@ -7,14 +7,18 @@ the evidence for the paper promotion rule, in this order:
 1. the signal-outcome tracker: every saved setup simulated forward on the
    recorded bars (its own append-only table is the only database write);
 2. the live R ledger from the PAPER bridge's state files (read-only);
-3. the paper promotion rule for every registered strategy (reports only);
+3. the paper promotion rule for every registered strategy (reports only),
+   then the promoter in propose mode for every sendable identity
+   (``trading.research.promotion_proposals``: proposals only, it changes no
+   constant, row or fence) with each identity's size steps;
 4. the window research sweep, unless it would start after
    ``SWEEP_LATEST_START`` inside the replay window: the supervisor stops the
    child at 18:30, and the weekly message must not be cut off with it.
 
 The reports land next to the replay's (``evidence.json``, ``windows.json``,
-``live-r.json``, ``evidence.txt``). Nothing here can place an order or change
-an authority; a database that is not this code's schema is left alone.
+``live-r.json``, ``proposals.json``, ``evidence.txt``). Nothing here can place
+an order or change an authority; a database that is not this code's schema is
+left alone.
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ from trading.research.paper_promotion import (
     evaluate_registry,
     read_live_evidence,
 )
+from trading.research.promotion_proposals import PromotionProposals, collect_proposals
 from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
 from trading.scheduler.sessions import market_session
@@ -97,6 +102,8 @@ class NightlyEvidence:
     week_start: date | None = None
     # Managed MOMO against MOMO_HOD_V2 on the same setups (phase-3 readiness).
     phase3: OverlayScorecard | None = None
+    # The promoter's proposals (propose mode) and each sendable identity's size steps.
+    proposals: PromotionProposals | None = None
 
 
 def week_start(day: date) -> date:
@@ -173,6 +180,11 @@ def collect_evidence(
         live, promotion = LiveEvidence(readable=False, note="failed"), ()
     as_of = now.astimezone(NEW_YORK).date()
     try:
+        proposals = collect_proposals(database=environment.database, ledger=live_r, live=live, as_of=as_of)
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("promotion proposals failed")
+        proposals = PromotionProposals(as_of=as_of, readable=False, note=_failed(exc))
+    try:
         # Every managed session so far: phase 3 is a cumulative question.
         phase3 = read_scorecard(environment.database, end=as_of, days=None)
     except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
@@ -197,6 +209,7 @@ def collect_evidence(
         live_hours=_live_hours(promotion, live),
         week_start=week_start(as_of),
         phase3=phase3,
+        proposals=proposals,
     )
 
 
@@ -226,6 +239,7 @@ def write_evidence(
                 for name, rows in evidence.live_hours.items()
             },
             "phase3": None if evidence.phase3 is None else evidence.phase3.payload(),
+            "size_steps": None if evidence.proposals is None else evidence.proposals.size_steps.payload(),
         },
         "windows.json": {
             "schema": "autotrader-v1/research-windows",
@@ -241,6 +255,8 @@ def write_evidence(
             **evidence.live_r.payload(),
         },
     }
+    if evidence.proposals is not None:
+        documents["proposals.json"] = evidence.proposals.payload(generated_at=generated_at)
     written = []
     for name, document in documents.items():
         target = directory / name

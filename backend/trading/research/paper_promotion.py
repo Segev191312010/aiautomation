@@ -13,7 +13,11 @@ below are pinned by a test):
 
 * one evidence identity: the rules fingerprint, the entry window and the risk
   policy (plus the manager version and prompt id when managed). Any change is
-  a new identity, so its evidence starts again from zero;
+  a new identity, so its evidence starts again from zero. An identity's size
+  multiplier (``trading.risk.identity_sizing``) is deliberately not part of it:
+  every statistic here is in R, which the quantity cancels out of, so a size
+  step never restarts the evidence (it is an event in ``size_steps``,
+  ``trading.research.size_history``; a test pins the identity across tables);
 * at least ``MIN_SESSIONS`` live sessions under that identity and as many
   replayed sessions;
 * at least ``MIN_REPLAY_TRADES`` replay trades and ``MIN_LIVE_SETUPS`` filled

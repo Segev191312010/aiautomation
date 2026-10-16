@@ -35,6 +35,8 @@ from trading.rules.strategy import (
     is_data_rejection,
 )
 from trading.scheduler.decision_keys import decision_key
+from trading.sendable_identities import is_sendable_identity
+from trading.storage.decision_sizing import DecisionSizing, decision_sizing, record_decision_sizing
 from trading.storage.manager_setups import FormedSetup, formed_setup, record_formed_setup
 from trading.storage.repository import record_decision
 
@@ -43,6 +45,7 @@ logger = logging.getLogger("autotrader.shadow.pipeline")
 
 DecisionRecorder = Callable[..., Awaitable[None]]
 SetupRecorder = Callable[[FormedSetup], Awaitable[object]]
+SizingRecorder = Callable[[DecisionSizing], Awaitable[object]]
 # Named token of the one failure the pipeline swallows: evidence that could
 # not be saved. The decision it follows is already recorded and unchanged.
 SETUP_PERSIST_FAILED = "setup_persist_failed"
@@ -50,6 +53,9 @@ SETUP_PERSIST_FAILED = "setup_persist_failed"
 # never larger (Principle 3).
 MANAGED_SIZE_FAILED = "managed_size_failed"
 MANAGED_RECORD_FAILED = "managed_record_failed"
+# The decision's effective size multiplier could not be kept beside it
+# (trading.storage.decision_sizing); the decision is recorded and unchanged.
+SIZING_RECORD_FAILED = "sizing_record_failed"
 NO_SCALING = Decimal("1")
 
 
@@ -206,11 +212,16 @@ class ShadowPipeline:
         setup_recorder: SetupRecorder = record_formed_setup,
         sizing: ManagedSizing | None = None,
         identity_multiplier: Decimal | None = NO_SCALING,
+        sizing_recorder: SizingRecorder = record_decision_sizing,
     ) -> None:
         """``identity_multiplier`` is the sendable identity's fixed size factor
         (``trading.risk.identity_sizing``), a Decimal in (0, 1]; ``None`` means a
         sendable identity with no row, and every setup is then blocked with
-        ``identity_sizing_missing`` (never sized at 1 by default)."""
+        ``identity_sizing_missing`` (never sized at 1 by default).
+
+        ``sizing_recorder`` keeps every decision's effective multiplier
+        (identity factor x managed factor) beside the decision, never in it:
+        the decision payload is fingerprinted content."""
         if not isinstance(strategy, StrategyEvaluator):
             raise TypeError("strategy must implement StrategyEvaluator")
         if identity_multiplier is not None:
@@ -224,6 +235,7 @@ class ShadowPipeline:
         self._setup_recorder = setup_recorder
         self._sizing = sizing
         self._identity_multiplier = identity_multiplier
+        self._sizing_recorder = sizing_recorder
         self._identity_missing_reported = False
 
         async def defer_recording(**_: object) -> None:
@@ -254,6 +266,34 @@ class ShadowPipeline:
     @property
     def identity_multiplier(self) -> Decimal | None:
         return self._identity_multiplier
+
+    @property
+    def decision_recorder(self) -> DecisionRecorder:
+        return self._decision_recorder
+
+    @property
+    def sizing_recorder(self) -> SizingRecorder:
+        return self._sizing_recorder
+
+    def with_decision_recorder(self, decision_recorder: DecisionRecorder) -> ShadowPipeline:
+        """This pipeline with every constructor argument, recording through ``decision_recorder``.
+
+        The repository runner wraps the recorder with its lease heartbeat. It
+        used to rebuild the pipeline field by field and dropped the identity
+        factor, so every identity was sized at x1 whatever its sizing row
+        said; the copy lives here, beside the constructor it must mirror (a
+        test compares it with the constructor's signature).
+        """
+        return ShadowPipeline(
+            proposal_provider=self._proposal_provider,
+            decision_recorder=decision_recorder,
+            strategy=self._strategy,
+            mode=self._mode,
+            setup_recorder=self._setup_recorder,
+            sizing=self._sizing,
+            identity_multiplier=self._identity_multiplier,
+            sizing_recorder=self._sizing_recorder,
+        )
 
     def _engine_size(self, multiplier: Decimal) -> dict[str, Decimal]:
         """The engine's ``size_multiplier`` keyword: identity factor x managed factor.
@@ -376,6 +416,7 @@ class ShadowPipeline:
                 outcome=outcome,
             )
             await self._record(decision, strategy.owner_id)
+            await self._record_sizing(decision=decision, strategy=strategy, managed_factor=NO_SCALING)
             return Assessment(decision=decision)
 
         result = self._strategy.evaluate(
@@ -527,6 +568,7 @@ class ShadowPipeline:
             portfolio=portfolio,
             multiplier=multiplier,
         )
+        await self._record_sizing(decision=decision, strategy=strategy, managed_factor=multiplier)
         return Assessment(decision=decision)
 
     async def _managed_multiplier(self, *, setup: RuleSetup, review: AIReview) -> Decimal:
@@ -601,10 +643,37 @@ class ShadowPipeline:
             outcome=DecisionOutcome.DATA_BLOCKED,
         )
         await self._record(decision, strategy.owner_id)
+        await self._record_sizing(decision=decision, strategy=strategy, managed_factor=NO_SCALING)
         return decision
 
     async def _record(self, decision: Decision, owner_id: str) -> None:
         await self._decision_recorder(decision=decision, owner_id=owner_id)
+
+    async def _record_sizing(
+        self, *, decision: Decision, strategy: StrategyRecord, managed_factor: Decimal
+    ) -> None:
+        """Keep the decision's effective multiplier beside it; a failure is logged, never raised.
+
+        ``managed_factor`` is the factor this decision was sized with: the
+        overlay's answer for a PROPOSE review (0 skips the setup), else 1.
+        The identity factor is this pipeline's own; ``None`` (a sendable
+        identity with no row) is recorded as no multiplier at all.
+        """
+        try:
+            name = strategy.spec.name
+            row = decision_sizing(
+                decision,
+                strategy_name=name,
+                sendable=is_sendable_identity(name),
+                identity_factor=self._identity_multiplier,
+                managed_factor=managed_factor,
+            )
+            await self._sizing_recorder(row)
+        except Exception:  # noqa: BLE001 - evidence must never block or alter a decision
+            logger.error(
+                "%s: run %s decision %s", SIZING_RECORD_FAILED, decision.run_id, decision.id,
+                exc_info=True,
+            )
 
     async def _persist_setup(
         self,
