@@ -36,25 +36,51 @@
      sweep), worded "IBKR is refusing prices". Both IBKR-side wordings ask
      the owner to log out of the IBKR app and website first and to restart
      the IB Gateway if it lasts; once the outage has lasted 15 minutes they
-     say "restart IB Gateway now".
+     say "restart IB Gateway now";
+  j. the Sentinel (``trading.operations.sentinel``, T-9): from the bridge's
+     structured state (today's state file, the live ledger, the heartbeat
+     row; never a log line) it fences one sendable identity at the owner's
+     daily-loss or losing-streak threshold, once per identity per day, with
+     one "⛔ auto-fence" message; while it cannot see the bridge state it
+     sends "sentinel blind since HH:MM ET" every half hour and fences nothing;
+  k. at start (07:55 ET), every identity whose fence is stopped (an earlier
+     day's auto-fence, the nightly replay's mismatch fence, an owner's /halt);
+  l. an OPS section in the 16:05 report: restarts per child, suspensions and
+     restart storms, Gateway outage minutes and flaps, launch and preflight
+     refusals, fenced identities, and trades and realized P&L per identity.
+     An announced outage counts once, as an outage, whatever opened it (a
+     failed connect, an IBKR-side loss, a data-refused run) and also when the
+     pair budget held it back until the sustain limit or the window announced
+     it; a flap is a flip the phone never heard as an outage.
 
-It only reads the database, the logs, and the bridge state file: nothing here
-can place, modify, or cancel an order. What was delivered, how far each log
-was read, whether the report went out, and the regime last reported are kept
-per date in a private state file, so a restart neither resends nor skips.
+It reads the database, the logs and the bridge state files, and writes one
+kind of row: the Sentinel's ``paper:<IDENTITY>`` fence, stop-only. Nothing
+here can place, modify, or cancel an order, resume a fence, or touch the
+global kill switch. What was delivered, how far each log was read, whether
+the report went out, the regime last reported, the Sentinel's fences and the
+day's OPS counts are kept per date in a private state file, so a restart
+neither resends nor skips.
 
 Unlike every other child it starts while a migration is pending: it never
-writes the database and reads only tables that exist since migrations 2 and
-11, so it keeps forwarding the bridge and the supervisor. It checks the
-schema (read-only) at start and every five minutes; while the schema is not
-current it sends one alert per session and drops the children's repeated
-exit-75 restarts instead of sending one message per restart.
+migrates, writes only the fence table (in every schema), and reads only
+tables that exist since migrations 2 and 11, so it keeps forwarding the
+bridge and the supervisor. It checks the schema (read-only) at start and
+every five minutes; while the schema is not current it sends one alert per
+session and drops the children's repeated exit-75 restarts instead of
+sending one message per restart.
+
+Every followed log survives the 18:35 ET rotation (a rename and a new file,
+or a copy then a truncate): a new file identity, a file shorter than the read
+offset, or one whose first 64 bytes changed is read again from its start, and
+the archive is never replayed. The state lines the rotation carries into the
+new supervisor.log (after its LOG_ROTATED marker) are neither forwarded again
+nor counted twice in the OPS lines.
 """
 from __future__ import annotations
 
 import asyncio
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -66,6 +92,7 @@ import re
 import stat
 import sys
 import time as monotonic_time
+import zlib
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, TextIO
 
 import aiosqlite
@@ -102,10 +129,23 @@ from trading.operations.paths import (
 )
 from trading.operations.schema_alert import schema_alert_text
 from trading.operations.schema_gate import EXIT_SCHEMA_NOT_READY
+from trading.operations.sentinel import (
+    BLIND_ALERT,
+    BLIND_KEY,
+    BLIND_REPEAT,
+    HeartbeatReader,
+    Sentinel,
+    blind_text,
+    read_bridge_heartbeat_at,
+    resume_command,
+)
 from trading.operations.supervisor import bridge_window
+from trading.operations.telegram_tools import child_starts_on, read_log_tail, restarts_text
+from trading.research.live_ledger import bridge_state_directory
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
-from trading.sendable_identities import is_sendable_identity
+from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 from trading.storage.migrations import SchemaStatus, inspect_schema
+from trading.storage.runtime_fence import SQLitePaperKillStore
 
 if TYPE_CHECKING:
     from trading.market.context import MarketContext
@@ -149,6 +189,39 @@ SCHEMA_ALERT_KEY = "schema_alert"
 # Pre-market regime swings only set the baseline that the 09:15 update reports.
 REGIME_ALERTS_FROM = MARKET_UPDATE_TIMES[0]
 HOT_NAMES_IN_UPDATE = 5
+# The Sentinel reads the bridge state this often (its blindness rule allows 5 minutes).
+SENTINEL_CHECK_SECONDS = 30.0
+# Fenced identities announced once per date, right after the startup line.
+FENCES_AT_START_KEY = "fences_at_start"
+# The 16:05 report's OPS lines read today's supervisor.log (rotated daily at
+# 18:35 ET, so one day is far below this).
+OPS_LOG_TAIL_BYTES = 4 << 20
+OPS_ITEMS_SHOWN = 5
+# The bridge's close checkpoints (paper_bridge FLATTEN_BEFORE_CLOSE and
+# VERIFY_BEFORE_CLOSE; a test pins them): the flatten is due at 15:45 ET and the
+# bridge checks it is flat at 15:50 ET (both earlier on a half day).
+FLATTEN_BEFORE_CLOSE = timedelta(minutes=15)
+VERIFY_BEFORE_CLOSE = timedelta(minutes=10)
+# A flatten the state first shows this long after it was due ran late (live
+# 2026-10-15: the Mac slept from 14:47 ET and the bridge flattened at 16:12).
+FLATTEN_LATE_AFTER = timedelta(minutes=2)
+# Observations of the bridge state kept in the per-date alerts map: what was
+# held at the first look at/after the 15:50 check (before the close), and when
+# the state first showed a flatten (the state file's write time).
+HELD_AT_VERIFY_KEY = "ops_held_at_verify"
+FLATTEN_SEEN_KEY = "ops_flatten_seen_at"
+# What the notifier itself counts for the OPS lines (persisted per date).
+GATEWAY_OUTAGES = "gateway_outages"
+GATEWAY_UNREACHABLE_SECONDS = "gateway_unreachable_seconds"
+GATEWAY_FLAPS = "gateway_flaps"
+PREFLIGHT_REFUSED = "preflight_refused"
+_PREFLIGHT_REFUSED = re.compile(r"\bPREFLIGHT_REFUSED\b")
+# The 18:35 ET rotation (T-3) renames supervisor.log to supervisor.log.<D>,
+# then copies its newest state lines verbatim (original timestamps) into the
+# new file, marked by ``<ISO> LOG_ROTATED date=<D> renamed=<n> truncated=<n>
+# pruned=<n> carried=<n>``. Carried lines were news when first written: they
+# are never forwarded again nor counted twice.
+_LOG_ROTATED = re.compile(r"\bLOG_ROTATED\b(?:.*?\bcarried=(?P<carried>\d+))?")
 _REGIME_LABELS = {"risk_on": "RISK-ON", "neutral": "NEUTRAL", "risk_off": "RISK-OFF"}
 _SERVICE_LOG_FILES = {
     "bridge": "bridge.log",
@@ -288,6 +361,9 @@ class NotifyEnvironment:
     read_market_context: MarketContextReader = _latest_market_context
     read_hot_list: HotListReader = _latest_hot_list
     read_schema_status: Callable[[], SchemaStatus] = _current_schema_status
+    # The Sentinel's only write path (stop one identity) and its freshness source.
+    fence_store: SQLitePaperKillStore = field(default_factory=SQLitePaperKillStore)
+    read_bridge_heartbeat: HeartbeatReader = read_bridge_heartbeat_at
 
     @classmethod
     def current(cls) -> NotifyEnvironment:
@@ -385,7 +461,10 @@ class NotifyState:
     ``delivered`` maps ``decision:<id>``, ``market:<HHMM>``, ``report`` and
     ``started`` to ``sent`` or ``dropped``; ``tails`` holds each log's file
     identity and the byte offset of its next unread line; ``market_regime`` is
-    the regime the phone was last told about (or the silent baseline).
+    the regime the phone was last told about (or the silent baseline);
+    ``alerts`` holds alert times, the Sentinel's memory among them;
+    ``counters`` the OPS counts the notifier keeps itself (Gateway outages,
+    unreachable seconds and flaps, bridge preflight refusals).
     """
 
     path: Path
@@ -394,6 +473,7 @@ class NotifyState:
     tails: dict[str, dict[str, int]] = field(default_factory=dict)
     alerts: dict[str, str] = field(default_factory=dict)
     market_regime: str | None = None
+    counters: dict[str, int] = field(default_factory=dict)
     dirty: bool = False
 
     @classmethod
@@ -428,8 +508,11 @@ class NotifyState:
                 if isinstance(checkpoint, dict) and all(
                     _int(checkpoint.get(key)) is not None for key in ("dev", "ino", "offset")
                 ):
+                    # The head fingerprint is optional (state files written before it).
                     state.tails[str(name)] = {
-                        key: int(checkpoint[key]) for key in ("dev", "ino", "offset")
+                        key: int(checkpoint[key])
+                        for key in ("dev", "ino", "offset", "head", "head_len")
+                        if _int(checkpoint.get(key)) is not None
                     }
         alerts = raw.get("alerts")
         if isinstance(alerts, dict):
@@ -439,7 +522,19 @@ class NotifyState:
         regime = raw.get("market_regime")
         if isinstance(regime, str) and regime:
             state.market_regime = regime
+        counters = raw.get("counters")
+        if isinstance(counters, dict):
+            state.counters = {
+                str(key): number
+                for key, value in counters.items()
+                if (number := _int(value)) is not None and number >= 0
+            }
         return state
+
+    def count(self, key: str, amount: int = 1) -> None:
+        if amount:
+            self.counters[key] = self.counters.get(key, 0) + amount
+            self.dirty = True
 
     def save(self) -> None:
         payload = {
@@ -449,6 +544,7 @@ class NotifyState:
             "tails": self.tails,
             "alerts": self.alerts,
             "market_regime": self.market_regime,
+            "counters": self.counters,
         }
         encoded = json.dumps(payload, sort_keys=True, indent=1).encode("utf-8")
         atomic_private_write(self.path, encoded)
@@ -462,6 +558,10 @@ class NotifyState:
 
 # Checkpoint for a log that did not exist: whatever appears later is all new.
 MISSING_FILE_CHECKPOINT = {"dev": 0, "ino": 0, "offset": 0}
+# A file's first bytes are its fingerprint: copied then truncated in place
+# (same inode), a log can grow past the read offset before the next poll, so
+# a shorter size alone misses it; different first bytes do not.
+HEAD_BYTES = 64
 
 
 class LogTailer:
@@ -470,7 +570,12 @@ class LogTailer:
     Only complete lines are returned. A file that exists at the first start of
     a session date is followed from its end (older lines belong to earlier
     runs); a file that appears later, or that replaced the one being
-    followed, is read from its beginning.
+    followed, is read from its beginning. The 18:35 ET rotation (T-3) either
+    renames the log and creates a new one (a new file identity: the old one's
+    unread tail is read once, then the new file from its start) or copies it
+    and truncates it in place (the same identity, shorter than the offset or
+    no longer starting with the bytes it started with: read again from its
+    start). The renamed or copied archive is never read.
     """
 
     def __init__(
@@ -488,6 +593,7 @@ class LogTailer:
         self._unreadable: tuple[int, int] | None = None
         self._offset = 0
         self._partial = b""
+        self._head = b""
 
     def start(self, checkpoint: Mapping[str, int] | None = None) -> None:
         """Resume at ``checkpoint`` while it names this same file, else follow from the end."""
@@ -497,8 +603,10 @@ class LogTailer:
         size = os.fstat(self._handle.fileno()).st_size
         if checkpoint is None:
             offset = size
-        elif (checkpoint.get("dev"), checkpoint.get("ino")) == self._identity and (
-            0 <= checkpoint.get("offset", -1) <= size
+        elif (
+            (checkpoint.get("dev"), checkpoint.get("ino")) == self._identity
+            and 0 <= checkpoint.get("offset", -1) <= size
+            and self._same_head(checkpoint)
         ):
             offset = checkpoint["offset"]
         else:
@@ -506,6 +614,7 @@ class LogTailer:
             offset = 0
         self._handle.seek(offset)
         self._offset = offset
+        self._remember_head()
 
     def checkpoint(self) -> dict[str, int]:
         if self._identity is None or self._handle is None:
@@ -514,11 +623,17 @@ class LogTailer:
             "dev": self._identity[0],
             "ino": self._identity[1],
             "offset": self._offset - len(self._partial),
+            "head": zlib.crc32(self._head),
+            "head_len": len(self._head),
         }
 
     def poll(self) -> list[str]:
         lines: list[str] = []
         if self._handle is not None:
+            if self._rewritten():
+                # Copied and truncated in place, and already longer than the
+                # offset again: the same file, new content from its start.
+                self._rewind()
             # Drain the file being followed first: after a rotation this is
             # the tail end of the old file.
             lines.extend(self._drain())
@@ -534,12 +649,44 @@ class LogTailer:
             if self._open(identity):
                 lines.extend(self._drain())
         elif status.st_size < self._offset:
-            assert self._handle is not None
-            self._handle.seek(0)
-            self._offset = 0
-            self._partial = b""
+            self._rewind()
             lines.extend(self._drain())
         return lines
+
+    def _rewind(self) -> None:
+        assert self._handle is not None
+        self._handle.seek(0)
+        self._offset = 0
+        self._partial = b""
+        self._head = b""
+
+    def _read_head(self, size: int = HEAD_BYTES) -> bytes | None:
+        assert self._handle is not None
+        try:
+            return os.pread(self._handle.fileno(), size, 0)
+        except OSError:
+            return None
+
+    def _remember_head(self) -> None:
+        if self._handle is not None and len(self._head) < HEAD_BYTES:
+            head = self._read_head()
+            if head is not None and head.startswith(self._head):
+                self._head = head
+
+    def _rewritten(self) -> bool:
+        """The followed file no longer starts with the bytes it started with."""
+        if not self._head:
+            return False
+        current = self._read_head(len(self._head))
+        return current is not None and len(current) == len(self._head) and current != self._head
+
+    def _same_head(self, checkpoint: Mapping[str, int]) -> bool:
+        """A checkpoint's fingerprint (absent in older state files) still matches the file."""
+        length = checkpoint.get("head_len")
+        if length is None or checkpoint.get("head") is None:
+            return True
+        current = self._read_head(length)
+        return current is not None and len(current) == length and zlib.crc32(current) == checkpoint["head"]
 
     def close(self) -> None:
         if self._handle is not None:
@@ -551,6 +698,7 @@ class LogTailer:
         self._identity = None
         self._offset = 0
         self._partial = b""
+        self._head = b""
 
     def _open(self, expected: tuple[int, int] | None = None) -> bool:
         self.close()
@@ -583,6 +731,7 @@ class LogTailer:
         if not chunk:
             return []
         self._offset += len(chunk)
+        self._remember_head()
         *complete, partial = (self._partial + chunk).split(b"\n")
         if len(partial) > self._max_line:
             # A runaway line is emitted rather than buffered without bound.
@@ -1031,6 +1180,17 @@ class BrokerWatch:
     flaps_seen: int = 0
     flaps_reported: int = 0
     flaps_from: datetime | None = None
+    # Announced outages and their length (first failure to the first success
+    # of the stretch that closed it), for the report's OPS lines.
+    outages: int = 0
+    unreachable_seconds: float = 0.0
+    # The OPS lines count one outage once (P1-B): an open the pair budget held
+    # back is a flap to the hysteresis even when the sustain limit or the window
+    # announces it later (the digest's flap line keeps that). ``holding_back``:
+    # the hysteresis is open and not announced after the latest signal;
+    # ``flaps_announced``: held-back opens announced since.
+    holding_back: bool = False
+    flaps_announced: int = 0
     # The supervisor's bridge window end for this date; None when it is no session.
     bridge_ends_at: datetime | None = field(init=False, default=None)
 
@@ -1054,6 +1214,14 @@ class BrokerWatch:
     @property
     def flaps_pending(self) -> bool:
         return self.hysteresis.flaps > self.flaps_reported
+
+    @property
+    def ops_flaps(self) -> int:
+        """The flaps the report's OPS lines count: flips the phone never heard as
+        an outage. The hysteresis's flaps less each held-back open announced later
+        (an outage there, counted once as one) and less the open still held back
+        (not settled yet: it ends as a flap or as an outage). Never decreases."""
+        return self.hysteresis.flaps - self.flaps_announced - int(self.holding_back)
 
     def session_started(self, now: datetime) -> None:
         if self.opened_at is None:
@@ -1204,15 +1372,22 @@ class BrokerWatch:
             if self.flaps_from is None:
                 self.flaps_from = now
             logger.info("%s flap %d held back from the phone", BROKER_UNREACHABLE, flaps)
+        if event is not None and event.kind is HYSTERESIS_OPEN and self.holding_back:
+            # Held back by the pair budget, announced now by the sustain limit or
+            # the window: the OPS lines count it as this outage, not also a flap.
+            self.flaps_announced += 1
+        self.holding_back = self.hysteresis.is_open and not self.hysteresis.announced
         if event is None:
             return None
         self.alerted = False
         self.swept_since_alert = False
         if event.kind is HYSTERESIS_OPEN:
             self.unreachable_since = event.since
+            self.outages += 1
             return None
         self.unreachable_since = None
         assert event.recovered_at is not None
+        self.unreachable_seconds += max((event.recovered_at - event.since).total_seconds(), 0.0)
         return (
             f"✅ IB Gateway reconnected {_et_hhmm(event.recovered_at)} ET — market data is back"
             f" (unreachable since {_et_hhmm(event.since)} ET)"
@@ -1609,6 +1784,244 @@ class DailyReport:
     last_snapshot_at: datetime | None
     market_close_summary: str | None = None
     market_close_at: datetime | None = None
+    ops: OpsReport | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpsCounters:
+    """What the notifier counts itself during the day (persisted per date).
+
+    ``gateway_unreachable_seconds`` includes an outage still open at the
+    report (``gateway_down_since``). A report built outside the notifier
+    (the phone's /report) has none: its Gateway line says so.
+    """
+
+    gateway_outages: int = 0
+    gateway_unreachable_seconds: int = 0
+    gateway_flaps: int = 0
+    gateway_down_since: datetime | None = None
+    preflight_refused: int = 0
+    # The bridge state as the notifier saw it during the day (HELD_AT_VERIFY_KEY,
+    # FLATTEN_SEEN_KEY): None when it did not look then.
+    held_at_verify: str | None = None
+    flatten_seen_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpsReport:
+    """The report's OPS lines: today's supervisor.log, the fence rows, the counters."""
+
+    restarts: str
+    capped: tuple[str, ...]
+    refusals: tuple[str, ...]
+    fenced: tuple[tuple[str, str], ...] | None
+    fences_problem: str | None
+    counters: OpsCounters | None
+    close: str = ""
+
+
+def held_positions(brackets: Iterable[Mapping[str, Any]]) -> list[str]:
+    """``<symbol> <n> sh`` for every bracket the bridge itself calls not flat
+    (open or needs attention, with entry shares not sold), by symbol."""
+    held: list[str] = []
+    for bracket in brackets:
+        if bracket.get("status") not in {"open", "needs_attention"}:
+            continue
+        net = (_int(bracket.get("filled")) or 0) - (_int(bracket.get("exit_filled")) or 0)
+        if net:
+            held.append(f"{bracket.get('symbol') or '?'} {net} sh")
+    return sorted(held)
+
+
+def flatten_shown(brackets: Iterable[Mapping[str, Any]]) -> bool:
+    """Whether the bridge has persisted a flatten attempt on any bracket."""
+    return any(bracket.get("flatten_attempted") is True for bracket in brackets)
+
+
+def close_line(
+    session_date: date,
+    brackets: Sequence[Mapping[str, Any]],
+    *,
+    now: datetime,
+    held_at_verify: str | None = None,
+    flatten_at: datetime | None = None,
+    problem: str | None = None,
+) -> str:
+    """Was the bridge flat at its 15:50 check, and did the 15:45 flatten run on time?
+
+    Nothing enters after the last entry (close - 30 min) and an entry lives
+    10 minutes, so shares held at the report were held at the check too: the
+    check's list is what the notifier saw then, else what is held now. A state
+    file that cannot be read now (``problem``) never reads as flat.
+    """
+    session = market_session(session_date)
+    if session is None:
+        return "• Close: no session"
+    due = session.closes_at - FLATTEN_BEFORE_CLOSE
+    verify = session.closes_at - VERIFY_BEFORE_CLOSE
+    if now < verify:
+        return f"• Close: not checked yet (the bridge checks it is flat at {_et_hhmm(verify)} ET)"
+    if problem is not None:
+        text = f"• Close: ⚠️ unknown ({problem})"
+        if held_at_verify is not None:
+            text += f"; at {_et_hhmm(verify)} ET the state showed {held_at_verify or 'flat'}"
+        return text
+    held_now = held_positions(brackets)
+    held = held_at_verify or ", ".join(held_now)
+    if not held:
+        when = verify if held_at_verify == "" else now
+        return f"• Close: flat at {_et_hhmm(when)} ET"
+    text = f"• Close: ⚠️ bridge not flat at {_et_hhmm(verify)} ET — {held}"
+    if flatten_at is None:
+        text += f"; flatten not run (due {_et_hhmm(due)} ET)"
+    elif flatten_at > due + FLATTEN_LATE_AFTER:
+        text += f"; flatten ran late at {_et_hhmm(flatten_at)} ET (due {_et_hhmm(due)} ET)"
+    else:
+        text += f"; flatten ran {_et_hhmm(flatten_at)} ET"
+    if not held_now:
+        text += f"; flat by {_et_hhmm(now)} ET"
+    elif held_at_verify:
+        text += f"; still open at {_et_hhmm(now)} ET: {', '.join(held_now)}"
+    else:
+        text += f"; still open at {_et_hhmm(now)} ET"
+    return text
+
+
+def supervisor_ops(lines: Sequence[str], day: date) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(suspensions and storms, launch refusals)`` on ``day`` (ET), oldest first."""
+    capped: list[str] = []
+    refusals: list[str] = []
+    for line in lines:
+        at_text, _, _rest = line.strip().partition(" ")
+        at = _parse_time(at_text)
+        if at is None or at.astimezone(MARKET_TIMEZONE).date() != day:
+            continue
+        clock = at.astimezone(MARKET_TIMEZONE).strftime("%H:%M ET")
+        event = restart_cap_event(line)
+        if event is not None:
+            kind, name, _text = event
+            if kind == CHILD_SUSPENDED:
+                capped.append(f"{name} suspended {clock}")
+            elif kind == CHILD_RESTART_STORM:
+                capped.append(f"{name} restart storm {clock}")
+            continue
+        refused = _LAUNCH_REFUSED.search(line)
+        if refused is not None:
+            refusals.append(
+                f"{refused.group('name')} LAUNCH_REFUSED {refused.group('reason')} {clock}"
+            )
+    return tuple(capped), tuple(refusals)
+
+
+def _line_time(line: str) -> datetime | None:
+    return _parse_time(line.strip().partition(" ")[0])
+
+
+def without_carried(lines: Sequence[str]) -> list[str]:
+    """``supervisor.log`` lines less each ``LOG_ROTATED`` marker and the lines the
+    rotation carried next to it (up to ``carried`` lines on either side of the
+    marker, none newer than it): their originals are in the archive."""
+    dropped: set[int] = set()
+    for index, line in enumerate(lines):
+        rotated = _LOG_ROTATED.search(line)
+        if rotated is None:
+            continue
+        dropped.add(index)
+        at = _line_time(line)
+        count = int(rotated.group("carried") or 0)
+        if at is None:
+            continue
+        before = range(max(index - count, 0), index)
+        after = range(index + 1, min(index + 1 + count, len(lines)))
+        for neighbour in before:
+            stamp = _line_time(lines[neighbour])
+            if stamp is not None and stamp <= at:
+                dropped.add(neighbour)
+        for neighbour in after:
+            stamp = _line_time(lines[neighbour])
+            if stamp is not None and stamp < at:
+                dropped.add(neighbour)
+    return [line for index, line in enumerate(lines) if index not in dropped]
+
+
+def _restarts_today(path: Path, day: date) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Restart counts (the /status wording), suspensions/storms and refusals from
+    supervisor.log, and from today's archive when the 18:35 rotation already ran."""
+    if path.is_symlink() or not path.is_file():
+        return "unknown (no supervisor.log)", (), ()
+    current = read_log_tail(path, max_bytes=OPS_LOG_TAIL_BYTES)
+    first_day = next(
+        (
+            moment.astimezone(MARKET_TIMEZONE).date()
+            for line in current
+            if (moment := _line_time(line)) is not None
+        ),
+        None,
+    )
+    partial = path.stat().st_size > OPS_LOG_TAIL_BYTES and first_day == day
+    archive = path.with_name(f"{path.name}.{day.isoformat()}")
+    archived = (
+        read_log_tail(archive, max_bytes=OPS_LOG_TAIL_BYTES)
+        if archive.is_file() and not archive.is_symlink()
+        else []
+    )
+    lines = [*without_carried(archived), *without_carried(current)]
+    capped, refusals = supervisor_ops(lines, day)
+    return restarts_text(child_starts_on(lines, day), partial=partial), capped, refusals
+
+
+def _state_written_at(paths: UserPaths, session_date: date) -> datetime | None:
+    try:
+        status = bridge_state_files(paths, session_date)[0].stat()
+    except OSError:
+        return None
+    return datetime.fromtimestamp(status.st_mtime, timezone.utc)
+
+
+async def collect_ops(
+    session_date: date,
+    paths: UserPaths,
+    counters: OpsCounters | None,
+    fence_store: SQLitePaperKillStore | None = None,
+    *,
+    trades: Sequence[Mapping[str, Any]] = (),
+    trades_problem: str | None = None,
+    now: datetime | None = None,
+) -> OpsReport:
+    try:
+        restarts, capped, refusals = await asyncio.to_thread(
+            _restarts_today, paths.log_directory / "supervisor.log", session_date
+        )
+    except OSError as exc:
+        restarts, capped, refusals = f"unknown (supervisor.log {type(exc).__name__})", (), ()
+    fenced: tuple[tuple[str, str], ...] | None = None
+    problem: str | None = None
+    try:
+        rows = await (fence_store or SQLitePaperKillStore()).identity_rows()
+        fenced = tuple((name, reason) for name, stopped, reason, _at in rows if stopped)
+    except Exception as exc:  # noqa: BLE001 - the report never waits on the fence table
+        problem = type(exc).__name__
+    flatten_at = counters.flatten_seen_at if counters is not None else None
+    if flatten_at is None and flatten_shown(trades):
+        # Not seen during the day (the notifier was down): the file's last write, an upper bound.
+        flatten_at = _state_written_at(paths, session_date)
+    close = close_line(
+        session_date,
+        trades,
+        now=now or _utc_now(),
+        held_at_verify=counters.held_at_verify if counters is not None else None,
+        flatten_at=flatten_at,
+        problem=trades_problem,
+    )
+    return OpsReport(
+        restarts=restarts,
+        capped=capped,
+        refusals=refusals,
+        fenced=fenced,
+        fences_problem=problem,
+        counters=counters,
+        close=close,
+    )
 
 
 def bridge_state_files(paths: UserPaths, session_date: date) -> tuple[Path, Path]:
@@ -1659,6 +2072,8 @@ async def collect_daily_report(
     *,
     read_market_context: MarketContextReader = _latest_market_context,
     now: datetime | None = None,
+    ops_counters: OpsCounters | None = None,
+    fence_store: SQLitePaperKillStore | None = None,
 ) -> DailyReport:
     outcomes: dict[str, Counter[str]] = defaultdict(Counter)
     ai_calls = 0
@@ -1692,6 +2107,15 @@ async def collect_daily_report(
             ai_calls += 1
     trades, source, problem = load_bridge_trades(paths, session_date)
     close = await _close_context(session_date, read_market_context, now or _utc_now())
+    ops = await collect_ops(
+        session_date,
+        paths,
+        ops_counters,
+        fence_store,
+        trades=trades,
+        trades_problem=problem,
+        now=now or _utc_now(),
+    )
     return DailyReport(
         session_date=session_date,
         outcomes={strategy: dict(counts) for strategy, counts in outcomes.items()},
@@ -1703,6 +2127,7 @@ async def collect_daily_report(
         last_snapshot_at=_parse_time(snapshot_row[0]) if snapshot_row else None,
         market_close_summary=(str(close.summary).strip() or None) if close else None,
         market_close_at=close.observed_at if close else None,
+        ops=ops,
     )
 
 
@@ -1760,6 +2185,81 @@ def _trade_lines(report: DailyReport) -> list[str]:
     return lines
 
 
+def _listed(items: Sequence[str]) -> str:
+    if not items:
+        return "none"
+    shown = "; ".join(items[:OPS_ITEMS_SHOWN])
+    return shown + (f"; … {len(items) - OPS_ITEMS_SHOWN} more" if len(items) > OPS_ITEMS_SHOWN else "")
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def _gateway_line(counters: OpsCounters | None) -> str:
+    if counters is None:
+        return "• Gateway: not counted here (the notifier's 16:05 report has it)"
+    if not counters.gateway_outages and not counters.gateway_flaps:
+        return "• Gateway: no outage, no flaps"
+    minutes = -(-counters.gateway_unreachable_seconds // 60)
+    text = (
+        f"• Gateway: {_plural(counters.gateway_outages, 'outage')}, {minutes} min unreachable,"
+        f" {_plural(counters.gateway_flaps, 'flap')}"
+    )
+    if counters.gateway_down_since is not None:
+        text += f"; still unreachable since {_et_hhmm(counters.gateway_down_since)} ET"
+    return text
+
+
+def _identity_lines(report: DailyReport) -> list[str]:
+    """Trades (entries that filled) and realized P&L per identity, from the bridge state."""
+    if report.trades_problem:
+        return [f"• Per identity: unavailable ({report.trades_problem})"]
+    totals: dict[str, tuple[int, Decimal]] = {
+        name: (0, Decimal("0")) for name in SENDABLE_IDENTITIES
+    }
+    for trade in report.trades:
+        if trade.get("status") == "skipped" or trade.get("skipped") is True:
+            continue
+        label = (
+            str(trade.get("strategy_name") or "").strip()
+            or str(trade.get("strategy") or "").strip()
+            or "unknown"
+        )
+        count, pnl = totals.get(label, (0, Decimal("0")))
+        filled = (_int(trade.get("filled")) or 0) > 0
+        totals[label] = (count + int(filled), pnl + (_decimal(trade.get("realized_pnl")) or Decimal("0")))
+    order = sorted(SENDABLE_IDENTITIES) + sorted(set(totals) - set(SENDABLE_IDENTITIES))
+    return [
+        f"• {name}: {_plural(totals[name][0], 'trade')} · P&L {_money(totals[name][1])}"
+        for name in order
+    ]
+
+
+def _ops_lines(report: DailyReport) -> list[str]:
+    ops = report.ops
+    if ops is None:
+        return []
+    refusals = list(ops.refusals)
+    if ops.counters is not None and ops.counters.preflight_refused:
+        refusals.append(f"PREFLIGHT_REFUSED ×{ops.counters.preflight_refused} (bridge.log)")
+    if ops.fenced is None:
+        fenced = f"unknown ({ops.fences_problem})"
+    else:
+        fenced = _listed([f"{name} ({reason})" for name, reason in ops.fenced])
+    return [
+        "",
+        "OPS",
+        f"• Restarts today: {ops.restarts}",
+        f"• Suspensions/storms: {_listed(ops.capped)}",
+        _gateway_line(ops.counters),
+        f"• Refusals: {_listed(refusals)}",
+        f"• Fenced: {fenced}",
+        *([ops.close] if ops.close else []),
+        *_identity_lines(report),
+    ]
+
+
 def format_daily_report(report: DailyReport) -> str:
     lines = [f"📊 Daily report · {report.session_date:%a %d %b %Y}", "", "Decisions by strategy"]
     if not report.outcomes:
@@ -1793,6 +2293,7 @@ def format_daily_report(report: DailyReport) -> str:
         lines.append("Market at close: unavailable")
     snapshot = _et_clock(report.last_snapshot_at) if report.last_snapshot_at else "none today"
     lines.append(f"Screener: last snapshot {snapshot}")
+    lines.extend(_ops_lines(report))
     return "\n".join(lines)
 
 
@@ -1801,6 +2302,21 @@ def startup_text(session_date: date) -> str:
         f"🤖 Autotrader notifier on for {session_date:%a %d %b %Y}: signals, orders, exits,"
         " market updates and the 16:05 ET report will arrive here."
     )
+
+
+def fences_at_start_text(rows: Sequence[tuple[str, str, str]]) -> str:
+    """Every stopped identity fence, ``(identity, reason, updated_at)``, at the notifier's start."""
+    lines = ["⛔ Fenced at start — no new entries for:"]
+    for identity, reason, updated in rows:
+        moment = _parse_time(updated)
+        since = (
+            moment.astimezone(MARKET_TIMEZONE).strftime("%a %d %b %H:%M ET")
+            if moment is not None
+            else updated
+        )
+        lines.append(f"• {identity}: {reason} (since {since})")
+    lines.append(f"Resume is the owner's: {resume_command('<IDENTITY>')}")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -1851,9 +2367,28 @@ class _NotifierSession:
         self._digest_members: dict[str, list[str]] = {}
         self._next_manager_poll = float("-inf")
         self._broker = BrokerWatch(session_date)
+        # The broker counts already added to the persisted OPS counters.
+        self._gateway_synced = (0, 0, 0)
         # What the phone last heard per child from the restart cap (suspended or
         # resumed); rebuilt from the persisted alert times after a restart.
         self._child_told: dict[str, str] = {}
+        # Its memory is the per-date alerts map: a restart neither fences twice
+        # nor overrides an owner's resume the same day.
+        self._sentinel = Sentinel(
+            session_date=session_date,
+            state_directory=bridge_state_directory(environment.paths),
+            memory=state.alerts,
+            store=environment.fence_store,
+            read_heartbeat=environment.read_bridge_heartbeat,
+        )
+        self._next_sentinel_check = float("-inf")
+        self._sentinel_failing_since: datetime | None = None
+        # The start's fence announcement is retried while the fence table cannot be read.
+        self._next_fence_announcement = float("-inf")
+        # The latest LOG_ROTATED marker seen in supervisor.log, and how many of
+        # the lines after it may still be carried copies.
+        self._rotated_at: datetime | None = None
+        self._carried_left = 0
         # Started after SESSION_START (a restart): the log line is behind the
         # checkpoint, so the session opened no later than now.
         if environment.clock() >= market_time(session_date, SESSION_OPENS):
@@ -1865,6 +2400,7 @@ class _NotifierSession:
         self._checkpoint()
         if "started" not in self._state.delivered:
             self._send(startup_text(self._session_date), key="started")
+        await self._announce_fences()
         while self._environment.clock() < self._end_at:
             try:
                 await self._cycle()
@@ -1903,8 +2439,14 @@ class _NotifierSession:
             await self._check_schema()
         self._poll_logs()
         self._follow_broker()
+        self._sync_gateway_counts()
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
+        if self._environment.monotonic() >= self._next_fence_announcement:
+            await self._announce_fences()
+        if self._environment.monotonic() >= self._next_sentinel_check:
+            self._next_sentinel_check = self._environment.monotonic() + SENTINEL_CHECK_SECONDS
+            await self._run_sentinel()
         if self._environment.monotonic() >= self._next_decision_poll:
             self._next_decision_poll = self._environment.monotonic() + DECISION_POLL_SECONDS
             await self._poll_decisions()
@@ -1973,6 +2515,108 @@ class _NotifierSession:
             self._send_alert(BROKER_UNREACHABLE, self._broker.alert_text())
             self._broker.alert_sent()
 
+    def _sync_gateway_counts(self) -> None:
+        """Add the broker's new outages, unreachable seconds and flaps to the day's
+        counters; an outage counts once, as an outage (``BrokerWatch.ops_flaps``)."""
+        broker = self._broker
+        current = (broker.outages, int(broker.unreachable_seconds), broker.ops_flaps)
+        for key, now, before in zip(
+            (GATEWAY_OUTAGES, GATEWAY_UNREACHABLE_SECONDS, GATEWAY_FLAPS), current, self._gateway_synced
+        ):
+            self._state.count(key, now - before)
+        self._gateway_synced = current
+
+    def _ops_counters(self) -> OpsCounters:
+        self._sync_gateway_counts()
+        counters = self._state.counters
+        seconds = counters.get(GATEWAY_UNREACHABLE_SECONDS, 0)
+        since = self._broker.unreachable_since
+        if since is not None:
+            seconds += max(int((self._environment.clock() - since).total_seconds()), 0)
+        return OpsCounters(
+            gateway_outages=counters.get(GATEWAY_OUTAGES, 0),
+            gateway_unreachable_seconds=seconds,
+            # An open still held back at the report is a flap as of now (persisted
+            # only once it settles: closed unannounced, a flap; announced, an outage).
+            gateway_flaps=counters.get(GATEWAY_FLAPS, 0) + int(self._broker.holding_back),
+            gateway_down_since=since,
+            preflight_refused=counters.get(PREFLIGHT_REFUSED, 0),
+            held_at_verify=self._state.alerts.get(HELD_AT_VERIFY_KEY),
+            flatten_seen_at=_parse_time(self._state.alerts.get(FLATTEN_SEEN_KEY)),
+        )
+
+    def _observe_close(self, now: datetime) -> None:
+        """From the Sentinel's reading: when the state first showed a flatten, and
+        what was held at the first look at/after the 15:50 check (before the close)."""
+        reading = self._sentinel.last_reading
+        if reading is None or reading.submitted is None:
+            return
+        alerts = self._state.alerts
+        brackets = list(reading.submitted.values())
+        if (
+            FLATTEN_SEEN_KEY not in alerts
+            and reading.modified_at is not None
+            and flatten_shown(brackets)
+        ):
+            alerts[FLATTEN_SEEN_KEY] = reading.modified_at.isoformat()
+            self._state.dirty = True
+        session = market_session(self._session_date)
+        if (
+            session is not None
+            and HELD_AT_VERIFY_KEY not in alerts
+            and session.closes_at - VERIFY_BEFORE_CLOSE <= now < session.closes_at
+        ):
+            alerts[HELD_AT_VERIFY_KEY] = ", ".join(held_positions(brackets))
+            self._state.dirty = True
+
+    async def _run_sentinel(self) -> None:
+        """The auto-fence check; a Sentinel that fails is as loud as a blind one."""
+        now = self._environment.clock()
+        before = dict(self._state.alerts)
+        try:
+            messages = await self._sentinel.check(now)
+        except Exception as exc:  # noqa: BLE001 - paged as blindness, never fatal
+            self._log_quietly("sentinel", logging.ERROR, "sentinel check failed", exc_info=True)
+            if self._sentinel_failing_since is None:
+                self._sentinel_failing_since = now
+            messages = []
+            if self._alert_allowed(BLIND_KEY, BLIND_REPEAT):
+                why = f"its check failed ({type(exc).__name__})"
+                messages.append((BLIND_ALERT, blind_text(self._sentinel_failing_since, why)))
+        else:
+            self._sentinel_failing_since = None
+            self._observe_close(now)
+        if self._state.alerts != before:
+            self._state.dirty = True
+        for alert, text in messages:
+            self._send_alert(alert, text)
+
+    async def _announce_fences(self) -> None:
+        """Once per date: every stopped identity fence, right after the startup line
+        (retried every minute while the fence table cannot be read)."""
+        if FENCES_AT_START_KEY in self._state.delivered or FENCES_AT_START_KEY in self._in_flight:
+            return
+        try:
+            rows = await self._environment.fence_store.identity_rows()
+        except Exception as exc:  # noqa: BLE001 - retried; the bridge's connect line names unreadable fences
+            self._next_fence_announcement = (
+                self._environment.monotonic() + REDELIVERY_COOLDOWN_SECONDS
+            )
+            self._log_quietly(
+                "fences", logging.WARNING, "fenced identities unreadable at start: %s",
+                type(exc).__name__,
+            )
+            return
+        stopped = [(name, reason, updated) for name, stopped, reason, updated in rows if stopped]
+        if not stopped:
+            self._state.delivered[FENCES_AT_START_KEY] = "sent"
+            self._state.dirty = True
+            return
+        logger.warning("fenced at start: %s", ", ".join(name for name, _reason, _at in stopped))
+        self._send_alert(
+            FENCES_AT_START_KEY, fences_at_start_text(stopped), key=FENCES_AT_START_KEY
+        )
+
     def _broker_recovered(self, text: str) -> None:
         logger.info("%s over: %s", BROKER_UNREACHABLE, text)
         # Once per announced outage: the hysteresis emits one close per open.
@@ -1981,7 +2625,27 @@ class _NotifierSession:
         if self._state.alerts.pop(BROKER_UNREACHABLE, None) is not None:
             self._state.dirty = True
 
+    def _carried(self, line: str) -> bool:
+        """A supervisor line that is not news today: the rotation's marker, a line
+        it carried into the new file, or one dated before this session."""
+        at = _line_time(line)
+        rotated = _LOG_ROTATED.search(line)
+        if rotated is not None:
+            self._rotated_at = at
+            self._carried_left = int(rotated.group("carried") or 0)
+            return True
+        if at is None:
+            return False  # a format drift is still forwarded, never dropped
+        if at.astimezone(MARKET_TIMEZONE).date() < self._session_date:
+            return True
+        if self._carried_left and self._rotated_at is not None and at < self._rotated_at:
+            self._carried_left -= 1
+            return True
+        return False
+
     def _handle_line(self, source: str, line: str) -> None:
+        if source == "supervisor" and self._carried(line):
+            return
         recovered = self._broker.observe(source, line, self._environment.clock())
         if recovered is not None:
             self._broker_recovered(recovered)
@@ -2010,6 +2674,8 @@ class _NotifierSession:
             if self._alert_allowed(f"tripwire:{token}", TRIPWIRE_ALERT_INTERVAL):
                 self._send_alert(f"tripwire:{token}", text)
         if source == "bridge":
+            if _PREFLIGHT_REFUSED.search(line):
+                self._state.count(PREFLIGHT_REFUSED)
             if not self._broker.folds_bridge_line(line):
                 self._handle_bridge_line(line)
             # The bridge already reports its own disconnects as CRITICAL.
@@ -2198,6 +2864,8 @@ class _NotifierSession:
                 self._environment.paths,
                 read_market_context=self._environment.read_market_context,
                 now=self._environment.clock(),
+                ops_counters=self._ops_counters(),
+                fence_store=self._environment.fence_store,
             )
         except (aiosqlite.Error, OSError) as exc:
             self._report_retry_at = self._environment.monotonic() + REDELIVERY_COOLDOWN_SECONDS
@@ -2517,11 +3185,15 @@ __all__ = [
     "TEST_MESSAGE",
     "BridgeEvent",
     "DailyReport",
+    "FENCES_AT_START_KEY",
     "FillCoalescer",
     "LogTailer",
     "MarketContextReader",
     "NotifyEnvironment",
     "NotifyState",
+    "OpsCounters",
+    "OpsReport",
+    "SENTINEL_CHECK_SECONDS",
     "SignalDecision",
     "bridge_event_text",
     "bridge_state_files",
@@ -2529,6 +3201,11 @@ __all__ = [
     "manager_tripwire",
     "supervisor_child_name",
     "collect_daily_report",
+    "close_line",
+    "collect_ops",
+    "fences_at_start_text",
+    "flatten_shown",
+    "held_positions",
     "format_daily_report",
     "format_decision",
     "format_market_update",
@@ -2547,4 +3224,6 @@ __all__ = [
     "startup_text",
     "state_file",
     "supervisor_event_text",
+    "supervisor_ops",
+    "without_carried",
 ]

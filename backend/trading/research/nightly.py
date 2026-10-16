@@ -8,13 +8,24 @@ the evidence for the paper promotion rule, in this order:
    recorded bars (its own append-only table is the only database write);
 2. the live R ledger from the PAPER bridge's state files (read-only);
 3. the paper promotion rule for every registered strategy (reports only);
-4. the window research sweep, unless it would start after
+4. live/shadow decision parity (T-9): a sendable identity whose live
+   decisions the replay does not reproduce is fenced (``paper:<IDENTITY>``
+   stopped=1, reason ``sentinel: replay mismatch <n> decisions``) through the
+   Sentinel's own ``fence_identity``, and the result is recorded in
+   ``evidence.json``; the notifier announces the fence at its 07:55 start;
+5. the window research sweep, unless it would start after
    ``SWEEP_LATEST_START`` inside the replay window: the supervisor stops the
    child at 18:30, and the weekly message must not be cut off with it.
 
+Step 4 is a hook today: nothing yet replays a live run's decisions (see
+``PARITY_NOT_COMPARED_NOTE``), so ``NightlyEnvironment.compare_decisions`` is
+None and the report says ``not_compared``. A comparer, once one exists,
+returns one ``trading.replay.ReplayEqualityReport`` per identity.
+
 The reports land next to the replay's (``evidence.json``, ``windows.json``,
 ``live-r.json``, ``evidence.txt``). Nothing here can place an order or change
-an authority; a database that is not this code's schema is left alone.
+an authority: the only write besides the tracker's table is the stop-only
+identity fence; a database that is not this code's schema is left alone.
 """
 from __future__ import annotations
 
@@ -29,6 +40,13 @@ import logging
 from pathlib import Path
 
 from trading.operations.paths import atomic_private_write
+from trading.operations.sentinel import (
+    FENCED,
+    FenceStore,
+    fence_identity,
+    replay_mismatch_reason,
+)
+from trading.replay.equality import ReplayEqualityReport
 from trading.research.bars_store import NEW_YORK, BarsStore, ResearchPaths
 from trading.research.live_ledger import LiveLedger, bridge_state_directory, read_live_ledger
 from trading.research.outcomes import TrackerReport, track_outcomes
@@ -42,6 +60,7 @@ from trading.research.paper_promotion import (
 from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
 from trading.scheduler.sessions import market_session
+from trading.sendable_identities import SENDABLE_IDENTITIES
 
 logger = logging.getLogger("autotrader.shadow.research")
 
@@ -53,6 +72,20 @@ SWEEP_LATEST_START = time(18, 0)
 _R_QUANTUM = Decimal("0.0001")
 
 Clock = Callable[[], datetime]
+# Per identity, the replay's equality report against its live run (T-9 hook).
+DecisionComparer = Callable[[Sequence[ReplayResult]], Mapping[str, ReplayEqualityReport]]
+
+PARITY_NOT_COMPARED = "not_compared"
+PARITY_COMPARED = "compared"
+# What is missing before step 4 can compare anything (2026-10-15): the
+# research replay walks stored bars with synthetic quotes over every stored
+# contract and never reads the live decisions, and nothing re-evaluates a
+# live run's candidates on their persisted bars
+# (``trading.replay.PersistedReplayRepository``) to build the replayed
+# ``ReplayFingerprintSet`` that ``compare_replay_fingerprints`` needs.
+PARITY_NOT_COMPARED_NOTE = (
+    "live decisions are not replayed yet: no replayed decision fingerprints to compare"
+)
 
 
 def _utc_now() -> datetime:
@@ -66,6 +99,11 @@ class NightlyEnvironment:
     database: Path
     bridge_directory: Path
     clock: Clock = _utc_now
+    # The live/shadow decision comparison (None: not built yet) and the fence
+    # store it writes through (None: ``SQLitePaperKillStore`` on the configured
+    # database, the one ``current()`` names).
+    compare_decisions: DecisionComparer | None = None
+    fence_store: FenceStore | None = None
 
     @classmethod
     def current(cls) -> NightlyEnvironment:
@@ -86,6 +124,95 @@ class LiveHour:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionParity:
+    """Step 4's outcome: mismatched decisions per identity and what was fenced."""
+
+    status: str
+    mismatches: Mapping[str, int] = field(default_factory=dict)
+    fenced: tuple[str, ...] = ()
+    already_fenced: tuple[str, ...] = ()
+    failed: Mapping[str, str] = field(default_factory=dict)
+    note: str = ""
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "mismatches": dict(self.mismatches),
+            "fenced": list(self.fenced),
+            "already_fenced": list(self.already_fenced),
+            "failed": dict(self.failed),
+            "note": self.note,
+        }
+
+
+def _not_compared() -> DecisionParity:
+    return DecisionParity(status=PARITY_NOT_COMPARED, note=PARITY_NOT_COMPARED_NOTE)
+
+
+def decision_mismatches(reports: Mapping[str, ReplayEqualityReport]) -> dict[str, int]:
+    """Mismatched decisions per identity: the ``decisions`` category only."""
+    counts = {
+        identity: sum(1 for item in report.mismatches if item.category == "decisions")
+        for identity, report in reports.items()
+    }
+    return {identity: count for identity, count in sorted(counts.items()) if count > 0}
+
+
+async def fence_replay_mismatches(
+    mismatches: Mapping[str, int], *, store: FenceStore
+) -> DecisionParity:
+    """Fence every sendable identity with a mismatched decision (stop-only).
+
+    A shadow identity sends nothing, so its mismatch is reported, never
+    fenced; an identity already stopped keeps its row and reason.
+    """
+    fenced: list[str] = []
+    already: list[str] = []
+    failed: dict[str, str] = {}
+    counted = {identity: count for identity, count in sorted(mismatches.items()) if count > 0}
+    for identity, count in counted.items():
+        if identity not in SENDABLE_IDENTITIES:
+            continue
+        reason = replay_mismatch_reason(count)
+        try:
+            outcome = await fence_identity(store, identity=identity, reason=reason)
+        except Exception as exc:  # noqa: BLE001 - named in the report; the others still fence
+            logger.exception("replay mismatch fence for %s NOT written", identity)
+            failed[identity] = _failed(exc)
+            continue
+        if outcome == FENCED:
+            logger.critical("fenced %s: %s", identity, reason)
+            fenced.append(identity)
+        else:
+            logger.warning("%s already fenced; %s", identity, reason)
+            already.append(identity)
+    return DecisionParity(
+        status=PARITY_COMPARED,
+        mismatches=counted,
+        fenced=tuple(fenced),
+        already_fenced=tuple(already),
+        failed=failed,
+    )
+
+
+def check_decision_parity(
+    results: Sequence[ReplayResult], environment: NightlyEnvironment
+) -> DecisionParity:
+    """Step 4: compare (when a comparer exists) and fence what does not match."""
+    if environment.compare_decisions is None:
+        return _not_compared()
+    mismatches = decision_mismatches(environment.compare_decisions(results))
+    if not mismatches:
+        return DecisionParity(status=PARITY_COMPARED)
+    store = environment.fence_store
+    if store is None:
+        from trading.storage.runtime_fence import SQLitePaperKillStore
+
+        store = SQLitePaperKillStore()
+    return asyncio.run(fence_replay_mismatches(mismatches, store=store))
+
+
+@dataclass(frozen=True, slots=True)
 class NightlyEvidence:
     tracker: TrackerReport
     promotion: tuple[PromotionReport, ...]
@@ -97,6 +224,7 @@ class NightlyEvidence:
     week_start: date | None = None
     # Managed MOMO against MOMO_HOD_V2 on the same setups (phase-3 readiness).
     phase3: OverlayScorecard | None = None
+    parity: DecisionParity = field(default_factory=_not_compared)
 
 
 def week_start(day: date) -> date:
@@ -171,6 +299,11 @@ def collect_evidence(
     except Exception:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("paper promotion evaluation failed")
         live, promotion = LiveEvidence(readable=False, note="failed"), ()
+    try:
+        parity = check_decision_parity(results, environment)
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("decision parity failed")
+        parity = DecisionParity(status=_failed(exc))
     as_of = now.astimezone(NEW_YORK).date()
     try:
         # Every managed session so far: phase 3 is a cumulative question.
@@ -197,6 +330,7 @@ def collect_evidence(
         live_hours=_live_hours(promotion, live),
         week_start=week_start(as_of),
         phase3=phase3,
+        parity=parity,
     )
 
 
@@ -226,6 +360,7 @@ def write_evidence(
                 for name, rows in evidence.live_hours.items()
             },
             "phase3": None if evidence.phase3 is None else evidence.phase3.payload(),
+            "decision_parity": evidence.parity.payload(),
         },
         "windows.json": {
             "schema": "autotrader-v1/research-windows",
@@ -253,12 +388,20 @@ def write_evidence(
 
 
 __all__ = [
+    "PARITY_COMPARED",
+    "PARITY_NOT_COMPARED",
+    "PARITY_NOT_COMPARED_NOTE",
     "REPLAY_WINDOW",
     "SWEEP_LATEST_START",
+    "DecisionComparer",
+    "DecisionParity",
     "LiveHour",
     "NightlyEnvironment",
     "NightlyEvidence",
+    "check_decision_parity",
     "collect_evidence",
+    "decision_mismatches",
+    "fence_replay_mismatches",
     "sweep_allowed",
     "week_start",
     "write_evidence",
