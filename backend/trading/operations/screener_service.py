@@ -217,6 +217,40 @@ def _listen_for_competing_logins(actor: ScreenerActor, monotonic: Callable[[], f
         attach(competing_login_listener(monotonic))
 
 
+class StatusCodeLog:
+    """The screener's TWS status lines: one INFO line per code change.
+
+    Attached by the screener only (``TWSPaperActor.set_status_listener``), so
+    it hears 2103/2105/2157 (a broken data farm) and 2110 (TWS cut off from
+    IBKR's servers), never the "OK" codes every connect sends. The line,
+    ``TWS status <code>: <message>``, is the notifier's IBKR-side failure
+    signal (``notify_service._SCREENER_STATUS``). The same code again is not a
+    change; a new connection starts over (``reset``), so a code that comes back
+    after a reconnect is logged again.
+    """
+
+    def __init__(self) -> None:
+        self._last: int | None = None
+
+    def __call__(self, code: int, message: str) -> None:
+        if code == self._last:
+            return
+        self._last = code
+        logger.info("TWS status %d: %s", code, " ".join(str(message).split())[:300])
+
+    def reset(self) -> None:
+        self._last = None
+
+
+def _listen_for_status_codes(actor: ScreenerActor) -> StatusCodeLog | None:
+    attach = getattr(actor, "set_status_listener", None)
+    if not callable(attach):
+        return None
+    status = StatusCodeLog()
+    attach(status)
+    return status
+
+
 def _build_actor(actor_factory: ActorFactory | None, config: TWSActorConfig) -> ScreenerActor:
     factory = actor_factory or default_actor_factory
     return factory(config)
@@ -421,6 +455,7 @@ async def run_screener_once(
     with tws_client_lock(config.client_id, "screener run --once"):
         actor = _build_actor(actor_factory, config)
         _listen_for_competing_logins(actor, monotonic_time.monotonic)
+        _listen_for_status_codes(actor)
         await connect_actor(actor)
         try:
             qualification = await _qualify(actor, session_date, clock=clock, pacer=pacer)
@@ -513,6 +548,7 @@ async def _screener_loop(
     retention: bool,
 ) -> int:
     _listen_for_competing_logins(actor, monotonic)
+    status_codes = _listen_for_status_codes(actor)
     history_pacer = RequestPacer(DAILY_HISTORY_MIN_INTERVAL_SECONDS)
     # Admission paces its own history requests: the hot-35's scan additions
     # keep their pacer, and so their request timing, exactly as before.
@@ -550,6 +586,8 @@ async def _screener_loop(
             try:
                 if not actor.connected:
                     await actor.disconnect()
+                    if status_codes is not None:
+                        status_codes.reset()
                     await connect_actor(actor)
                     logger.info("screener connected to TWS")
                 failures = 0
@@ -645,6 +683,7 @@ __all__ = [
     "competing_login_listener",
     "SCREENER_CLIENT_ID_OFFSET",
     "ClientIdInUseError",
+    "StatusCodeLog",
     "ScreenerActor",
     "ScreenerConfigurationError",
     "client_lock_path",

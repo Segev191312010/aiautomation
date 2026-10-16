@@ -144,7 +144,8 @@ launchd  (LaunchAgent com.maccabi.autotrader-v1.shadow)
     ├── strategy children  V2 all-session runners, momo, momo-ap → decisions → DB
     ├── paper_bridge.py    reads decisions → gates → sends brackets to IB (09:25–close)
     ├── notifier           tails bridge/supervisor lines, forwards CRITICAL to the phone (07:55–16:15)
-    ├── telegram           always-on: owner commands (/closeall, /status …)
+    ├── telegram           always-on: owner commands (/closeall, /status …); overnight Gateway watch,
+    │                      after-hours restart-cap pages, recorder competing-login page (T-4)
     ├── manager            AI day manager (narrow-only, momo-ap)
     ├── recorder           evening recording (16:20–17:30)
     ├── replay             night replay of the day through the pipeline (17:35–18:30)
@@ -154,7 +155,7 @@ launchd  (LaunchAgent com.maccabi.autotrader-v1.shadow)
 **Restart policy** (`supervisor.py`): backoff 15 → 30 → 60 → 120 → 300 s, capped at 5 min, reset after 5 min healthy.
 **Restart cap** `[NOW]`: exits are counted per child over a rolling 30 min, only while port 7497 answers (`CHILD_EXIT_UNCOUNTED <name> reason=port_closed`, or `reason=port_unknown` when the probe itself failed; always-on children always count). A scheduled child's exit 75 is the schema gate's refusal (a pending migration): never counted (`reason=schema_not_ready`); the schema alert pages it once. At 6, a scheduled child is suspended into a probe every 5 min (`CHILD_SUSPENDED`) and resumes when a probe stays up 5 min, the port reopens, its window ends, or the supervisor stops (`CHILD_RESUMED`, written before any child is signalled). The bridge and always-on children are never suspended: they page `CHILD_RESTART_STORM` and keep their backoff.
 
-**Restart-cap pages reach the phone only 07:55–16:15 ET on session days** (the notifier's window), until the T-4 overnight watch lands (P1-B). A recorder suspension (16:20–17:30), a replay suspension (17:35–18:30) and a `telegram` crash loop overnight are written to `supervisor.log` and **not paged**; nothing reaches the phone for them. Check `grep -E 'CHILD_(SUSPENDED|RESTART_STORM)' $L/supervisor.log` in the post-session report.
+**Restart-cap pages reach the phone at any hour** `[NOW]`: the notifier forwards them 07:55–16:15 ET on session days; outside that window the always-on `telegram` child tails `supervisor.log` and forwards `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` / `CHILD_RESUMED` with the same texts and the same rule (each once per child per half hour; a contradicting state always goes), plus the line's ET time. A line dated inside the notifier's window is the notifier's and is never sent twice; the 18:35 rotation's carried lines and archives are never re-sent (its read position is kept in the assistant's `state.json`). A `telegram` crash loop outside the window is sent only by a restarted `telegram` child that comes up far enough to read it (one that refuses at start, exit 78, never does): check `grep -E 'CHILD_(SUSPENDED|RESTART_STORM)' $L/supervisor.log` in the post-session report.
 
 | Exit code | Meaning | What happens / what you do |
 |---|---|---|
@@ -168,9 +169,11 @@ Scheduling is code-driven in **America/New_York**. Israel = ET + 7 until 2026-10
 
 | ET | Israel (ET+7) | Event |
 |---|---|---|
+| 18:30 → 05:55 | 01:30 → 12:55 | Gateway watch quiet hours: a closed port is not paged, it goes to the 05:55 digest (weekends and holidays are quiet throughout) |
+| 05:55 | 12:55 | Gateway watch lead 1 (`telegram` child): the quiet-hours digest line; a page if the port is closed |
 | 07:20 | 14:20 | **Last moment to start a deploy** |
-| 07:40 | 14:40 | Pre-session check (Part 6.4) |
-| 07:55 | 14:55 | `SESSION_START` |
+| 07:40 | 14:40 | Gateway watch lead 2: a page if the port is closed. Pre-session check (Part 6.4) |
+| 07:55 | 14:55 | `SESSION_START`; the notifier's BrokerWatch owns the Gateway until 16:15 |
 | 09:25 | 16:25 | Bridge starts, connects to IB |
 | 09:28 | 16:28 | V2 children start |
 | 09:55 | 16:55 | momo starts |
@@ -178,12 +181,13 @@ Scheduling is code-driven in **America/New_York**. Israel = ET + 7 until 2026-10
 | close − 30m | — | V2 identities last entry (15:30 on a normal day) |
 | 15:45 | 22:45 | **Flatten** all bot positions |
 | 16:00 | 23:00 | Market close |
-| 16:20–17:30 | 23:20–00:30 | Recorder |
+| 16:15 | 23:15 | Notifier ends; the `telegram` child's watch pages a closed port again (until 18:30) |
+| 16:20–17:30 | 23:20–00:30 | Recorder (a competing IBKR login in `recorder.log` is paged by the `telegram` child) |
 | 17:35–18:30 | 00:35–01:30 | Replay |
-| 18:30 | 01:30 | **Deploy window opens** |
+| 18:30 | 01:30 | **Deploy window opens**; Gateway quiet hours start |
 | — | 02:30 (local) | IB Gateway auto-restart (configured in Gateway) `[UNVERIFIED]` |
 
-On a 13:00 ET early close, every "close − N" deadline moves with it. That is why deadlines are offsets, not clock times.
+On a 13:00 ET early close, every "close − N" deadline moves with it. That is why deadlines are offsets, not clock times. The watch's leads are offsets too: `PRE_SESSION_LEADS` (2 h and 15 min) before `SESSION_START`, on session days only (`market_session`); in the week Israel is ET + 6 they are 11:55 and 13:40 Israel.
 
 ### 2.4 Decision → order flow
 
@@ -534,11 +538,14 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `screener sweep failed: N consecutive …` | screener.log | A sweep whose snapshots all timed out with the Gateway connected: one failure signal each, worded like data refused |
 | `TWS PAPER handshake failed` | children | Gateway down |
 | `IBKR login active elsewhere` | screener/children | Competing phone/web login; market data refused |
+| `TWS status 2103\|2105\|2157\|2110: <message>` | screener.log | The screener's opt-in status lines, one per code change (and again after a reconnect): a broken market-data / HMDS / sec-def farm, or TWS cut off from IBKR (GW-HMDS-1016). A failure signal worded "IBKR connectivity lost" (4.9), at most one per 2 min, never re-asserted, so a farm blip during the 08:00 qualification pages nothing alone. 2104/2106/2158 ("OK", every connect) are never logged |
+| `backfill stopped at <SYM>: competing_session: TWS error 10197 …` | recorder.log | A competing login during the recording: paged by the `telegram` child 16:15–17:30 ET |
+| `overnight watch: …` | telegram.log | The `telegram` child's watch: each lead's port result, every message it sends, `BrokerWatch owns the Gateway until 16:15 ET` at the handover |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_closed` | supervisor.log | Exit while the Gateway port was closed: not counted toward the cap |
 | `CHILD_EXIT_UNCOUNTED <name> reason=port_unknown` | supervisor.log | The port probe itself failed (`PORT_PROBE_FAILED error=<class>` in the same pass): not counted |
 | `CHILD_EXIT_UNCOUNTED <name> reason=schema_not_ready` | supervisor.log | Exit 75 of a scheduled child: the schema gate's refusal (migration pending), not counted |
-| `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` | supervisor.log | Restart cap (Part 2.2); paged 07:55–16:15 ET on session days only |
-| `CHILD_RESUMED <name> reason=probe_healthy\|port_open\|window_boundary\|supervisor_stop` | supervisor.log | Suspension lifted: a probe stayed up 5 min, the port reopened, the child's window or the session ended, the supervisor stopped (deploy, restart); paged 07:55–16:15 ET only |
+| `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` | supervisor.log | Restart cap (Part 2.2); paged at any hour (the notifier 07:55–16:15 ET on session days, the `telegram` child outside that window) |
+| `CHILD_RESUMED <name> reason=probe_healthy\|port_open\|window_boundary\|supervisor_stop` | supervisor.log | Suspension lifted: a probe stayed up 5 min, the port reopened, the child's window or the session ended, the supervisor stopped (deploy, restart); paged at any hour, like the suspension |
 
 Every cap line follows the `CHILD_EXIT` line of the exit it is about (`CHILD_RESUMED reason=probe_healthy`, `PORT_PROBE_FAILED`, `CHILD_EXIT_UNCOUNTED`, `CHILD_SUSPENDED` / `CHILD_RESTART_STORM`, in that order).
 
@@ -603,20 +610,28 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | `/halt <IDENTITY>` + `/confirm <code>` (identity stop only, 6-character code valid 60 s; the third wrong code drops the request; no resume from the phone) | `[NOW]` |
 | Gateway unreachable alert with hysteresis (one pair per 30 min, flap count in the digest; failures unbroken for 5 min always page) | `[NOW]` |
 | Gateway alert for IBKR refusing data with the Gateway connected (daily-history timeouts, failed sweeps); IBKR-side wordings say log out, then restart IB Gateway, and "restart now" after 15 min (GW-HMDS-1016) | `[NOW]` |
-| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`), **07:55–16:15 ET on session days only** | `[NOW]` |
-| Overnight Gateway watch with quiet hours, external dead-man's switch, competing-login page; restart-cap pages outside 07:55–16:15 ET | `[PLANNED]` P1-B |
+| Restart-cap pages (`CHILD_SUSPENDED` / `CHILD_RESUMED` / `CHILD_RESTART_STORM`) at any hour: the notifier 07:55–16:15 ET on session days, the `telegram` child outside that window | `[NOW]` |
+| Overnight Gateway watch (`telegram` child, outside 07:55–16:15 ET): 5-min port checks, quiet hours 18:30 → 05:55 ET with a morning digest, pages at 05:55 and 07:40 ET on session days, one recovery line | `[NOW]` |
+| Competing-login page 07:55–17:30 ET: at the first line, re-paged every 10 min while it is still seen (the notifier to 16:15, then the `telegram` child from `recorder.log`) | `[NOW]` |
+| External dead-man's switch | `[PLANNED]` P1-B |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
 
 What the phone says:
-- **Gateway alert.** It opens at the third failure signal in a row or a failure 2 min into the streak. Failure signals: a failed connect of the screener, the bridge or a child; the bridge's TWS 1100/2110 "IBKR connectivity lost" not restored within 2 min while the bridge runs, before the close; IBKR refusing data with the Gateway connected (6 daily-history timeouts in a row, each within 45 s of the one before with no sweep between, counted from the first; every failed sweep). The wording follows the newest failure:
+- **Gateway alert.** It opens at the third failure signal in a row or a failure 2 min into the streak. Failure signals: a failed connect of the screener, the bridge or a child; the bridge's TWS 1100/2110 "IBKR connectivity lost" not restored within 2 min while the bridge runs, before the close; the screener's `TWS status 2110` or broken-farm line (2103/2105/2157; at most one signal per 2 min, never re-asserted); IBKR refusing data with the Gateway connected (6 daily-history timeouts in a row, each within 45 s of the one before with no sweep between, counted from the first; every failed sweep). The wording follows the newest failure:
   - a failed connect, or no first sweep by 08:30 ET: `⛔ IB Gateway unreachable since HH:MM ET — log in; the bot has no market data`;
-  - TWS 1100/2110: `⛔ IBKR connectivity lost since HH:MM ET — the Gateway is still logged in; 1) log out of the IBKR app and website, 2) if it lasts, restart IB Gateway: File → Exit, reopen, log in`;
+  - TWS 1100/2110 (the bridge's, or the screener's status lines): `⛔ IBKR connectivity lost since HH:MM ET — the Gateway is still logged in; 1) log out of the IBKR app and website, 2) if it lasts, restart IB Gateway: File → Exit, reopen, log in`;
   - data refused: `⛔ IBKR is refusing prices since HH:MM ET (Gateway connected) — 1) log out of the IBKR app and website, 2) if it lasts, restart IB Gateway: File → Exit, reopen, log in`;
   - either IBKR-side wording once the outage has lasted 15 min (so every half-hour repeat): `⛔ IBKR still refusing prices since HH:MM ET — restart IB Gateway now: File → Exit, reopen, log in`.
 
   Live 2026-10-16 (GW-HMDS-1016) the Gateway stayed connected and did not reconnect by itself for two hours: logging out of the IBKR app and website brought the orders back, and only a Gateway restart brought the price history back. A restart drops the bridge's connection: it exits 75 and reconnects, and open brackets keep their GTC stop and target at IBKR. `✅ IB Gateway reconnected` comes 2 min after the first success (a screener sweep or TWS 1101/1102). At most one pair per 30 min: a second outage inside that half hour is held back as a flap only while its failures are younger than 5 min, then it pages anyway. While the alert is open the outage's child exits and the bridge's repeated `TWS did not answer` lines are folded into it ("N children restarting"), not sent one by one.
-- **Restart cap.** `⛔ <child> suspended after 6 restarts in 30 min (relaunch probe every 5 min)`; `✅ <child> resumed (<reason>)` for `probe_healthy`, `port_open` and `supervisor_stop` (a deploy or restart while it was suspended: it starts afresh); `✅ <child> done for today (window ended)` when the suspension ends with the child's window (it does not run again today); `⚠️ <child> restart storm: …` for the bridge and `telegram`. **Only 07:55–16:15 ET on session days** (the notifier's window) until T-4: recorder and replay suspensions and an overnight `telegram` crash loop are in `supervisor.log` only.
+- **Restart cap.** `⛔ <child> suspended after 6 restarts in 30 min (relaunch probe every 5 min)`; `✅ <child> resumed (<reason>)` for `probe_healthy`, `port_open` and `supervisor_stop` (a deploy or restart while it was suspended: it starts afresh); `✅ <child> done for today (window ended)` when the suspension ends with the child's window (it does not run again today); `⚠️ <child> restart storm: …` for the bridge and `telegram`. At any hour: outside 07:55–16:15 ET the `telegram` child sends the same text followed by `· HH:MM ET` (the line's time), e.g. `⛔ replay suspended after 6 restarts in 30 min (relaunch probe every 5 min) · 18:00 ET`.
+- **Overnight Gateway watch** (the `telegram` child, outside 07:55–16:15 ET; port checks every 5 min through the same hysteresis as the Gateway alert: two failed checks 5 min apart open it, two clean minutes close it):
+  - quiet hours (18:30 → 05:55 ET, and all of a closed day): nothing is paged; the next lead sends one line, e.g. `🌙 Overnight IB Gateway watch (quiet hours, not paged): port closed 02:45 ET–03:10 ET` or `… port closed since 02:45 ET, still closed`;
+  - at 05:55 and 07:40 ET on session days, if the port is closed (a lead's first failed check is confirmed 2 min later, so a Gateway restart spanning the lead is not paged): `⛔ IB Gateway closed since HH:MM ET (its API port does not answer) — log in to IB Gateway; session starts 07:55 ET (05:55 ET check)`;
+  - 05:55–07:55 and 16:15–18:30 ET: the same page (without the check) when an outage opens;
+  - once per paged outage, whenever it reopens: `✅ IB Gateway port open again HH:MM ET (closed since HH:MM ET)` (at 07:55 at the latest, if the last check before the notifier's window succeeded). Inside 07:55–16:15 the watch is silent: the Gateway alert above is the notifier's.
+- **Competing login.** `⚠️ IBKR login active elsewhere — log out of the IBKR app/website` `(seen in the <source> log)` at its first line, then every 10 min while it is still seen: `⚠️ IBKR login still active elsewhere since HH:MM ET — log out of the IBKR app/website`. IBKR says nothing when the other login ends: 10 min without a line ends it (no message). 07:55–16:15 ET from the notifier (screener, bridge, children), 16:15–17:30 ET from the `telegram` child (`recorder.log`).
 - **`/halt`.** The reply carries a 6-character code; `/confirm <code>` within 60 s writes `paper:<IDENTITY>`. A wrong code writes nothing and says how many tries are left; the third wrong code drops the request (send `/halt` again). `/halt` and a request's first `/confirm` pass the flood limit; after a wrong code `/confirm` is flood-limited like any command.
 
 ### 4.10 Ledger
@@ -835,7 +850,7 @@ $CTL paper stop --reason "<why>"  → no new entries
 ### 7.10 Competing IBKR login during the session
 - **Signal:** `IBKR login active elsewhere (phone/web)` / TWS 10197, 162, 165 in the screener or children; the `ibkr_session` alert (904af38).
 - **Meaning:** a phone or web IBKR login took the market data; the port is open but data is refused; children exit and restart.
-- **Action:** the owner logs out of IBKR mobile/web. Stay logged out 07:55–17:30 ET on session days (LEARNED).
+- **Action:** the owner logs out of IBKR mobile/web. Stay logged out 07:55–17:30 ET on session days (LEARNED). The page repeats every 10 min while the refusals continue; 10 min without one ends it.
 - **Who:** OWNER.
 
 ---

@@ -342,7 +342,12 @@ def exit_status(returncode: int) -> int:
 
 
 def gateway_port_open() -> bool:
-    """Whether the IB Gateway's API port accepts a TCP connection (no API handshake)."""
+    """Whether the IB Gateway's API port accepts a TCP connection (no API handshake).
+
+    The repository's one port probe: the Telegram child awaits it through
+    ``telegram_tools.gateway_port_open`` (in a worker thread) for /status and
+    the overnight watch.
+    """
     try:
         with socket.create_connection((GATEWAY_HOST, GATEWAY_PORT), timeout=PORT_PROBE_TIMEOUT_S):
             return True

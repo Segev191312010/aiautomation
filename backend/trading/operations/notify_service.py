@@ -10,7 +10,14 @@
   c. supervisor child exits, and the restart cap's suspended, resumed and
      restart-storm lines (each once per child per half hour; a suspension or
      resumption that contradicts the last one the phone heard always goes);
-  d. competing IBKR logins and lost TWS connections seen in the data logs;
+     outside this window the Telegram child forwards the restart cap's lines
+     by the same rule (``trading.operations.overnight_watch``);
+  d. competing IBKR logins and lost TWS connections seen in the data logs: a
+     competing login through ``gateway_watch.CompetingLoginWatch`` (a page at
+     the first line, re-paged every 10 minutes while its lines keep coming,
+     over after a 10-minute silence; after 16:15 the Telegram child watches
+     the recorder's log the same way), a lost connection at most every 10
+     minutes;
   e. the 16:05 ET daily report, closing with the last market context;
   f. market updates at 09:15, 12:00 and 15:30 ET and market regime changes,
      from the screener's market context;
@@ -31,7 +38,9 @@
      what it holds back is a flap, counted in the next digest. An IBKR-side
      loss the bridge reports (TWS 1100/2110 not restored within two minutes,
      while the bridge runs inside its window) opens it too, worded "IBKR
-     connectivity lost"; so does IBKR refusing the screener's data with the
+     connectivity lost"; the screener's TWS 2110 and broken-farm codes
+     (2103/2105/2157, its opt-in status lines) are failure signals worded the
+     same way; so does IBKR refusing the screener's data with the
      Gateway connected (six daily-history timeouts in a row, or a failed
      sweep), worded "IBKR is refusing prices". Both IBKR-side wordings ask
      the owner to log out of the IBKR app and website first and to restart
@@ -75,7 +84,8 @@ offset, or one whose first 64 bytes changed is read again from its start, and
 the archive is never replayed. The state lines the rotation carries into the
 new supervisor.log (T-3 writes them just before its LOG_ROTATED marker; lines
 after it, dated before it, count too) are neither forwarded again nor counted
-twice in the OPS lines (one rule: ``rotation_carried``).
+twice in the OPS lines (one rule: ``rotation_carried``, shared with the
+Telegram child's after-hours forwarder in ``trading.operations.log_tailer``).
 """
 from __future__ import annotations
 
@@ -87,19 +97,22 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import json
 import logging
-import os
 from pathlib import Path
 import re
-import stat
 import sys
 import time as monotonic_time
-import zlib
-from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, TextIO
+from typing import TYPE_CHECKING, Any, Protocol, TextIO
 
 import aiosqlite
 import httpx
 
 from db.core import get_db
+from trading.operations.gateway_watch import (
+    COMPETING_LOGIN_REPAGE,
+    CompetingDecision,
+    CompetingKind,
+    CompetingLoginWatch,
+)
 from trading.operations.hysteresis import OPEN as HYSTERESIS_OPEN
 from trading.operations.hysteresis import Event as HysteresisEvent, Hysteresis
 from trading.operations.keychain import (
@@ -107,6 +120,15 @@ from trading.operations.keychain import (
     TELEGRAM_KEYCHAIN_SERVICE,
     KeychainReadError,
     read_telegram_bot_token,
+)
+from trading.operations.log_tailer import (
+    MISSING_FILE_CHECKPOINT,
+    LogTailer,
+    RotationCarried,
+    line_time as _line_time,
+    parse_iso as _parse_time,
+    rotation_carried,
+    without_carried,
 )
 from trading.operations.logging import RedactingFormatter, configure_shadow_logging
 from trading.operations.notifier import (
@@ -160,7 +182,8 @@ REPORT_AT = time(16, 5)
 LOOP_TICK_SECONDS = 1.0
 DECISION_POLL_SECONDS = 5.0
 FILL_COALESCE_SECONDS = 10.0
-IBKR_ALERT_INTERVAL = timedelta(minutes=10)
+# The IBKR alerts' throttle and a competing login's re-page: one number.
+IBKR_ALERT_INTERVAL = COMPETING_LOGIN_REPAGE
 # A message the sender dropped (Telegram unreachable) is offered again after
 # a cooldown, a bounded number of times.
 REDELIVERY_COOLDOWN_SECONDS = 60.0
@@ -217,12 +240,6 @@ GATEWAY_UNREACHABLE_SECONDS = "gateway_unreachable_seconds"
 GATEWAY_FLAPS = "gateway_flaps"
 PREFLIGHT_REFUSED = "preflight_refused"
 _PREFLIGHT_REFUSED = re.compile(r"\bPREFLIGHT_REFUSED\b")
-# The 18:35 ET rotation (T-3) renames supervisor.log to supervisor.log.<D>,
-# then copies its newest state lines verbatim (original timestamps) into the
-# new file, followed by ``<ISO> LOG_ROTATED date=<D> renamed=<n> truncated=<n>
-# pruned=<n> carried=<n>``. Carried lines were news when first written: they
-# are never forwarded again nor counted twice.
-_LOG_ROTATED = re.compile(r"\bLOG_ROTATED\b(?:.*?\bcarried=(?P<carried>\d+))?")
 _REGIME_LABELS = {"risk_on": "RISK-ON", "neutral": "NEUTRAL", "risk_off": "RISK-OFF"}
 _SERVICE_LOG_FILES = {
     "bridge": "bridge.log",
@@ -378,18 +395,6 @@ def market_time(session_date: date, moment: time) -> datetime:
 # --------------------------------------------------------------------------
 # Small value helpers
 # --------------------------------------------------------------------------
-
-
-def _parse_time(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip())
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        return None
-    return parsed
 
 
 def _et_clock(moment: datetime | None) -> str:
@@ -557,194 +562,7 @@ class NotifyState:
 # --------------------------------------------------------------------------
 
 
-# Checkpoint for a log that did not exist: whatever appears later is all new.
-MISSING_FILE_CHECKPOINT = {"dev": 0, "ino": 0, "offset": 0}
-# A file's first bytes are its fingerprint: copied then truncated in place
-# (same inode), a log can grow past the read offset before the next poll, so
-# a shorter size alone misses it; different first bytes do not.
-HEAD_BYTES = 64
-
-
-class LogTailer:
-    """Follow one log by byte offset across rotation, truncation, and restarts.
-
-    Only complete lines are returned. A file that exists at the first start of
-    a session date is followed from its end (older lines belong to earlier
-    runs); a file that appears later, or that replaced the one being
-    followed, is read from its beginning. The 18:35 ET rotation (T-3) either
-    renames the log and creates a new one (a new file identity: the old one's
-    unread tail is read once, then the new file from its start) or copies it
-    and truncates it in place (the same identity, shorter than the offset or
-    no longer starting with the bytes it started with: read again from its
-    start). The renamed or copied archive is never read.
-    """
-
-    def __init__(
-        self,
-        path: Path,
-        *,
-        max_read_bytes: int = 1 << 20,
-        max_line_bytes: int = 16 << 10,
-    ) -> None:
-        self.path = path
-        self._max_read = max_read_bytes
-        self._max_line = max_line_bytes
-        self._handle: BinaryIO | None = None
-        self._identity: tuple[int, int] | None = None
-        self._unreadable: tuple[int, int] | None = None
-        self._offset = 0
-        self._partial = b""
-        self._head = b""
-
-    def start(self, checkpoint: Mapping[str, int] | None = None) -> None:
-        """Resume at ``checkpoint`` while it names this same file, else follow from the end."""
-        if not self._open():
-            return
-        assert self._handle is not None
-        size = os.fstat(self._handle.fileno()).st_size
-        if checkpoint is None:
-            offset = size
-        elif (
-            (checkpoint.get("dev"), checkpoint.get("ino")) == self._identity
-            and 0 <= checkpoint.get("offset", -1) <= size
-            and self._same_head(checkpoint)
-        ):
-            offset = checkpoint["offset"]
-        else:
-            # Rotated or truncated while the notifier was down: all of it is new.
-            offset = 0
-        self._handle.seek(offset)
-        self._offset = offset
-        self._remember_head()
-
-    def checkpoint(self) -> dict[str, int]:
-        if self._identity is None or self._handle is None:
-            return dict(MISSING_FILE_CHECKPOINT)
-        return {
-            "dev": self._identity[0],
-            "ino": self._identity[1],
-            "offset": self._offset - len(self._partial),
-            "head": zlib.crc32(self._head),
-            "head_len": len(self._head),
-        }
-
-    def poll(self) -> list[str]:
-        lines: list[str] = []
-        if self._handle is not None:
-            if self._rewritten():
-                # Copied and truncated in place, and already longer than the
-                # offset again: the same file, new content from its start.
-                self._rewind()
-            # Drain the file being followed first: after a rotation this is
-            # the tail end of the old file.
-            lines.extend(self._drain())
-        try:
-            status = self.path.stat()
-        except OSError:
-            return lines
-        if not stat.S_ISREG(status.st_mode):
-            return lines
-        identity = (status.st_dev, status.st_ino)
-        if identity != self._identity:
-            # First appearance or rotation: everything in the new file is new.
-            if self._open(identity):
-                lines.extend(self._drain())
-        elif status.st_size < self._offset:
-            self._rewind()
-            lines.extend(self._drain())
-        return lines
-
-    def _rewind(self) -> None:
-        assert self._handle is not None
-        self._handle.seek(0)
-        self._offset = 0
-        self._partial = b""
-        self._head = b""
-
-    def _read_head(self, size: int = HEAD_BYTES) -> bytes | None:
-        assert self._handle is not None
-        try:
-            return os.pread(self._handle.fileno(), size, 0)
-        except OSError:
-            return None
-
-    def _remember_head(self) -> None:
-        if self._handle is not None and len(self._head) < HEAD_BYTES:
-            head = self._read_head()
-            if head is not None and head.startswith(self._head):
-                self._head = head
-
-    def _rewritten(self) -> bool:
-        """The followed file no longer starts with the bytes it started with."""
-        if not self._head:
-            return False
-        current = self._read_head(len(self._head))
-        return current is not None and len(current) == len(self._head) and current != self._head
-
-    def _same_head(self, checkpoint: Mapping[str, int]) -> bool:
-        """A checkpoint's fingerprint (absent in older state files) still matches the file."""
-        length = checkpoint.get("head_len")
-        if length is None or checkpoint.get("head") is None:
-            return True
-        current = self._read_head(length)
-        return current is not None and len(current) == length and zlib.crc32(current) == checkpoint["head"]
-
-    def close(self) -> None:
-        if self._handle is not None:
-            try:
-                self._handle.close()
-            except OSError:
-                pass
-        self._handle = None
-        self._identity = None
-        self._offset = 0
-        self._partial = b""
-        self._head = b""
-
-    def _open(self, expected: tuple[int, int] | None = None) -> bool:
-        self.close()
-        try:
-            handle = self.path.open("rb")
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            # Retried every poll (it may be fixed), reported once per file.
-            if expected is None or expected != self._unreadable:
-                logger.warning("cannot read %s: %s", self.path.name, type(exc).__name__)
-            self._unreadable = expected
-            return False
-        status = os.fstat(handle.fileno())
-        if not stat.S_ISREG(status.st_mode):
-            handle.close()
-            return False
-        self._handle = handle
-        self._identity = (status.st_dev, status.st_ino)
-        self._unreadable = None
-        return True
-
-    def _drain(self) -> list[str]:
-        assert self._handle is not None
-        try:
-            chunk = self._handle.read(self._max_read)
-        except OSError as exc:
-            logger.warning("cannot read %s: %s", self.path.name, type(exc).__name__)
-            return []
-        if not chunk:
-            return []
-        self._offset += len(chunk)
-        self._remember_head()
-        *complete, partial = (self._partial + chunk).split(b"\n")
-        if len(partial) > self._max_line:
-            # A runaway line is emitted rather than buffered without bound.
-            complete.append(partial)
-            partial = b""
-        self._partial = partial
-        lines: list[str] = []
-        for raw in complete:
-            text = raw.decode("utf-8", "replace").rstrip("\r")
-            if text.strip():
-                lines.append(text)
-        return lines
+# ``LogTailer`` and the rotation's carried-line rule: ``trading.operations.log_tailer``.
 
 
 # --------------------------------------------------------------------------
@@ -985,6 +803,14 @@ def ibkr_alert_text(problem: str, source: str) -> str:
     )
 
 
+def competing_login_repage_text(since: datetime, source: str) -> str:
+    """A competing login still seen ``COMPETING_LOGIN_REPAGE`` after the last page."""
+    return (
+        f"⚠️ IBKR login still active elsewhere since {_et_hhmm(since)} ET — log out of the"
+        f" IBKR app/website\n(seen in the {source} log)"
+    )
+
+
 # -- IB Gateway reachability ------------------------------------------------
 # Live 2026-10-14: the Gateway was off all session. The bridge exited 75 every
 # 5 minutes ("TWS did not answer"), the screener logged "TWS connection failed"
@@ -1064,17 +890,29 @@ _SWEEP_FAILED = re.compile(r"\bscreener sweep failed: \d+ consecutive\b")
 # not the traceback line above it: one per exit.
 _HANDSHAKE_FAILED = re.compile(r"^error: .*failed: TWSConnectionError: TWS PAPER handshake failed")
 _SWEEP = re.compile(r"\bsweep (?P<date>\d{4}-\d{2}-\d{2}):")
+# The screener's opt-in TWS status lines (screener_service.StatusCodeLog, T-4):
+# ``TWS status <code>: <message>``, once per code change, for a broken farm
+# (2103 market data, 2105 HMDS, 2157 sec-def) or a broken TWS-to-IBKR link
+# (2110): IBKR's side down with the Gateway's port open, worded like the
+# bridge's 1100/2110. Unlike the bridge's it is never re-asserted (no restore
+# line follows it; the screener's next sweep is the success), and a connect's
+# burst of codes is one failure signal (at most one per open_after), so a farm
+# blip while the screener qualifies (no sweep for minutes) never pages alone.
+_SCREENER_STATUS = re.compile(r"\bTWS status (?:2103|2105|2110|2157):")
 
 
 def broker_evidence(source: str, line: str) -> str | None:
     """What one log line says about the Gateway: ``sweep`` (market data flows),
     ``ibkr_restored`` (TWS 1101/1102), ``bridge_refused``, ``ibkr_lost`` (TWS
-    1100/2110), ``screener_failed``, ``history_timeout`` (one daily-history
-    timeout; ``BrokerWatch`` counts the run), ``sweep_failed``,
-    ``handshake_failed``, or None."""
+    1100/2110), ``ibkr_status`` (the screener's TWS 2110 or broken farm),
+    ``screener_failed``, ``history_timeout`` (one daily-history timeout;
+    ``BrokerWatch`` counts the run), ``sweep_failed``, ``handshake_failed``,
+    or None."""
     if source == "screener":
         if _SWEEP.search(line):
             return "sweep"
+        if _SCREENER_STATUS.search(line):
+            return "ibkr_status"
         if _SCREENER_UNREACHABLE.search(line):
             return "screener_failed"
         if _HISTORY_TIMEOUT.search(line):
@@ -1125,6 +963,10 @@ class BrokerWatch:
     16:00:30 with nobody left to log it, paged "unreachable" at 16:01). A new
     bridge reports a loss that is still there itself (TWS 2110 on connect).
 
+    The screener's own TWS status lines (2110, and the broken farms 2103,
+    2105 and 2157) are failure signals worded IBKR-side too, one per
+    ``open_after`` at most and never re-asserted (``_SCREENER_STATUS``).
+
     IBKR refusing the data with the Gateway connected (live 2026-10-16,
     GW-HMDS-1016) is a failure signal too: the screener's daily-history
     timeouts once ``REFUSAL_RUN`` of them have come each within
@@ -1174,6 +1016,8 @@ class BrokerWatch:
     refusal_count: int = 0
     # The newest data-refused failure signal since the last sweep (None after one).
     refused_at: datetime | None = None
+    # The screener's last TWS status line counted as a failure signal.
+    screener_status_at: datetime | None = None
     # The latest observe/check: how long the announced outage has lasted.
     checked_at: datetime | None = None
     alerted: bool = False
@@ -1285,6 +1129,8 @@ class BrokerWatch:
             return None
         if evidence == "history_timeout":
             return self._history_timeout(now)
+        if evidence == "ibkr_status":
+            return self._screener_status(now)
         if evidence == "sweep":
             self.last_sweep_at = now
             # Data flowed: a refusal run, if any, is over.
@@ -1330,6 +1176,16 @@ class BrokerWatch:
         self.refused_at = now
         self.failure_kind = DATA_REFUSED
         return self._apply(self.hysteresis.failure(now, since=self.refusal_started), now)
+
+    def _screener_status(self, now: datetime) -> str | None:
+        """The screener's TWS 2110 or broken farm: one failure signal, worded
+        IBKR-side, at most one per ``open_after`` (a connect's burst of codes)."""
+        last = self.screener_status_at
+        if last is not None and now - last < self.hysteresis.open_after:
+            return None
+        self.screener_status_at = now
+        self.failure_kind = IBKR_LINK_DOWN
+        return self._apply(self.hysteresis.failure(now), now)
 
     def check(self, now: datetime) -> str | None:
         """Time passing: no first sweep in time (the Gateway never answered), an
@@ -1914,54 +1770,6 @@ def supervisor_ops(lines: Sequence[str], day: date) -> tuple[tuple[str, ...], tu
     return tuple(capped), tuple(refusals)
 
 
-def _line_time(line: str) -> datetime | None:
-    return _parse_time(line.strip().partition(" ")[0])
-
-
-def rotation_carried(lines: Sequence[str]) -> dict[int, tuple[tuple[int, ...], tuple[int, ...]]]:
-    """Each ``LOG_ROTATED`` marker's index in ``supervisor.log`` lines, with the
-    indices of the lines the rotation carried next to it: up to ``carried`` lines
-    on either side, none newer than the marker (T-3 writes them just before it).
-    The one rule for the OPS counts and for what the notifier forwards."""
-    markers: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
-    for index, line in enumerate(lines):
-        rotated = _LOG_ROTATED.search(line)
-        if rotated is None:
-            continue
-        at = _line_time(line)
-        count = int(rotated.group("carried") or 0)
-        if at is None:
-            markers[index] = ((), ())
-            continue
-        markers[index] = (
-            _dated_by(lines, range(max(index - count, 0), index), at, inclusive=True),
-            _dated_by(lines, range(index + 1, min(index + 1 + count, len(lines))), at, inclusive=False),
-        )
-    return markers
-
-
-def _dated_by(lines: Sequence[str], indices: range, at: datetime, *, inclusive: bool) -> tuple[int, ...]:
-    """The indices whose line is dated before ``at`` (or at it, if ``inclusive``)."""
-    kept: list[int] = []
-    for index in indices:
-        stamp = _line_time(lines[index])
-        if stamp is not None and (stamp < at or (inclusive and stamp == at)):
-            kept.append(index)
-    return tuple(kept)
-
-
-def without_carried(lines: Sequence[str]) -> list[str]:
-    """``supervisor.log`` lines less each ``LOG_ROTATED`` marker and the lines the
-    rotation carried next to it (``rotation_carried``): their originals are in the
-    archive."""
-    dropped = {
-        index
-        for marker, (before, after) in rotation_carried(lines).items()
-        for index in (marker, *before, *after)
-    }
-    return [line for index, line in enumerate(lines) if index not in dropped]
-
-
 def _restarts_today(path: Path, day: date) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     """Restart counts (the /status wording), suspensions/storms and refusals from
     supervisor.log, and from today's archive when the 18:35 rotation already ran."""
@@ -2385,6 +2193,8 @@ class _NotifierSession:
         self._digest_members: dict[str, list[str]] = {}
         self._next_manager_poll = float("-inf")
         self._broker = BrokerWatch(session_date)
+        # A login elsewhere: paged at its first line, re-paged while it lasts.
+        self._competing = CompetingLoginWatch()
         # The broker counts already added to the persisted OPS counters.
         self._gateway_synced = (0, 0, 0)
         # What the phone last heard per child from the restart cap (suspended or
@@ -2404,9 +2214,8 @@ class _NotifierSession:
         # The start's fence announcement is retried while the fence table cannot be read.
         self._next_fence_announcement = float("-inf")
         # The latest LOG_ROTATED marker seen in supervisor.log, and how many of
-        # the lines after it may still be carried copies.
-        self._rotated_at: datetime | None = None
-        self._carried_left = 0
+        # the lines after it may still be carried copies (log_tailer's one rule).
+        self._rotation = RotationCarried()
         # Started after SESSION_START (a restart): the log line is behind the
         # checkpoint, so the session opened no later than now.
         if environment.clock() >= market_time(session_date, SESSION_OPENS):
@@ -2457,6 +2266,7 @@ class _NotifierSession:
             await self._check_schema()
         self._poll_logs()
         self._follow_broker()
+        self._follow_competing()
         self._sync_gateway_counts()
         for text in self._fills.due(self._environment.monotonic()):
             self._send(text)
@@ -2504,7 +2314,7 @@ class _NotifierSession:
                 self._handle_line(name, line)
                 if index in markers:
                     # The marker's count covers these: fewer can follow it.
-                    self._carried_left = max(self._carried_left - len(markers[index][0]), 0)
+                    self._rotation.marker_counted(len(markers[index][0]))
 
     async def _check_schema(self) -> None:
         """Read-only ledger check; never migrates. One alert per session date."""
@@ -2658,20 +2468,10 @@ class _NotifierSession:
     def _carried(self, line: str) -> bool:
         """A supervisor line that is not news today: the rotation's marker, a line
         it carried into the new file, or one dated before this session."""
-        at = _line_time(line)
-        rotated = _LOG_ROTATED.search(line)
-        if rotated is not None:
-            self._rotated_at = at
-            self._carried_left = int(rotated.group("carried") or 0)
-            return True
-        if at is None:
-            return False  # a format drift is still forwarded, never dropped
-        if at.astimezone(MARKET_TIMEZONE).date() < self._session_date:
-            return True
-        if self._carried_left and self._rotated_at is not None and at < self._rotated_at:
-            self._carried_left -= 1
-            return True
-        return False
+        return self._rotation.is_carried(line, stale=self._before_session)
+
+    def _before_session(self, at: datetime) -> bool:
+        return at.astimezone(MARKET_TIMEZONE).date() < self._session_date
 
     def _handle_line(self, source: str, line: str) -> None:
         if source == "supervisor" and self._carried(line):
@@ -2712,8 +2512,38 @@ class _NotifierSession:
             problem = ibkr_session_problem(line, include_connection_lost=False)
         else:
             problem = ibkr_session_problem(line)
-        if problem and self._alert_allowed("ibkr_session"):
+        if problem == "competing_login":
+            self._competing_login(self._competing.seen(self._environment.clock(), source))
+        elif problem and self._alert_allowed("ibkr_session"):
             self._send_alert(f"ibkr_session:{problem}", ibkr_alert_text(problem, source))
+
+    def _follow_competing(self) -> None:
+        self._competing_login(self._competing.tick(self._environment.clock()))
+
+    def _competing_login(self, decision: CompetingDecision | None) -> None:
+        """A competing login's page or re-page, under the persisted IBKR alert
+        throttle (one IBKR alert per 10 minutes, across restarts)."""
+        if decision is None:
+            return
+        if decision.kind is CompetingKind.CLEARED:
+            logger.info(
+                "competing login over (no line for %d min; since %s ET)",
+                round(COMPETING_LOGIN_REPAGE.total_seconds() / 60),
+                _et_hhmm(decision.since),
+            )
+            return
+        if not self._alert_allowed("ibkr_session"):
+            # The phone heard an IBKR alert inside the interval (perhaps before a
+            # restart): the next re-page counts from it.
+            heard = _parse_time(self._state.alerts.get("ibkr_session"))
+            if heard is not None:
+                self._competing.heard(heard)
+            return
+        if decision.kind is CompetingKind.OPENED:
+            text = ibkr_alert_text("competing_login", decision.source)
+        else:
+            text = competing_login_repage_text(decision.since, decision.source)
+        self._send_alert("ibkr_session:competing_login", text)
 
     def _handle_bridge_line(self, line: str) -> None:
         event = parse_bridge_line(line)

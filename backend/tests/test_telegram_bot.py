@@ -1169,6 +1169,12 @@ def test_claude_gets_data_tools_only_with_strict_schemas():
 # --------------------------------------------------------------------------
 
 
+async def closed_gateway() -> bool:
+    """The composition root's Gateway probe in these tests: never the real port
+    (tests/conftest.py fails any test that reaches 7497)."""
+    return False
+
+
 def env(tmp_path: Path, **overrides: Any) -> AssistantEnvironment:
     base: dict[str, Any] = {
         "paths": UserPaths(home=tmp_path),
@@ -1176,6 +1182,7 @@ def env(tmp_path: Path, **overrides: Any) -> AssistantEnvironment:
         "read_anthropic_key": lambda: "sk-ant-test-key-0123456789",
         "out": io.StringIO(),
         "configure_logging": False,
+        "gateway_probe": closed_gateway,
     }
     base.update(overrides)
     return AssistantEnvironment(**base)
@@ -2181,3 +2188,59 @@ async def test_end_to_end_the_composition_root_wires_the_real_fence_store(tmp_pa
         ("ORB_V2", True, "telegram /halt by owner")
     ]
     assert not await SQLitePaperKillStore().is_stopped()
+
+
+async def test_end_to_end_the_composition_root_runs_the_overnight_watch(tmp_path, monkeypatch):
+    """T-4 through run_telegram_assistant -> _serve: the always-on child's own
+    watch, with the environment's clock, sleep and Gateway probe, pages a port
+    closed at the 05:55 ET lead through the real sender to the pinned chat."""
+    import httpx
+
+    from trading.operations.keychain import KeychainReadError
+
+    await fence_database(tmp_path, monkeypatch)
+    monday = datetime(2026, 10, 19, 5, 50, tzinfo=ET).astimezone(UTC)
+    now = {"at": monday}
+    probes: list[datetime] = []
+    sent: list[tuple[int, str]] = []
+
+    async def closed() -> bool:
+        probes.append(now["at"])
+        return False
+
+    async def sleep(seconds: float) -> None:
+        now["at"] += timedelta(seconds=seconds)
+        await asyncio.sleep(0)
+
+    page = (
+        "⛔ IB Gateway closed since 05:50 ET (its API port does not answer) — log in to IB Gateway;"
+        " session starts 07:55 ET (05:55 ET check)"
+    )
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        method = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content or b"{}")
+        if method == "sendMessage":
+            sent.append((payload["chat_id"], payload["text"]))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": len(sent)}})
+        await asyncio.sleep(0.01)
+        if any(text == page for _chat, text in sent):
+            return httpx.Response(401, json={"ok": False, "error_code": 401, "description": "Unauthorized"})
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    def no_key() -> str:
+        raise KeychainReadError("no key in this test")
+
+    environment = env(
+        tmp_path,
+        transport=httpx.MockTransport(handle),
+        read_anthropic_key=no_key,
+        clock=lambda: now["at"],
+        sleep=sleep,
+        gateway_probe=closed,
+    )
+    save_chat_id(telegram_config_file(environment.paths), OWNER)
+
+    assert await asyncio.wait_for(bot.run_telegram_assistant(env=environment), 20) == bot.EXIT_CONFIG
+    assert (OWNER, page) in sent
+    assert probes[:2] == [monday, monday + timedelta(minutes=5)]

@@ -32,6 +32,13 @@ PACING_ERROR_CODES = frozenset({162, 165, 366, 420})
 # IBKR codes 2100-2199 are informational warnings (farm status, fractional-size
 # trimming) and may carry a request ID; they never fail the request.
 WARNING_CODE_RANGE = range(2100, 2200)
+# The warnings an opt-in status listener hears (``set_status_listener``): a
+# broken market-data (2103), HMDS (2105) or sec-def (2157) farm, and a broken
+# link between TWS and IBKR's servers (2110). Never the farms' "OK" codes
+# 2104/2106/2158, which arrive on every connect, nor any other warning. Live
+# 2026-10-16 (GW-HMDS-1016) the Gateway logged 2110 with its port open while
+# every data request timed out and nothing said why.
+STATUS_LISTENER_CODES = frozenset({2103, 2105, 2110, 2157})
 # Two sessions of five-minute RTH bars: ATR(14) is available at the first
 # signal bar (09:50) from the prior session's history.
 INTRADAY_HISTORY_DURATION = "2 D"
@@ -544,6 +551,16 @@ class TWSPaperActor:
         self._last_error: str | None = None
         self._callbacks_seen = 0
         self._competing_session_listener: Callable[[str], None] | None = None
+        self._status_listener: Callable[[int, str], None] | None = None
+
+    def set_status_listener(self, listener: Callable[[int, str], None] | None) -> None:
+        """Opt-in: called with ``(code, message)`` for ``STATUS_LISTENER_CODES`` only.
+
+        Runs on the API's reader thread. Those codes stay warnings: they fail
+        no request and never become ``last_error``, exactly as without a
+        listener. A failing listener is ignored.
+        """
+        self._status_listener = listener
 
     def set_competing_session_listener(self, listener: Callable[[str], None] | None) -> None:
         """Called with TWS's report the moment any competing-login error arrives.
@@ -1484,6 +1501,12 @@ class TWSPaperActor:
     def _on_error(self, request_id: int, code: int, message: str) -> None:
         self._callbacks_seen += 1
         if code in WARNING_CODE_RANGE:
+            listener = self._status_listener
+            if listener is not None and code in STATUS_LISTENER_CODES:
+                try:
+                    listener(code, str(message))
+                except Exception:  # noqa: BLE001 - a listener never breaks error routing
+                    pass
             return
         self._last_error = f"TWS error {code}: {message}"
         competing = is_competing_session_error(code, str(message))

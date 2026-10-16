@@ -13,9 +13,13 @@ Users, with the default constants below and no other copy of them:
   * ``notify_service.BrokerWatch`` (T-2): the IB Gateway inside the notifier's
     07:55-16:15 ET day, fed by log lines (screener/bridge/children failures,
     screener sweeps) and ticked every notifier cycle;
-  * the overnight Gateway watch (T-4): the same machine, fed by a 5-minute TCP
-    check of the Gateway port. It instantiates ``Hysteresis()`` with these
-    defaults; the constants live here and nowhere else.
+  * the overnight Gateway watch (T-4, ``gateway_watch.PortWatch``): the same
+    machine, fed by a 5-minute TCP check of the Gateway port. It instantiates
+    ``Hysteresis()`` with these defaults; the constants live here and nowhere
+    else;
+  * the competing-login watch (T-4, ``gateway_watch.CompetingLoginWatch``):
+    ``Hysteresis(open_after_count=1)``, so the first "login active elsewhere"
+    line opens it; every other number is these defaults.
 
 Rules (defaults in brackets)
   * OPEN: at the failure signal that is the ``open_after_count``-th [3] in an

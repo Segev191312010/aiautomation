@@ -37,6 +37,13 @@ The name must be exactly one of
 the global row. There is no resume from the phone: ``autotraderctl paper
 resume --identity`` at the Mac only. ``/fences`` lists every fence row.
 
+Overnight watch (T-4). The assistant is the only always-on child, so it also
+runs ``overnight_watch.OvernightWatch`` as a background task: the IB Gateway
+port outside the notifier's window (quiet hours, a morning digest, pages at
+the pre-session leads), the restart cap's lines outside that window, and a
+competing login in the recorder's log. It sends text only; its log
+checkpoints are kept in the assistant's state file.
+
 Schema. The assistant never migrates. It starts while only migrations newer
 than ``schema_gate.TELEGRAM_ASSISTANT_REQUIRES`` are pending, so /stop and
 manual exits stay available (a test pins every table this module, the data
@@ -556,13 +563,19 @@ def _read_private_json(path: Path, *, max_bytes: int = 2 * 1024 * 1024) -> Any:
     return json.loads(raw.decode("utf-8"))
 
 
+_TAIL_KEYS = ("dev", "ino", "offset")
+_TAIL_OPTIONAL_KEYS = ("head", "head_len")
+
+
 @dataclass(slots=True)
 class AssistantState:
-    """The getUpdates offset and the order statuses already reported."""
+    """The getUpdates offset, the order statuses already reported, and the
+    overnight watch's log checkpoints (``LogTailer.checkpoint`` per log)."""
 
     path: Path
     offset: int | None = None
     notified: dict[str, str] = field(default_factory=dict)
+    tails: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> AssistantState:
@@ -577,6 +590,7 @@ class AssistantState:
             return cls(path=path)
         offset = _int_id(data.get("offset"))
         notified = data.get("notified")
+        tails = data.get("tails")
         return cls(
             path=path,
             offset=offset if offset is not None and offset > 0 else None,
@@ -584,13 +598,30 @@ class AssistantState:
                 str(key): str(value)
                 for key, value in (notified.items() if isinstance(notified, dict) else ())
             },
+            tails={
+                str(name): {
+                    key: int(checkpoint[key])
+                    for key in (*_TAIL_KEYS, *_TAIL_OPTIONAL_KEYS)
+                    if _int_id(checkpoint.get(key)) is not None
+                }
+                for name, checkpoint in (tails.items() if isinstance(tails, dict) else ())
+                # A checkpoint without its file identity is dropped: that log is
+                # followed from its end, never replayed.
+                if isinstance(checkpoint, dict)
+                and all(_int_id(checkpoint.get(key)) is not None for key in _TAIL_KEYS)
+            },
         )
 
     def save(self) -> None:
         if len(self.notified) > MAX_NOTIFIED_ORDERS:
             # Oldest first (insertion order); the ledger keeps the full history.
             self.notified = dict(list(self.notified.items())[-MAX_NOTIFIED_ORDERS:])
-        payload = {"version": STATE_VERSION, "offset": self.offset, "notified": self.notified}
+        payload = {
+            "version": STATE_VERSION,
+            "offset": self.offset,
+            "notified": self.notified,
+            "tails": self.tails,
+        }
         atomic_private_write(self.path, json.dumps(payload).encode("utf-8"))
 
 
@@ -1152,6 +1183,12 @@ class ManagerControl(Protocol):
     async def plan(self) -> str: ...
 
 
+class BackgroundWatch(Protocol):
+    """``overnight_watch.OvernightWatch``: runs until cancelled, sending through the assistant."""
+
+    async def run(self, send: Callable[[str], None], save: Callable[[], None]) -> None: ...
+
+
 class _FatalPollError(Exception):
     def __init__(self, code: int) -> None:
         super().__init__(code)
@@ -1179,6 +1216,7 @@ class TelegramAssistant:
         state: AssistantState,
         manager: ManagerControl | None = None,
         fences: IdentityFenceControl | None = None,
+        overnight: BackgroundWatch | None = None,
         clock: Clock = _utc_now,
         monotonic: Callable[[], float] = monotonic_time.monotonic,
         sleep: Sleeper = asyncio.sleep,
@@ -1197,6 +1235,7 @@ class TelegramAssistant:
         self._questions_unavailable = questions_unavailable
         self._manager = manager
         self._fences = fences
+        self._overnight = overnight
         self._halts = HaltRequests(clock=clock, new_nonce=new_nonce)
         self._state = state
         self._clock = clock
@@ -1230,6 +1269,12 @@ class TelegramAssistant:
             # down is reported by the first check.
             self._watched[view.order_id] = last
         self._tasks.append(asyncio.create_task(self._watch_loop(), name="telegram-order-watch"))
+        if self._overnight is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._overnight.run(self._reply, self._save_state), name="telegram-overnight-watch"
+                )
+            )
 
     async def run(self) -> int:
         await self.start()
@@ -1676,6 +1721,9 @@ class AssistantEnvironment:
     monotonic: Callable[[], float] = monotonic_time.monotonic
     out: TextIO | None = None
     configure_logging: bool = True
+    # The Gateway port probe for /status and the overnight watch; None:
+    # telegram_tools.gateway_port_open (the supervisor's one bounded connect).
+    gateway_probe: Callable[[], Awaitable[bool]] | None = None
 
     @classmethod
     def current(cls) -> AssistantEnvironment:
@@ -1740,11 +1788,18 @@ def _data_tools(environment: AssistantEnvironment) -> DataTools:
         config = load_shadow_runtime_config(user_paths=environment.paths)
     except ShadowSettingsError as exc:
         logger.error("IBKR data disabled for the assistant: %s", exc)
-        return DataTools(paths=environment.paths, tws=None, tws_problem_text=str(exc), clock=environment.clock)
+        return DataTools(
+            paths=environment.paths,
+            tws=None,
+            tws_problem_text=str(exc),
+            clock=environment.clock,
+            gateway_probe=environment.gateway_probe,
+        )
     return DataTools(
         paths=environment.paths,
         tws=TWSDataSession(account=config.paper_account_id),
         clock=environment.clock,
+        gateway_probe=environment.gateway_probe,
     )
 
 
@@ -1825,9 +1880,18 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
         send_api, chat_id=owner, sleep=environment.sleep, monotonic=environment.monotonic
     )
     from trading.manager.telegram import ManagerDesk
+    from trading.operations.overnight_watch import OvernightWatch
 
+    overnight = OvernightWatch(
+        log_directory=environment.paths.log_directory,
+        checkpoints=state.tails,
+        clock=environment.clock,
+        sleep=environment.sleep,
+        probe=environment.gateway_probe,
+    )
     assistant = TelegramAssistant(
         manager=ManagerDesk(),
+        overnight=overnight,
         owner_id=owner,
         updates=BotUpdates(poll_api),
         replies=notifier,

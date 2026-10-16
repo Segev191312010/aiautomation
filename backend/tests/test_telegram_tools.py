@@ -928,20 +928,45 @@ def test_the_launch_agent_line_reads_the_plist_and_never_runs_launchctl(tmp_path
 
 async def test_the_gateway_probe_is_a_plain_tcp_connect(monkeypatch):
     """Against a loopback listener on a free port, never the real 7497."""
-    from trading.market import tws_actor
+    from trading.operations import supervisor
 
     async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.close()
 
     server = await asyncio.start_server(accept, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    monkeypatch.setattr(tws_actor, "PAPER_TWS_PORT", port)
+    monkeypatch.setattr(supervisor, "GATEWAY_PORT", port)
     try:
         assert await REAL_GATEWAY_PROBE() is True
     finally:
         server.close()
         await server.wait_closed()
     assert await REAL_GATEWAY_PROBE() is False
+
+
+async def test_the_awaited_gateway_probe_is_the_supervisors_one_implementation(monkeypatch):
+    """T-4: one probe. /status and the overnight watch await the supervisor's
+    bounded connect (PORT_PROBE_TIMEOUT_S) in a worker thread; there is no
+    second connect of its own, and the port is the TWS actor's PAPER port."""
+    import threading
+
+    from trading.market import tws_actor
+    from trading.operations import supervisor
+
+    assert (supervisor.GATEWAY_HOST, supervisor.GATEWAY_PORT) == (
+        tws_actor.PAPER_TWS_HOST,
+        tws_actor.PAPER_TWS_PORT,
+    )
+    calls: list[tuple[object, object, bool]] = []
+    main = threading.current_thread()
+
+    def connect(address, timeout):
+        calls.append((address, timeout, threading.current_thread() is main))
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(supervisor.socket, "create_connection", connect)
+    assert await REAL_GATEWAY_PROBE() is False
+    assert calls == [(("127.0.0.1", 7497), supervisor.PORT_PROBE_TIMEOUT_S, False)]
 
 
 async def test_the_suite_wide_guard_refuses_the_live_gateway_port(no_live_gateway_port):

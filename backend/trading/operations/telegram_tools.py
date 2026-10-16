@@ -645,23 +645,18 @@ GlobalFenceRow = tuple[bool, str, str]  # (stopped, reason, updated_at)
 
 
 async def gateway_port_open() -> bool:
-    """A plain TCP connect to the local PAPER API port, closed at once.
+    """The supervisor's Gateway port probe, awaited: one implementation.
 
+    ``supervisor.gateway_port_open`` is a plain TCP connect to the PAPER API
+    port, closed at once and bounded by ``supervisor.PORT_PROBE_TIMEOUT_S``.
     Reachability only (no API handshake, no client id): an open port with a
-    competing IBKR login still refuses market data. The caller bounds the wait.
+    competing IBKR login still refuses market data. It runs in a worker thread
+    so a hung connect never blocks the assistant's event loop; the supervisor
+    calls the same function directly (its loop tolerates the bounded block).
     """
-    from trading.market.tws_actor import PAPER_TWS_HOST, PAPER_TWS_PORT
+    from trading.operations.supervisor import gateway_port_open as probe
 
-    try:
-        _reader, writer = await asyncio.open_connection(PAPER_TWS_HOST, PAPER_TWS_PORT)
-    except OSError:
-        return False
-    writer.close()
-    try:
-        await writer.wait_closed()
-    except OSError:
-        pass
-    return True
+    return await asyncio.to_thread(probe)
 
 
 def run_read_only_command(argv: Sequence[str], timeout_seconds: float) -> str:

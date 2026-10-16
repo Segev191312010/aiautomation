@@ -1119,11 +1119,15 @@ async def test_run_notifier_forwards_every_source_once_and_resumes_after_restart
     assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, clock)) == 0
 
     resent = restarted.sent()
+    # T-4: the 16:09 line shows the login elsewhere persists, so it is re-paged
+    # 10 min after the 16:04 alert (the throttle persisted across the restart);
+    # "since" is the restarted notifier's own first line, as for BrokerWatch.
     assert [text.splitlines()[0] for text in resent] == [
         "✅ FLAT: no open engine positions · 16:09:00 ET",
+        "⚠️ IBKR login still active elsewhere since 16:10 ET — log out of the IBKR app/website",
         "🗂 Shadow digest 16:15 ET · 1 decisions (no orders)",
     ]
-    assert "ORB_V1:\n• NEW WOULD BUY" in resent[1]
+    assert "ORB_V1:\n• NEW WOULD BUY" in resent[2]
 
 
 @pytest.mark.anyio
