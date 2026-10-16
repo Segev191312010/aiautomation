@@ -319,7 +319,9 @@ async def test_a_failed_sidecar_write_never_changes_a_decision_on_the_production
     """P1-B (mutation-guarded): the recorded MOMO day through the repository runner
     with ORB_V2's identity factor, once with a working sidecar and once with a
     failing one. Every decision (payload, outcome, quantity), every stored row and
-    the order the writer is asked in are the same; the failure is only logged."""
+    the order the writer is asked in are the same; the failure is only logged.
+    Then one pipeline decides BF B twice with the failing writer: a failure leaves
+    no state behind, so the later decision is the working pipeline's too."""
     import sqlite3
 
     from config import cfg
@@ -339,25 +341,29 @@ async def test_a_failed_sidecar_write_never_changes_a_decision_on_the_production
         # As stored, less the random id, the wall-clock times and the approval token (the golden's rule).
         return decisions, sorted((key, outcome, setup, _normalized(json.loads(payload))) for key, outcome, setup, payload in rows)
 
-    asked: list[str] = []
-    if failure == "every write":
+    def failing_writer() -> tuple[object, list[str]]:
+        asked: list[str] = []
+        if failure == "every write":
 
-        async def failing(row: DecisionSizing) -> None:
-            asked.append(row.decision_id)
-            raise OSError("disk full")
+            async def failing(row: DecisionSizing) -> None:
+                asked.append(row.decision_id)
+                raise OSError("disk full")
 
-    elif failure == "the first write only":
+        elif failure == "the first write only":
 
-        async def failing(row: DecisionSizing) -> None:
-            asked.append(row.decision_id)
-            if len(asked) == 1:
-                raise RuntimeError("sidecar directory vanished")
+            async def failing(row: DecisionSizing) -> None:
+                asked.append(row.decision_id)
+                if len(asked) == 1:
+                    raise RuntimeError("sidecar directory vanished")
 
-    else:
+        else:
 
-        def failing(row: DecisionSizing) -> None:  # awaiting its None raises TypeError
-            asked.append(row.decision_id)
+            def failing(row: DecisionSizing) -> None:  # awaiting its None raises TypeError
+                asked.append(row.decision_id)
 
+        return failing, asked
+
+    failing, asked = failing_writer()
     working = _Capture()
     good, good_rows = await replay("working", working)
     with caplog.at_level(logging.ERROR, logger="autotrader.shadow.pipeline"):
@@ -377,6 +383,18 @@ async def test_a_failed_sidecar_write_never_changes_a_decision_on_the_production
     assert len(asked) == 2
     logged = [record for record in caplog.records if record.getMessage().startswith(SIZING_RECORD_FAILED)]
     assert len(logged) == (1 if failure == "the first write only" else 2)
+
+    # The same pipeline after its failed write: BF B decided again, as a working one decides it.
+    reference = (await _assess(_pipeline(_Capture(), identity_multiplier=Decimal("0.25")))).decision
+    writer, again = failing_writer()
+    pipeline = _pipeline(writer, identity_multiplier=Decimal("0.25"))  # type: ignore[arg-type]
+    first, second = [(await _assess(pipeline)).decision for _ in range(2)]
+    assert len(again) == 2
+    for decision in (first, second):
+        assert decision is not None and reference is not None
+        assert _digest(decision) == _digest(reference)
+        assert decision.risk is not None and decision.risk.intent is not None
+        assert decision.risk.intent.quantity == 931
 
 
 def test_the_sidecar_module_reads_no_decision_back_and_touches_no_authority():
