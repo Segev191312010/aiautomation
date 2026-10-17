@@ -547,18 +547,25 @@ parse_ref("manual:...")                      # → None
 ### 4.5 IB Gateway
 
 ```bash
-nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
+lsof -nP -iTCP:7497 -sTCP:LISTEN && echo OPEN || echo CLOSED
 tail -n 50 ~/Jts/launcher.log
 head -n 1 ~/Jts/launcher.log
 grep -c 'Running in auto-restart mode' ~/Jts/launcher.log
 ```
 
-The first line says whether the API port is up (`OPEN` or `CLOSED`); the second shows the Gateway's
-recent lines (restarts, logoffs). The last two verify the nightly auto-restart (LEARNED GW-HMDS-1016,
-2026-10-17): after an auto-restart, launcher.log's first line is dated at that restart (about 02:30
-Israel, the Mac's clock), and the log has the line `Running in auto-restart mode: restoring session
-token and session ID` (a count of 1 or more). Never judge it by `Daily auto-restart is enabled.`: on
-2026-10-17 the log still printed `Daily auto-restart is not enabled.` after a real auto-restart.
+The first line says whether the Gateway's API port is up: the listening socket (a line ending
+`TCP …:7497 (LISTEN)`) and `OPEN`, or only `CLOSED`. It reads the Mac's own socket table and never
+connects to the port. The `nc -z 127.0.0.1 7497` it replaces opened a real connection to the
+Gateway's API port and dropped it, a client the Gateway sees and nothing needs; nobody probes 7497
+(2026-10-16: one such probe was sent by mistake during the session, ledger GW-HMDS-1016). The same
+check is in 6.4 and 10.1.
+
+The second line shows the Gateway's recent lines (restarts, logoffs). The last two verify the nightly
+auto-restart (LEARNED GW-HMDS-1016, 2026-10-17): after an auto-restart, launcher.log's first line is
+dated at that restart (about 02:30 Israel, the Mac's clock), and the log has the line `Running in
+auto-restart mode: restoring session token and session ID` (a count of 1 or more). Never judge it by
+`Daily auto-restart is enabled.`: on 2026-10-17 the log still printed `Daily auto-restart is not
+enabled.` after a real auto-restart.
 
 | Situation | Meaning |
 |---|---|
@@ -970,7 +977,7 @@ Mid-session emergency is **never** a rollback: it is `/closeall` + `paper stop`.
 The `telegram` child has already checked the port and requested real data at 05:55 and 07:40 ET (each with one 30-s retry on the fallback symbol before it pages); a silent phone means both passed (`grep 'pre-session data check' $L/telegram.log`). The manual check below is the agent's own:
 
 ```bash
-nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
+lsof -nP -iTCP:7497 -sTCP:LISTEN && echo OPEN || echo CLOSED
 $CTL paper status
 grep -E 'SESSION_WAIT|LAUNCH_REFUSED' $L/supervisor.log | tail -2
 tail -n 3 $L/supervisor.log
@@ -979,7 +986,7 @@ pmset -g batt | head -1
 ```
 
 Expect, line by line:
-1. `OPEN`;
+1. the Gateway's listening socket (`TCP …:7497 (LISTEN)`), then `OPEN` (4.5: read from the socket table, the port is never connected to);
 2. `PAPER kill switch: INACTIVE`, and each identity row as you expect it;
 3. `SESSION_WAIT date=` and today's date, and no `LAUNCH_REFUSED`;
 4. the newest lines; a `LOG_ROTATED` line from last night's 18:35 rotation may be last: expected;
@@ -1246,7 +1253,7 @@ shasum -a 256 /Users/salomon/aiautomation/backend/scripts_local/paper_bridge.py
 grep -n 'SENDABLE_IDENTITIES' /Users/salomon/aiautomation/backend/trading/sendable_identities.py
 $CTL db status; $CTL paper status
 launchctl list | grep autotrader
-nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
+lsof -nP -iTCP:7497 -sTCP:LISTEN && echo OPEN || echo CLOSED
 ```
 
 ### 10.2 Where the current state is recorded

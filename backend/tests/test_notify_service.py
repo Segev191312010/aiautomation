@@ -1768,6 +1768,92 @@ def test_a_saved_gateway_outage_is_current_only_when_stamped_near_the_notifiers_
     assert not gateway_outage_current(stamped(end + timedelta(hours=8)), SESSION)
 
 
+# The P1-A merge into P1-B (S6b): an outage still announced at 16:15, because fewer
+# than CLOSE_AFTER_COUNT sweeps came before the screener's 16:00 stop, is handed to the
+# Telegram watch. End to end: the real notifier writes its per-date state, the real
+# watch reads it; real two-line sweeps. (kind, the sweeps after the outage, the port's
+# closed spans in the evening, the notifier's Gateway lines, the watch's lines.)
+_HANDOVER_DAYS = {
+    # The Gateway does not answer from 15:30, then is back for two sweeps: no ✅ (two
+    # are no recovery), the "status unclear" repeat 10 min after the last success, and
+    # the watch's first check at 16:15 answers the notifier's page.
+    "gateway not answering": (
+        "gateway_down",
+        (_et(15, 58, 30), _et(15, 59, 35)),
+        [],
+        [
+            (_et(15, 30, 40), _GATEWAY_ALERT.format(since="15:30")),
+            (_et(16, 9, 35), _STATUS_UNCLEAR_ALERT.format(last="15:59", since="15:30")),
+        ],
+        ["✅ IB Gateway port open again 16:15 ET (closed since 15:30 ET)"],
+    ),
+    # IBKR refusing prices with the Gateway connected: the port stayed open, so the
+    # outage is no port evidence and the watch sends nothing (never "port open again").
+    "data refused": (
+        "data_refused",
+        (_et(15, 58, 30), _et(15, 59, 35)),
+        [],
+        [
+            (_et(15, 32), _DATA_REFUSED_ALERT.format(since="15:30")),
+            (_et(16, 9, 35), _STATUS_UNCLEAR_ALERT.format(last="15:59", since="15:30")),
+        ],
+        [],
+    ),
+    # One sweep at 15:58:30, then the port closes 16:05-16:50 with no notifier evidence:
+    # the same outage (one success is no recovery), so no second page; its recovery
+    # line when the port reopens.
+    "port closed again": (
+        "gateway_down",
+        (_et(15, 58, 30),),
+        [(_et(16, 5), _et(16, 50))],
+        [
+            (_et(15, 30, 40), _GATEWAY_ALERT.format(since="15:30")),
+            (_et(16, 8, 30), _STATUS_UNCLEAR_ALERT.format(last="15:58", since="15:30")),
+        ],
+        ["✅ IB Gateway port open again 16:50 ET (closed since 15:30 ET)"],
+    ),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", sorted(_HANDOVER_DAYS))
+async def test_an_outage_still_open_at_1615_after_too_few_sweeps_is_handed_to_the_telegram_watch(
+    case, tmp_path, monkeypatch, caplog
+):
+    from datetime import time
+
+    from tests.test_overnight_watch import Port, Time, drive, make_watch
+    from trading.operations.notify_service import gateway_outage_current, notifier_gateway_outage
+    from trading.operations.overnight_watch import notifier_port_outage
+
+    kind, sweeps, closed, notifier_lines, watch_lines = _HANDOVER_DAYS[case]
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(16, 15))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(15, 20))
+    clock.at(_et(15, 21), _append(screener, *_sweep_lines(TWO_LINES, SESSION, _et(15, 21))))
+    at, n = _et(15, 30), 0
+    while at < _et(15, 58):
+        clock.at(at, _append(screener, _SCREENER_FAILED if kind == "gateway_down" else _timeout_at(at, n)))
+        at, n = at + timedelta(seconds=20), n + 1
+    for moment in sweeps:
+        clock.at(moment, _append(screener, *_sweep_lines(TWO_LINES, SESSION, moment)))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    _assert_lines(_broker_lines(telegram), notifier_lines)
+    outage = notifier_gateway_outage(paths, SESSION)
+    assert outage is not None and (outage.kind, outage.paged) == (kind, True)
+    assert _between(outage.since, _et(15, 30)) and gateway_outage_current(outage, SESSION)
+
+    evening = Time(_et(16, 10), _et(17, 30))
+    port = Port(evening, closed)
+    watch, _ = make_watch(tmp_path / "watch", evening, port, memory={}, notifier_outage=notifier_port_outage(paths))
+    assert await drive(watch) == watch_lines
+    # It took the Gateway over at 16:15 and checked the port then (nothing before).
+    assert _between(port.checks[0], _et(16, 15))
+
+
 @pytest.mark.anyio
 async def test_a_flapping_gateway_is_one_outage_with_its_half_hour_repeats_and_a_flap_count(
     tmp_path, monkeypatch, caplog
@@ -3463,6 +3549,80 @@ def test_p1a5_low1_a_success_then_ten_silent_minutes_repeats_as_status_unclear()
     assert watch.alert_text() == _GATEWAY_ALERT.format(since="15:00")
 
 
+# Main sweep lines as the live screener.log has them (2026-10-13, copied read-only:
+# 216 of its 1199 main lines carry snapshot errors, review N14c LOW-1), the errors=0
+# line of _REAL_SWEEP, and a hot count below 35, which screener.py's own format
+# (`hot=%d`) allows and the day-universe loop test logs (hot=1); none is in the live
+# log yet.
+_REAL_MAIN_SWEEPS = (
+    _REAL_SWEEP[0],
+    "2026-10-13 15:27:40,896 INFO sweep 2026-10-13: qualified=391 quoted=381 errors=10 hot=35 seconds=116.9",
+    "2026-10-13 16:01:08,220 INFO sweep 2026-10-13: qualified=406 quoted=392 errors=14 hot=35 seconds=79.8",
+    "2026-10-13 17:37:11,411 INFO sweep 2026-10-13: qualified=406 quoted=404 errors=2 hot=35 seconds=69.1",
+    "2026-10-13 15:27:40,896 INFO sweep 2026-10-13: qualified=391 quoted=381 errors=10 hot=12 seconds=116.9",
+)
+
+
+def test_every_real_main_sweep_shape_is_one_success_snapshot_errors_included():
+    """Review N14c LOW-1: every main-line fixture had errors=0, so a ``_SWEEP`` that
+    matched only ``errors=0`` (its mutation M2) passed every targeted test, and a
+    recovery whose sweeps carry snapshot errors would never clear. Each real shape is
+    one success, and three sweeps with errors close an announced outage."""
+    from trading.operations.notify_service import BrokerWatch, broker_evidence
+
+    for line in _REAL_MAIN_SWEEPS:
+        assert broker_evidence("screener", line) == "sweep", line
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(7, 55))
+    for at in (_et(10, 0, 0), _et(10, 0, 20), _et(10, 0, 40)):
+        watch.observe("screener", _SCREENER_FAILED, at)
+    assert watch.unreachable
+    watch.alert_sent()
+    with_errors = _REAL_MAIN_SWEEPS[1:4]
+    assert watch.observe("screener", with_errors[0], _et(10, 10)) is None
+    assert watch.observe("screener", with_errors[1], _et(10, 11, 5)) is None
+    assert watch.observe("screener", with_errors[2], _et(10, 12, 10)) == _RECONNECTED.format(
+        back="10:10", since="10:00"
+    )
+    assert not watch.unreachable
+
+
+_TWS_RESTORES = {
+    "1101": "10:07:00 ET  INFO TWS -1 1101 Connectivity between IBKR and Trader Workstation has been restored"
+    " - data lost.",
+    "1102": _BRIDGE_1102,
+}
+
+
+@pytest.mark.parametrize("code", sorted(_TWS_RESTORES))
+def test_a_tws_restore_is_the_latest_success_that_status_unclear_counts_from_and_names(code):
+    """Review N14c LOW-2: the bridge's TWS 1101/1102 is a success and, when newest, the
+    latest one: the "status unclear" timer counts from it and its line names it ("no
+    price data since" the restore's time, though a restore is not price data: the
+    reviewer's wording nit, pinned as it is). Counting only sweeps (mutation M8) dated
+    both from the sweep before."""
+    from trading.operations.notify_service import STATUS_UNCLEAR_AFTER, BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(7, 55))
+    for at in (_et(10, 0, 0), _et(10, 0, 20), _et(10, 0, 40)):
+        watch.observe("screener", _SCREENER_FAILED, at)
+    watch.alert_sent()
+    for line in _sweep_lines(TWO_LINES, SESSION, _et(10, 5)):  # one real sweep
+        assert watch.observe("screener", line, _et(10, 5)) is None
+    assert watch.observe("bridge", _TWS_RESTORES[code], _et(10, 7)) is None  # two successes: no recovery
+    assert watch.last_success_at == _et(10, 7)
+    # Ten minutes after the sweep the restore still holds the repeat back...
+    assert watch.check(_et(10, 5) + STATUS_UNCLEAR_AFTER) is None
+    assert watch.unreachable and not watch.status_unclear and not watch.alert_due
+    assert watch.check(_et(10, 7) + STATUS_UNCLEAR_AFTER - timedelta(seconds=1)) is None
+    assert not watch.status_unclear
+    # ...ten minutes after the restore it is unclear, and the line names the restore.
+    assert watch.check(_et(10, 7) + STATUS_UNCLEAR_AFTER) is None
+    assert watch.unreachable and watch.status_unclear and watch.alert_due
+    assert watch.alert_text() == _STATUS_UNCLEAR_ALERT.format(last="10:07", since="10:00")
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("sweeps", _SWEEP_FORMATS)
 async def test_p1a5_low1_one_sweep_at_1559_30_then_the_screener_stops_says_status_unclear(
@@ -4016,25 +4176,34 @@ _OUTAGE_CAUSES = ("failed connects", "ibkr link loss", "data-refused run")
 _RESTORED = {"ibkr link loss": ("bridge", _BRIDGE_1102)}
 
 
+def _observe_sweep(watch, sweeps: str, at: datetime) -> list[str]:
+    """One screener sweep at ``at``, logged as in ``sweeps`` (ONE_LINE or TWO_LINES),
+    fed line by line; the texts it returned (a recovery line at most)."""
+    texts = [watch.observe("screener", line, at) for line in _sweep_lines(sweeps, SESSION, at)]
+    return [text for text in texts if text is not None]
+
+
+@pytest.mark.parametrize("sweeps", _SWEEP_FORMATS)
 @pytest.mark.parametrize("cause", _OUTAGE_CAUSES)
 @pytest.mark.parametrize("after_blip", [False, True], ids=["budget-free", "held-back-then-sustained"])
-def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_counts(cause, after_blip):
+def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_counts(cause, after_blip, sweeps):
     """Whatever opened it (a failed connect, an IBKR-side loss, a data-refused run),
     and also when the pair budget held it back until the sustain limit announced it
     (the hysteresis counts that hold-back as a flap for the digest), an announced
-    outage is one outage and no flap in the OPS lines (P1-B)."""
+    outage is one outage and no flap in the OPS lines (P1-B). Every sweep is fed as
+    logged on 2026-10-13 (one line) and since 2026-10-14 (two `sweep D:` lines)."""
     from trading.operations.notify_service import BrokerWatch
 
     watch = BrokerWatch(SESSION)
     watch.session_started(_et(7, 55))
-    watch.observe("screener", _SWEEP_LINE, _et(8, 10))
+    _observe_sweep(watch, sweeps, _et(8, 10))
     if after_blip:
         # An announced 70-second blip at 08:15, recovered at 08:17 (its pair goes out).
         for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
             watch.observe("screener", _SCREENER_FAILED, at)
         # P1-A.4 merge: three sweeps in a row (the first at 08:17), closed two clean minutes on.
         for at in (_et(8, 17), _et(8, 17, 40), _et(8, 18, 20)):
-            watch.observe("screener", _SWEEP_LINE, at)
+            _observe_sweep(watch, sweeps, at)
         assert watch.check(_et(8, 19)) is not None
         assert (watch.outages, watch.ops_flaps, watch.hysteresis.flaps) == (1, 0, 0)
     start = _et(8, 25)
@@ -4048,11 +4217,13 @@ def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_coun
         assert watch.unreachable_since == start and not watch.holding_back
     _drive(watch, _outage_signals(cause, _et(8, 27, 30), _et(8, 40)), _et(8, 40))
     assert watch.unreachable_since == start  # announced (by the sustain limit after a blip)
-    source, line = _RESTORED.get(cause, ("screener", _SWEEP_LINE))
-    watch.observe(source, line, _et(8, 40, 5))
+    if cause in _RESTORED:
+        watch.observe(*_RESTORED[cause], _et(8, 40, 5))
+    else:
+        _observe_sweep(watch, sweeps, _et(8, 40, 5))
     # P1-A.4 merge: two more sweeps, so three successes in a row before 08:42:05.
     for at in (_et(8, 40, 45), _et(8, 41, 25)):
-        watch.observe("screener", _SWEEP_LINE, at)
+        _observe_sweep(watch, sweeps, at)
     assert watch.check(_et(8, 42, 5)) is not None and not watch.hysteresis.is_open
 
     assert watch.outages == (2 if after_blip else 1)
@@ -4063,25 +4234,27 @@ def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_coun
     assert not watch.flaps_pending and watch.take_flap_line() is None
 
 
-def test_a_held_back_open_that_closes_unannounced_is_a_flap_in_the_ops_counts():
-    """The counterpart: a flip the phone never heard as an outage stays a flap."""
+@pytest.mark.parametrize("sweeps", _SWEEP_FORMATS)
+def test_a_held_back_open_that_closes_unannounced_is_a_flap_in_the_ops_counts(sweeps):
+    """The counterpart: a flip the phone never heard as an outage stays a flap. On
+    both sweep formats, one line and two."""
     from trading.operations.notify_service import BrokerWatch
 
     watch = BrokerWatch(SESSION)
     watch.session_started(_et(7, 55))
-    watch.observe("screener", _SWEEP_LINE, _et(8, 10))
+    _observe_sweep(watch, sweeps, _et(8, 10))
     for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
         watch.observe("screener", _SCREENER_FAILED, at)
     # P1-A.4 merge: three sweeps in a row (the first at 08:17), closed two clean minutes on.
     for at in (_et(8, 17), _et(8, 17, 40), _et(8, 18, 20)):
-        watch.observe("screener", _SWEEP_LINE, at)
+        _observe_sweep(watch, sweeps, at)
     assert watch.check(_et(8, 19)) is not None
     for at in (_et(8, 25, 0), _et(8, 25, 30), _et(8, 26, 0)):
         watch.observe("screener", _SCREENER_FAILED, at)
     assert watch.holding_back and watch.ops_flaps == 0
     # P1-A.4 merge: three sweeps in a row from 08:26:30 (an unannounced open needs them too).
     for at in (_et(8, 26, 30), _et(8, 27, 10), _et(8, 27, 50)):
-        watch.observe("screener", _SWEEP_LINE, at)
+        _observe_sweep(watch, sweeps, at)
     assert watch.check(_et(8, 28, 30)) is None  # its close is silent too
     assert not watch.hysteresis.is_open and not watch.holding_back
     assert (watch.outages, watch.ops_flaps, watch.hysteresis.flaps) == (1, 1, 1)

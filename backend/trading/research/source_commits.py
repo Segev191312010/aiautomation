@@ -1,7 +1,7 @@
 """Which table of identity size factors each commit ran with (data only).
 
-Generated on 2026-10-16, and again on 2026-10-17 (P1-B.3), from every branch, tag
-and remote of the repository:
+Generated on 2026-10-16, and again on 2026-10-17 (P1-B.3, and after the P1-A
+freeze at 2608230632365c), from every branch, tag and remote of the repository:
 
     git rev-list --branches --tags --remotes                      # every commit
     git rev-list --branches --tags --remotes --ancestry-path ^784c2bd6a732
@@ -23,7 +23,9 @@ regeneration only adds: a listed commit is never dropped.
     (``with_decision_recorder``: v7b.1 7f7178d4f90f and its descendants, and
     T-8's own copy of the fix, ded4264f61c9), so the four rows are applied:
     the v7b verdict's head 7872c86 and its docs-only children up to the frozen
-    bridge-v7b tip 5d0eb1c, and the P1-A and P1-B heads.
+    bridge-v7b tip 5d0eb1c, and the P1-A and P1-B heads (P1-A to its frozen tip
+    2608230, P1-A.4 4c5c6c6 and P1-A.5 a6c8d67 included; P1-B to its merge of
+    that tip, 89ce62d).
 
 ``trading.research.size_history`` maps each to its table version.
 
@@ -147,18 +149,19 @@ V7B_COMMITS: frozenset[str] = frozenset(
 )
 V7B_SIZED_COMMITS: frozenset[str] = frozenset(
     """
-    0633efdbeacd 087e9f0f4b78 09e997b93eeb 134bde4ff2ff 282408a3081e 3375b7dcaba4
-    3a17ed29672f 3a4254e90dcb 5b4c45bfcb06 5d0eb1ca947a 622af486377a 6578feb64aab
-    6ba575a013c7 74025d798ca3 7872c86357ee 7f7178d4f90f 809142ca60bd 83a7f2f70a94
-    8dac16b34b16 95e7534eeb70 9c3a4dcb43e3 a07084867dcf a23f6d43e918 aad915741067
-    ded4264f61c9 df6ce5983bb0 edb46c001a4b eededf9204f3 f31543030909 f656cba7a43b
-    ff45ec8abb37
+    0633efdbeacd 087e9f0f4b78 09e997b93eeb 0a4893e47c8c 0b8b2b92526e 0e52f7813260
+    134bde4ff2ff 201172c8e6c8 260823063236 282408a3081e 3375b7dcaba4 33acc6a5ee8b
+    3a17ed29672f 3a4254e90dcb 4c5c6c61125e 5b4c45bfcb06 5d0eb1ca947a 622af486377a
+    6578feb64aab 6ba575a013c7 74025d798ca3 7872c86357ee 7f7178d4f90f 809142ca60bd
+    83a7f2f70a94 89ce62d21c38 8dac16b34b16 95e7534eeb70 9c3a4dcb43e3 a07084867dcf
+    a23f6d43e918 a6c8d6711394 aad915741067 b2a8f8bc868b d6b168babae0 ded4264f61c9
+    df6ce5983bb0 edb46c001a4b eededf9204f3 f31543030909 f656cba7a43b ff45ec8abb37
     """.split()
 )
 # Pinned so an edit of the lists is visible (tests/test_size_history.py).
 PRE_V7B_COUNT = 557
 V7B_COUNT = 19
-V7B_SIZED_COUNT = 31
+V7B_SIZED_COUNT = 42
 
 __all__ = [
     "PRE_V7B_COMMITS",

@@ -81,6 +81,18 @@ P1_HEADS = (
     "3a4254e90dcb3c5cd5f63d8e9cbe458053637efd",  # P1-B.2
     "74025d798ca31485f420996582e4ccc3571df980",  # N15d re-read
     "6ba575a013c71aadf908c9bf96aaafd181113b62",  # W6.4, the base of P1-B.3
+    # The weekend heads (regenerated after the P1-A freeze, S6b).
+    "4c5c6c61125e0f5fe1742fdc4dfe270ad1f4e977",  # P1-A.4
+    "d6b168babae0293804e839c41722da59fc433321",  # bridge-v7b docs merged into P1-A
+    "33acc6a5ee8bc83e92dbc1bd2b7a7d5edc402c56",  # ledger: P1-A Docker gates on d6b168b
+    "0b8b2b92526ededd6050dff4c709af0b1174dd53",  # N14b re-read
+    "a6c8d671139470914670eeab0ab6151f81156a37",  # P1-A.5
+    "0a4893e47c8c5b16f97f303a61a014a45b15d704",  # LEARNED: real log format
+    "2608230632365c555926528ffc7f93c9d607f246",  # N14c re-read, Docker: the frozen P1-A tip (layer 2)
+    "b2a8f8bc868b57ffff16bfa724236b4acce9f336",  # P1-B.3
+    "0e52f7813260d40c8d5ee3e53abd40fd54503d14",  # P1-A.4 merged into P1-B
+    "201172c8e6c80a082fe2403c976f2798af1aa4f7",  # P1-A.5 merged into P1-B
+    "89ce62d21c3838b2dda640e14add07e936136a8f",  # the frozen P1-A tip merged into P1-B
 )
 
 
