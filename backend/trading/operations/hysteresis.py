@@ -26,10 +26,17 @@ Rules (defaults in brackets)
     lone failure followed by silence is not an outage. Live 2026-10-13: one
     connect failure, then an 8-minute universe qualification with no sweep.
   * CLOSE: once a success has been followed by ``close_after`` [2 min] with no
-    failure; checked on the next ``success``/``tick`` (a ``failure`` that arrives
-    after the clean stretch has already lasted that long closes first and
-    starts a new streak). A failure inside the clean stretch is a flap: the
-    condition stays open and the next success restarts the clock.
+    failure, and that clean stretch holds ``close_after_count`` [1] successes
+    (the first counts); checked on the next ``success``/``tick`` (a ``failure``
+    that arrives after the clean stretch has already met both closes first and
+    starts a new streak). A failure before the clean stretch meets both is a
+    flap: the condition stays open, and the next success restarts the clock
+    and the count. With a count above 1 a lone success, however long the
+    silence after it, never closes an open condition (BrokerWatch passes
+    ``notify_service.CLOSE_AFTER_COUNT`` = 3; owner decision 2026-10-17,
+    review N14 MEDIUM-1).
+    A success while still FAILING (not opened) breaks the streak whatever
+    the count.
   * Budget: at most ``max_pairs_per_window`` [1] OPEN announcements in any
     ``window`` [30 min] (counted from each announced OPEN), hence at most that
     many OPEN/CLOSE pairs, with one exception below. An open beyond the budget
@@ -53,7 +60,9 @@ Rules (defaults in brackets)
 
 API
   ``Hysteresis(open_after_count=3, open_after=2 min, close_after=2 min,
-  max_pairs_per_window=1, window=30 min, sustain_limit=5 min)``
+  max_pairs_per_window=1, window=30 min, sustain_limit=5 min,
+  close_after_count=1)``: ``close_after_count`` defaults to 1, the rule every
+  user had before it existed; only a caller that asks for more gets more.
   ``failure(now, *, since=None) -> Event | None``: a failure signal; ``since``
       backdates a streak that has not opened yet when the caller knows the
       failure began earlier (BrokerWatch: no first sweep since the screener's
@@ -66,7 +75,9 @@ API
   ``recovering_since``, ``flaps``; ``reset()`` forgets everything.
   Each call returns at most one ``Event``: ``Event.kind`` is ``OPEN`` or
   ``CLOSE``; ``since`` is the streak's first failure; ``recovered_at`` (CLOSE
-  only) is the first success of the clean stretch that closed it.
+  only) is the first success of the clean stretch that closed it; a CLOSE's
+  ``at`` is ``recovered_at + close_after`` or the ``close_after_count``-th
+  success, whichever is later.
 """
 from __future__ import annotations
 
@@ -130,10 +141,12 @@ class Hysteresis:
         max_pairs_per_window: int = MAX_PAIRS_PER_WINDOW,
         window: timedelta = PAIR_WINDOW,
         sustain_limit: timedelta = SUSTAIN_LIMIT,
+        close_after_count: int = 1,
     ) -> None:
         for name, count in (
             ("open_after_count", open_after_count),
             ("max_pairs_per_window", max_pairs_per_window),
+            ("close_after_count", close_after_count),
         ):
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
                 raise ValueError(f"{name} must be an int >= 1")
@@ -149,6 +162,7 @@ class Hysteresis:
         self.max_pairs_per_window = max_pairs_per_window
         self.window = window
         self.sustain_limit = sustain_limit
+        self.close_after_count = close_after_count
         self.reset()
 
     def reset(self) -> None:
@@ -160,6 +174,11 @@ class Hysteresis:
         # The first failure after the last success: where the sustain limit counts from.
         self._unbroken_since: datetime | None = None
         self._recovering_since: datetime | None = None
+        # Successes in the clean stretch since ``_recovering_since`` (a failure
+        # ends the stretch and the count), and when the count reached
+        # ``close_after_count`` (None until it does).
+        self._successes = 0
+        self._counted_at: datetime | None = None
         self._opens: deque[datetime] = deque()
         self._flaps = 0
 
@@ -212,10 +231,13 @@ class Hysteresis:
             self._backdate(since)
             return self._open_if_due(now)
         if state is State.RECOVERING:
-            # The recovery did not hold: no message, one flap. The success broke
-            # the run of failures, so the sustain limit counts from here.
+            # The recovery did not hold: no message, one flap, and the next clean
+            # stretch counts its successes from zero. The success broke the run
+            # of failures, so the sustain limit counts from here.
             self._state = State.OPEN
             self._recovering_since = None
+            self._successes = 0
+            self._counted_at = None
             self._unbroken_since = now
             self._flaps += 1
         self._last_failure_at = now
@@ -230,8 +252,13 @@ class Hysteresis:
         if self._state is State.OPEN:
             self._state = State.RECOVERING
             self._recovering_since = now
-        if self._state is State.RECOVERING and self._clean_long_enough(now):
-            return self._close()
+            self._successes = 0
+        if self._state is State.RECOVERING:
+            self._successes += 1
+            if self._counted_at is None and self._successes >= self.close_after_count:
+                self._counted_at = now
+            if self._clean_long_enough(now):
+                return self._close()
         return None
 
     def tick(self, now: datetime) -> Event | None:
@@ -299,16 +326,19 @@ class Hysteresis:
         )
 
     def _clean_long_enough(self, now: datetime) -> bool:
+        """The clean stretch closes: ``close_after`` since its first success, and
+        ``close_after_count`` successes in it (with the default 1, the first)."""
         assert self._recovering_since is not None
-        return now - self._recovering_since >= self.close_after
+        return self._counted_at is not None and now - self._recovering_since >= self.close_after
 
     def _close(self) -> Event | None:
         assert self._failing_since is not None and self._recovering_since is not None
+        assert self._counted_at is not None
         event: Event | None = None
         if self._announced:
             event = Event(
                 kind=CLOSE,
-                at=self._recovering_since + self.close_after,
+                at=max(self._recovering_since + self.close_after, self._counted_at),
                 since=self._failing_since,
                 recovered_at=self._recovering_since,
             )
@@ -323,6 +353,8 @@ class Hysteresis:
         self._last_failure_at = None
         self._unbroken_since = None
         self._recovering_since = None
+        self._successes = 0
+        self._counted_at = None
 
 
 __all__ = [

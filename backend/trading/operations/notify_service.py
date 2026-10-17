@@ -25,8 +25,11 @@
      children's handshake failures make three in a row or a streak two
      minutes long, or when no screener sweep has come 30 minutes after the
      screener's 08:00 ET window opened; repeated at most every 30 minutes
-     while no sweep returns, and one "reconnected" line once a sweep has
-     been followed by two minutes without a failure. At most one such pair
+     while the newest evidence is a failure (a lone success inside the
+     outage stops no repeat), and one "reconnected" line once three
+     successes in a row have come and two minutes have passed since the
+     first of them without a failure; an outage's first page never says
+     "restart IB Gateway now", only a repeat (below). At most one such pair
      per half hour (the shared ``trading.operations.hysteresis`` machine);
      what it holds back is a flap, counted in the next digest. An IBKR-side
      loss the bridge reports (TWS 1100/2110 not restored within two minutes,
@@ -857,7 +860,19 @@ SESSION_OPENS = time(7, 55)
 SCREENER_OPENS = time(8, 0)
 FIRST_SWEEP_GRACE = timedelta(minutes=30)
 # Open/close thresholds and the pair cap are the shared Hysteresis defaults
-# (trading/operations/hysteresis.py, also the overnight watch's): no copy here.
+# (trading/operations/hysteresis.py, also the overnight watch's): no copy here,
+# except the close count. An announced outage closes only once it has had
+# CLOSE_AFTER_COUNT successes in a row (sweeps, TWS 1101/1102) AND the
+# hysteresis's close_after (2 min) has passed since the first of them, with no
+# failure between; any failure before that is a flap that restarts the count
+# and the clock. Owner decision 2026-10-17
+# ("clear only after several successes in a row spread over a few minutes,
+# never after a single one"); review N14 MEDIUM-1: one lucky sweep (or a 1102)
+# inside a refusal, then the 6th timeout of the next run two minutes later,
+# closed the outage or silenced its repeats and its "restart now". With the
+# screener's one sweep about every minute that is about two minutes of sweeps.
+# The Hysteresis default stays 1 for its other users.
+CLOSE_AFTER_COUNT = 3
 _SESSION_START = re.compile(r"\bSESSION_START\s+date=(?P<date>\d{4}-\d{2}-\d{2})\b")
 # One line per failed bridge connect attempt: its closing CRITICAL. The
 # "TWS -1 502 Couldn't connect" INFO line before it is the same attempt (live
@@ -878,8 +893,9 @@ _IBKR_RESTORED = re.compile(r"\bTWS\s+-?\d+\s+110[12]\b")
 # Live 2026-10-16 (GW-HMDS-1016) it did not reconnect by itself for two hours:
 # logging out of the IBKR app and website brought the orders back, and only an
 # IB Gateway restart brought the price history back. So both IBKR-side
-# wordings give those two steps in that order, and once the outage has lasted
-# RESTART_ADVICE_AFTER they say "restart IB Gateway now".
+# wordings give those two steps in that order, and a repeat of the alert (never
+# an outage's first page, review N14 LOW-1) once the outage has lasted
+# RESTART_ADVICE_AFTER says "restart IB Gateway now".
 GATEWAY_DOWN = "gateway_down"
 IBKR_LINK_DOWN = "ibkr_link_down"
 DATA_REFUSED = "data_refused"
@@ -959,7 +975,10 @@ class BrokerWatch:
     the bridge's TWS 1101/1102 "restored" a success, for one shared
     ``Hysteresis``: the outage opens at the third failure in a row or at a
     failure two minutes into the streak (a success breaks it), and closes once
-    a success has been followed by two minutes with no failure; at most one
+    ``CLOSE_AFTER_COUNT`` (3) successes in a row have come and two minutes have
+    passed since the first of them with no failure (a failure before that is a
+    flap: the outage stays open, its half-hour repeats and their "restart now"
+    go on, and the count starts again; review N14 MEDIUM-1); at most one
     alert/recovery pair per half hour, except that failures running unbroken
     for the sustain limit (5 min) always page. What it holds back is a flap,
     reported by ``take_flap_line`` in the next digest (live 2026-10-14: 183
@@ -988,9 +1007,11 @@ class BrokerWatch:
     no first sweep says "log in"; an IBKR-side loss (TWS 1100/2110) or data
     refused says the Gateway is connected and gives the two steps of
     GW-HMDS-1016 (log out of the IBKR app and website; if it lasts, restart IB
-    Gateway); once the outage has lasted ``RESTART_ADVICE_AFTER`` (every
-    half-hour repeat) the IBKR-side wordings say "restart IB Gateway now". The
-    recovery line is the same for all.
+    Gateway); a repeat of the alert (every half-hour repeat: the first comes 30
+    minutes in) once the outage has lasted ``RESTART_ADVICE_AFTER`` says
+    "restart IB Gateway now" in the IBKR-side wordings, and an outage's first
+    page never does (review N14 LOW-1: a backdated 08:30 first page said it).
+    The recovery line is the same for all.
 
     In memory only: after a notifier restart during an outage the next
     evidence reopens it (the 30-minute cadence lives in the persisted
@@ -1008,7 +1029,9 @@ class BrokerWatch:
     bridge_refused: bool = False
     handshake_children: set[str] = field(default_factory=set)
     restarting: dict[str, int] = field(default_factory=dict)
-    hysteresis: Hysteresis = field(default_factory=Hysteresis)
+    hysteresis: Hysteresis = field(
+        default_factory=lambda: Hysteresis(close_after_count=CLOSE_AFTER_COUNT)
+    )
     first_sweep_overdue: bool = False
     # The bridge's last TWS 1100/2110 (or its re-assertion) while no restore
     # and no sweep has come since; None when IBKR's side is not known lost.
@@ -1046,10 +1069,16 @@ class BrokerWatch:
 
     @property
     def alert_due(self) -> bool:
-        """The alert, subject to the half-hour cadence: the outage's first, and
-        repeats only while no sweep has come since the last one (a connection
-        that flaps is the digest's flap line, not a repeat)."""
-        return self.unreachable and not (self.alerted and self.swept_since_alert)
+        """The alert, subject to the half-hour cadence: the outage's first, and a
+        repeat unless a success has come since the last page and still holds
+        (the hysteresis is recovering: no failure since). A failure after that
+        success puts the outage back to OPEN, and the repeat, "restart now"
+        included, is due again at its half hour (review N14 MEDIUM-1: one sweep
+        or TWS 1102 inside an announced outage silenced its repeats for good).
+        A success never resets the half-hour timer: only the recovery line does,
+        and that needs ``CLOSE_AFTER_COUNT`` successes."""
+        holding = self.hysteresis.recovering_since is not None
+        return self.unreachable and not (self.alerted and self.swept_since_alert and holding)
 
     @property
     def flaps_pending(self) -> bool:
@@ -1164,8 +1193,9 @@ class BrokerWatch:
 
     def check(self, now: datetime) -> str | None:
         """Time passing: no first sweep in time (the Gateway never answered), an
-        IBKR loss still not restored, the recovery line two clean minutes after a
-        success, or a held-back outage announced once the pair cap or the
+        IBKR loss still not restored, the recovery line two clean minutes after
+        the first of ``CLOSE_AFTER_COUNT`` successes in a row (once they have
+        come), or a held-back outage announced once the pair cap or the
         sustain limit allows; the recovery text, else None."""
         self.checked_at = now
         due = self.first_sweep_due()
@@ -1237,7 +1267,10 @@ class BrokerWatch:
         lasted = (
             self.checked_at - self.unreachable_since if self.checked_at is not None else timedelta(0)
         )
-        if kind in (IBKR_LINK_DOWN, DATA_REFUSED) and lasted >= RESTART_ADVICE_AFTER:
+        # "Restart now" only on a repeat (``alerted``: this outage was paged), never
+        # on its first page, whose start may be backdated to 08:00 (review N14 LOW-1).
+        repeat = self.alerted
+        if kind in (IBKR_LINK_DOWN, DATA_REFUSED) and repeat and lasted >= RESTART_ADVICE_AFTER:
             text = f"⛔ IBKR still refusing prices since {since} ET — {_RESTART_NOW}"
         elif kind == IBKR_LINK_DOWN:
             text = (
