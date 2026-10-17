@@ -381,6 +381,38 @@ def _parser() -> argparse.ArgumentParser:
         "--skip-clock", action="store_true", help="no sntp query (the clock check warns instead)"
     )
 
+    session = domains.add_parser(
+        "session", help="read-only checks of one PAPER bridge session (no writes, no migration)"
+    )
+    session_actions = session.add_subparsers(dest="action", required=True)
+    session_check = session_actions.add_parser(
+        "check",
+        help=(
+            "read-only: identities, attribution, caps, size, daily loss and fences of one session"
+            " from bridge.log, supervisor.log, the bridge state and the database"
+            " (exit 0 pass, 1 a rule failed, 2 an input is missing)"
+        ),
+    )
+    session_check.add_argument(
+        "--date", type=date.fromisoformat, required=True, metavar="YYYY-MM-DD", help="New York session date"
+    )
+    session_check.add_argument(
+        "--logs", type=Path, default=None, metavar="DIR", help="log directory (default ~/Library/Logs/AutotraderV1)"
+    )
+    session_check.add_argument(
+        "--data",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="data directory holding bridge/<date>.json (default ~/.local/share/autotrader-v1)",
+    )
+    session_check.add_argument(
+        "--db-path",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="database, opened read-only (default <data>/autotrader.db with --data, else DB_PATH)",
+    )
+
     supervise = domains.add_parser(
         "run",
         help="supervise each trading day's screener, bridge, strategies and notifier (foreground)",
@@ -957,6 +989,31 @@ def _deploy_command(arguments: argparse.Namespace, parser: argparse.ArgumentPars
     return deploy_check.run_deploy_check(request)
 
 
+def _session_command(arguments: argparse.Namespace) -> int:
+    """``session check``: read-only; exit 0 pass, 1 a rule failed, 2 an input is missing."""
+    from trading.operations import session_check
+    from trading.operations.paths import UserPaths
+
+    paths = UserPaths.current()
+    logs = (arguments.logs or paths.log_directory).expanduser()
+    data = (arguments.data or paths.data_directory).expanduser()
+    requested = getattr(arguments, "db_path", None)
+    if requested is not None:
+        database = requested.expanduser()
+    elif arguments.data is not None:
+        database = data / paths.database_file.name
+    else:
+        database = Path(cfg.DB_PATH).expanduser()
+    try:
+        report = session_check.check_session(arguments.date, logs=logs, data=data, db=database)
+    except Exception as exc:  # noqa: BLE001 - no verdict; the message is masked like the report
+        message = session_check.mask_accounts(f"{type(exc).__name__}: {exc}")
+        print(f"error: session check could not run, no verdict: {message}", file=sys.stderr)
+        return session_check.EXIT_INPUTS_MISSING
+    sys.stdout.write(report.render())
+    return report.exit_code
+
+
 def _supervise_command(arguments: argparse.Namespace) -> int:
     """``autotraderctl run``: the foreground supervisor, or its simulated timeline."""
     from trading.operations import supervisor
@@ -990,6 +1047,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _supervise_command(arguments)
     if arguments.domain == "deploy":
         return _deploy_command(arguments, parser)
+    if arguments.domain == "session":
+        return _session_command(arguments)
     if arguments.domain == "db":
         return _database_command(arguments)
     if arguments.domain == "manager":
