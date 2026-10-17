@@ -50,8 +50,10 @@
      structured state (today's state file, the live ledger, the heartbeat
      row; never a log line) it fences one sendable identity at the owner's
      daily-loss or losing-streak threshold, once per identity per day, with
-     one "⛔ auto-fence" message; while it cannot see the bridge state it
-     sends "sentinel blind since HH:MM ET" every half hour and fences nothing;
+     one "⛔ auto-fence" message (log-only until ``SENTINEL_FENCES_LIVE``: no
+     row, one "🔎 auto-fence (log-only)" line per identity per day instead);
+     while it cannot see the bridge state it sends "sentinel blind since
+     HH:MM ET" every half hour and fences nothing;
   k. at start (07:55 ET), every identity whose fence is stopped (an earlier
      day's auto-fence, the nightly replay's mismatch fence, an owner's /halt);
   l. an OPS section in the 16:05 report: restarts per child, suspensions and

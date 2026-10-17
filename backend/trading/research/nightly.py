@@ -15,7 +15,11 @@ the evidence for the paper promotion rule, in this order:
    decisions the replay does not reproduce is fenced (``paper:<IDENTITY>``
    stopped=1, reason ``sentinel: replay mismatch <n> decisions``) through the
    Sentinel's own ``fence_identity``, and the result is recorded in
-   ``evidence.json``; the notifier announces the fence at its 07:55 start;
+   ``evidence.json``; the notifier announces the fence at its 07:55 start.
+   While the Sentinel is log-only (``sentinel.SENTINEL_FENCES_LIVE`` False,
+   owner 2026-10-17) nothing is written: the identity is recorded as
+   ``would_fence`` and logged ``sentinel would fence <ID>: replay mismatch
+   <n> decisions``;
 5. the window research sweep, unless it would start after
    ``SWEEP_LATEST_START`` inside the replay window: the supervisor stops the
    child at 18:30, and the weekly message must not be cut off with it.
@@ -52,6 +56,7 @@ from pathlib import Path
 from trading.operations.paths import atomic_private_write
 from trading.operations.sentinel import (
     FENCED,
+    WOULD_FENCE,
     FenceStore,
     fence_identity,
     replay_mismatch_reason,
@@ -168,6 +173,8 @@ class DecisionParity:
     note: str = ""
     # Recorded decisions the replay lacks, per identity: missing data, not compared.
     not_compared: Mapping[str, int] = field(default_factory=dict)
+    # Log-only (the Sentinel's switch): judged a fence, nothing written.
+    would_fence: tuple[str, ...] = ()
 
     def payload(self) -> dict[str, object]:
         return {
@@ -178,6 +185,7 @@ class DecisionParity:
             "failed": dict(self.failed),
             "note": self.note,
             "not_compared": dict(self.not_compared),
+            "would_fence": list(self.would_fence),
         }
 
 
@@ -211,10 +219,13 @@ async def fence_replay_mismatches(
     """Fence every sendable identity with a mismatched decision (stop-only).
 
     A shadow identity sends nothing, so its mismatch is reported, never
-    fenced; an identity already stopped keeps its row and reason.
+    fenced; an identity already stopped keeps its row and reason. While the
+    Sentinel is log-only, ``fence_identity`` writes nothing and the identity
+    is recorded as ``would_fence``.
     """
     fenced: list[str] = []
     already: list[str] = []
+    would: list[str] = []
     failed: dict[str, str] = {}
     counted = {identity: count for identity, count in sorted(mismatches.items()) if count > 0}
     for identity, count in counted.items():
@@ -230,6 +241,8 @@ async def fence_replay_mismatches(
         if outcome == FENCED:
             logger.critical("fenced %s: %s", identity, reason)
             fenced.append(identity)
+        elif outcome == WOULD_FENCE:
+            would.append(identity)  # fence_identity logged "sentinel would fence …"
         else:
             logger.warning("%s already fenced; %s", identity, reason)
             already.append(identity)
@@ -239,6 +252,7 @@ async def fence_replay_mismatches(
         fenced=tuple(fenced),
         already_fenced=tuple(already),
         failed=failed,
+        would_fence=tuple(would),
     )
 
 

@@ -1,23 +1,42 @@
-"""Which table of identity size factors each pre-T-8 commit ran with (data only).
+"""Which table of identity size factors each commit ran with (data only).
 
-Generated on 2026-10-16 from every branch, tag and remote of the repository:
+Generated on 2026-10-16, and again on 2026-10-17 (P1-B.3), from every branch, tag
+and remote of the repository:
 
     git rev-list --branches --tags --remotes                      # every commit
     git rev-list --branches --tags --remotes --ancestry-path ^784c2bd6a732
                                                                   # descendants of v7b
     (plus 784c2bd6a732 itself)
+    git show <sha>:backend/trading/orchestration/persistence.py   # per descendant:
+        "self._pipeline.with_decision_recorder(" present or not
 
-and abbreviated to 12 hex digits (no two of these commits share a prefix).
-``PRE_V7B_COMMITS`` are the commits that do not contain 784c2bd6a732 ("feat(bridge):
-v7b: the four sendable identities, data rows only"); ``V7B_COMMITS`` are 784c2bd6a732
-and its descendants up to this file. ``trading.research.size_history`` maps them
-to their table version.
+and abbreviated to 12 hex digits (no two of these commits share a prefix). A
+regeneration only adds: a listed commit is never dropped.
 
-The list is closed by design: from the commit that adds the decision-sizing
-sidecar (``trading.storage.decision_sizing``) on, every decision records its own
-effective multiplier, so only commits that ran before it need a row here. A
-commit that is not listed reads as unknown and is named in the nightly evidence,
-never guessed; listing one is a data-only change (rerun the commands above).
+  * ``PRE_V7B_COMMITS``: the commits that do not contain 784c2bd6a732
+    ("feat(bridge): v7b: the four sendable identities, data rows only"). Every
+    commit that recorded decisions on the live system is one of them (88b963d,
+    904af38 and 664c93b, the v7a head live since 2026-10-16).
+  * ``V7B_COMMITS``: 784c2bd6a732 and those descendants whose repository runner
+    rebuilds the pipeline without its identity factor (every decision x1).
+  * ``V7B_SIZED_COMMITS``: the descendants whose runner keeps it
+    (``with_decision_recorder``: v7b.1 7f7178d4f90f and its descendants, and
+    T-8's own copy of the fix, ded4264f61c9), so the four rows are applied:
+    the v7b verdict's head 7872c86 and its docs-only children up to the frozen
+    bridge-v7b tip 5d0eb1c, and the P1-A and P1-B heads.
+
+``trading.research.size_history`` maps each to its table version.
+
+The source is the run's ``source_sha``: ``git rev-parse HEAD`` of the checkout
+it ran from (``trading.operations.shadow_service.source_sha``), ``-dirty`` with
+local changes. A commit that is not listed reads as unknown and is named in the
+nightly evidence, never guessed; listing one is a data-only change (rerun the
+commands above). A commit cannot list itself, so a head made after this file
+(a later docs/reviews commit included) is unknown here until a later
+regeneration lists it. From the decision-sizing sidecar
+(``trading.storage.decision_sizing``, T-8) on, every decision records its own
+effective multiplier and needs no row; a run with no decision still reads its
+commit here.
 """
 from __future__ import annotations
 
@@ -120,13 +139,32 @@ PRE_V7B_COMMITS: frozenset[str] = frozenset(
 )
 V7B_COMMITS: frozenset[str] = frozenset(
     """
-    1120b7549b24 227b8b3d4fe5 299d6e13ac92 378ebd4af372 784c2bd6a732 8399d08256ca
-    866bca88b16b 967cbc01e426 a8cba98cce99 bdc05a07bcef bfb1cb1259f4 d0553725d5a1
-    e0e5ae6a4bd7 f8df19bf7031
+    04ad69411810 1120b7549b24 227b8b3d4fe5 299d6e13ac92 35250bcfc27a 378ebd4af372
+    784c2bd6a732 78e7d0396cfd 7adcd12ede74 8399d08256ca 866bca88b16b 927bb266a906
+    967cbc01e426 a8cba98cce99 bdc05a07bcef bfb1cb1259f4 d0553725d5a1 e0e5ae6a4bd7
+    f8df19bf7031
+    """.split()
+)
+V7B_SIZED_COMMITS: frozenset[str] = frozenset(
+    """
+    0633efdbeacd 087e9f0f4b78 09e997b93eeb 134bde4ff2ff 282408a3081e 3375b7dcaba4
+    3a17ed29672f 3a4254e90dcb 5b4c45bfcb06 5d0eb1ca947a 622af486377a 6578feb64aab
+    6ba575a013c7 74025d798ca3 7872c86357ee 7f7178d4f90f 809142ca60bd 83a7f2f70a94
+    8dac16b34b16 95e7534eeb70 9c3a4dcb43e3 a07084867dcf a23f6d43e918 aad915741067
+    ded4264f61c9 df6ce5983bb0 edb46c001a4b eededf9204f3 f31543030909 f656cba7a43b
+    ff45ec8abb37
     """.split()
 )
 # Pinned so an edit of the lists is visible (tests/test_size_history.py).
 PRE_V7B_COUNT = 557
-V7B_COUNT = 14
+V7B_COUNT = 19
+V7B_SIZED_COUNT = 31
 
-__all__ = ["PRE_V7B_COMMITS", "PRE_V7B_COUNT", "V7B_COMMITS", "V7B_COUNT"]
+__all__ = [
+    "PRE_V7B_COMMITS",
+    "PRE_V7B_COUNT",
+    "V7B_COMMITS",
+    "V7B_COUNT",
+    "V7B_SIZED_COMMITS",
+    "V7B_SIZED_COUNT",
+]

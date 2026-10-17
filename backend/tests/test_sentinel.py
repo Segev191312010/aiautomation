@@ -4,6 +4,11 @@ Every state file here is written by the pinned bridge's own StateStore and
 Bracket (tests.test_paper_bridge loads scripts_local/paper_bridge.py), so the
 Sentinel reads exactly what the bridge writes. Fences go to a scratch database
 (conftest isolates HOME and DB_PATH); nothing touches the live state.
+
+The Sentinel ships log-only (owner, 2026-10-17: ``SENTINEL_FENCES_LIVE = False``
+for its first session). Most tests here protect the live auto-fence the owner
+turns on afterwards (P1-B.4), unchanged, so the module's autouse fixture
+switches it on; the log-only tests run with the shipped value.
 """
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import inspect
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -26,6 +32,7 @@ from trading.operations.sentinel import (
     LOSING_STREAK,
     MAX_ENTRIES_PER_DAY,
     UNCAPPED_LOSS_R,
+    WOULD_FENCE,
     Sentinel,
     blind_text,
     bracket_r,
@@ -33,12 +40,16 @@ from trading.operations.sentinel import (
     daily_loss_trigger,
     fence_identity,
     fence_text,
+    losing_streak_trigger,
     loss_limit,
     owner_resume_reason,
     owner_resumed_on,
     read_bridge_state,
+    replay_mismatch_reason,
     streak_triggers,
 )
+# The value the module ships with, bound before any fixture switches it.
+from trading.operations.sentinel import SENTINEL_FENCES_LIVE as SHIPPED_FENCES_LIVE
 from trading.research.live_ledger import read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.sendable_identities import SENDABLE_IDENTITIES
@@ -49,6 +60,18 @@ FRIDAY = date(2026, 10, 9)
 MONDAY = date(2026, 10, 12)
 TUESDAY = date(2026, 10, 13)
 TODAY = date(2026, 10, 14)  # a Wednesday session
+
+
+@pytest.fixture(autouse=True)
+def fences_live(monkeypatch) -> None:
+    """The live auto-fence (P1-B.4's switch), for the tests that protect it unchanged."""
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
+
+
+def _log_only(monkeypatch) -> None:
+    """Back to the shipped switch, which must be log-only."""
+    assert SHIPPED_FENCES_LIVE is False
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", SHIPPED_FENCES_LIVE)
 
 
 def _et(hour: int, minute: int, second: int = 0, *, day: date = TODAY) -> datetime:
@@ -179,7 +202,7 @@ def _sentinel(
 def test_the_thresholds_are_the_owner_accepted_defaults_and_the_bridges_caps():
     assert CAPPED_LOSS_FACTOR == Decimal("1.25")
     assert UNCAPPED_LOSS_R == Decimal("2")
-    assert LOSING_STREAK == 3
+    assert LOSING_STREAK == 4  # owner, 2026-10-17 (was 3)
     assert (BLIND_AFTER, BLIND_REPEAT) == (timedelta(minutes=5), timedelta(minutes=30))
     # One caps row per sendable identity, equal to the pinned bridge's own table.
     assert set(MAX_ENTRIES_PER_DAY) == set(SENDABLE_IDENTITIES)
@@ -278,17 +301,19 @@ def test_a_bracket_without_a_usable_r_is_measured_in_the_identitys_largest_r_tod
 # --------------------------------------------------------------------------
 
 
-def test_three_losses_in_a_row_across_sessions_fence_on_the_day_the_third_closes(tmp_path):
+def test_four_losses_in_a_row_across_sessions_fence_on_the_day_the_fourth_closes(tmp_path):
+    """Owner, 2026-10-17: the streak is 4 in a row (it was 3)."""
     directory = tmp_path / "bridge"
+    _save(directory, FRIDAY, [_closed("f-loss", "ORB_V2", "-100.00", day=FRIDAY)])
     _save(directory, MONDAY, [_closed("m-loss", "ORB_V2", "-100.00", day=MONDAY)])
     _save(directory, TUESDAY, [_closed("t-loss", "ORB_V2", "-100.00", day=TUESDAY)])
-    # Two so far: nothing.
+    # Three so far, the third closed on Tuesday: not a streak.
     assert streak_triggers(directory, TUESDAY, read_live_ledger) == ()
     _save(directory, TODAY, [_closed("w-loss", "ORB_V2", "-101.00", day=TODAY)])
 
     (trigger,) = streak_triggers(directory, TODAY, read_live_ledger)
     assert trigger.identity == "ORB_V2"
-    assert trigger.reason.startswith("sentinel: losing streak 3 losing trades in a row (-1.0")
+    assert trigger.reason.startswith("sentinel: losing streak 4 losing trades in a row (-1.0")
     assert trigger.reason.endswith(" R net)")
     # The next day, with no new trade, the old streak does not fire again
     # (an owner's resume holds until the next loss).
@@ -298,19 +323,36 @@ def test_three_losses_in_a_row_across_sessions_fence_on_the_day_the_third_closes
     assert streak_triggers(directory, TODAY, read_live_ledger) == ()
 
 
+def test_three_losses_in_a_row_are_not_a_streak_four_are(tmp_path):
+    """The boundary on the pure rule: 3 trailing losses never fire, 4 do."""
+    directory = tmp_path / "bridge"
+    for index, day in enumerate((FRIDAY, MONDAY, TUESDAY, TODAY)):
+        _save(directory, day, [_closed(f"loss-{index}", "GAP_GO_V2", "-100.00", day=day)])
+    trades = sorted(
+        (trade for trade in read_live_ledger(directory).trades if trade.strategy == "GAP_GO_V2"),
+        key=lambda trade: trade.session_date,
+    )
+    assert [trade.session_date for trade in trades] == [FRIDAY, MONDAY, TUESDAY, TODAY]
+    assert losing_streak_trigger("GAP_GO_V2", trades[1:], TODAY) is None
+    four = losing_streak_trigger("GAP_GO_V2", trades, TODAY)
+    assert four is not None and four.numbers.startswith("4 losing trades in a row (")
+
+
 def test_trades_are_ordered_by_entry_time_not_by_decision_id(tmp_path):
     directory = tmp_path / "bridge"
     _save(directory, MONDAY, [_closed("m-win", "VWAP_PB_V2", "100.00", day=MONDAY)])
-    # In entry order Tuesday is win, loss, loss; by decision id it would be loss, loss, win.
+    # In entry order Tuesday is win, loss, loss, loss; by decision id it would be
+    # loss, loss, loss, win.
     _save(directory, TUESDAY, [
         _closed("z-win", "VWAP_PB_V2", "100.00", day=TUESDAY, at=time(10, 0)),
         _closed("a-loss", "VWAP_PB_V2", "-100.00", day=TUESDAY, at=time(11, 0)),
         _closed("b-loss", "VWAP_PB_V2", "-100.00", day=TUESDAY, at=time(12, 0)),
+        _closed("c-loss", "VWAP_PB_V2", "-100.00", day=TUESDAY, at=time(13, 0)),
     ])
-    _save(directory, TODAY, [_closed("c-loss", "VWAP_PB_V2", "-100.00", day=TODAY)])
+    _save(directory, TODAY, [_closed("d-loss", "VWAP_PB_V2", "-100.00", day=TODAY)])
 
     (trigger,) = streak_triggers(directory, TODAY, read_live_ledger)
-    assert trigger.identity == "VWAP_PB_V2" and "3 losing trades in a row" in trigger.reason
+    assert trigger.identity == "VWAP_PB_V2" and "4 losing trades in a row" in trigger.reason
 
 
 # --------------------------------------------------------------------------
@@ -339,6 +381,8 @@ async def test_a_trigger_writes_its_identity_row_once_per_day_and_an_owner_resum
     # The bridge's own predicate sees the stop.
     assert bridge.identity_fence_active(fences, "ORB_V2")
 
+    # Live: nothing of the log-only memory.
+    assert [key for key in memory if key.startswith("sentinel_would_fence:")] == []
     # Still over the limit a minute later: no second write, no second message.
     written = rows["paper:ORB_V2"][2]
     heartbeat.at = _et(10, 1)
@@ -365,6 +409,7 @@ async def test_a_trigger_writes_its_identity_row_once_per_day_and_an_owner_resum
 async def test_the_sentinel_never_resumes_and_never_writes_the_global_row(tmp_path):
     directory = tmp_path / "bridge"
     # Every sendable identity over its limit at once, and a losing streak on ORB_V2 too.
+    _save(directory, FRIDAY, [_closed("f", "ORB_V2", "-100.00", day=FRIDAY)])
     _save(directory, MONDAY, [_closed("m", "ORB_V2", "-100.00", day=MONDAY)])
     _save(directory, TUESDAY, [_closed("t", "ORB_V2", "-100.00", day=TUESDAY)])
     _save(directory, TODAY, [
@@ -501,7 +546,7 @@ async def test_an_owner_resume_holds_from_the_fence_table_when_the_notifier_stat
 
 
 def test_the_resume_trace_names_the_lifted_fences_own_date_and_only_a_sentinel_fence():
-    fence = FenceRow(True, "sentinel: losing streak 3 losing trades in a row", _et(15, 0, day=TUESDAY).isoformat())
+    fence = FenceRow(True, "sentinel: losing streak 4 losing trades in a row", _et(15, 0, day=TUESDAY).isoformat())
     assert owner_resume_reason("ok", fence) == "ok (lifts sentinel fence of 2026-10-13)"
     # An owner's own stop, a row already resumed, or no row: the reason as typed.
     assert owner_resume_reason("ok", FenceRow(True, "telegram /halt by owner", fence.updated_at)) == "ok"
@@ -686,3 +731,123 @@ async def test_the_end_of_the_bridge_window_is_not_seeing_again(tmp_path):
     # state is no fresher, so no "sees again" line.
     assert await watcher.check(_et(15, 55)) == []
     assert await watcher.check(_et(16, 5)) == []
+
+
+# --------------------------------------------------------------------------
+# Log-only: the shipped switch (owner, 2026-10-17: log-only for the first session)
+# --------------------------------------------------------------------------
+
+ORB_WOULD = "🔎 auto-fence (log-only): would stop ORB_V2 — daily loss 1.30 R > 1.25 R (realized -$130.00)"
+
+
+class NoStore:
+    """Fails the test on any call: log-only never reaches the fence store."""
+
+    async def stop_identity(self, **_kwargs) -> FenceRow | None:
+        raise AssertionError("log-only reached the fence store")
+
+
+def test_the_sentinel_ships_log_only_and_the_switch_is_one_code_constant():
+    import ast
+
+    assert SHIPPED_FENCES_LIVE is False
+    source = inspect.getsource(sentinel)
+    assigned = [
+        node.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "SENTINEL_FENCES_LIVE" for target in node.targets)
+    ]
+    assert len(assigned) == 1 and isinstance(assigned[0], ast.Constant) and assigned[0].value is False
+    # Read inside the one write path: the Sentinel and the nightly replay hook both obey it.
+    assert "SENTINEL_FENCES_LIVE" in inspect.getsource(fence_identity)
+    # Never an environment variable or a setting.
+    assert "os.environ" not in source and "getenv(" not in source
+
+
+async def test_log_only_fence_identity_never_reaches_the_store_for_either_writer(monkeypatch, caplog):
+    _log_only(monkeypatch)
+    caplog.set_level(logging.INFO, logger="autotrader.shadow.sentinel")
+    store = NoStore()
+
+    # The Sentinel's call (with resumed_on) and the nightly replay hook's (without).
+    reason = "sentinel: daily loss 1.30 R > 1.25 R (realized -$130.00)"
+    assert await fence_identity(store, identity="ORB_V2", reason=reason, resumed_on=TODAY) == WOULD_FENCE
+    assert await fence_identity(store, identity="GAP_GO_V2", reason=replay_mismatch_reason(2)) == WOULD_FENCE
+    assert [record.getMessage() for record in caplog.records] == [
+        "sentinel would fence ORB_V2: daily loss 1.30 R > 1.25 R (realized -$130.00)",
+        "sentinel would fence GAP_GO_V2: replay mismatch 2 decisions",
+    ]
+    # Its guards hold in both modes: never the global row, never a name that is not sendable.
+    for name in (None, "MOMO_HOD_V1", "orb_v2", ""):
+        with pytest.raises(ValueError):
+            await fence_identity(store, identity=name, reason="sentinel: x")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        await fence_identity(store, identity="ORB_V2", reason="owner wants it")
+
+
+async def test_log_only_writes_no_row_and_says_would_fence_once_per_identity_per_day(
+    tmp_path, fences, monkeypatch, caplog
+):
+    _log_only(monkeypatch)
+    caplog.set_level(logging.INFO, logger="autotrader.shadow.sentinel")
+    directory = tmp_path / "bridge"
+    _save(directory, TODAY, [_bracket("orb", status="closed", realized_pnl="-130.00")], written_at=_et(10, 0))
+    memory: dict[str, str] = {}
+    heartbeat = Heartbeat(_et(10, 0))
+    watcher = _sentinel(directory, memory, heartbeat=heartbeat)  # the real SQLitePaperKillStore
+
+    assert await watcher.check(_et(10, 0, 30)) == [("sentinel_would_fence", ORB_WOULD)]
+    assert _rows(fences) == {}
+    assert not bridge.identity_fence_active(fences, "ORB_V2")
+    assert "sentinel_would_fence:ORB_V2" in memory and "sentinel_fence:ORB_V2" not in memory
+
+    # Every later 30-second check, and a restart on the same per-date memory: nothing more.
+    for seconds in range(60, 600, 30):
+        heartbeat.at = _et(10, 0) + timedelta(seconds=seconds)
+        assert await watcher.check(_et(10, 0) + timedelta(seconds=seconds)) == []
+    restarted = _sentinel(directory, memory, heartbeat=Heartbeat(_et(10, 11)))
+    assert await restarted.check(_et(10, 11)) == []
+
+    # Another identity over its limit later that day: its own line, once.
+    _save(directory, TODAY, [
+        _bracket("orb", status="closed", realized_pnl="-130.00"),
+        _bracket("gap", "GAP_GO_V2", status="closed", realized_pnl="-200.00"),
+    ], written_at=_et(11, 0))
+    assert await restarted.check(_et(11, 0, 30)) == [(
+        "sentinel_would_fence",
+        "🔎 auto-fence (log-only): would stop GAP_GO_V2 — daily loss 2.00 R > 1.25 R (realized -$200.00)",
+    )]
+    assert await restarted.check(_et(11, 1)) == []
+    assert _rows(fences) == {}
+    assert [record.getMessage() for record in caplog.records if "would fence" in record.getMessage()] == [
+        "sentinel would fence ORB_V2: daily loss 1.30 R > 1.25 R (realized -$130.00)",
+        "sentinel would fence GAP_GO_V2: daily loss 2.00 R > 1.25 R (realized -$200.00)",
+    ]
+
+    # The next session day (a fresh per-date memory): said again, still no row.
+    tomorrow = date(2026, 10, 15)
+    _save(directory, tomorrow, [_bracket("orb2", status="closed", realized_pnl="-200.00")],
+          written_at=_et(10, 0, day=tomorrow))
+    next_day = _sentinel(directory, {}, store=NoStore(), heartbeat=Heartbeat(_et(10, 0, day=tomorrow)), day=tomorrow)
+    assert await next_day.check(_et(10, 0, 30, day=tomorrow)) == [(
+        "sentinel_would_fence",
+        "🔎 auto-fence (log-only): would stop ORB_V2 — daily loss 2.00 R > 1.25 R (realized -$200.00)",
+    )]
+    assert _rows(fences) == {}
+
+
+async def test_log_only_the_sees_again_line_does_not_claim_an_active_fence(tmp_path, monkeypatch):
+    _log_only(monkeypatch)
+    directory = tmp_path / "bridge"
+    _save(directory, TODAY, [_bracket("o", status="closed", realized_pnl="-130.00")], written_at=_et(9, 40))
+    heartbeat = Heartbeat(_et(9, 40))
+    watcher = _sentinel(directory, {}, store=NoStore(), heartbeat=heartbeat)
+    (blind,) = await watcher.check(_et(9, 46))
+    assert blind[0] == "sentinel_blind"
+
+    heartbeat.at = _et(10, 20)
+    assert [text for _alert, text in await watcher.check(_et(10, 20, 5))] == [
+        "✅ sentinel sees the bridge state again (10:20 ET); auto-fence log-only",
+        ORB_WOULD,
+    ]

@@ -13,9 +13,10 @@ session calendar (no clock time is typed here):
 
   * pre-session leads: ``PRE_SESSION_LEADS`` before ``SCREENER_WINDOW[0]``
     (SESSION_START) on session days only: 05:55 and 07:40 ET;
-  * the watch day: from a session day's first lead to ``REPLAY_WINDOW``'s end
-    (18:30 ET). Everything else is quiet hours: 18:30 ET to the next session
-    day's 05:55 ET, so a weekend or a holiday is quiet throughout;
+  * the watch day: from a session day's first lead to ``RECORDER_WINDOW``'s
+    end (17:30 ET; owner, 2026-10-17: the evening pages 16:15-17:30 ET, 23:15-
+    00:30 Israel, then sleep). Everything else is quiet hours: 17:30 ET to the
+    next session day's 05:55 ET, so a weekend or a holiday is quiet throughout;
   * the notifier's window: the watch is silent (``PortWatch.handover``);
   * the competing-login window: ``SCREENER_WINDOW[0]`` to ``RECORDER_WINDOW``'s
     end (07:55-17:30 ET) on session days; the notifier covers it to its own
@@ -69,7 +70,6 @@ from trading.operations.hysteresis import CLOSE, OPEN, Event, Hysteresis, State
 from trading.operations.supervisor import (
     NOTIFIER_WINDOW,
     RECORDER_WINDOW,
-    REPLAY_WINDOW,
     SCREENER_WINDOW,
 )
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
@@ -121,15 +121,15 @@ def in_notifier_window(now: datetime) -> bool:
 
 
 def watch_day(day: date) -> tuple[datetime, datetime] | None:
-    """From the first lead to the replay window's end; None on a closed day."""
+    """From the first lead to the recorder window's end; None on a closed day."""
     leads = pre_session_leads(day)
     if not leads:
         return None
-    return leads[0], _at(day, REPLAY_WINDOW[1])
+    return leads[0], _at(day, RECORDER_WINDOW[1])
 
 
 def is_quiet(now: datetime) -> bool:
-    """Quiet hours: outside the watch day (18:30 ET to the next session day's first lead)."""
+    """Quiet hours: outside the watch day (17:30 ET to the next session day's first lead)."""
     span = watch_day(et_day(now))
     return span is None or not span[0] <= now < span[1]
 

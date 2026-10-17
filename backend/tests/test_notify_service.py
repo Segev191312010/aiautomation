@@ -2844,8 +2844,10 @@ async def _notify_day(tmp_path: Path, monkeypatch) -> UserPaths:
 async def test_the_sentinel_fences_from_the_notifier_once_and_a_restart_keeps_it(tmp_path, monkeypatch):
     from datetime import time
 
-    from trading.operations import notify_service
+    from trading.operations import notify_service, sentinel
 
+    # The live auto-fence (P1-B.4's switch; the Sentinel ships log-only), unchanged.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
     paths = await _notify_day(tmp_path, monkeypatch)
     _write_bridge_state(paths, {
         "orb": _bracket("ABC", "closed", strategy="orb", strategy_name="ORB_V2", entry="50.00",
@@ -2874,6 +2876,45 @@ async def test_the_sentinel_fences_from_the_notifier_once_and_a_restart_keeps_it
     restarted = FakeTelegram()
     assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, FakeTime(_et(10, 10)))) == 0
     assert not any("auto-fence" in text or "Fenced at start" in text for text in restarted.sent())
+
+
+@pytest.mark.anyio
+async def test_log_only_the_notifier_sends_one_would_fence_line_and_writes_no_fence(tmp_path, monkeypatch, caplog):
+    """The shipped switch through the production path: 20 Sentinel checks (every
+    30 s, 10:00-10:10) over ORB_V2's limit send one 🔎 line, write no fence row,
+    and a restart the same day sends nothing more."""
+    from datetime import time
+
+    from config import cfg
+    from trading.operations import notify_service, sentinel
+
+    assert sentinel.SENTINEL_FENCES_LIVE is False
+    caplog.set_level(logging.INFO, logger="autotrader.shadow")
+    paths = await _notify_day(tmp_path, monkeypatch)
+    _write_bridge_state(paths, {
+        "orb": _bracket("ABC", "closed", strategy="orb", strategy_name="ORB_V2", entry="50.00",
+                        stop="49.00", filled=100, exit_filled=100, realized_pnl="-130.00"),
+    })
+    monkeypatch.setattr(notify_service, "SESSION_END", time(10, 10))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, FakeTime(_et(10, 0)))) == 0
+
+    would = "🔎 auto-fence (log-only): would stop ORB_V2 — daily loss 1.30 R > 1.25 R (realized -$130.00)"
+    assert [text for text in telegram.sent() if "auto-fence" in text] == [would]
+    assert _fence_rows(Path(cfg.DB_PATH)) == {}
+    saved = json.loads(state_file(paths, SESSION).read_text(encoding="utf-8"))
+    assert "sentinel_would_fence:ORB_V2" in saved["alerts"] and "sentinel_fence:ORB_V2" not in saved["alerts"]
+    assert _queued_alerts(caplog).count("sentinel_would_fence") == 1
+    assert [record.getMessage() for record in caplog.records if "would fence" in record.getMessage()] == [
+        "sentinel would fence ORB_V2: daily loss 1.30 R > 1.25 R (realized -$130.00)"
+    ]
+
+    monkeypatch.setattr(notify_service, "SESSION_END", time(10, 20))
+    restarted = FakeTelegram()
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, restarted, FakeTime(_et(10, 10)))) == 0
+    assert not any("auto-fence" in text or "Fenced at start" in text for text in restarted.sent())
+    assert _fence_rows(Path(cfg.DB_PATH)) == {}
 
 
 @pytest.mark.anyio

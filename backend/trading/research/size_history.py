@@ -25,10 +25,13 @@ v7b only MOMO_HOD_V2 sent orders, at x1, and every other name was sized at the
 unscaled policy quantity (x1). v7b (784c2bd6a732) added ORB_V2 x0.25 and
 VWAP_PB_V2 / GAP_GO_V2 x0.5, but the repository runner rebuilt the pipeline
 without its identity factor (``trading/orchestration/persistence.py`` before
-T-8), so every decision those commits made through the session runner was sized
-at x1. The table below records both: ``table`` (the constant) and ``applied``
-(what the decisions carry). The fix ships with the sidecar, so every commit
-that applies the table also records it.
+v7b.1), so every decision those commits made through the session runner was
+sized at x1. The table below records both: ``table`` (the constant) and
+``applied`` (what the decisions carry). v7b.1 (7f7178d4f90f) fixed the runner
+before the sidecar existed, so its commits apply the table without recording
+it: the ``v7b`` version, the four rows applied (the v7b head 7872c86 to the
+frozen bridge-v7b tip 5d0eb1c, and the P1 heads; T-8's ded4264f61c9 carried
+its own copy of the fix).
 """
 from __future__ import annotations
 
@@ -44,7 +47,7 @@ import sqlite3
 from types import MappingProxyType
 from urllib.parse import quote
 
-from trading.research.source_commits import PRE_V7B_COMMITS, V7B_COMMITS
+from trading.research.source_commits import PRE_V7B_COMMITS, V7B_COMMITS, V7B_SIZED_COMMITS
 from trading.storage.decision_sizing import DecisionSizing, SizingIndex
 from trading.storage.migrations import SCHEMA_READ_TIMEOUT_SECONDS
 
@@ -57,6 +60,8 @@ SIZE_STEP = "size_step"
 LEFT_SENDABLE = "left_sendable"
 
 V7B_FIRST_COMMIT = "784c2bd6a7322a8abc7afe9d8561ae904d181225"
+# v7b.1: "the repository runner keeps the identity size factor".
+V7B_SIZED_FIRST_COMMIT = "7f7178d4f90f49244666239fccc855596e842e40"
 _ONE = Decimal("1")
 _HEX = re.compile(r"^[0-9a-f]{12,64}$")
 _DIRTY = "-dirty"
@@ -106,7 +111,16 @@ V7B_FACTOR_DROPPED = TableVersion(
         " every decision was sized x1 whatever the table said"
     ),
 )
-TABLE_VERSIONS: tuple[TableVersion, ...] = (PRE_V7B, V7B_FACTOR_DROPPED)
+_V7B_ROWS = {"MOMO_HOD_V2": "1", "ORB_V2": "0.25", "VWAP_PB_V2": "0.5", "GAP_GO_V2": "0.5"}
+V7B_SIZED = TableVersion(
+    label="v7b",
+    first_commit=V7B_SIZED_FIRST_COMMIT,
+    sendable=frozenset(_V7B_ROWS),
+    table=_frozen(_V7B_ROWS),
+    applied=_frozen(_V7B_ROWS),
+    note="the repository runner keeps the identity factor (v7b.1): every decision sized by the table",
+)
+TABLE_VERSIONS: tuple[TableVersion, ...] = (PRE_V7B, V7B_FACTOR_DROPPED, V7B_SIZED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +144,8 @@ def table_version_for(source_sha: str) -> SourceLookup:
     if not _HEX.fullmatch(text):
         return SourceLookup(version=None, commit=None, dirty=dirty)
     prefix = text[:12]
+    if prefix in V7B_SIZED_COMMITS:
+        return SourceLookup(V7B_SIZED, prefix, dirty)
     if prefix in V7B_COMMITS:
         return SourceLookup(V7B_FACTOR_DROPPED, prefix, dirty)
     if prefix in PRE_V7B_COMMITS:
@@ -534,6 +550,8 @@ __all__ = [
     "UNKNOWN",
     "V7B_FACTOR_DROPPED",
     "V7B_FIRST_COMMIT",
+    "V7B_SIZED",
+    "V7B_SIZED_FIRST_COMMIT",
     "DecisionRef",
     "EffectiveMultiplier",
     "IdentitySizeHistory",

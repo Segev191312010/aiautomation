@@ -143,10 +143,12 @@ def test_the_leads_and_windows_are_derived_from_the_supervisor_constants(monkeyp
     assert pre_session_leads(MONDAY) == tuple(sorted(start - lead for lead in PRE_SESSION_LEADS))
     assert [lead.strftime("%H:%M") for lead in pre_session_leads(MONDAY)] == ["05:55", "07:40"]
     assert pre_session_leads(SATURDAY) == () and pre_session_leads(THANKSGIVING) == ()
-    # Quiet hours: REPLAY_WINDOW's end to the next session day's first lead.
-    assert REPLAY_WINDOW[1] == time(18, 30)
+    # Quiet hours: RECORDER_WINDOW's end (owner, 2026-10-17; it was REPLAY_WINDOW's,
+    # 18:30) to the next session day's first lead.
+    assert RECORDER_WINDOW[1] == time(17, 30) and REPLAY_WINDOW[1] == time(18, 30)
     assert is_quiet(et(MONDAY, 5, 54, 59)) and not is_quiet(et(MONDAY, 5, 55))
-    assert not is_quiet(et(MONDAY, 18, 29, 59)) and is_quiet(et(MONDAY, 18, 30))
+    assert not is_quiet(et(MONDAY, 17, 29, 59)) and is_quiet(et(MONDAY, 17, 30))
+    assert is_quiet(et(MONDAY, 18, 0)) and is_quiet(et(MONDAY, 18, 30))
     assert is_quiet(et(SATURDAY, 12, 0)) and is_quiet(et(THANKSGIVING, 6, 0))
     assert NOTIFIER_WINDOW == (time(7, 55), time(16, 15))
     assert in_notifier_window(et(MONDAY, 7, 55)) and not in_notifier_window(et(MONDAY, 16, 15))
@@ -256,6 +258,35 @@ async def test_inside_the_notifier_window_the_watch_says_nothing_and_checks_noth
     assert sent == [
         "⛔ IB Gateway closed since before 16:15 ET (its API port does not answer) — log in to IB Gateway"
     ]
+
+
+async def test_an_evening_closure_pages_until_1730_et_and_after_it_goes_to_the_morning_digest(tmp_path):
+    """Owner, 2026-10-17: the evening pages 16:15-17:30 ET (23:15-00:30 Israel),
+    quiet from RECORDER_WINDOW's end. Checks every 5 min: the second failed check
+    opens the outage. Opened at 17:29 it pages at once; opened at 17:31 it is
+    a digest entry, sent with the 05:55 page the next session day."""
+    tuesday = date(2026, 10, 20)
+
+    # Checks 17:14, 17:19 (open), 17:24 (closed), 17:29 (closed: opens, paged).
+    clock = Time(et(MONDAY, 17, 14), et(MONDAY, 17, 45))
+    port = Port(clock, [(et(MONDAY, 17, 22), et(tuesday, 9, 0))])
+    watch, _ = make_watch(tmp_path / "1729", clock, port)
+    assert await drive(watch) == [
+        "⛔ IB Gateway closed since 17:24 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+    assert watch.port.hysteresis.is_open and et(MONDAY, 17, 29) in port.checks
+
+    # Checks 17:16, 17:21 (open), 17:26 (closed), 17:31 (closed: opens, quiet): no page
+    # tonight; the 05:55 lead sends the digest, then the page.
+    clock = Time(et(MONDAY, 17, 16), et(tuesday, 5, 56))
+    port = Port(clock, [(et(MONDAY, 17, 24), et(tuesday, 9, 0))])
+    watch, _ = make_watch(tmp_path / "1731", clock, port)
+    assert await drive(watch) == [
+        "🌙 Overnight IB Gateway watch (quiet hours, not paged): port closed since Mon 17:26 ET, still closed",
+        "⛔ IB Gateway closed since Mon 17:26 ET (its API port does not answer) — log in to IB Gateway;"
+        " session starts 07:55 ET (05:55 ET check)",
+    ]
+    assert et(MONDAY, 17, 31) in port.checks
 
 
 async def test_a_paged_outage_that_recovers_by_0755_gets_its_recovery_line_at_the_handover(tmp_path):

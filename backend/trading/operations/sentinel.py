@@ -30,7 +30,7 @@ Triggers (each fences the identity once per day; the first to fire wins):
     (no entries cap). Each bracket's realized P&L is divided by its own R,
     ``qty x (entry - stop)``, and the identity's brackets are summed (a win
     offsets a loss: the rule is about the day's realized loss).
-  * losing streak: the identity's last 3 (or more) closed trades across
+  * losing streak: the identity's last 4 (or more) closed trades across
     sessions, in entry order (``sent_at``), all lost (net R after costs, as
     the live ledger computes it), and the latest of them closed today. A
     streak whose last loss is older does not fire again, so an owner's resume
@@ -45,6 +45,17 @@ Triggers (each fences the identity once per day; the first to fire wins):
     ``avg_exit`` for its own leg ids); executions, with their order ids and
     orderRefs, live only in the bridge process's memory and are never written
     to any structured state. It cannot be detected without reading log lines.
+
+Log-only first (owner, 2026-10-17): ``SENTINEL_FENCES_LIVE`` is False, so the
+Sentinel runs log-only for its first session and fences only after the owner
+agrees, through a reviewed one-line change of that constant (never an
+environment variable or a setting). The switch is read inside
+``fence_identity``, the one write path, so both writers obey it: the Sentinel's
+triggers and the nightly replay-mismatch hook. Log-only, ``fence_identity``
+never calls the store: it logs ``sentinel would fence <ID>: <trigger>`` and
+returns ``WOULD_FENCE``, and the phone gets ``🔎 auto-fence (log-only): would
+stop <ID> — <trigger>`` once per identity per day (its own memory key). Live,
+every row, reason and text is as it was before the switch existed.
 
 A Sentinel that cannot see is loud, and never fences: inside the bridge's own
 window (09:25 ET to 5 minutes before the close) an unreadable state file, no
@@ -105,8 +116,8 @@ logger = logging.getLogger("autotrader.shadow.sentinel")
 CAPPED_LOSS_FACTOR = Decimal("1.25")
 # MOMO_HOD_V2 has no entries cap: fenced at UNCAPPED_LOSS_R or more.
 UNCAPPED_LOSS_R = Decimal("2")
-# Consecutive losing trades across sessions.
-LOSING_STREAK = 3
+# Consecutive losing trades across sessions (owner, 2026-10-17: 4; it was 3).
+LOSING_STREAK = 4
 # Blindness: no evidence for this long inside the window; repeated at most this often.
 BLIND_AFTER = timedelta(minutes=5)
 BLIND_REPEAT = timedelta(minutes=30)
@@ -126,6 +137,12 @@ MAX_ENTRIES_PER_DAY: Mapping[str, int | None] = MappingProxyType(
 _MISSING_CAPS_ENTRIES = 1
 MAX_STATE_BYTES = 5 * 1024 * 1024
 
+# -- the owner's switch (2026-10-17) -----------------------------------------------------
+# False: log-only (no fence row is ever written; WOULD_FENCE and one 🔎 line per
+# identity per day instead). The owner turns fences on after the first session
+# with a reviewed one-line change of this constant (P1-B.4), never otherwise.
+SENTINEL_FENCES_LIVE = False
+
 REASON_PREFIX = "sentinel: "
 DAILY_LOSS = "daily loss"
 LOSING_STREAK_TRIGGER = "losing streak"
@@ -133,9 +150,12 @@ REPLAY_MISMATCH = "replay mismatch"
 # Memory keys (values: ISO timestamps).
 FENCED_KEY = "sentinel_fence:{identity}"
 FENCE_FAILED_KEY = "sentinel_fence_failed:{identity}"
+# Log-only: the 🔎 line was sent for this identity today.
+WOULD_FENCE_KEY = "sentinel_would_fence:{identity}"
 BLIND_KEY = "sentinel_blind"
 # Alert names for the caller's "alert queued" log line.
 FENCE_ALERT = "sentinel_fence"
+WOULD_FENCE_ALERT = "sentinel_would_fence"
 BLIND_ALERT = "sentinel_blind"
 SEES_AGAIN_ALERT = "sentinel_sees_again"
 
@@ -143,6 +163,8 @@ FENCED = "fenced"
 ALREADY_FENCED = "already_fenced"
 # The owner resumed today's Sentinel fence today: the row is kept, never fenced again.
 OWNER_RESUMED = "owner_resumed"
+# Log-only (SENTINEL_FENCES_LIVE is False): judged a fence, wrote nothing.
+WOULD_FENCE = "would_fence"
 # The trace an owner's resume of a Sentinel fence leaves in the row's reason.
 LIFTED_SUFFIX = " (lifts sentinel fence of {day})"
 _LIFTED = re.compile(r" \(lifts sentinel fence of (?P<day>\d{4}-\d{2}-\d{2})\)$")
@@ -209,6 +231,10 @@ async def fence_identity(
     ``OWNER_RESUMED`` when ``resumed_on`` is given and the owner resumed that
     day's Sentinel fence that day. Check and stop are one transaction.
 
+    Log-only (``SENTINEL_FENCES_LIVE`` is False): ``WOULD_FENCE``, after one
+    log line, and the store is never called, so no row can be written by
+    either writer (the Sentinel, the nightly replay hook).
+
     Only an exact sendable identity reaches the store, so the global ``paper``
     row (``identity=None``) can never be written from here, and nothing here
     can resume.
@@ -217,6 +243,9 @@ async def fence_identity(
         raise ValueError(f"not a sendable identity: {identity!r}")
     if not reason.startswith(REASON_PREFIX):
         raise ValueError("an auto-fence reason starts with 'sentinel: '")
+    if not SENTINEL_FENCES_LIVE:
+        logger.warning("sentinel would fence %s: %s", identity, reason[len(REASON_PREFIX):])
+        return WOULD_FENCE
     unless = None if resumed_on is None else partial(owner_resumed_on, day=resumed_on)
     kept = await store.stop_identity(reason=reason, identity=identity, unless=unless)
     if kept is None:
@@ -514,6 +543,10 @@ def already_fenced_text(trigger: Trigger) -> str:
     )
 
 
+def would_fence_text(trigger: Trigger) -> str:
+    return f"🔎 auto-fence (log-only): would stop {trigger.identity} — {trigger.text}"
+
+
 def fence_failed_text(trigger: Trigger, problem: str) -> str:
     return (
         f"⚠️ auto-fence {trigger.identity} NOT written ({problem}): {trigger.text} — block it by hand:"
@@ -526,7 +559,8 @@ def blind_text(since: datetime, why: str) -> str:
 
 
 def sees_again_text(now: datetime) -> str:
-    return f"✅ sentinel sees the bridge state again ({_hhmm(now)} ET); auto-fence active"
+    mode = "active" if SENTINEL_FENCES_LIVE else "log-only"
+    return f"✅ sentinel sees the bridge state again ({_hhmm(now)} ET); auto-fence {mode}"
 
 
 # --------------------------------------------------------------------------
@@ -654,6 +688,9 @@ class Sentinel:
         done = FENCED_KEY.format(identity=identity)
         if done in self._memory:
             return []  # one fence per identity per day; an owner's resume holds
+        would = WOULD_FENCE_KEY.format(identity=identity)
+        if not SENTINEL_FENCES_LIVE and would in self._memory:
+            return []  # log-only: one 🔎 line per identity per day, never one per check
         try:
             outcome = await fence_identity(
                 self._store, identity=identity, reason=trigger.reason, resumed_on=self._session_date
@@ -663,6 +700,10 @@ class Sentinel:
             if self._due(FENCE_FAILED_KEY.format(identity=identity), now, FENCE_FAILED_REPEAT):
                 return [(FENCE_ALERT, fence_failed_text(trigger, type(exc).__name__))]
             return []
+        if outcome == WOULD_FENCE:
+            # Nothing was written: remembered under its own key, never as a fence.
+            self._memory[would] = now.isoformat()
+            return [(WOULD_FENCE_ALERT, would_fence_text(trigger))]
         self._memory[done] = now.isoformat()
         self._memory.pop(FENCE_FAILED_KEY.format(identity=identity), None)
         if outcome == OWNER_RESUMED:
@@ -713,9 +754,13 @@ __all__ = [
     "OWNER_RESUMED",
     "REASON_PREFIX",
     "REPLAY_MISMATCH",
+    "SENTINEL_FENCES_LIVE",
     "UNCAPPED_LOSS_R",
     "WATCH_FROM",
     "WATCH_UNTIL_BEFORE_CLOSE",
+    "WOULD_FENCE",
+    "WOULD_FENCE_ALERT",
+    "WOULD_FENCE_KEY",
     "BridgeStateReading",
     "FenceStore",
     "HeartbeatReader",
@@ -738,4 +783,5 @@ __all__ = [
     "replay_mismatch_reason",
     "resume_command",
     "streak_triggers",
+    "would_fence_text",
 ]

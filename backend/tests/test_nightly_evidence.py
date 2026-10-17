@@ -286,6 +286,14 @@ def _fence_rows(database: Path) -> dict[str, tuple[int, str]]:
         }
 
 
+@pytest.fixture
+def fences_live(monkeypatch) -> None:
+    """The live auto-fence (P1-B.4's switch): the Sentinel ships log-only (owner, 2026-10-17)."""
+    from trading.operations import sentinel
+
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
+
+
 def test_without_a_comparer_the_parity_step_says_not_compared_and_fences_nothing(night, fence_db):
     from trading.research.nightly import PARITY_NOT_COMPARED_NOTE
 
@@ -294,11 +302,59 @@ def test_without_a_comparer_the_parity_step_says_not_compared_and_fences_nothing
     evidence = json.loads((night["root"] / "reports" / "2026-10-12" / "evidence.json").read_text())
     assert evidence["decision_parity"] == {
         "status": "not_compared", "mismatches": {}, "fenced": [], "already_fenced": [], "failed": {},
-        "note": PARITY_NOT_COMPARED_NOTE, "not_compared": {},
+        "note": PARITY_NOT_COMPARED_NOTE, "not_compared": {}, "would_fence": [],
     }
     assert _fence_rows(fence_db) == {}
 
 
+def test_in_log_only_a_replay_mismatch_writes_no_fence_and_the_report_says_would_fence(
+    night, fence_db, caplog
+):
+    """The shipped switch (log-only): the nightly hook judges as when live, through
+    the same ``fence_identity``, writes no row, and records WOULD_FENCE."""
+    import logging
+
+    from trading.operations import sentinel
+    from trading.research.nightly import fence_replay_mismatches
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    assert sentinel.SENTINEL_FENCES_LIVE is False
+    caplog.set_level(logging.INFO)
+
+    def compare(_results):
+        return {
+            "ORB_V2": _equality("decisions", "decisions"),
+            "ORB_V1": _equality("decisions"),  # shadow-only: reported, never even a would-fence
+        }
+
+    environment = NightlyEnvironment(
+        database=night["database"], bridge_directory=night["bridge"], clock=lambda: _et(TUESDAY, 17, 40),
+        compare_decisions=compare, fence_store=SQLitePaperKillStore(),
+    )
+    assert run_replay_cli([], environment=environment) == 0
+
+    assert _fence_rows(fence_db) == {}
+    report = night["root"] / "reports" / "2026-10-12" / "evidence.json"
+    assert json.loads(report.read_text())["decision_parity"] == {
+        "status": "compared", "mismatches": {"ORB_V1": 1, "ORB_V2": 2}, "fenced": [],
+        "already_fenced": [], "failed": {}, "note": "", "not_compared": {}, "would_fence": ["ORB_V2"],
+    }
+    messages = [record.getMessage() for record in caplog.records]
+    assert "sentinel would fence ORB_V2: replay mismatch 2 decisions" in messages
+    assert not any(message.startswith("fenced ORB_V2") for message in messages)
+
+    # An identity the owner already stopped is still "would fence": log-only never reads the store.
+    class NoStore:
+        async def stop_identity(self, **_kwargs):
+            raise AssertionError("log-only reached the fence store")
+
+    import asyncio
+
+    parity = asyncio.run(fence_replay_mismatches({"GAP_GO_V2": 1, "ORB_V1": 3}, store=NoStore()))
+    assert (parity.would_fence, parity.fenced, parity.already_fenced, parity.failed) == (("GAP_GO_V2",), (), (), {})
+
+
+@pytest.mark.usefixtures("fences_live")
 def test_a_replay_mismatch_fences_the_sendable_identity_once_and_the_report_records_it(night, fence_db):
     from trading.storage.runtime_fence import SQLitePaperKillStore
 
@@ -326,7 +382,7 @@ def test_a_replay_mismatch_fences_the_sendable_identity_once_and_the_report_reco
     report = night["root"] / "reports" / "2026-10-12" / "evidence.json"
     assert json.loads(report.read_text())["decision_parity"] == {
         "status": "compared", "mismatches": {"ORB_V1": 1, "ORB_V2": 2}, "fenced": ["ORB_V2"],
-        "already_fenced": [], "failed": {}, "note": "", "not_compared": {},
+        "already_fenced": [], "failed": {}, "note": "", "not_compared": {}, "would_fence": [],
     }
 
     # A restart inside the window finds the row already stopped: kept, not rewritten.
@@ -353,6 +409,7 @@ def _decisions(*reasons: str):
     )
 
 
+@pytest.mark.usefixtures("fences_live")
 def test_a_decision_missing_from_the_replay_is_not_compared_and_never_fenced(night, fence_db):
     """N15a LOW-3: incomplete stored bars leave the replay without a recorded
     decision. That is missing data, never a mismatch: reported as not compared
@@ -396,6 +453,7 @@ def test_a_decision_missing_from_the_replay_is_not_compared_and_never_fenced(nig
     assert _fence_rows(fence_db) == {}
 
 
+@pytest.mark.usefixtures("fences_live")
 def test_the_fence_a_parity_step_writes_is_the_one_the_promoter_reads(night, tmp_path, monkeypatch):
     """N15a LOW-4: one database, resolved by ``fence_database``. With the default
     fence store (production: no store injected), tonight's mismatch fence is the

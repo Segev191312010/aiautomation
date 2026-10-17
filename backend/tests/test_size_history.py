@@ -34,6 +34,8 @@ from trading.research.size_history import (
     UNKNOWN,
     V7B_FACTOR_DROPPED,
     V7B_FIRST_COMMIT,
+    V7B_SIZED,
+    V7B_SIZED_FIRST_COMMIT,
     DecisionRef,
     RunRef,
     effective_multiplier_for,
@@ -47,6 +49,39 @@ REPO = Path(__file__).resolve().parents[2]
 LIVE_88B963D = "88b963d"  # the deployed head on 2026-10-15 (bridge v5)
 V7A_HEAD = "2b81eee"
 V7B = V7B_FIRST_COMMIT
+LISTED = source_commits.PRE_V7B_COMMITS | source_commits.V7B_COMMITS | source_commits.V7B_SIZED_COMMITS
+
+# What ``shadow_service.source_sha()`` stores for a run: ``git rev-parse HEAD`` of the
+# checkout, the full 40 digits (``-dirty`` added with local changes). Every head
+# that recorded decisions on the live system, and every head the 2026-10-18
+# layered install can run (P1-B.3, owner decisions 2026-10-17).
+RAN_LIVE = (
+    "88b963d0c15568c43ffafee4b07726351965d990",  # deployed 2026-10-15 (bridge v5)
+    "904af3854602615aadd74f933b2b3693243bdb3d",  # R-A, deployed 2026-10-16 01:44 Israel
+    "664c93be7a48a4d1fb17f85667f0bed0f4f62e40",  # R-B v7a, deployed 2026-10-16 01:48 Israel (live now)
+)
+V7B_HEADS = (
+    "7872c86357eee85ddd2230300cd0791b92985240",  # v7b.2, the v7b verdict's head
+    # its docs-only children, up to the frozen bridge-v7b tip (layer 1)
+    "5b4c45bfcb06a377728fbc16013ab78d2a2fc8b5",
+    "f31543030909677352d4f0dfddc3bd7e7135f395",
+    "3a17ed29672fa725c51508f34bf08ecfc0b73a45",
+    "8dac16b34b16a2bdfc3024efc8f630e431d22dff",
+    "6578feb64aab012892c6ac1fa07d8ce3886a9f11",
+    "5d0eb1ca947a45bfa1a30ab836850df70a1bf12e",
+)
+P1_HEADS = (
+    "95e7534eeb7003d5ebe121e1050ade79df209415",  # P1-A takes v7b.1/v7b.2
+    "aad91574106788f9e98f131ec3f155d022c07451",  # P1-A.2
+    "a07084867dcf85349ccf1a548dff036815e12f12",  # P1-A.3
+    "3375b7dcaba452b9058ae286d95a6fe9cd88312a",  # N14 re-read
+    "282408a3081e95201c08168d110853804d5f8325",  # ops-p1, owner decisions 2026-10-17
+    "ded4264f61c9afc9a413c53b3440787731275667",  # T-8 (its own copy of the v7b.1 fix)
+    "622af486377aed1fb35ecf03feaa0b84c21c1d2a",  # T-8 merged into P1-B
+    "3a4254e90dcb3c5cd5f63d8e9cbe458053637efd",  # P1-B.2
+    "74025d798ca31485f420996582e4ccc3571df980",  # N15d re-read
+    "6ba575a013c71aadf908c9bf96aaafd181113b62",  # W6.4, the base of P1-B.3
+)
 
 
 def _git(*args: str) -> str:
@@ -57,7 +92,7 @@ def _git(*args: str) -> str:
 
 def _full(short: str) -> str:
     """The full sha of a listed commit, from the table's own 12-digit prefix."""
-    matches = [prefix for prefix in source_commits.PRE_V7B_COMMITS | source_commits.V7B_COMMITS if prefix.startswith(short)]
+    matches = [prefix for prefix in LISTED if prefix.startswith(short)]
     assert len(matches) == 1, short
     return matches[0] + "0" * 28  # a 40-digit sha with the listed prefix
 
@@ -71,15 +106,40 @@ def _ref(name: str, sha: str, **extra) -> DecisionRef:
 
 def test_the_commit_table_is_closed_disjoint_and_pinned():
     pre, v7b = source_commits.PRE_V7B_COMMITS, source_commits.V7B_COMMITS
-    assert (len(pre), len(v7b)) == (source_commits.PRE_V7B_COUNT, source_commits.V7B_COUNT)
-    assert not pre & v7b
-    assert all(re.fullmatch(r"[0-9a-f]{12}", item) for item in pre | v7b)
-    assert V7B[:12] in v7b
+    sized = source_commits.V7B_SIZED_COMMITS
+    assert (len(pre), len(v7b), len(sized)) == (
+        source_commits.PRE_V7B_COUNT, source_commits.V7B_COUNT, source_commits.V7B_SIZED_COUNT,
+    )
+    assert not pre & v7b and not pre & sized and not v7b & sized
+    assert all(re.fullmatch(r"[0-9a-f]{12}", item) for item in pre | v7b | sized)
+    assert V7B[:12] in v7b and V7B_SIZED_FIRST_COMMIT[:12] in sized
     for short in (LIVE_88B963D, V7A_HEAD, "3354c3c", "e5997af"):  # bridge v5, v7a
         assert any(item.startswith(short) for item in pre), short
     for short in ("784c2bd", "a8cba98", "227b8b3", "299d6e1"):  # v7b and its descendants
         assert any(item.startswith(short) for item in v7b), short
-    assert [version.label for version in TABLE_VERSIONS] == ["pre-v7b", "v7b-factor-dropped"]
+    assert [version.label for version in TABLE_VERSIONS] == ["pre-v7b", "v7b-factor-dropped", "v7b"]
+
+
+@pytest.mark.parametrize("sha", RAN_LIVE + V7B_HEADS + P1_HEADS)
+def test_every_head_that_ran_live_or_installs_on_sunday_is_listed_as_its_table(sha):
+    """The decisions recorded on the live system (88b963d, 904af38, 664c93b) sized
+    MOMO_HOD_V2 x1 alone; from v7b.1 on (7872c86 to 5d0eb1c, the P1 heads) the
+    runner keeps the identity factor: the four rows. Full shas, as runs store
+    them, clean and ``-dirty``."""
+    v7a = sha in RAN_LIVE
+    version, rows = (PRE_V7B, {"MOMO_HOD_V2": "1"}) if v7a else (
+        V7B_SIZED, {"MOMO_HOD_V2": "1", "ORB_V2": "0.25", "VWAP_PB_V2": "0.5", "GAP_GO_V2": "0.5"}
+    )
+    for stored in (sha, sha + "-dirty"):
+        lookup = table_version_for(stored)
+        assert (lookup.version, lookup.commit, lookup.dirty) == (version, sha[:12], stored.endswith("-dirty"))
+        for name in ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2", "ORB_V1", "AP_MOMO_HOD_V1"):
+            result = effective_multiplier_for(_ref(name, stored))
+            factor = Decimal(rows.get(name, "1"))
+            assert (result.source, result.table_version) == (DERIVED, version.label), name
+            assert (result.value, result.identity_factor, result.sendable) == (factor, factor, name in rows), name
+    assert dict(version.applied) == {name: Decimal(value) for name, value in rows.items()}
+    assert dict(version.table) == dict(version.applied)
 
 
 @pytest.mark.skipif(shutil.which("git") is None or not (REPO / ".git").exists(), reason="needs the git history")
@@ -90,12 +150,27 @@ def test_the_commit_table_agrees_with_the_git_history():
         _git("rev-list", "--branches", "--tags", "--remotes", "--ancestry-path", f"^{V7B}").split()
     ) | {V7B}
     by_prefix = {sha[:12]: sha for sha in present}
-    for prefix in source_commits.V7B_COMMITS:
+    for prefix in source_commits.V7B_COMMITS | source_commits.V7B_SIZED_COMMITS:
         if prefix in by_prefix:  # a rebased branch's commit may be gone
             assert by_prefix[prefix] in descendants, prefix
     for prefix in source_commits.PRE_V7B_COMMITS:
         if prefix in by_prefix:
             assert by_prefix[prefix] not in descendants, prefix
+    # Among v7b's descendants the code decides the version: the runner keeps the
+    # identity factor (v7b.1's ``with_decision_recorder``, or T-8's own copy of it)
+    # and the four rows are the table, or it drops the factor.
+    for sized, prefixes in ((True, source_commits.V7B_SIZED_COMMITS), (False, source_commits.V7B_COMMITS)):
+        for prefix in prefixes:
+            if prefix not in by_prefix:
+                continue
+            persistence = _git("show", f"{by_prefix[prefix]}:backend/trading/orchestration/persistence.py")
+            assert ("self._pipeline.with_decision_recorder(" in persistence) is sized, prefix
+            source = _git("show", f"{by_prefix[prefix]}:backend/trading/risk/identity_sizing.py")
+            rows = dict(re.findall(r'"([A-Z0-9_]+)": Decimal\("([0-9.]+)"\)', source))
+            assert {name: Decimal(value) for name, value in rows.items()} == dict(V7B_SIZED.table), prefix
+    # Every head named above is in the history, so the parametrized checks are real commits.
+    for sha in RAN_LIVE + V7B_HEADS + P1_HEADS:
+        assert sha in present, sha
     # The tables are the constants at those commits.
     v7b_source = _git("show", f"{V7B}:backend/trading/risk/identity_sizing.py")
     rows = dict(re.findall(r'"([A-Z0-9_]+)": Decimal\("([0-9.]+)"\)', v7b_source))
