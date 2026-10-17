@@ -1298,6 +1298,50 @@ async def test_a_sweep_without_idle_time_says_the_day_universe_was_skipped(datab
     assert {record.levelname for record in skipped} == {"INFO"}
     # No admission ran; the hot-35's own scan addition is unaffected.
     assert actor.detail_calls == [] and await load_day_universe(DAY) == ()
+
+
+@pytest.mark.asyncio
+async def test_p1a5_a_sweep_logs_two_sweep_lines_and_the_gateway_alert_counts_it_once(database, caplog) -> None:
+    """Review N14b MEDIUM-1 through the screener's own loop: with the day universe
+    on (the default since 2026-10-14) every sweep logs its main line and then
+    `sweep D: day universe …`, both as `sweep D:`. The notifier's Gateway alert must
+    count one success per sweep (the main line), and the notifier tests' real-format
+    sweep must be this output's shape, line for line."""
+    import re
+
+    from tests.test_notify_service import TWO_LINES, _sweep_lines
+    from trading.operations.notify_service import broker_evidence
+
+    await replace_universe_source("watchlist", [universe_row("AAA", 1)])
+    await upsert_daily(qualified_row("AAA", 1))
+    clock = FakeClock(at(10, 0))
+    actor = SlowSweepActor(
+        clock,
+        answers={},
+        scans={"HOT_BY_VOLUME": [scan_row(101, "NEW", 1)]},
+        histories={101: history_batch(101)},
+        details={101: stock_details(101, "NEW")},
+    )
+    caplog.set_level("INFO", logger="autotrader.shadow.screener")
+
+    await service._screener_loop(
+        actor, interval_seconds=60, clock=clock, sleep=clock.sleep, monotonic=clock.monotonic,
+        max_sweeps=3, include_scans=True, retention=False,
+    )
+
+    # As screener.log writes them (the screener child's stderr, trading/cli.py).
+    as_logged = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    lines = [as_logged.format(record) for record in caplog.records if record.name == "autotrader.shadow.screener"]
+    swept = [line for line in lines if " INFO sweep " in line]
+    assert [" day universe " in line for line in swept] == [False, True] * 3
+    # One success per sweep: its main line, never the day universe's.
+    assert [line for line in lines if broker_evidence("screener", line) == "sweep"] == swept[0::2]
+
+    def shape(line: str) -> str:
+        return re.sub(r"\d+", "N", line)
+
+    fixture = [line for line in _sweep_lines(TWO_LINES, DAY, at(10, 0)) if " INFO sweep " in line]
+    assert [shape(line) for line in fixture] == [shape(line) for line in swept[:2]]
     snapshot = await latest_snapshot(DAY)
     assert snapshot is not None and [row.con_id for row in snapshot.rows if row.source == "ibkr_scan"] == [101]
 

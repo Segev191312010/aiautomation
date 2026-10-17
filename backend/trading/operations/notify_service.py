@@ -33,10 +33,12 @@
      minutes long, or when no screener sweep has come 30 minutes after the
      screener's 08:00 ET window opened; repeated at most every 30 minutes
      while the newest evidence is a failure (a lone success inside the
-     outage stops no repeat), and one "reconnected" line once three
-     successes in a row have come and two minutes have passed since the
-     first of them without a failure; an outage's first page never says
-     "restart IB Gateway now", only a repeat (below). At most one such pair
+     outage stops no repeat), or worded "status unclear" once a success
+     has had nothing after it for 10 minutes, and one "reconnected" line
+     once three successes in a row (one per screener sweep) have come and
+     two minutes have passed since the first of them without a failure; an
+     outage's first page never says "restart IB Gateway now", only a
+     repeat (below). At most one such pair
      per half hour (the shared ``trading.operations.hysteresis`` machine);
      what it holds back is a flap, counted in the next digest. An IBKR-side
      loss the bridge reports (TWS 1100/2110 not restored within two minutes,
@@ -48,7 +50,8 @@
      sweep), worded "IBKR is refusing prices". Both IBKR-side wordings ask
      the owner to log out of the IBKR app and website first and to restart
      the IB Gateway if it lasts; once the outage has lasted 15 minutes they
-     say "restart IB Gateway now";
+     say "restart IB Gateway now", with the log-out step first when the
+     outage's earlier pages said only "log in";
   j. the Sentinel (``trading.operations.sentinel``, T-9): from the bridge's
      structured state (today's state file, the live ledger, the heartbeat
      row; never a log line) it fences one sendable identity at the owner's
@@ -926,10 +929,18 @@ FIRST_SWEEP_GRACE = timedelta(minutes=30)
 # ("clear only after several successes in a row spread over a few minutes,
 # never after a single one"); review N14 MEDIUM-1: one lucky sweep (or a 1102)
 # inside a refusal, then the 6th timeout of the next run two minutes later,
-# closed the outage or silenced its repeats and its "restart now". With the
-# screener's one sweep about every minute that is about two minutes of sweeps.
+# closed the outage or silenced its repeats and its "restart now". A screener
+# sweep is one success however many lines it logs (``_SWEEP``, review N14b
+# MEDIUM-1), so with one sweep about every minute the outage closes at the
+# third sweep, about two minutes after the first.
 # The Hysteresis default stays 1 for its other users.
 CLOSE_AFTER_COUNT = 3
+# An announced outage that has had a success but neither a failure nor another
+# success for this long is no recovery and no failure: its half-hour repeat
+# comes again, worded "status unclear", instead of being held until the
+# notifier's day ends (review N14b LOW-1: one sweep at 15:59:30, then the
+# screener's 16:00 stop, left "log in" as the phone's last word with no repeat).
+STATUS_UNCLEAR_AFTER = timedelta(minutes=10)
 _SESSION_START = re.compile(r"\bSESSION_START\s+date=(?P<date>\d{4}-\d{2}-\d{2})\b")
 # One line per failed bridge connect attempt: its closing CRITICAL. The
 # "TWS -1 502 Couldn't connect" INFO line before it is the same attempt (live
@@ -952,7 +963,10 @@ _IBKR_RESTORED = re.compile(r"\bTWS\s+-?\d+\s+110[12]\b")
 # IB Gateway restart brought the price history back. So both IBKR-side
 # wordings give those two steps in that order, and a repeat of the alert (never
 # an outage's first page, review N14 LOW-1) once the outage has lasted
-# RESTART_ADVICE_AFTER says "restart IB Gateway now".
+# RESTART_ADVICE_AFTER says "restart IB Gateway now". When that repeat is the
+# outage's first IBKR-side page (its earlier pages said "log in"), it gives the
+# log-out step first (review N14b LOW-3: the step that brought the orders back
+# on 2026-10-16 was never sent for that outage).
 GATEWAY_DOWN = "gateway_down"
 IBKR_LINK_DOWN = "ibkr_link_down"
 DATA_REFUSED = "data_refused"
@@ -962,6 +976,10 @@ _IBKR_SIDE_STEPS = (
     " File → Exit, reopen, log in"
 )
 _RESTART_NOW = "restart IB Gateway now: File → Exit, reopen, log in"
+_LOG_OUT_THEN_RESTART_NOW = (
+    "log out of the IBKR app and website first, then restart IB Gateway now:"
+    " File → Exit, reopen, log in"
+)
 _SCREENER_UNREACHABLE = re.compile(r"\bTWS connection failed\b", re.IGNORECASE)
 # Data refused with the Gateway connected (live 2026-10-16 08:00:20-09:51 ET):
 # the screener connected, then every universe qualification timed out after
@@ -986,7 +1004,13 @@ _SWEEP_FAILED = re.compile(r"\bscreener sweep failed: \d+ consecutive\b")
 # The child's own last line (`error: shadow run --strategy <name> failed: ...`),
 # not the traceback line above it: one per exit.
 _HANDSHAKE_FAILED = re.compile(r"^error: .*failed: TWSConnectionError: TWS PAPER handshake failed")
-_SWEEP = re.compile(r"\bsweep (?P<date>\d{4}-\d{2}-\d{2}):")
+# One success per screener sweep: its main line (`sweep D: qualified=N quoted=N
+# errors=N hot=N seconds=S`), logged once per sweep when its ranking group is
+# stored. Since 2026-10-14 every sweep also logs `sweep D: day universe
+# quoted=N/M seconds=S` about 10 ms later (the day universe's own pass, on by
+# default; screener.py). That line is the same sweep, never a second success:
+# counted, it made "three successes in a row" two sweeps (review N14b MEDIUM-1).
+_SWEEP = re.compile(r"\bsweep (?P<date>\d{4}-\d{2}-\d{2}): qualified=\d+ ")
 # The screener's opt-in TWS status lines (screener_service.StatusCodeLog, T-4):
 # ``TWS status <code>: <message>``, once per code change, for a broken farm
 # (2103 market data, 2105 HMDS, 2157 sec-def) or a broken TWS-to-IBKR link
@@ -999,12 +1023,12 @@ _SCREENER_STATUS = re.compile(r"\bTWS status (?:2103|2105|2110|2157):")
 
 
 def broker_evidence(source: str, line: str) -> str | None:
-    """What one log line says about the Gateway: ``sweep`` (market data flows),
-    ``ibkr_restored`` (TWS 1101/1102), ``bridge_refused``, ``ibkr_lost`` (TWS
-    1100/2110), ``ibkr_status`` (the screener's TWS 2110 or broken farm),
-    ``screener_failed``, ``history_timeout`` (one daily-history timeout;
-    ``BrokerWatch`` counts the run), ``sweep_failed``, ``handshake_failed``,
-    or None."""
+    """What one log line says about the Gateway: ``sweep`` (market data flows;
+    once per sweep, its main line only), ``ibkr_restored`` (TWS 1101/1102),
+    ``bridge_refused``, ``ibkr_lost`` (TWS 1100/2110), ``ibkr_status`` (the
+    screener's TWS 2110 or broken farm), ``screener_failed``, ``history_timeout``
+    (one daily-history timeout; ``BrokerWatch`` counts the run), ``sweep_failed``,
+    ``handshake_failed``, or None."""
     if source == "screener":
         if _SWEEP.search(line):
             return "sweep"
@@ -1040,14 +1064,18 @@ class BrokerWatch:
 
     Every failure line (the bridge's failed connect attempt, the screener's
     failed connect, a child's failed handshake, the bridge's TWS 1100/2110
-    "IBKR connectivity lost") is a failure signal, and every screener sweep and
-    the bridge's TWS 1101/1102 "restored" a success, for one shared
-    ``Hysteresis``: the outage opens at the third failure in a row or at a
-    failure two minutes into the streak (a success breaks it), and closes once
-    ``CLOSE_AFTER_COUNT`` (3) successes in a row have come and two minutes have
-    passed since the first of them with no failure (a failure before that is a
-    flap: the outage stays open, its half-hour repeats and their "restart now"
-    go on, and the count starts again; review N14 MEDIUM-1); at most one
+    "IBKR connectivity lost") is a failure signal, and every screener sweep
+    (once, by its main line; review N14b MEDIUM-1) and the bridge's TWS
+    1101/1102 "restored" a success, for one shared ``Hysteresis``: the outage
+    opens at the third failure in a row or at a failure two minutes into the
+    streak (a success breaks it), and closes once ``CLOSE_AFTER_COUNT`` (3)
+    successes in a row have come and two minutes have passed since the first
+    of them with no failure (a failure before that is a flap: the outage stays
+    open, its half-hour repeats and their "restart now" go on, and the count
+    starts again; review N14 MEDIUM-1). A success holds the next repeat back
+    only while it is fresh: after ``STATUS_UNCLEAR_AFTER`` (10 min) with no
+    failure and no further success the repeat is due again, worded "status
+    unclear" (review N14b LOW-1); at most one
     alert/recovery pair per half hour, except that failures running unbroken
     for the sustain limit (5 min) always page. What it holds back is a flap,
     reported by ``take_flap_line`` in the next digest (live 2026-10-14: 183
@@ -1084,9 +1112,10 @@ class BrokerWatch:
     minutes in) once the outage has lasted ``RESTART_ADVICE_AFTER`` says
     "restart IB Gateway now" in the IBKR-side wordings, and an outage's first
     page never does (review N14 LOW-1: a backdated 08:30 first page said it).
-    The recovery line follows the kind that opened the outage: "IBKR is
-    returning prices again" after data refused, "IB Gateway reconnected"
-    otherwise (N15b L-10).
+    The first such "restart now" of an outage whose pages so far said only
+    "log in" gives the log-out step first (review N14b LOW-3). The recovery
+    line follows the kind that opened the outage: "IBKR is returning prices
+    again" after data refused, "IB Gateway reconnected" otherwise (N15b L-10).
 
     In memory only: after a notifier restart during an outage the next
     evidence reopens it (the 30-minute cadence lives in the persisted
@@ -1096,6 +1125,8 @@ class BrokerWatch:
     session_date: date
     opened_at: datetime | None = None
     last_sweep_at: datetime | None = None
+    # The latest success (a sweep or TWS 1101/1102): how long a hold has lasted.
+    last_success_at: datetime | None = None
     # The first failure of the announced outage; None while none is announced.
     unreachable_since: datetime | None = None
     # Who the outage took down: the bridge (its own refusal line) and the
@@ -1128,6 +1159,8 @@ class BrokerWatch:
     checked_at: datetime | None = None
     alerted: bool = False
     swept_since_alert: bool = False
+    # A page of this outage already gave the log-out step (an IBKR-side wording).
+    told_log_out: bool = False
     flaps_seen: int = 0
     flaps_reported: int = 0
     # The flaps the digest has not reported yet, by time (oldest first), counted
@@ -1172,9 +1205,25 @@ class BrokerWatch:
         included, is due again at its half hour (review N14 MEDIUM-1: one sweep
         or TWS 1102 inside an announced outage silenced its repeats for good).
         A success never resets the half-hour timer: only the recovery line does,
-        and that needs ``CLOSE_AFTER_COUNT`` successes."""
-        holding = self.hysteresis.recovering_since is not None
+        and that needs ``CLOSE_AFTER_COUNT`` successes. A success that has had
+        nothing after it for ``STATUS_UNCLEAR_AFTER`` holds nothing back (review
+        N14b LOW-1): the repeat is due, worded "status unclear"."""
+        holding = self.hysteresis.recovering_since is not None and not self.status_unclear
         return self.unreachable and not (self.alerted and self.swept_since_alert and holding)
+
+    @property
+    def status_unclear(self) -> bool:
+        """An announced outage on hold (a success, no failure since) whose latest
+        success is ``STATUS_UNCLEAR_AFTER`` old, as of the latest observe/check:
+        neither recovered (fewer than ``CLOSE_AFTER_COUNT`` successes) nor known
+        to fail (review N14b LOW-1)."""
+        return (
+            self.unreachable
+            and self.hysteresis.recovering_since is not None
+            and self.last_success_at is not None
+            and self.checked_at is not None
+            and self.checked_at - self.last_success_at >= STATUS_UNCLEAR_AFTER
+        )
 
     @property
     def flaps_pending(self) -> bool:
@@ -1221,6 +1270,9 @@ class BrokerWatch:
         return caused
 
     def alert_sent(self) -> None:
+        """The alert as ``alert_text`` worded it now went to the phone."""
+        if self._wording()[1]:
+            self.told_log_out = True
         self.restarting.clear()
         self.alerted = True
         self.swept_since_alert = False
@@ -1260,6 +1312,7 @@ class BrokerWatch:
             # Market data answered, or TWS says IBKR is back: who the outage
             # took down is forgotten (a later exit is its own news unless the
             # failure line comes again).
+            self.last_success_at = now
             self.ibkr_lost_at = None
             self.bridge_refused = False
             self.handshake_children.clear()
@@ -1368,6 +1421,7 @@ class BrokerWatch:
             return None
         self.alerted = False
         self.swept_since_alert = False
+        self.told_log_out = False
         if event.kind is HYSTERESIS_OPEN:
             self.unreachable_since = event.since
             self.outage_kind = self.failure_kind
@@ -1401,8 +1455,24 @@ class BrokerWatch:
 
     def alert_text(self) -> str:
         """The alert for the newest failure kind, as of the latest observe/check."""
+        text = self._wording()[0]
+        count = len(self.restarting)
+        if count:
+            text += f" ({count} {'child' if count == 1 else 'children'} restarting)"
+        return text
+
+    def _wording(self) -> tuple[str, bool]:
+        """The alert's text (without the restart count), and whether it gives the
+        log-out step; one place, so ``alert_sent`` records what was sent."""
         assert self.unreachable_since is not None
         since = _et_hhmm(self.unreachable_since)
+        if self.status_unclear:
+            assert self.last_success_at is not None
+            return (
+                f"⛔ IB Gateway status unclear: no price data since {_et_hhmm(self.last_success_at)} ET"
+                f" (down since {since} ET, not recovered) — check IB Gateway",
+                False,
+            )
         kind = self.failure_kind
         lasted = (
             self.checked_at - self.unreachable_since if self.checked_at is not None else timedelta(0)
@@ -1411,20 +1481,20 @@ class BrokerWatch:
         # on its first page, whose start may be backdated to 08:00 (review N14 LOW-1).
         repeat = self.alerted
         if kind in (IBKR_LINK_DOWN, DATA_REFUSED) and repeat and lasted >= RESTART_ADVICE_AFTER:
-            text = f"⛔ IBKR still refusing prices since {since} ET — {_RESTART_NOW}"
-        elif kind == IBKR_LINK_DOWN:
-            text = (
+            if self.told_log_out:
+                return f"⛔ IBKR still refusing prices since {since} ET — {_RESTART_NOW}", False
+            # The outage's first IBKR-side page: its earlier ones said "log in"
+            # (review N14b LOW-3), so the log-out step comes first.
+            return f"⛔ IBKR is refusing prices since {since} ET — {_LOG_OUT_THEN_RESTART_NOW}", True
+        if kind == IBKR_LINK_DOWN:
+            return (
                 f"⛔ IBKR connectivity lost since {since} ET — the Gateway is still logged in;"
-                f" {_IBKR_SIDE_STEPS}"
+                f" {_IBKR_SIDE_STEPS}",
+                True,
             )
-        elif kind == DATA_REFUSED:
-            text = f"⛔ IBKR is refusing prices since {since} ET (Gateway connected) — {_IBKR_SIDE_STEPS}"
-        else:
-            text = f"⛔ IB Gateway unreachable since {since} ET — log in; the bot has no market data"
-        count = len(self.restarting)
-        if count:
-            text += f" ({count} {'child' if count == 1 else 'children'} restarting)"
-        return text
+        if kind == DATA_REFUSED:
+            return f"⛔ IBKR is refusing prices since {since} ET (Gateway connected) — {_IBKR_SIDE_STEPS}", True
+        return f"⛔ IB Gateway unreachable since {since} ET — log in; the bot has no market data", False
 
 
 @dataclass(slots=True)

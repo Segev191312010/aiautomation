@@ -850,7 +850,7 @@ async def test_the_screener_logs_one_status_line_per_code_change_and_brokerwatch
 
 
 def test_brokerwatch_counts_a_screener_2110_as_ibkr_side_never_re_asserted():
-    from tests.test_notify_service import SESSION, _et
+    from tests.test_notify_service import SESSION, TWO_LINES, _et, _sweep_lines  # P1-A.5 merge
     from trading.operations.notify_service import IBKR_LINK_DOWN, BrokerWatch
 
     def status(code: int) -> str:
@@ -865,7 +865,9 @@ def test_brokerwatch_counts_a_screener_2110_as_ibkr_side_never_re_asserted():
     for minute in range(1, 9):
         assert watch.check(_et(8, minute, 30)) is None
     assert not watch.unreachable
-    watch.observe("screener", "sweep 2026-10-13: 35 ranked", _et(8, 9))
+    # P1-A.5 merge: a real sweep, as logged (two lines; its main line is the success).
+    for line in _sweep_lines(TWO_LINES, SESSION, _et(8, 9)):
+        watch.observe("screener", line, _et(8, 9))
     assert watch.hysteresis.state is State.CLEAR
 
     # A 2110 that comes back after the reconnect: a second signal, two minutes on: open, IBKR-side.

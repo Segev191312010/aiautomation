@@ -78,3 +78,6 @@
   runs in the caller's task), check `Task.cancelling()` before sleeping, and
   have `stop()` re-cancel a task that is still running. A test that fails only
   "sometimes" by timing out is evidence of this kind of race, not noise.
+
+## Test fixtures copy the real log format
+- One screener sweep logs TWO `sweep D:` lines (the main `qualified=… quoted=…` line and, since 2026-10-14, a `day universe …` line about 10 ms later). P1-A.4's "3 successes" rule was correct against one-line fixtures and wrong in production, where it cleared after two real sweeps (review N14b, 2026-10-17). Build alert-counting fixtures from real log lines, and add a meta-test that the fixture has the production shape.
