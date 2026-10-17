@@ -319,3 +319,139 @@ def test_inputs_are_validated():
     ):
         with pytest.raises(ValueError):
             Hysteresis(**kwargs)
+
+
+# --------------------------------------------------------------------------
+# close_after_count (P1-A.4; owner 2026-10-17, review N14 MEDIUM-1)
+# --------------------------------------------------------------------------
+
+
+def test_the_default_close_after_count_is_one_and_every_old_scenario_is_unchanged():
+    """Plan HIGH-2: the overnight port watch and the competing-login watch build
+    ``Hysteresis()`` too; a default above 1 would change them silently."""
+    machine = Hysteresis()
+    assert machine.close_after_count == 1
+    for _name, steps, expected, final_state, flaps in SCENARIOS:
+        default, events = run(steps)
+        explicit, explicit_events = run(steps, Hysteresis(close_after_count=1))
+        assert kinds(events) == kinds(explicit_events) == expected
+        assert [event for _, event in events] == [event for _, event in explicit_events]
+        assert default.state is explicit.state is final_state
+        assert default.flaps == explicit.flaps == flaps
+    # One success, then two clean minutes: closed, as before the parameter existed.
+    _, events = run([(0, "F"), (5, "F"), (10, "F"), (100, "S"), (220, "T")])
+    assert kinds(events) == [(10, "OPEN"), (220, "CLOSE")]
+
+
+# (name, steps, expected events [(seconds, kind)], final state, flaps), with
+# close_after_count=3: three successes in a row AND two clean minutes since the
+# first of them; a failure before both restarts the count and the clock.
+COUNT_SCENARIOS = [
+    (
+        "three successes over two minutes close at the third",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (165, "S"), (219, "T"), (230, "S")],
+        [(10, "OPEN"), (230, "CLOSE")],
+        State.CLEAR,
+        0,
+    ),
+    (
+        "three successes within seconds close only two minutes after the first",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (105, "S"), (110, "S"), (219, "T"), (220, "T")],
+        [(10, "OPEN"), (220, "CLOSE")],
+        State.CLEAR,
+        0,
+    ),
+    (
+        "a lone success never closes, however long the silence after it",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (220, "T"), (3700, "T")],
+        [(10, "OPEN")],
+        State.RECOVERING,
+        0,
+    ),
+    (
+        "two successes never close either",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (165, "S"), (3700, "T")],
+        [(10, "OPEN")],
+        State.RECOVERING,
+        0,
+    ),
+    (
+        "two successes then a failure after two minutes is a flap, not a close",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (165, "S"), (230, "F"), (231, "T")],
+        [(10, "OPEN")],
+        State.OPEN,
+        1,
+    ),
+    (
+        "one success then a failure 2 min 10 s later (N14: a lucky sweep in a refusal) is a flap",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (230, "F"), (250, "F")],
+        [(10, "OPEN")],
+        State.OPEN,
+        1,
+    ),
+    (
+        "a failure restarts the count: two, a failure, one more is one",
+        [
+            (0, "F"), (5, "F"), (10, "F"),
+            (100, "S"), (165, "S"), (200, "F"),  # flap: the count starts again
+            (300, "S"), (420, "T"), (1000, "T"),  # one success: still open
+            (1065, "S"), (1130, "S"),  # the third since the failure, 830 s after the first
+        ],
+        [(10, "OPEN"), (1130, "CLOSE")],
+        State.CLEAR,
+        1,
+    ),
+    (
+        "a failure after a clean stretch that met both closes first and starts a new streak",
+        [(0, "F"), (5, "F"), (10, "F"), (100, "S"), (165, "S"), (230, "S"), (400, "F"), (405, "F")],
+        [(10, "OPEN"), (230, "CLOSE")],
+        State.FAILING,
+        0,
+    ),
+    (
+        "a success still breaks a streak that has not opened: one is enough",
+        [(0, "F"), (5, "F"), (10, "S"), (600, "F"), (605, "F")],
+        [],
+        State.FAILING,
+        0,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "steps, expected, final_state, flaps",
+    [scenario[1:] for scenario in COUNT_SCENARIOS],
+    ids=[scenario[0] for scenario in COUNT_SCENARIOS],
+)
+def test_close_after_count_scenarios(steps, expected, final_state, flaps):
+    machine, events = run(steps, Hysteresis(close_after_count=3))
+    assert kinds(events) == expected
+    assert machine.state is final_state
+    assert machine.flaps == flaps
+
+
+def test_a_counted_close_names_the_first_success_and_takes_effect_at_the_later_time():
+    opened = [(0, "F"), (5, "F"), (10, "F")]
+    # Three successes spread out: in effect at the third (230 > 100 + 120).
+    _, events = run([*opened, (100, "S"), (165, "S"), (230, "S")], Hysteresis(close_after_count=3))
+    assert events[-1][1] == Event(kind=CLOSE, at=at(230), since=at(0), recovered_at=at(100))
+    # Three within seconds: in effect two minutes after the first, whenever the tick.
+    _, events = run([*opened, (100, "S"), (101, "S"), (102, "S"), (300, "T")], Hysteresis(close_after_count=3))
+    assert events[-1][1] == Event(kind=CLOSE, at=at(220), since=at(0), recovered_at=at(100))
+    # The same pair budget: a re-open inside the window after a counted close is held back.
+    machine, events = run(
+        [
+            (0, "F"), (5, "F"), (10, "F"), (100, "S"), (165, "S"), (230, "S"),
+            (300, "F"), (305, "F"), (310, "F"),
+        ],
+        Hysteresis(close_after_count=3),
+    )
+    assert kinds(events) == [(10, "OPEN"), (230, "CLOSE")]
+    assert machine.is_open and not machine.announced and machine.flaps == 1
+
+
+def test_close_after_count_is_validated():
+    for value in (0, -1, True, 1.5, "3"):
+        with pytest.raises(ValueError):
+            Hysteresis(close_after_count=value)
+    assert Hysteresis(close_after_count=3).close_after_count == 3

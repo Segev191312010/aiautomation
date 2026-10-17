@@ -1422,12 +1422,13 @@ def test_broker_watch_thresholds_grace_and_recovery():
     # Since the streak's first failure (the hysteresis opens at the third).
     assert watch.unreachable_since == _et(8, 1)
     assert watch.alert_text() == "⛔ IB Gateway unreachable since 08:01 ET — log in; the bot has no market data"
-    # More evidence keeps the first time; a sweep followed by two clean minutes
-    # ends it with one line and resets the streak.
+    # More evidence keeps the first time; three sweeps in a row and two clean
+    # minutes from the first (P1-A.4) end it with one line and reset the streak.
     watch.observe("bridge", _BRIDGE_REFUSED, _et(8, 6))
     assert watch.unreachable_since == _et(8, 1)
     assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) is None
     assert watch.observe("screener", _SWEEP_LINE, _et(8, 34)) is None
+    assert watch.observe("screener", _SWEEP_LINE, _et(8, 34, 30)) is None
     assert watch.check(_et(8, 35) - timedelta(seconds=1)) is None and watch.unreachable
     assert watch.check(_et(8, 35)) == (
         "✅ IB Gateway reconnected 08:33 ET — market data is back (unreachable since 08:01 ET)"
@@ -1487,10 +1488,13 @@ def test_broker_watch_folds_the_outages_child_exits_into_its_alert():
     assert watch.restarting == {} and "restarting" not in watch.alert_text()
     assert watch.broker_exit("orb-v2", 1)
     assert watch.alert_text().endswith("(1 child restarting)")
-    # The sweep forgets who the outage took down; two clean minutes end it.
+    # The sweep forgets who the outage took down; three sweeps and two clean
+    # minutes end it (P1-A.4).
     assert watch.observe("screener", _SWEEP_LINE, _et(8, 33)) is None
     assert not watch.bridge_refused and not watch.handshake_children and not watch.restarting
     assert not watch.broker_exit("orb-v2", 1)
+    watch.observe("screener", _SWEEP_LINE, _et(8, 34))
+    watch.observe("screener", _SWEEP_LINE, _et(8, 34, 30))
     assert watch.check(_et(8, 35)) is not None
     assert not watch.broker_exit("orb-v2", 1)
 
@@ -1536,7 +1540,9 @@ async def test_run_notifier_alerts_once_per_half_hour_while_the_gateway_is_unrea
         clock.at(_et(8, 13, 30), _append(logs / "supervisor.log", f"2026-10-13T12:13:30+00:00 CHILD_EXIT {name} code=1 restart_in=300"))
     clock.at(_et(8, 29, 50), _append(logs / "screener.log", _SCREENER_FAILED))
     clock.at(_et(8, 30, 20), _append(logs / "screener.log", _SCREENER_FAILED))
-    clock.at(_et(8, 33, 0), _append(logs / "screener.log", _SWEEP_LINE))
+    # Back: three sweeps (the recovery line needs three in a row over two minutes, P1-A.4).
+    for at in (_et(8, 33, 0), _et(8, 34, 5), _et(8, 35, 10)):
+        clock.at(at, _append(logs / "screener.log", _SWEEP_LINE))
     telegram = FakeTelegram()
 
     assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
@@ -1740,10 +1746,14 @@ def test_a_saved_gateway_outage_is_current_only_when_stamped_near_the_notifiers_
 
 
 @pytest.mark.anyio
-async def test_a_flapping_gateway_sends_one_pair_and_a_flap_count_in_the_digest(
+async def test_a_flapping_gateway_is_one_outage_with_its_half_hour_repeats_and_a_flap_count(
     tmp_path, monkeypatch, caplog
 ):
-    """Review 904af38 F-1: failure/sweep alternating every 70 s for an hour sent ~50 messages."""
+    """Review 904af38 F-1: failure/sweep alternating every 70 s for an hour sent ~50
+    messages. It is one outage: no pair per blip, the flips are the digest's flap
+    count. P1-A.4 (owner 2026-10-17, review N14 MEDIUM-1): a lone sweep between two
+    failures never clears it, so its half-hour repeats go on while it flaps, and
+    the recovery line needs three sweeps in a row over two minutes."""
     from datetime import time
 
     # Cut before 09:20, when the (planless) day manager's own outage alert is due.
@@ -1755,31 +1765,40 @@ async def test_a_flapping_gateway_sends_one_pair_and_a_flap_count_in_the_digest(
     for at in (_et(8, 0, 10), _et(8, 0, 25), _et(8, 0, 45)):
         clock.at(at, _append(screener, _SCREENER_FAILED))
     # ...then a sweep and a failure alternating every 70 s from 08:10 for an hour,
-    # ending on a sweep.
+    # ending on three sweeps 65 s apart: the recovery.
     sweep_at, flaps = _et(8, 10), 0
     while sweep_at + timedelta(seconds=70) <= _et(9, 10):
         clock.at(sweep_at, _append(screener, _SWEEP_LINE))
         clock.at(sweep_at + timedelta(seconds=70), _append(screener, _SCREENER_FAILED))
         flaps += 1
         sweep_at += timedelta(seconds=140)
-    clock.at(sweep_at, _append(screener, _SWEEP_LINE))
     last_sweep = sweep_at
+    for n in range(3):
+        clock.at(last_sweep + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
     telegram = TimedTelegram(clock)
 
     assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
 
     sent = telegram.sent()
-    unreachable = [text for text in sent if text.startswith("⛔ IB Gateway unreachable")]
+    unreachable = [(at, text) for at, text in telegram.sent_at if text.startswith("⛔ IB Gateway unreachable")]
     reconnected = [text for text in sent if text.startswith("✅ IB Gateway reconnected")]
-    # Exactly one pair: no repeat while sweeps keep coming, no pair per blip.
-    assert unreachable == ["⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"]
+    # One alert, then a repeat every half hour while it still fails between the
+    # sweeps (the newest evidence at 08:30:45 is the 08:29:50 failure, at 09:00:45
+    # the 09:00:10 one), and one recovery line: no pair per blip.
+    alert = "⛔ IB Gateway unreachable since 08:00 ET — log in; the bot has no market data"
+    assert [text for _at, text in unreachable] == [alert, alert, alert]
+    assert _between(unreachable[0][0], _et(8, 0, 45))
+    assert _between(unreachable[1][0], _et(8, 30, 45)) and _between(unreachable[2][0], _et(9, 0, 45))
     assert reconnected == [
         f"✅ IB Gateway reconnected {last_sweep.astimezone(MARKET_TIMEZONE):%H:%M} ET — market data is back"
         " (unreachable since 08:00 ET)"
     ]
+    # At the third sweep (2 min 10 s after the first), not two minutes after the first.
     [(closed_at, _text)] = [(at, text) for at, text in telegram.sent_at if text in reconnected]
-    assert last_sweep + timedelta(minutes=2) <= closed_at < last_sweep + timedelta(minutes=2, seconds=5)
-    assert _queued_alerts(caplog) == ["broker_unreachable", "broker_reconnected"]
+    assert _between(closed_at, last_sweep + timedelta(seconds=130))
+    assert _queued_alerts(caplog) == [
+        "broker_unreachable", "broker_unreachable", "broker_unreachable", "broker_reconnected",
+    ]
     # The flaps reach the phone only as digest lines, and every one is counted.
     digests = [text for text in sent if text.startswith("🗂 Shadow digest")]
     counted = [
@@ -1844,7 +1863,9 @@ async def test_a_genuine_outage_alerts_within_two_minutes_and_folds_its_exits(tm
         ))
     # Not the outage's (no handshake line in momo.log): still news.
     clock.at(_et(11, 4), _append(supervisor_log, "2026-10-13T15:04:00+00:00 CHILD_EXIT momo code=1 restart_in=300"))
-    clock.at(_et(11, 35), _append(logs / "screener.log", _SWEEP_LINE))
+    # Back: three sweeps (P1-A.4), the recovery line at the third.
+    for at in (_et(11, 35), _et(11, 36, 5), _et(11, 37, 10)):
+        clock.at(at, _append(logs / "screener.log", _SWEEP_LINE))
     telegram = TimedTelegram(clock)
 
     assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
@@ -1858,7 +1879,7 @@ async def test_a_genuine_outage_alerts_within_two_minutes_and_folds_its_exits(tm
     ]
     assert alerts[0][0] - failures[0] <= timedelta(minutes=2)
     assert alerts[1][0] - alerts[0][0] >= timedelta(minutes=30)
-    assert alerts[2][0] >= _et(11, 37)
+    assert _between(alerts[2][0], _et(11, 37, 10))
     exits = [text for text in telegram.sent() if text.startswith("⚙️")]
     assert exits == ["⚙️ momo exited (code 1), restarting in 300 s"]
     assert _queued_alerts(caplog) == [
@@ -1896,7 +1917,8 @@ async def test_a_real_outage_right_after_an_announced_blip_pages_within_the_sust
     outage = _et(8, 25)
     for n in range(38):
         clock.at(outage + timedelta(seconds=70 * n), _append(screener, _SCREENER_FAILED))
-    clock.at(_et(9, 11), _append(screener, _SWEEP_LINE))
+    for n in range(3):  # back: three sweeps (P1-A.4)
+        clock.at(_et(9, 11) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
     # A child the outage takes down: once while its page is held back, once after.
     for at in (_et(8, 28), _et(8, 35)):
         exited = at + timedelta(seconds=10)
@@ -1916,14 +1938,15 @@ async def test_a_real_outage_right_after_an_announced_blip_pages_within_the_sust
         "⛔ IB Gateway unreachable since 08:25 ET — log in; the bot has no market data (1 child restarting)",
         "✅ IB Gateway reconnected 09:11 ET — market data is back (unreachable since 08:25 ET)",
     ]
-    # The blip's pair still goes out at once.
-    assert _between(broker[0][0], _et(8, 16, 10)) and _between(broker[1][0], _et(8, 19))
+    # The blip's pair still goes out at once (its recovery line at its third sweep,
+    # 08:19:10: three in a row over two minutes, P1-A.4).
+    assert _between(broker[0][0], _et(8, 16, 10)) and _between(broker[1][0], _et(8, 19, 10))
     # The real outage pages at the first failure that is SUSTAIN_LIMIT into an
     # unbroken run (08:30:50: failures every 70 s from 08:25:00), not at 08:46:10.
     assert SUSTAIN_LIMIT == timedelta(minutes=5)
     assert _between(broker[2][0], _et(8, 30, 50))
     assert broker[2][0] - outage <= SUSTAIN_LIMIT + timedelta(seconds=70 + 5)
-    assert _between(broker[3][0], _et(9, 0, 50)) and _between(broker[4][0], _et(9, 13))
+    assert _between(broker[3][0], _et(9, 0, 50)) and _between(broker[4][0], _et(9, 13, 10))
     # Held back, the outage's exit is forwarded as before; announced, it is folded
     # into the alert (the repeat counts it).
     exits = [(at, text) for at, text in telegram.sent_at if text.startswith("⚙️")]
@@ -1940,7 +1963,8 @@ def test_a_held_back_outage_forwards_its_exits_until_the_sustain_limit_announces
     for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
         watch.observe("screener", _SCREENER_FAILED, at)
     assert watch.unreachable
-    watch.observe("screener", _SWEEP_LINE, _et(8, 17))
+    for at in (_et(8, 17), _et(8, 18), _et(8, 18, 30)):  # three sweeps (P1-A.4)
+        watch.observe("screener", _SWEEP_LINE, at)
     assert watch.check(_et(8, 19)) is not None and not watch.unreachable
     # Three failures from 08:25: open, but the pair budget holds it back.
     for at in (_et(8, 25, 0), _et(8, 26, 10), _et(8, 27, 20)):
@@ -2003,9 +2027,13 @@ def test_an_ibkr_loss_not_restored_within_two_minutes_opens_the_alert_and_a_quic
     assert lost.unreachable_since == _et(14, 32, 16)
     # The Gateway is still logged in: its own wording, never "log in" (review P1-A.1 L-3).
     assert lost.alert_text() == _IBKR_LOST_ALERT.format(since="14:32")
-    # The restore is success evidence: two clean minutes later, the recovery line.
+    # The restore is success evidence, the first of the three in a row the recovery
+    # line needs (P1-A.4): with the screener's next two sweeps (live 2026-10-14:
+    # 15:26:05, 15:27:07), at the third, 2 min 14 s after the restore.
     assert lost.observe("bridge", _BRIDGE_1102, _et(15, 24, 53)) is None
-    assert lost.check(_et(15, 26, 53)) == (
+    assert lost.observe("screener", _SWEEP_LINE, _et(15, 26, 5)) is None
+    assert lost.check(_et(15, 26, 53)) is None and lost.unreachable
+    assert lost.observe("screener", _SWEEP_LINE, _et(15, 27, 7)) == (
         "✅ IB Gateway reconnected 15:24 ET — market data is back (unreachable since 14:32 ET)"
     )
 
@@ -2107,7 +2135,8 @@ def test_the_alert_wording_follows_the_newest_failure_and_pages_at_six_minutes_a
         watch.observe("screener", _SCREENER_FAILED, at)
     assert watch.alert_text() == _GATEWAY_ALERT.format(since="10:00")
     watch.alert_sent()
-    watch.observe("screener", _SWEEP_LINE, _et(10, 1))
+    for at in (_et(10, 1), _et(10, 2), _et(10, 2, 30)):  # three sweeps (P1-A.4)
+        watch.observe("screener", _SWEEP_LINE, at)
     assert watch.check(_et(10, 3)) is not None and not watch.unreachable
 
     lost_at = _et(10, 10)
@@ -2139,13 +2168,14 @@ def test_the_alert_wording_follows_the_newest_failure_and_pages_at_six_minutes_a
 
     # A notifier restarted mid-session with no sweep yet: the first-sweep deadline
     # passes during a known IBKR loss, which explains it; the IBKR-side wording
-    # stays, never "log in" (by 10:30 the loss has lasted 25 minutes: "restart now",
-    # P1-A.3).
+    # stays, never "log in" (by 10:30 the loss has lasted 25 minutes, and its first
+    # page went out at 10:07: a repeat says "restart now", P1-A.3).
     restarted = BrokerWatch(SESSION)
     restarted.session_started(_et(10, 0))
     restarted.observe("bridge", _BRIDGE_1100.replace("14:32:16", "10:05:00"), _et(10, 5))
     restarted.check(_et(10, 7))
     assert restarted.alert_text() == _IBKR_LOST_ALERT.format(since="10:05")
+    restarted.alert_sent()
     restarted.check(_et(10, 30))
     assert restarted.first_sweep_overdue
     assert restarted.alert_text() == _RESTART_NOW_ALERT.format(since="10:05")
@@ -2220,7 +2250,8 @@ async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_
     # The Gateway stayed logged in (the bridge kept its connection): the IBKR-side
     # wording, never "log in" (review P1-A.1 L-3); the half-hour repeat, 32 minutes
     # into the loss, says "restart IB Gateway now" (P1-A.3, GW-HMDS-1016); the same
-    # recovery line follows.
+    # recovery line follows, at the third success in a row (P1-A.4): the 15:24:53
+    # restore, the 15:26:05 and 15:27:07 sweeps.
     assert [text for _at, text in broker] == [
         _IBKR_LOST_ALERT.format(since="14:32"),
         _RESTART_NOW_ALERT.format(since="14:32"),
@@ -2228,7 +2259,7 @@ async def test_the_real_1014_afternoon_ibkr_loss_with_the_port_open_reaches_the_
     ]
     assert _between(broker[0][0], _et(14, 34, 16))
     assert _between(broker[1][0], _et(15, 4, 16))
-    assert _between(broker[2][0], _et(15, 26, 53))
+    assert _between(broker[2][0], _et(15, 27, 7))
     # The bridge's own 1100 CRITICAL lines still go out, as before.
     assert sum(text.startswith("⚠️ CRITICAL TWS -1 1100") for _at, text in telegram.sent_at) == 2
 
@@ -2394,12 +2425,14 @@ def test_the_alert_wording_switches_between_connect_failure_ibkr_loss_and_data_r
     data.observe("screener", _SWEEP_FAILED, _et(10, 3, 30))
     assert data.alert_text() == _DATA_REFUSED_ALERT.format(since="10:00")
 
-    # 15 minutes into the outage both IBKR-side wordings say "restart IB Gateway now"
-    # (time passing: the notifier's check every cycle).
+    # 15 minutes into the outage a repeat of either IBKR-side wording says "restart
+    # IB Gateway now" (time passing: the notifier's check every cycle); its first
+    # page, sent at the opening, gave the two steps (review N14 LOW-1).
     assert RESTART_ADVICE_AFTER == timedelta(minutes=15)
     refused = watching()
     refuse(refused, _et(10, 0, 0))
     for watch, expected in ((refused, _DATA_REFUSED_ALERT), (link, _IBKR_LOST_ALERT)):
+        watch.alert_sent()
         watch.check(_et(10, 14, 59))
         assert watch.alert_text() == expected.format(since="10:00")
         watch.check(_et(10, 15))
@@ -2583,8 +2616,9 @@ async def test_owner_c_a_real_refusal_after_an_announced_blip_pages_within_the_s
         _DATA_REFUSED_ALERT.format(since="08:10"),
         _RESTART_NOW_ALERT.format(since="08:10"),
     ]
-    # The blip's pair goes out at once.
-    assert _between(broker[0][0], _et(8, 2, 20)) and _between(broker[1][0], _et(8, 6))
+    # The blip's pair goes out at once (its recovery line at the third sweep, 08:06:10:
+    # three in a row over two minutes, P1-A.4).
+    assert _between(broker[0][0], _et(8, 2, 20)) and _between(broker[1][0], _et(8, 6, 10))
     # The real refusal pages at the first failure five minutes into its unbroken
     # run (08:15:00 for timeouts every 20 s, 08:15:32 for failed sweeps every 83 s),
     # not at 08:32:20 when the pair budget would free.
@@ -2623,6 +2657,587 @@ async def test_owner_d_the_1013_slow_morning_without_timeouts_stays_silent(tmp_p
     )))
     for n in range(26):
         clock.at(_et(8, 10, 2) + timedelta(seconds=80 * n), _append(screener, _SWEEP_LINE))
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert telegram.sent() == [startup_text(SESSION)]
+    assert _queued_alerts(caplog) == []
+
+
+# --------------------------------------------------------------------------
+# P1-A.4: an announced outage clears only after several successes in a row,
+# spread over minutes, never after a single one (owner 2026-10-17; review N14
+# MEDIUM-1, LOW-1). Times are ET.
+# --------------------------------------------------------------------------
+
+
+def _broker_lines(telegram: TimedTelegram) -> list[tuple[datetime, str]]:
+    """The Gateway alert's phone lines, with the simulated time each went out."""
+    return [(at, text) for at, text in telegram.sent_at if text.startswith(("⛔ IB", "✅ IB"))]
+
+
+def _broker_alerts_queued(caplog) -> list[str]:
+    return [alert for alert in _queued_alerts(caplog) if alert.startswith("broker_")]
+
+
+def _assert_lines(broker: list[tuple[datetime, str]], expected: list[tuple[datetime, str]]) -> None:
+    """Exactly ``expected`` (due time, text), each sent from the notifier cycle at its due time."""
+    assert [text for _at, text in broker] == [text for _due, text in expected]
+    for (sent_at, text), (due, _text) in zip(broker, expected):
+        assert _between(sent_at, due), (text, sent_at, due)
+
+
+def _flaps_in_digests(telegram: FakeTelegram) -> int:
+    return sum(
+        int(match.group("count"))
+        for text in telegram.sent()
+        if text.startswith("🗂 Shadow digest")
+        for match in map(_FLAP_LINE.match, text.splitlines()[1:])
+        if match is not None
+    )
+
+
+def _sweep_on(day: date, at: datetime) -> str:
+    """A screener sweep line as logged on ``day`` (any sweep is success evidence)."""
+    return _screener_line(at, f"INFO sweep {day.isoformat()}: qualified=391 quoted=391 errors=0 hot=35 seconds=58.0")
+
+
+_RECONNECTED = "✅ IB Gateway reconnected {back} ET — market data is back (unreachable since {since} ET)"
+# P1-A.4 merge: an outage opened by data refused recovers with P1-B's own line (N15b L-10).
+_RETURNING = "✅ IBKR is returning prices again {back} ET — market data is back (refusing prices since {since} ET)"
+
+
+def test_p1a4_only_broker_watch_asks_for_three_successes_the_shared_default_stays_one():
+    from trading.operations.hysteresis import CLOSE_AFTER, Hysteresis
+    from trading.operations.notify_service import CLOSE_AFTER_COUNT, BrokerWatch
+
+    assert CLOSE_AFTER_COUNT == 3
+    machine = BrokerWatch(SESSION).hysteresis
+    assert machine.close_after_count == CLOSE_AFTER_COUNT
+    assert machine.close_after == CLOSE_AFTER == timedelta(minutes=2)
+    # Every other number is the shared default, and the default count stays 1 for the
+    # other users (plan HIGH-2: the overnight port watch, the competing-login watch).
+    default = Hysteresis()
+    assert default.close_after_count == 1
+    names = ("open_after_count", "open_after", "close_after", "max_pairs_per_window", "window", "sustain_limit")
+    assert [getattr(machine, name) for name in names] == [getattr(default, name) for name in names]
+    assert BrokerWatch(SESSION).hysteresis is not machine
+
+
+def test_p1a4_merge_the_port_and_competing_login_watches_keep_a_close_count_of_one():
+    """P1-A.4 merge, plan HIGH-2: only BrokerWatch asks for three successes. The
+    overnight port watch closes two clean minutes after ONE good check (its checks
+    are 5 min apart: three would hold a recovery line back 10 min), and the
+    competing-login watch keeps the default too. Before this test a PortWatch built
+    with ``close_after_count=3`` passed every test."""
+    from trading.operations.gateway_watch import CompetingLoginWatch, PortWatch
+
+    assert PortWatch().hysteresis.close_after_count == 1
+    assert CompetingLoginWatch().hysteresis.close_after_count == 1
+    watch = PortWatch()
+    assert watch.check(_et(16, 25), True) == []
+    assert watch.check(_et(16, 30), False) == []
+    assert watch.check(_et(16, 35), False) == [
+        "⛔ IB Gateway closed since 16:30 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+    assert watch.check(_et(16, 40), True) == []
+    assert watch.tick(_et(16, 42)) == ["✅ IB Gateway port open again 16:40 ET (closed since 16:30 ET)"]
+
+
+def test_p1a4_a_success_holds_a_repeat_back_only_until_the_next_failure():
+    """Review N14 MEDIUM-1 at the unit: one sweep inside an announced outage set
+    ``swept_since_alert`` and nothing cleared it when failures came back within
+    two minutes, so ``alert_due`` stayed False for the rest of the outage."""
+    from trading.operations.notify_service import BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(7, 55))
+    watch.observe("screener", _SWEEP_LINE, _et(9, 59))
+    for at in (_et(10, 0, 0), _et(10, 0, 20), _et(10, 0, 40)):
+        watch.observe("screener", _SCREENER_FAILED, at)
+    assert watch.unreachable and watch.alert_due  # the first page
+    watch.alert_sent()
+    assert watch.alert_due  # the next repeat, when the session's half-hour timer allows
+    # One sweep: no repeat while it holds, and no close however long it holds.
+    assert watch.observe("screener", _SWEEP_LINE, _et(10, 5)) is None
+    assert watch.unreachable and not watch.alert_due
+    for moment in (_et(10, 7), _et(10, 20), _et(10, 35)):
+        assert watch.check(moment) is None
+        assert watch.unreachable and not watch.alert_due
+    # It did not hold: one failure, and the repeat is due again (a flap, no message).
+    assert watch.observe("screener", _SCREENER_FAILED, _et(10, 35, 20)) is None
+    assert watch.unreachable and watch.alert_due and watch.flaps_pending
+    # Two sweeps over two minutes, then a failure: the same.
+    watch.observe("screener", _SWEEP_LINE, _et(10, 36))
+    watch.observe("screener", _SWEEP_LINE, _et(10, 37, 5))
+    assert watch.check(_et(10, 38)) is None and not watch.alert_due
+    assert watch.observe("screener", _SCREENER_FAILED, _et(10, 38, 10)) is None
+    assert watch.unreachable and watch.alert_due
+    # Three sweeps in a row, two clean minutes from the first: the recovery line.
+    for at in (_et(10, 39), _et(10, 40, 5)):
+        assert watch.observe("screener", _SWEEP_LINE, at) is None
+    assert watch.check(_et(10, 41) - timedelta(seconds=1)) is None and watch.unreachable
+    assert watch.observe("screener", _SWEEP_LINE, _et(10, 41, 10)) == _RECONNECTED.format(back="10:39", since="10:00")
+    assert not watch.unreachable and not watch.alert_due
+
+
+def test_p1a4_restart_now_is_never_an_outages_first_page():
+    """Review N14 LOW-1 at the unit: the 08:30 backstop backdates the outage to
+    08:00, so its first page already said "IBKR still refusing prices since 08:00 ET
+    — restart IB Gateway now"."""
+    from trading.operations.notify_service import RESTART_ADVICE_AFTER, BrokerWatch
+
+    watch = BrokerWatch(SESSION)
+    watch.session_started(_et(7, 55))
+    start = _et(8, 20)
+    for n in range(6):  # one failure signal, backdated to 08:20:00; no seventh
+        watch.observe("screener", _timeout_at(start, n), start + timedelta(seconds=20 * n))
+    assert not watch.unreachable
+    watch.check(_et(8, 30))  # no first sweep by 08:30: open, failing since 08:00
+    assert watch.unreachable_since == _et(8, 0)
+    assert watch.checked_at - watch.unreachable_since >= RESTART_ADVICE_AFTER
+    # Its first page: data refused, the two steps; never "restart now".
+    assert watch.alert_due and watch.alert_text() == _DATA_REFUSED_ALERT.format(since="08:00")
+    watch.alert_sent()
+    # A repeat says it.
+    watch.check(_et(9, 0))
+    assert watch.alert_text() == _RESTART_NOW_ALERT.format(since="08:00")
+    # A new outage's first page is a first page again.
+    for at in (_et(9, 10), _et(9, 11, 5), _et(9, 12, 10)):
+        watch.observe("screener", _SWEEP_LINE, at)
+    assert not watch.unreachable
+    restart = _et(9, 40)
+    for n in range(7):
+        watch.observe("screener", _timeout_at(restart, n), restart + timedelta(seconds=20 * n))
+    watch.check(_et(10, 0))
+    assert watch.unreachable_since == restart
+    assert watch.alert_text() == _DATA_REFUSED_ALERT.format(since="09:40")
+
+
+@pytest.mark.anyio
+async def test_p1a4_low1_the_0830_first_page_after_one_refusal_signal_gives_the_two_steps(
+    tmp_path, monkeypatch, caplog
+):
+    """Review N14 LOW-1 end to end: six daily-history timeouts 08:20:00-08:21:40 (one
+    failure signal), a slow but healthy qualification, the first sweep at 08:36.
+    a070848's first and only page, at 08:30: "IBKR still refusing prices since 08:00
+    ET — restart IB Gateway now"."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 45))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    clock.at(_et(8, 0), _append(screener, _screener_line(_et(8, 0), "INFO screener connected to TWS")))
+    start = _et(8, 20)
+    for n in range(6):
+        at = start + timedelta(seconds=20 * n)
+        clock.at(at, _append(screener, _timeout_at(at, n)))
+    for n in range(4):  # 08:36:00, 08:37:05, 08:38:10, 08:39:15
+        clock.at(_et(8, 36) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    _assert_lines(_broker_lines(telegram), [
+        (_et(8, 30), _DATA_REFUSED_ALERT.format(since="08:00")),
+        (_et(8, 38, 10), _RETURNING.format(back="08:36", since="08:00")),  # P1-A.4 merge: N15b L-10 wording
+    ])
+    assert not any("restart IB Gateway now" in text for text in telegram.sent())
+    assert _broker_alerts_queued(caplog) == ["broker_unreachable", "broker_reconnected"]
+
+
+# Owner test (a): live 2026-10-16 (GW-HMDS-1016) every universe qualification timed
+# out, one line every ~20 s from 08:00:20 until the screener reconnected at 09:51
+# (329 lines, max gap 41 s); the first sweep came at 10:00:36. ONE successful sweep
+# is injected at about 08:40 ET.
+_ONE_SWEEP = {
+    # Between two timeouts, the 20-s cadence unbroken: the next run's sixth timeout,
+    # 08:42:20 (1 min 50 s after the sweep), is the next failure signal.
+    "between two timeouts": (_et_on(GW_HMDS_DAY, 8, 40, 30), None),
+    # Then no timeout for 2 min 20 s (the screener sweeping, then qualifying again):
+    # two clean minutes after ONE success; the next run's sixth timeout at 08:44:00.
+    "then two clean minutes": (
+        _et_on(GW_HMDS_DAY, 8, 40),
+        (_et_on(GW_HMDS_DAY, 8, 40), _et_on(GW_HMDS_DAY, 8, 42, 20)),
+    ),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("injected", sorted(_ONE_SWEEP))
+async def test_p1a4_owner_a_one_sweep_inside_the_1016_refusal_keeps_the_repeats_and_restart_now(
+    injected, tmp_path, monkeypatch, caplog
+):
+    """Owner test (a), P1-A.4. a070848 (review N14 MEDIUM-1): the sweep between two
+    timeouts switched the half-hour repeats and "restart now" off for good (no page
+    from 08:32 to 10:02); and a close on one success would have sent a false
+    "reconnected 08:40" at 08:42 and paged a 'new' outage with the two steps again."""
+    from datetime import time
+
+    day = GW_HMDS_DAY
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(10, 5))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et_on(day, 7, 55))
+    clock.at(_et_on(day, 7, 55, 1), _append(
+        logs / "supervisor.log", "2026-10-16T11:55:00+00:00 SESSION_START date=2026-10-16"
+    ))
+    opened = _et_on(day, 8, 0)
+    clock.at(opened, _append(
+        screener,
+        _screener_line(opened, "INFO screener connected to TWS"),
+        _screener_line(opened, "INFO qualifying 503 of 503 instruments for 2026-10-16"),
+    ))
+    sweep_at, pause = _ONE_SWEEP[injected]
+    at, n = _et_on(day, 8, 0, 20), 0
+    while at < _et_on(day, 9, 51):
+        if pause is None or not pause[0] <= at < pause[1]:
+            clock.at(at, _append(screener, _timeout_at(at, n)))
+            n += 1
+        at += timedelta(seconds=20)
+    assert n >= 320  # as live: 329
+    clock.at(sweep_at, _append(screener, _sweep_on(day, sweep_at)))
+    # The real recovery: the first sweep at 10:00:36, then one about every minute.
+    for k in range(5):
+        back = _et_on(day, 10, 0, 36) + timedelta(seconds=65 * k)
+        clock.at(back, _append(screener, _sweep_on(day, back)))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=day, env=_environment(paths, telegram, clock)) == 0
+
+    _assert_lines(_broker_lines(telegram), [
+        (_et_on(day, 8, 2, 20), _DATA_REFUSED_ALERT.format(since="08:00")),
+        (_et_on(day, 8, 32, 20), _RESTART_NOW_ALERT.format(since="08:00")),
+        # The injected sweep changes nothing on the phone: the half-hour repeats go
+        # on, "restart IB Gateway now" included...
+        (_et_on(day, 9, 2, 20), _RESTART_NOW_ALERT.format(since="08:00")),
+        (_et_on(day, 9, 32, 20), _RESTART_NOW_ALERT.format(since="08:00")),
+        # ...and the outage closes once, at the real recovery's third sweep (10:02:46,
+        # 2 min 10 s after the first), never at ~08:42.
+        (_et_on(day, 10, 2, 46), _RETURNING.format(back="10:00", since="08:00")),  # P1-A.4 merge: N15b L-10
+    ])
+    assert _broker_alerts_queued(caplog) == ["broker_unreachable"] * 4 + ["broker_reconnected"]
+    # The lone sweep is one flap in a digest, not a message of its own.
+    assert _flaps_in_digests(telegram) == 1
+
+
+@pytest.mark.anyio
+async def test_p1a4_a_relapse_20_s_after_the_recovery_sweep_keeps_the_repeats_1014_timing(
+    tmp_path, monkeypatch, caplog
+):
+    """Review N14 MEDIUM-1 evidence 1, pinned as N14 asked: an announced Gateway
+    outage from 14:20 whose first recovery sweep is 14:31:26; then, as live on
+    2026-10-14, a failed sweep 20 s later (14:31:46), the bridge's TWS 1100 at
+    14:32:16 and failed sweeps every ~83 s until the 15:24:53 restore. a070848: one
+    page ("log in"), a flap line, then nothing until "reconnected" at 15:26:54."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(15, 40))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(14, 10))
+    for n in range(8):  # healthy: 14:11:00-14:18:35
+        clock.at(_et(14, 11) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    # The Gateway stops answering at 14:20: the screener's reconnect attempts to 14:30.
+    connects = [_et(14, 20, 0), _et(14, 20, 20), _et(14, 20, 40)]
+    connects += [_et(14, 21, 50) + timedelta(seconds=70 * n) for n in range(8)]
+    for at in connects:
+        clock.at(at, _append(screener, _SCREENER_FAILED))
+    clock.at(_et(14, 31, 26), _append(screener, _SWEEP_LINE))
+    for at in [*(_et(14, 31, 46) + timedelta(seconds=83 * n) for n in range(38)), _et(15, 24, 49)]:
+        clock.at(at, _append(screener, _SWEEP_FAILED))
+    clock.at(_et(14, 32, 16), _append(logs / "bridge.log", _BRIDGE_1100))
+    clock.at(_et(15, 24, 50), _append(logs / "bridge.log", _BRIDGE_1100.replace("14:32:16", "15:24:50")))
+    clock.at(_et(15, 24, 53), _append(logs / "bridge.log", _BRIDGE_1102))
+    for n in range(10):
+        clock.at(_et(15, 26, 5) + timedelta(seconds=62 * n), _append(screener, _SWEEP_LINE))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    _assert_lines(_broker_lines(telegram), [
+        (_et(14, 20, 40), _GATEWAY_ALERT.format(since="14:20")),
+        # The sweep at 14:31:26 did not hold: the repeats come at their half hour,
+        # IBKR-side and "restart now" (the newest failures are the failed sweeps
+        # and the 1100's re-assertions).
+        (_et(14, 50, 40), _RESTART_NOW_ALERT.format(since="14:20")),
+        (_et(15, 20, 40), _RESTART_NOW_ALERT.format(since="14:20")),
+        # The restore and the next two sweeps: three in a row, at the third.
+        (_et(15, 27, 7), _RECONNECTED.format(back="15:24", since="14:20")),
+    ])
+    assert _broker_alerts_queued(caplog) == ["broker_unreachable"] * 3 + ["broker_reconnected"]
+
+
+@pytest.mark.anyio
+async def test_p1a4_a_tws_1102_inside_a_refusal_keeps_the_repeats_and_restart_now(tmp_path, monkeypatch, caplog):
+    """Review N14 MEDIUM-1 evidence 4, pinned as N14 asked: IBKR's link back (the
+    bridge's TWS 1102) while the price history is still refused, as could have
+    happened on 2026-10-16 had a bridge been connected. a070848: the 08:02 page and
+    a flap line; no 08:32 "restart now"."""
+    from datetime import time
+
+    day = GW_HMDS_DAY
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(9, 5))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et_on(day, 7, 55))
+    clock.at(_et_on(day, 7, 55, 1), _append(
+        logs / "supervisor.log", "2026-10-16T11:55:00+00:00 SESSION_START date=2026-10-16"
+    ))
+    at, n = _et_on(day, 8, 0, 20), 0
+    while at < _et_on(day, 9, 5):
+        clock.at(at, _append(screener, _timeout_at(at, n)))
+        at, n = at + timedelta(seconds=20), n + 1
+    clock.at(_et_on(day, 8, 20, 5), _append(logs / "bridge.log", _BRIDGE_1102.replace("15:24:53", "08:20:05")))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=day, env=_environment(paths, telegram, clock)) == 0
+
+    _assert_lines(_broker_lines(telegram), [
+        (_et_on(day, 8, 2, 20), _DATA_REFUSED_ALERT.format(since="08:00")),
+        (_et_on(day, 8, 32, 20), _RESTART_NOW_ALERT.format(since="08:00")),
+        (_et_on(day, 9, 2, 20), _RESTART_NOW_ALERT.format(since="08:00")),
+    ])
+    assert _flaps_in_digests(telegram) == 1
+
+
+# Owner test (b): offsets in seconds from 08:30:20 ET; t a daily-history timeout,
+# c a failed connect, f a failed sweep, s a sweep. After the last one the screener
+# qualifies again for five minutes (no line), then sweeps every 65 s.
+_ONE_SUCCESS_BLIPS = {
+    # The owner's words: three to five timeouts, then a sweep within two minutes.
+    "three timeouts, one sweep": [(0, "t"), (20, "t"), (40, "t"), (100, "s")],
+    "five timeouts, one sweep": [(0, "t"), (20, "t"), (40, "t"), (60, "t"), (80, "t"), (110, "s")],
+    # A streak that never opened is broken by ONE success (only an announced outage
+    # needs three), so a lone failure later starts afresh instead of opening it.
+    "two failed connects, one sweep, a lone failed connect 10 min later": [
+        (0, "c"), (20, "c"), (70, "s"), (670, "c"),
+    ],
+    "six timeouts (one signal), one sweep, a lone failed sweep 12 min later": [
+        (0, "t"), (20, "t"), (40, "t"), (60, "t"), (80, "t"), (100, "t"), (110, "s"), (830, "f"),
+    ],
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blip", sorted(_ONE_SUCCESS_BLIPS))
+async def test_p1a4_owner_b_a_short_blip_that_recovers_by_itself_stays_quiet_on_one_sweep(
+    blip, tmp_path, monkeypatch, caplog
+):
+    """Owner test (b), P1-A.4: a short self-recovering blip stays quiet, also when
+    only one sweep follows it (P1-A.3's owner (b) has a sweep every 65 s after)."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 55))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(8, 25))
+    for n in range(4):
+        clock.at(_et(8, 26) + timedelta(seconds=65 * n), _append(screener, _SWEEP_LINE))
+    start = _et(8, 30, 20)
+    other = {"c": _SCREENER_FAILED, "f": _SWEEP_FAILED, "s": _SWEEP_LINE}
+    for n, (offset, kind) in enumerate(_ONE_SUCCESS_BLIPS[blip]):
+        at = start + timedelta(seconds=offset)
+        clock.at(at, _append(screener, _timeout_at(at, n) if kind == "t" else other[kind]))
+    after = start + timedelta(seconds=_ONE_SUCCESS_BLIPS[blip][-1][0] + 300)
+    while after < _et(8, 55):
+        clock.at(after, _append(screener, _SWEEP_LINE))
+        after += timedelta(seconds=65)
+    telegram = FakeTelegram()
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    assert telegram.sent() == [startup_text(SESSION)]
+    assert _queued_alerts(caplog) == []
+
+
+# Owner test (c), P1-A.4 (the F-1 case, and review N14's attack grid): a refusal blip
+# from 08:00:20 is paged at 08:02:20; its recovery sweeps come every 65 s from 08:04:00
+# until a second refusal starts R after that page: timeouts every 20 s, or failed
+# sweeps every 83 s (as on 2026-10-14). With one or two recovery sweeps before it
+# (R = 130 s, 190 s) a070848 never paged the failed-sweep relapse. Now the blip has
+# not cleared (no ✅), so the relapse is the same outage: the phone still holds its
+# alert and the 08:32:20 repeat says "restart now". After three sweeps (✅ at 08:06:10)
+# the relapse is a new outage and pages at the sustain limit, never ~30 min late.
+_HELD = [
+    (_et(8, 2, 20), _DATA_REFUSED_ALERT.format(since="08:00")),
+    (_et(8, 32, 20), _RESTART_NOW_ALERT.format(since="08:00")),
+]
+_CLOSED = [
+    (_et(8, 2, 20), _DATA_REFUSED_ALERT.format(since="08:00")),
+    (_et(8, 6, 10), _RETURNING.format(back="08:04", since="08:00")),  # P1-A.4 merge: N15b L-10 wording
+]
+_RELAPSES = {
+    ("130 s", "history timeouts"): _HELD,
+    ("130 s", "failed sweeps"): _HELD,
+    ("190 s", "history timeouts"): _HELD,
+    ("190 s", "failed sweeps"): _HELD,
+    # 08:07:20: timeouts from 08:07:20 page at 08:12:20 (5 min of unbroken failures,
+    # the run backdated to its first); failed sweeps at 08:12:52 (the fifth, 5:32 in).
+    ("5 min", "history timeouts"): [
+        *_CLOSED,
+        (_et(8, 12, 20), _DATA_REFUSED_ALERT.format(since="08:07")),
+        (_et(8, 42, 20), _RESTART_NOW_ALERT.format(since="08:07")),
+    ],
+    ("5 min", "failed sweeps"): [
+        *_CLOSED,
+        (_et(8, 12, 52), _DATA_REFUSED_ALERT.format(since="08:07")),
+        (_et(8, 42, 52), _RESTART_NOW_ALERT.format(since="08:07")),
+    ],
+    # 08:22:20: still inside the blip's half hour (to 08:32:20); the sustain limit pages it.
+    ("20 min", "history timeouts"): [*_CLOSED, (_et(8, 27, 20), _DATA_REFUSED_ALERT.format(since="08:22"))],
+    ("20 min", "failed sweeps"): [*_CLOSED, (_et(8, 27, 52), _DATA_REFUSED_ALERT.format(since="08:22"))],
+}
+_RELAPSE_AFTER = {"130 s": timedelta(seconds=130), "190 s": timedelta(seconds=190), "5 min": timedelta(minutes=5), "20 min": timedelta(minutes=20)}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("relapse, signal", sorted(_RELAPSES))
+async def test_p1a4_owner_c_a_relapse_after_a_paged_blip_is_never_left_without_an_alert(
+    relapse, signal, tmp_path, monkeypatch, caplog
+):
+    from datetime import time
+
+    from trading.operations.hysteresis import SUSTAIN_LIMIT
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 50))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    blip = _et(8, 0, 20)
+    for n in range(9):  # 08:00:20-08:03:00, paged at the seventh (08:02:20)
+        at = blip + timedelta(seconds=20 * n)
+        clock.at(at, _append(screener, _timeout_at(at, n)))
+    second = _et(8, 2, 20) + _RELAPSE_AFTER[relapse]
+    sweep = _et(8, 4)
+    while sweep < second:
+        clock.at(sweep, _append(screener, _SWEEP_LINE))
+        sweep += timedelta(seconds=65)
+    timeouts = signal == "history timeouts"
+    every = timedelta(seconds=20 if timeouts else 83)
+    at, n = second, 0
+    while at < _et(8, 50):
+        clock.at(at, _append(screener, _timeout_at(at, n) if timeouts else _SWEEP_FAILED))
+        at, n = at + every, n + 1
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    broker = _broker_lines(telegram)
+    _assert_lines(broker, _RELAPSES[relapse, signal])
+    # Never left without an alert: when the relapse starts, the phone either still
+    # holds the blip's alert (no ✅ before it, none after it while it fails) or had
+    # its ✅, and then the relapse's own page comes within the sustain limit plus one
+    # failure interval of its first failure.
+    before = [text for sent_at, text in broker if sent_at < second]
+    if before[-1].startswith("✅"):
+        pages = [sent_at for sent_at, text in broker if sent_at >= second and text.startswith("⛔")]
+        assert pages and pages[0] - second <= SUSTAIN_LIMIT + every + timedelta(seconds=5)
+    else:
+        assert not any(text.startswith("✅") for _at, text in broker)
+
+
+# Owner test (d): a Gateway that does not answer from 10:00 (a failed connect every
+# 20 s, paged at 10:00:40), then sweeps 65 s apart.
+_OUTAGE = [_et(10, 0) + timedelta(seconds=20 * n) for n in range(30)]  # to 10:09:40
+_RECOVERIES = {
+    # Three sweeps in a row over two minutes: exactly one ✅, at the third (10:12:10),
+    # not two minutes after the first (10:12:00).
+    "three sweeps over two minutes": (
+        _OUTAGE,
+        [_et(10, 10) + timedelta(seconds=65 * n) for n in range(10)],
+        (10, 20),
+        [
+            (_et(10, 0, 40), _GATEWAY_ALERT.format(since="10:00")),
+            (_et(10, 12, 10), _RECONNECTED.format(back="10:10", since="10:00")),
+        ],
+    ),
+    # Two sweeps, then a failure 2 min 10 s after the first: no ✅; the outage goes
+    # on, its repeat at its half hour (10:30:40, not at the 10:12:10 relapse); then
+    # the real recovery from 10:40.
+    "two sweeps then a failure": (
+        [*_OUTAGE, *(_et(10, 12, 10) + timedelta(seconds=20 * n) for n in range(84))],  # to 10:39:50
+        [_et(10, 10), _et(10, 11, 5), *(_et(10, 40) + timedelta(seconds=65 * n) for n in range(5))],
+        (10, 45),
+        [
+            (_et(10, 0, 40), _GATEWAY_ALERT.format(since="10:00")),
+            (_et(10, 30, 40), _GATEWAY_ALERT.format(since="10:00")),
+            (_et(10, 42, 10), _RECONNECTED.format(back="10:40", since="10:00")),
+        ],
+    ),
+    # Two sweeps, a failure, one sweep, then eight minutes with no line (the screener
+    # qualifying again): the failure restarted the count, so the 10:12 sweep is one,
+    # not three; the ✅ comes at the third sweep after the failure (10:21:05).
+    "after a failure the count starts again": (
+        [*_OUTAGE, _et(10, 11, 30)],
+        [_et(10, 10), _et(10, 11, 5), _et(10, 12), _et(10, 20), _et(10, 21, 5), _et(10, 22, 10)],
+        (10, 25),
+        [
+            (_et(10, 0, 40), _GATEWAY_ALERT.format(since="10:00")),
+            (_et(10, 21, 5), _RECONNECTED.format(back="10:12", since="10:00")),
+        ],
+    ),
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recovery", sorted(_RECOVERIES))
+async def test_p1a4_owner_d_only_a_genuine_recovery_clears_with_exactly_one_reconnected_line(
+    recovery, tmp_path, monkeypatch, caplog
+):
+    """Owner test (d), P1-A.4: CLOSE_AFTER_COUNT successes in a row over at least
+    CLOSE_AFTER clear the alert with exactly one ✅; two successes then a failure do not."""
+    from datetime import time
+
+    failures, sweeps, until, expected = _RECOVERIES[recovery]
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(*until))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(9, 57))
+    clock.at(_et(9, 58), _append(screener, _SWEEP_LINE))
+    for at in failures:
+        clock.at(at, _append(screener, _SCREENER_FAILED))
+    for at in sweeps:
+        clock.at(at, _append(screener, _SWEEP_LINE))
+    telegram = TimedTelegram(clock)
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
+
+    _assert_lines(_broker_lines(telegram), expected)
+    assert sum(text.startswith("✅") for _at, text in _broker_lines(telegram)) == 1
+    assert _broker_alerts_queued(caplog)[-1] == "broker_reconnected"
+
+
+@pytest.mark.anyio
+async def test_p1a4_owner_e_the_1013_slow_morning_stays_silent(tmp_path, monkeypatch, caplog):
+    """Owner test (e), P1-A.4: live 2026-10-13, one connect failure at the window
+    open (08:00:10), a qualification of 503 names to 08:08:24 (a progress line every
+    ~50 s, no timeout), the first sweep at 08:10:02, then a sweep every ~80 s with an
+    isolated failed sweep at 08:25:42. Nothing reaches the phone."""
+    from datetime import time
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 45))
+    logs = paths.log_directory
+    screener = logs / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(logs / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    clock.at(_et(8, 0, 10), _append(screener, _SCREENER_FAILED))
+    clock.at(_et(8, 0, 15), _append(
+        screener,
+        _screener_line(_et(8, 0, 15), "INFO screener connected to TWS"),
+        _screener_line(_et(8, 0, 15), "INFO qualifying 503 of 503 instruments for 2026-10-13"),
+    ))
+    for n in range(1, 11):
+        at = _et(8, 0, 15) + timedelta(seconds=50 * n)
+        clock.at(at, _append(screener, _screener_line(at, f"INFO qualified {50 * n}/503 instruments")))
+    clock.at(_et(8, 8, 24), _append(screener, _screener_line(
+        _et(8, 8, 24), "INFO universe qualified for 2026-10-13: 391 qualified, 0 transient errors"
+    )))
+    for n in range(26):
+        clock.at(_et(8, 10, 2) + timedelta(seconds=80 * n), _append(screener, _SWEEP_LINE))
+    clock.at(_et(8, 25, 42), _append(screener, _SWEEP_FAILED))
     telegram = FakeTelegram()
 
     assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
@@ -3106,7 +3721,9 @@ def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_coun
         # An announced 70-second blip at 08:15, recovered at 08:17 (its pair goes out).
         for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
             watch.observe("screener", _SCREENER_FAILED, at)
-        watch.observe("screener", _SWEEP_LINE, _et(8, 17))
+        # P1-A.4 merge: three sweeps in a row (the first at 08:17), closed two clean minutes on.
+        for at in (_et(8, 17), _et(8, 17, 40), _et(8, 18, 20)):
+            watch.observe("screener", _SWEEP_LINE, at)
         assert watch.check(_et(8, 19)) is not None
         assert (watch.outages, watch.ops_flaps, watch.hysteresis.flaps) == (1, 0, 0)
     start = _et(8, 25)
@@ -3122,6 +3739,9 @@ def test_an_outage_counts_once_as_an_outage_never_also_as_a_flap_in_the_ops_coun
     assert watch.unreachable_since == start  # announced (by the sustain limit after a blip)
     source, line = _RESTORED.get(cause, ("screener", _SWEEP_LINE))
     watch.observe(source, line, _et(8, 40, 5))
+    # P1-A.4 merge: two more sweeps, so three successes in a row before 08:42:05.
+    for at in (_et(8, 40, 45), _et(8, 41, 25)):
+        watch.observe("screener", _SWEEP_LINE, at)
     assert watch.check(_et(8, 42, 5)) is not None and not watch.hysteresis.is_open
 
     assert watch.outages == (2 if after_blip else 1)
@@ -3141,12 +3761,16 @@ def test_a_held_back_open_that_closes_unannounced_is_a_flap_in_the_ops_counts():
     watch.observe("screener", _SWEEP_LINE, _et(8, 10))
     for at in (_et(8, 15, 0), _et(8, 15, 35), _et(8, 16, 10)):
         watch.observe("screener", _SCREENER_FAILED, at)
-    watch.observe("screener", _SWEEP_LINE, _et(8, 17))
+    # P1-A.4 merge: three sweeps in a row (the first at 08:17), closed two clean minutes on.
+    for at in (_et(8, 17), _et(8, 17, 40), _et(8, 18, 20)):
+        watch.observe("screener", _SWEEP_LINE, at)
     assert watch.check(_et(8, 19)) is not None
     for at in (_et(8, 25, 0), _et(8, 25, 30), _et(8, 26, 0)):
         watch.observe("screener", _SCREENER_FAILED, at)
     assert watch.holding_back and watch.ops_flaps == 0
-    watch.observe("screener", _SWEEP_LINE, _et(8, 26, 30))
+    # P1-A.4 merge: three sweeps in a row from 08:26:30 (an unannounced open needs them too).
+    for at in (_et(8, 26, 30), _et(8, 27, 10), _et(8, 27, 50)):
+        watch.observe("screener", _SWEEP_LINE, at)
     assert watch.check(_et(8, 28, 30)) is None  # its close is silent too
     assert not watch.hysteresis.is_open and not watch.holding_back
     assert (watch.outages, watch.ops_flaps, watch.hysteresis.flaps) == (1, 1, 1)

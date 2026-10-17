@@ -5,7 +5,9 @@ Inside ``NOTIFIER_WINDOW`` on session days (07:55-16:15 ET) the notifier's
 runs this watch (``overnight_watch``): a TCP check of the API port every
 ``PORT_CHECK_INTERVAL``, fed into the shared ``Hysteresis`` with its default
 constants (the numbers BrokerWatch uses: three failed checks or two minutes
-to open, two clean minutes to close, one pair per half hour). Nothing here
+to open, two clean minutes to close, one pair per half hour), and its default
+``close_after_count`` of 1: one good check starts the two clean minutes
+(BrokerWatch alone asks for three successes, P1-A.4; plan HIGH-2). Nothing here
 reads a clock, a socket or a file; every call takes ``now``.
 
 Schedule, America/New_York, derived from the supervisor's windows and the
