@@ -43,6 +43,7 @@ from trading.research.live_ledger import read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import FenceRow, SQLitePaperKillStore
+from tests.test_runtime_fence import FENCE_DAMAGE, break_fence_table
 
 FRIDAY = date(2026, 10, 9)
 MONDAY = date(2026, 10, 12)
@@ -548,6 +549,45 @@ async def test_a_fence_that_cannot_be_written_is_paged_and_retried(tmp_path):
     assert fenced[1].startswith("⛔ auto-fence ORB_V2: daily loss") and store.stops == [
         ("ORB_V2", "sentinel: daily loss 2.00 R > 1.25 R (realized -$200.00)")
     ]
+
+
+@pytest.mark.parametrize("damage", FENCE_DAMAGE)
+async def test_an_unreadable_fence_table_is_paged_not_written_never_already_fenced(tmp_path, fences, damage):
+    """N15c LOW-2: the real store on a real database whose fence table is missing or
+    unreadable, while ORB_V2 is over its limit. The Sentinel pages "NOT written …
+    block it by hand" (never "already blocked": no fence exists), remembers nothing,
+    and writes the fence at the first check after the table is back. Meanwhile the
+    bridge's own reader fails on the same table (and fails closed: no entry)."""
+    directory = tmp_path / "bridge"
+    _save(directory, TODAY, [_bracket("o", status="closed", realized_pnl="-200.00")], written_at=_et(10, 0))
+    reason = "sentinel: daily loss 2.00 R > 1.25 R (realized -$200.00)"
+    repair = break_fence_table(fences, damage)
+    memory: dict[str, str] = {}
+    heartbeat = Heartbeat(_et(10, 0))
+    watcher = _sentinel(directory, memory, heartbeat=heartbeat)  # the real SQLitePaperKillStore
+
+    assert await watcher.check(_et(10, 0, 10)) == [(
+        "sentinel_fence",
+        "⚠️ auto-fence ORB_V2 NOT written (OperationalError): daily loss 2.00 R > 1.25 R (realized -$200.00)"
+        f' — block it by hand: autotraderctl paper stop --identity ORB_V2 --reason "{reason}"',
+    )]
+    assert "sentinel_fence:ORB_V2" not in memory
+    with pytest.raises(sqlite3.OperationalError):
+        await fence_identity(SQLitePaperKillStore(), identity="ORB_V2", reason=reason, resumed_on=TODAY)
+    with pytest.raises(sqlite3.OperationalError):
+        bridge.identity_fence_active(fences, "ORB_V2")
+    heartbeat.at = _et(10, 1)
+    assert await watcher.check(_et(10, 1)) == []  # retried every check, re-paged at most every half hour
+
+    repair()
+    heartbeat.at = _et(10, 2)
+    assert await watcher.check(_et(10, 2)) == [(
+        "sentinel_fence",
+        "⛔ auto-fence ORB_V2: daily loss 2.00 R > 1.25 R (realized -$200.00) — new entries blocked;"
+        " resume: autotraderctl paper resume --identity ORB_V2",
+    )]
+    assert _rows(fences)["paper:ORB_V2"][:2] == (1, reason)
+    assert bridge.identity_fence_active(fences, "ORB_V2")
 
 
 # --------------------------------------------------------------------------

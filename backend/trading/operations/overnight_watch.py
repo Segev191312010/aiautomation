@@ -14,7 +14,9 @@ schedule); this module probes, reads the logs and sends:
     taking the Gateway over from the notifier, the watch starts from the
     notifier's announced outage of the day (``notify_service.
     notifier_gateway_outage``: its start, and whether it was paged), never
-    from its own first failed check (N15b L-1);
+    from its own first failed check (N15b L-1), but only when the notifier
+    was still checking it near its end (``gateway_outage_current``, N15c
+    LOW-1): a stale one is ignored;
   * F-2, ``supervisor.log`` on any day: the restart cap's lines
     (``CHILD_SUSPENDED``, ``CHILD_RESTART_STORM``, ``CHILD_RESUMED``) dated
     outside the notifier's window, with notify_service's own texts and
@@ -78,6 +80,7 @@ from trading.operations.notify_service import (
     CHILD_SUSPENDED,
     GATEWAY_DOWN,
     competing_login_repage_text,
+    gateway_outage_current,
     ibkr_alert_text,
     ibkr_session_problem,
     notifier_gateway_outage,
@@ -121,11 +124,26 @@ NotifierOutage = Callable[[date], KnownOutage | None]
 def notifier_port_outage(paths: UserPaths) -> NotifierOutage:
     """The notifier's announced outage of a date, when it is the Gateway not
     answering (``GATEWAY_DOWN``): the port watch's evidence at 16:15. IBKR-side
-    outages (data refused, the link lost) leave the port open: not evidence."""
+    outages (data refused, the link lost) leave the port open: not evidence.
+
+    Only a current outage counts (``gateway_outage_current``: stamped by a
+    notifier still checking it near its end, N15c LOW-1). One a notifier left
+    when it stopped early (a crash loop, a suspension) may have ended unseen;
+    borrowing its "paged" would keep a new evening outage off the phone until
+    05:55, so the evening starts from the watch's own checks instead."""
 
     def read(day: date) -> KnownOutage | None:
         outage = notifier_gateway_outage(paths, day)
         if outage is None or outage.kind != GATEWAY_DOWN:
+            return None
+        if not gateway_outage_current(outage, day):
+            checked = outage.checked_at
+            logger.warning(
+                "overnight watch: the notifier's Gateway outage since %s was last checked %s, not near"
+                " its end: stale, ignored",
+                clock_text(outage.since, outage.since),
+                "never" if checked is None else f"at {clock_text(checked, outage.since)}",
+            )
             return None
         return KnownOutage(since=outage.since, paged=outage.paged)
 

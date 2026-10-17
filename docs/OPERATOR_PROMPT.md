@@ -14,7 +14,8 @@
 > - `[PLANNED]` does not exist in code yet: never call it, never describe it as working
 > - `[UNVERIFIED]` configured by hand, not yet proven by observation
 >
-> Values in `<ANGLE_BRACKETS>` are placeholders the owner fills in.
+> Values in `<ANGLE_BRACKETS>` are placeholders the owner fills in. They appear in prose and tool
+> cards only, never inside a command block (Part 2.1).
 > This document is a snapshot. **Always verify live state with the commands in Part 10 before acting.**
 
 ---
@@ -63,7 +64,7 @@ THE ENVELOPE     = the limits inside which the machine trades:
 | Gating | Allowlist, caps, entries/day, deadlines, daily loss, fences |
 | Orders | Bracket per entry: parent LMT + target LMT + **stop STP resting at IB** |
 | Exits | Targets/stops at IB; 15:45 ET flatten; working-parent expiry at the deadline |
-| Recovery | Exit 75 → supervisor restart with backoff; Gateway auto-restart nightly `[UNVERIFIED]` |
+| Recovery | Exit 75 → supervisor restart with backoff; Gateway auto-restart nightly at 02:30 Israel (set in the Gateway; first observed 2026-10-17, checked each morning by launcher.log, Part 4.5) |
 | Evidence | Recorder (evening), replay (night), shadow == live comparison |
 | Alerts | CRITICAL lines forwarded to the owner's phone via Telegram by the **notifier** child |
 
@@ -130,10 +131,24 @@ Shell preamble used by every command in this document:
 
 ```bash
 cd /Users/salomon/aiautomation/backend
-CTL=".venv/bin/python autotraderctl.py"
+CTL=(.venv/bin/python autotraderctl.py)
 L=~/Library/Logs/AutotraderV1
 D=~/.local/share/autotrader-v1
 ```
+
+Every command block is written for the owner's Terminal: zsh, with `interactive_comments` off (its
+default). So:
+- no block carries a `#` comment: in that shell `#` and the words after it become arguments of the
+  command. What to expect is in the prose next to the block;
+- no block holds an `<ANGLE_BRACKET>` placeholder (zsh reads `<` and `>` as redirections). A value to
+  fill in is a shell variable that the prose names and you set first, e.g. `NEXT_SESSION=2026-10-19`.
+  Where an empty value would be wrong, the block writes `${NAME:?}`, so an unset variable stops the
+  command (`zsh: NAME: parameter not set`) instead of running with nothing;
+- `CTL` is an array: zsh does not split a string into words, so `CTL=".venv/bin/python
+  autotraderctl.py"` fails as one command name. In zsh, `$CTL paper status` expands the whole array.
+  In bash (an agent's shell), `$CTL` is only its first word: an agent writes `"${CTL[@]}" paper status`.
+
+Paste one block at a time, and read its result before the next.
 
 ### 2.2 Process tree
 
@@ -156,10 +171,11 @@ launchd  (LaunchAgent com.maccabi.autotrader-v1.shadow)
 **Restart policy** (`supervisor.py`): backoff 15 → 30 → 60 → 120 → 300 s, capped at 5 min, reset after 5 min healthy.
 **Restart cap** `[NOW]`: exits are counted per child over a rolling 30 min, only while port 7497 answers (`CHILD_EXIT_UNCOUNTED <name> reason=port_closed`, or `reason=port_unknown` when the probe itself failed; always-on children always count). A scheduled child's exit 75 is the schema gate's refusal (a pending migration): never counted (`reason=schema_not_ready`); the schema alert pages it once. At 6, a scheduled child is suspended into a probe every 5 min (`CHILD_SUSPENDED`) and resumes when a probe stays up 5 min, the port reopens, its window ends, or the supervisor stops (`CHILD_RESUMED`, written before any child is signalled). The bridge and always-on children are never suspended: they page `CHILD_RESTART_STORM` and keep their backoff.
 
-**Restart-cap pages reach the phone at any hour** `[NOW]`: the notifier forwards them 07:55–16:15 ET on session days; outside that window the always-on `telegram` child tails `supervisor.log` and forwards `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` / `CHILD_RESUMED` with the same texts and the same rule (each once per child per half hour; a contradicting state always goes), plus the line's ET time. A line dated inside the notifier's window is the notifier's and is never sent twice, with one exception: the notifier's own lines (`CHILD_SUSPENDED notifier`, `CHILD_RESTART_STORM notifier`, `CHILD_RESUMED notifier`) are always the `telegram` child's, at any hour, inside the notifier's window too (a suspended notifier cannot report itself), and the notifier never forwards a line about itself. The 18:35 rotation's carried lines and archives are never re-sent (its read position is kept in the assistant's `state.json`). A `telegram` crash loop outside the window is sent only by a restarted `telegram` child that comes up far enough to read it (one that refuses at start, exit 78, never does): check the day's lines in the post-session report, archives included (the rotation's carried lines are verbatim copies of archive lines, so `sort -u` drops them; `DAY` is the session date, `YYYY-MM-DD`):
+**Restart-cap pages reach the phone at any hour** `[NOW]`: the notifier forwards them 07:55–16:15 ET on session days; outside that window the always-on `telegram` child tails `supervisor.log` and forwards `CHILD_SUSPENDED` / `CHILD_RESTART_STORM` / `CHILD_RESUMED` with the same texts and the same rule (each once per child per half hour; a contradicting state always goes), plus the line's ET time. A line dated inside the notifier's window is the notifier's and is never sent twice, with one exception: the notifier's own lines (`CHILD_SUSPENDED notifier`, `CHILD_RESTART_STORM notifier`, `CHILD_RESUMED notifier`) are always the `telegram` child's, at any hour, inside the notifier's window too (a suspended notifier cannot report itself), and the notifier never forwards a line about itself. The 18:35 rotation's carried lines and archives are never re-sent (its read position is kept in the assistant's `state.json`). A `telegram` crash loop outside the window is sent only by a restarted `telegram` child that comes up far enough to read it (one that refuses at start, exit 78, never does): check the day's lines in the post-session report, archives included (the rotation's carried lines are verbatim copies of archive lines, so `sort -u` drops them). `DAY` is the session date, `YYYY-MM-DD`: the first line sets it to today's ET date; for an earlier session, or after midnight ET, skip that line and set it by hand first (e.g. `DAY=2026-10-16`):
 
 ```bash
-cat $L/supervisor.log* | grep -E "^${DAY}T[^ ]* CHILD_(SUSPENDED|RESTART_STORM) " | sort -u
+DAY=$(TZ=America/New_York date +%F)
+cat $L/supervisor.log* | grep -E "^${DAY:?}T[^ ]* CHILD_(SUSPENDED|RESTART_STORM) " | sort -u
 ```
 
 | Exit code | Meaning | What happens / what you do |
@@ -187,12 +203,12 @@ Scheduling is code-driven in **America/New_York**. Israel = ET + 7 until 2026-10
 | 15:45 | 22:45 | **Flatten** all bot positions |
 | 16:00 | 23:00 | Market close |
 | 16:05 | 23:05 | Notifier's daily report, with its OPS block (Part 6.5) |
-| 16:15 | 23:15 | Notifier ends; the `telegram` child's watch pages a closed port again (until 18:30), starting from the notifier's last Gateway state |
+| 16:15 | 23:15 | Notifier ends; the `telegram` child's watch pages a closed port again (until 18:30), starting from the notifier's last Gateway state when the notifier was still checking it at its end (a stale one is ignored, 4.9) |
 | 16:20–17:30 | 23:20–00:30 | Recorder (a competing IBKR login in `recorder.log` is paged by the `telegram` child) |
 | 17:35–18:30 | 00:35–01:30 | Replay |
 | 18:30 | 01:30 | **Deploy window opens**; Gateway quiet hours start |
 | 18:35 | 01:35 | Log rotation (T-3, between sessions, after the replay window; inside the deploy window): `supervisor.log`, every child's `<name>.log` and launchd's two logs move to `<name>.log.<YYYY-MM-DD>` (14 days kept); one `LOG_ROTATED …` line (Part 4.6). A supervisor that was down across 18:35 makes it up at its next start |
-| — | 02:30 (local) | IB Gateway auto-restart (configured in Gateway) `[UNVERIFIED]` |
+| — | 02:30 (local) | IB Gateway auto-restart (set in the Gateway: Configure → Settings → Lock and Exit → Auto restart). First observed 2026-10-17 02:30:04 Israel; verify it each morning by launcher.log (Part 4.5), never by "Daily auto-restart is enabled." |
 
 On a 13:00 ET early close, every "close − N" deadline moves with it. That is why deadlines are offsets, not clock times. The watch's leads are offsets too: `PRE_SESSION_LEADS` (2 h and 15 min) before `SESSION_START`, on session days only (`market_session`); in the week Israel is ET + 6 they are 11:55 and 13:40 Israel.
 
@@ -424,8 +440,10 @@ NOTE    v7a/v7b need NO migration. If a change suddenly needs one, stop and say 
 ```
 
 #### 4.2.3 Reading the DB safely
+
+Read-only, and never on the live file during a session for anything heavy:
+
 ```bash
-# read-only, never on the live file during a session for anything heavy
 sqlite3 "file:$D/autotrader.db?mode=ro" \
   "SELECT name, stopped, reason, updated_at FROM autotrader_execution_fences;"
 ```
@@ -462,7 +480,8 @@ EFFECT  Global fence stopped=1. Stop-only: there is no global resume.
 ```
 STATUS  [NOW]
 WHO     OWNER / AGENT+ (only when the owner asked for this exact stop in the current session; never unattended).
-        The runtime auto-fence (Part 8.4, [PLANNED]) is deterministic code with owner-set thresholds, not an agent action.
+        The runtime auto-fence (the Sentinel, Part 8.4, [NOW]) is deterministic code with owner-set thresholds,
+        not an agent action: it writes this same row, stopped=1, with a reason starting "sentinel: ".
 EXAMPLE $CTL paper stop --identity ORB_V2 --reason "slippage 3x shadow on 2 fills"
 EFFECT  Row paper:ORB_V2 stopped=1 → next ORB_V2 entry skipped "identity_stopped:ORB_V2" (forwarded to the phone).
         Bridge connect line becomes CRITICAL while any identity row is stopped.
@@ -497,8 +516,8 @@ USE     Mid-session emergency, together with `paper stop`. Never deploy as an em
 ```bash
 shasum -a 256 scripts_local/paper_bridge.py
 grep 'REVIEWED_BRIDGE_SHA256 = ' trading/operations/supervisor.py
-# the two hashes MUST be equal, or the supervisor refuses to launch (exit 78)
 ```
+The two hashes MUST be equal, or the supervisor refuses to launch (exit 78).
 Which pin belongs to which version, and which is live, is recorded in `docs/PAPER_EXECUTION_STATUS.md` (review history) and in the ledger `docs/reviews/<date>-ledger.md`. This document lists no pins.
 
 #### 4.4.2 `--preflight`
@@ -526,14 +545,23 @@ parse_ref("manual:...")                      # → None
 ### 4.5 IB Gateway
 
 ```bash
-nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED      # is the API port up?
-tail -n 50 ~/Jts/launcher.log                               # restarts, logoffs
+nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
+tail -n 50 ~/Jts/launcher.log
+head -n 1 ~/Jts/launcher.log
+grep -c 'Running in auto-restart mode' ~/Jts/launcher.log
 ```
+
+The first line says whether the API port is up (`OPEN` or `CLOSED`); the second shows the Gateway's
+recent lines (restarts, logoffs). The last two verify the nightly auto-restart (LEARNED GW-HMDS-1016,
+2026-10-17): after an auto-restart, launcher.log's first line is dated at that restart (about 02:30
+Israel, the Mac's clock), and the log has the line `Running in auto-restart mode: restoring session
+token and session ID` (a count of 1 or more). Never judge it by `Daily auto-restart is enabled.`: on
+2026-10-17 the log still printed `Daily auto-restart is not enabled.` after a real auto-restart.
 
 | Situation | Meaning |
 |---|---|
 | `CLOSED` before 07:55 ET | Session will start blind. Owner must log in (Playbook 7.1) |
-| launcher log "Daily auto-restart is not enabled" | Auto-restart setting lost: Gateway will log off nightly |
+| launcher.log's first line is not dated at last night's 02:30, or no `Running in auto-restart mode` line | The auto-restart did not run, or the Gateway was restarted by hand since: check Configure → Settings → Lock and Exit → Auto restart. `Daily auto-restart is not enabled.` in the log is no evidence either way |
 | Port OPEN but children log "login active elsewhere" (TWS 10197/162/165) | A phone/web IBKR login is taking the market data: log out there (Playbook 7.10) |
 | `⛔ IB Gateway is not returning prices (05:55 ET check)` (or 07:40) | Port open, but the pre-session data check's daily-history request timed out, failed or returned no bars, and so did its one retry 30 s later on the fallback symbol (GW-HMDS-1016): log out of the IBKR app and website, then restart IB Gateway (File → Exit, reopen, log in) |
 | Sunday | Weekly 2FA login is due (owner) |
@@ -577,49 +605,64 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 
 Every cap line follows the `CHILD_EXIT` line of the exit it is about (`CHILD_RESUMED reason=probe_healthy`, `PORT_PROBE_FAILED`, `CHILD_EXIT_UNCOUNTED`, `CHILD_SUSPENDED` / `CHILD_RESTART_STORM`, in that order).
 
-**Carried lines.** After a rotation the new `supervisor.log` starts with copies of the newest state lines (this run's `SUPERVISOR_START`, the newest `SESSION_*` line, each child's newest `CHILD_START` or `CHILD_EXIT`), verbatim with their original times, followed by the `LOG_ROTATED` marker; they are written in one write. They are copies of lines in `supervisor.log.<date>`: the notifier, the `telegram` watch and the heartbeat skip them. A reader of the new file alone still sees the running supervisor. Anything that counts or lists a day must read the archives (`supervisor.log*`) and drop the copies: `sort -u` does, because a carried line is byte-identical to its archive line. `DAY` is the session date (`YYYY-MM-DD`); the lines carry UTC ISO times, and a session's lines from 07:55 to 18:35 ET all have that same UTC date.
+**Carried lines.** After a rotation the new `supervisor.log` starts with copies of the newest state lines (this run's `SUPERVISOR_START`, the newest `SESSION_*` line, each child's newest `CHILD_START` or `CHILD_EXIT`), verbatim with their original times, followed by the `LOG_ROTATED` marker; they are written in one write. They are copies of lines in `supervisor.log.<date>`: the notifier, the `telegram` watch and the heartbeat skip them. A reader of the new file alone still sees the running supervisor. Anything that counts or lists a day must read the archives (`supervisor.log*`) and drop the copies: `sort -u` does, because a carried line is byte-identical to its archive line. `DAY` is the session date (`YYYY-MM-DD`); the lines carry UTC ISO times, and a session's lines from 07:55 to 18:35 ET all have that same UTC date. The block's third line sets `DAY` to today's ET date; for an earlier session, or after midnight ET, skip that line and set it by hand first (e.g. `DAY=2026-10-16`).
 
 ```bash
-tail -n 3  $L/supervisor.log
+tail -n 3 $L/supervisor.log
 grep -n 'CRITICAL' $L/bridge.log | tail
-DAY=<SESSION_DATE>
-cat $L/supervisor.log* | grep -E "^${DAY}T[^ ]* CHILD_START " | sort -u | awk '{print $3}' | sort | uniq -c
-cat $L/supervisor.log* | grep -E "^${DAY}T[^ ]* CHILD_(SUSPENDED|RESTART_STORM) " | sort -u
+DAY=$(TZ=America/New_York date +%F)
+cat $L/supervisor.log* | grep -E "^${DAY:?}T[^ ]* CHILD_START " | sort -u | awk '{print $3}' | sort | uniq -c
+cat $L/supervisor.log* | grep -E "^${DAY:?}T[^ ]* CHILD_(SUSPENDED|RESTART_STORM) " | sort -u
 ```
 
 The first `cat … | uniq -c` gives each child's starts that day; a child's restarts = its starts − 1. The second lists the day's suspensions and storms. A child log that spans days is read the same way, e.g. `cat $L/bridge.log* | grep …`.
 
 ### 4.7 Git and worktrees
 
+Read-only (set `CANDIDATE` to the branch first):
+
 ```bash
 git -C /Users/salomon/aiautomation worktree list
-git -C /Users/salomon/aiautomation rev-parse --short HEAD          # what is live
-git -C .. merge-base --is-ancestor HEAD <candidate> && echo ff-ok
-git -C .. diff --stat HEAD..<candidate>                            # what will ship
-git -C .. merge --ff-only <candidate>                              # deploy (OWNER)
-git -C .. reset --keep "$PREV_SHA"                                 # rollback, whole tree only
+git -C /Users/salomon/aiautomation rev-parse --short HEAD
+git -C .. merge-base --is-ancestor HEAD "${CANDIDATE:?}" && echo ff-ok
+git -C .. diff --stat "HEAD..${CANDIDATE:?}"
 ```
+
+The second line is what is live; `ff-ok` means the candidate fast-forwards; the last is what will
+ship. The deploy itself is the owner's `git -C .. merge --ff-only "$CANDIDATE"` (6.2 STEP 2), and a
+rollback is `git -C .. reset --keep "$PREV_SHA"`, whole tree only (6.3): never pasted from here.
 
 Rules: build only in worktrees; never per-file checkout on the live tree (it desyncs the pin → exit 78 → no bridge). A reviewed deploy branch takes no further commits except the reviewer's `docs/reviews/`-only addendum line.
 
 ### 4.8 Tests
 
+Targeted:
+
 ```bash
-# targeted
 backend/.venv/bin/python -m pytest backend/tests/test_paper_bridge.py \
   backend/tests/test_sendable_identities.py backend/tests/test_identity_sizing.py \
   backend/tests/test_supervisor.py backend/tests/test_bridge_imports.py \
   backend/tests/test_shadow_replay_equality.py backend/tests/test_shadow_modelled_fills.py \
   backend/tests/test_momo_v2.py -q
+```
 
-# full suite (tests/conftest.py isolates HOME and DB_PATH; run from backend/)
+Full suite (`tests/conftest.py` isolates HOME and DB_PATH; run from backend/):
+
+```bash
 backend/.venv/bin/python -m pytest backend/tests -q -p no:cacheprovider
+```
 
-# AGENTS.md quality gates — BEFORE ANY COMMIT (backend tests, pip-audit, git diff --check,
-# dashboard typecheck, build and tests):
+AGENTS.md quality gates, BEFORE ANY COMMIT (backend tests, pip-audit, git diff --check, dashboard
+typecheck, build and tests):
+
+```bash
 SKIP_DOCKER=1 scripts/run_quality_gates.sh
-# BEFORE SHIPPING (a deploy) — the same plus both Docker images; needs the Docker daemon,
-# so run it outside session hours:
+```
+
+BEFORE SHIPPING (a deploy): the same plus both Docker images; it needs the Docker daemon, so run it
+outside session hours:
+
+```bash
 scripts/run_quality_gates.sh
 ```
 In a worktree the script needs `backend/.venv/bin/{python,pytest,pip-audit}` and a real
@@ -666,6 +709,7 @@ What the phone says:
   - at 05:55 and 07:40 ET on session days, if the port is closed (a lead's first failed check is confirmed 2 min later, so a Gateway restart spanning the lead is not paged): `⛔ IB Gateway closed since HH:MM ET (its API port does not answer) — log in to IB Gateway; session starts 07:55 ET (05:55 ET check)`;
   - 05:55–07:55 and 16:15–18:30 ET: the same page (without the check) when an outage opens;
   - when the outage began is unknown, the page says so: the watch starts looking after a `telegram` restart, at its first start, and at 16:15 when it takes over from the notifier, and if its first check then finds the port closed it says `⛔ IB Gateway closed since before HH:MM ET (its API port does not answer) — log in to IB Gateway` (HH:MM = that first check), unless it has evidence of the start: its own saved state from before a restart (kept in the assistant's `state.json`), or at 16:15 the notifier's last Gateway state for today (an announced "unreachable" outage: its start, and whether the notifier paged it). The same "since before" wording appears in the digest and the recovery line;
+  - the notifier's state counts only when it is current: while an outage lasts the notifier stamps its latest check into its state at least once a minute, and the watch uses that outage only when it was stamped at most 5 min before the notifier's 16:15 end (N15c LOW-1). A state left by a notifier that stopped earlier (a crash loop, a suspension, a hang) may describe an outage that ended unseen: it is ignored (a `stale, ignored` line in telegram.log), and the evening starts from the watch's own checks, so a closed port is paged within minutes (`… since before 16:15 ET`) instead of waiting for the 05:55 lead. The same rule holds for a `telegram` child that was down at 16:15 and takes over later;
   - an outage the notifier, or the watch itself before a restart, already paged is not paged again and never appears in the quiet-hours digest as "not paged"; it still gets its recovery line;
   - once per paged outage, whenever it reopens: `✅ IB Gateway port open again HH:MM ET (closed since HH:MM ET)`. At 07:55 at the latest: if the last check before the notifier's window succeeded, at once; if it still failed, the watch checks the port once more at 07:55 before handing over, and sends the line if the port answers then. Inside 07:55–16:15 the watch is silent: the Gateway alert above is the notifier's.
 - **Pre-session data check** (05:55 and 07:40 ET on session days, when the port watch found the port open; owner decision 2026-10-16: a historical-bar request, because quotes are thin at 05:55). One request for the first pinned symbol the universe resolved (AAPL). If it fails (a timeout, an error or no bars), the check waits 30 s and makes ONE more request on the fallback symbol (MSFT: the next pinned symbol the universe resolved; the same contract if there is none). Only a second failure pages, about 75 s after the lead at worst. Healthy (bars came back on either request): nothing. Otherwise one page per check, so 07:40 pages again after a 05:55 failure:
@@ -690,8 +734,10 @@ The ledger is the decision and evidence log. It lives **in the repo**: `docs/rev
 ### 4.11 Clock
 
 ```bash
-sntp time.apple.com      # abort any timed step if |offset| > 2 s
+sntp time.apple.com
 ```
+
+Abort any timed step if |offset| > 2 s.
 
 ### 4.12 Heartbeat (external dead-man's switch, T-3)
 
@@ -744,7 +790,7 @@ LOGS    heartbeat.log: HEARTBEAT_START every=60s timeout=10s host=<host> · HEAR
 | `run --dry-run`, `--preflight`, `deploy check` (read-only) | — | ✓ | ✓ | ✓ |
 | Deploy (merge/reset live tree, agent disable/enable) | — | ✗ | ✗ (P2 write half pending) | ✓ |
 | `db migrate` on live DB | — | ✗ | ✗ | ✓ |
-| `paper stop --identity` | `[PLANNED]` auto-fence rules | ✗ | ✓ (owner asked for this exact stop) | ✓ |
+| `paper stop --identity` | `[NOW]` the Sentinel's auto-fence rules only (Part 8.4; reason `sentinel: …`; stop only, never resume) | ✗ | ✓ (owner asked for this exact stop) | ✓ |
 | `/halt <IDENTITY>` (phone) | — | ✗ | ✗ | ✓ |
 | `paper stop` (global) | — | ✗ | ✓ (owner asked for this exact stop) | ✓ |
 | `/closeall` and every phone order command | — | ✗ | ✗ | ✓ |
@@ -784,18 +830,22 @@ Pattern to copy: **v7a** (identity-agnostic logic, MOMO-only data) → one obser
 
 ### 6.2 Deploy runbook (generic)
 
-Variables: `CANDIDATE` (branch), `EXPECTED_PARENT` (live sha now), `EXPECTED_PIN`, `SCOPE` (reviewed slices), `LEDGER=docs/reviews/<date>-ledger.md` (read from the candidate branch: the live tree may not have it).
+Variables: set them in the shell before STEP 0, each to its real value (no angle brackets; Part 2.1):
+`CANDIDATE` (the branch, e.g. `CANDIDATE=ops-p1b`), `EXPECTED_PARENT` (the live sha now),
+`EXPECTED_PIN` (the reviewed bridge sha256), `VERDICT_SHA` (the sha the ledger's verdict line names),
+`SCOPE` (the reviewed slices, comma-separated), `NEXT_SESSION` (the next session date, e.g.
+`NEXT_SESSION=2026-10-19`) and `LEDGER`, the ledger's path such as `docs/reviews/2026-10-17-ledger.md`
+(read from the candidate branch: the live tree may not have it). `PREV_SHA` is set by STEP 0 itself.
 
 `autotraderctl deploy check` (read-only, from P1-A on) runs every STEP 0 check below and exits 78 on
 any refusal. **Run it from the candidate's worktree**, not from the live checkout: its schema check
 compares the database with the migrations of the code that runs it, so only the candidate's code
 notices a migration the candidate adds. **`--repo` is required** and names the live checkout the
 candidate is deployed into; `parent` refuses when that checkout's HEAD is the candidate itself
-(the candidate checked against itself proves nothing).
+(the candidate checked against itself proves nothing). From the candidate worktree's `backend/`:
 
 ```bash
-# from the candidate worktree's backend/:
-.venv/bin/python autotraderctl.py deploy check --candidate $CANDIDATE --repo /Users/salomon/aiautomation --scope $SCOPE
+.venv/bin/python autotraderctl.py deploy check --candidate "${CANDIDATE:?}" --repo /Users/salomon/aiautomation --scope "${SCOPE:?}"
 ```
 
 A commit cannot contain its own sha, so in practice the ledger's verdict line names an earlier
@@ -805,42 +855,84 @@ prints the matched line and those commits. Only a ledger verdict line counts: it
 being a release name with a digit (`v7a`, `P1-A`); a sha with `verdict=GO` anywhere else in a line
 ("not yet: <sha> verdict=GO", a backticked quote) is not a verdict.
 
+**STEP 0 — pre-checks.** Abort on ANY mismatch.
+
 ```bash
-# STEP 0 — pre-checks (abort on ANY mismatch)
-git -C .. show $CANDIDATE:$LEDGER | grep -E "<VERDICT_SHA> verdict=GO"  # FIRST: then `git -C .. diff --name-only <VERDICT_SHA>..$CANDIDATE` touches only docs/reviews/ (I-11)
-git -C .. status --short                       # only known-benign entries
-git -C .. rev-parse --short HEAD               # == EXPECTED_PARENT
-PREV_SHA=$(git -C .. rev-parse HEAD); echo "$(date -Iseconds) $CANDIDATE PREV_SHA=$PREV_SHA" >> $L/deploys.log   # outside the tree
-git -C .. merge-base --is-ancestor HEAD $CANDIDATE && echo ff-ok
-git -C .. diff --stat HEAD..$CANDIDATE         # only the reviewed files
-$CTL db status                                 # schema v16 current
-$CTL paper status                              # kill switch inactive
-sntp time.apple.com                            # |offset| ≤ 2 s
-date                                           # inside 18:30 → 07:20 ET?
+git -C .. show "${CANDIDATE:?}:${LEDGER:?}" | grep -E "${VERDICT_SHA:?} verdict=GO"
+git -C .. diff --name-only "${VERDICT_SHA:?}..${CANDIDATE:?}"
+git -C .. status --short
+git -C .. rev-parse --short HEAD
+PREV_SHA=$(git -C .. rev-parse HEAD); echo "$(date -Iseconds) ${CANDIDATE:?} PREV_SHA=$PREV_SHA" >> $L/deploys.log
+git -C .. merge-base --is-ancestor HEAD "${CANDIDATE:?}" && echo ff-ok
+git -C .. diff --stat "HEAD..${CANDIDATE:?}"
+$CTL db status
+$CTL paper status
+sntp time.apple.com
+date
+```
 
-# STEP 1 — stop
+Expect, line by line:
+1. the ledger's verdict line for `VERDICT_SHA` (this check comes FIRST);
+2. only paths under `docs/reviews/` (I-11), or nothing when the verdict names the candidate's head;
+3. only known-benign entries;
+4. `EXPECTED_PARENT`;
+5. nothing on screen: the line goes to `$L/deploys.log`, outside the tree;
+6. `ff-ok`;
+7. only the reviewed files;
+8. `schema v16 current`;
+9. the kill switch inactive;
+10. an offset of at most ±2 s;
+11. a time inside 18:30 → 07:20 ET.
+
+**STEP 1 — stop.**
+
+```bash
 $CTL shadow agent disable; sleep 5; pgrep -fl 'autotraderctl.py' || echo none
-tail -n 1 $L/supervisor.log                    # SUPERVISOR_STOP reason=SIGTERM
+tail -n 1 $L/supervisor.log
+```
 
-# STEP 2 — fast-forward
-git -C .. merge --ff-only $CANDIDATE
-shasum -a 256 scripts_local/paper_bridge.py    # == pin in supervisor.py
+Expect `none`, then `SUPERVISOR_STOP reason=SIGTERM`.
 
-# STEP 3 — dry run while stopped
-$CTL run --dry-run --date <NEXT_SESSION>       # Part 4.1.2 expectations, no '!!!'
+**STEP 2 — fast-forward.**
 
-# STEP 4 — start
+```bash
+git -C .. merge --ff-only "${CANDIDATE:?}"
+shasum -a 256 scripts_local/paper_bridge.py
+grep 'REVIEWED_BRIDGE_SHA256 = ' trading/operations/supervisor.py
+```
+
+Expect a fast-forward, then the same hash twice: `EXPECTED_PIN`, the pin in `supervisor.py`.
+
+**STEP 3 — dry run while stopped.**
+
+```bash
+$CTL run --dry-run --date "${NEXT_SESSION:?}"
+```
+
+Expect Part 4.1.2's lines, and no line containing `!!!`.
+
+**STEP 4 — start.**
+
+```bash
 $CTL shadow agent enable; sleep 20
 grep -E 'SUPERVISOR_START|SESSION_WAIT' $L/supervisor.log | tail -2
-# expect SUPERVISOR_START, then SESSION_WAIT date=<NEXT_SESSION>
 tail -n 3 $L/supervisor.log
-# expect CHILD_START telegram (or CHILD_START heartbeat), SESSION_WAIT date=<NEXT_SESSION>,
-# and on the first start after an 18:35 ET boundary a LOG_ROTATED line last (see below)
-
-# STEP 5 — post-check, then record (outside the tree; copy into the repo ledger later)
-git -C .. rev-parse --short HEAD               # == candidate
-echo "$(date -Iseconds) DEPLOY $CANDIDATE@<sha> PREV_SHA=$PREV_SHA pin=<12hex> result=PASS" >> $L/deploys.log
 ```
+
+Expect, from the `grep`: `SUPERVISOR_START`, then `SESSION_WAIT date=` and the `NEXT_SESSION` date.
+From the `tail`: `CHILD_START telegram` (or `CHILD_START heartbeat`), the same `SESSION_WAIT` line,
+and on the first start after an 18:35 ET boundary a `LOG_ROTATED` line last (see below).
+
+**STEP 5 — post-check, then record** (outside the tree; copy into the repo ledger later). Run the
+last line only when every check above passed:
+
+```bash
+git -C .. rev-parse --short HEAD
+PIN=$(shasum -a 256 scripts_local/paper_bridge.py | cut -c1-12)
+echo "$(date -Iseconds) DEPLOY ${CANDIDATE:?}@$(git -C .. rev-parse --short HEAD) PREV_SHA=${PREV_SHA:?} pin=$PIN result=PASS" >> $L/deploys.log
+```
+
+Expect the candidate's sha, then nothing on screen (the `DEPLOY` line goes to `$L/deploys.log`).
 
 **STEP 4 and the log rotation.** A supervisor start whose newest 18:35 ET boundary has no `supervisor.log.<date>` archive yet rotates the logs at once. That is always the case for the first P1-B start, wherever it falls in the window (at 18:30–18:35 the rotation takes the previous day's date, and the 18:35 one follows a few minutes later), and for any start after a supervisor that was down across 18:35. The first rotation moves the whole multi-day `supervisor.log` and every child log into `<name>.log.<date>`. The new `supervisor.log` then holds the carried lines (`SUPERVISOR_START`, `CHILD_START telegram`, `CHILD_START heartbeat` when the heartbeat is configured, `SESSION_WAIT date=<NEXT_SESSION>`) followed by `LOG_ROTATED date=<YYYY-MM-DD> renamed=<n> truncated=<n> pruned=<n> carried=<n>`, written in one write. So `tail -n 3` may read `CHILD_START telegram … | SESSION_WAIT … | LOG_ROTATED …`, or with the heartbeat `CHILD_START heartbeat … | SESSION_WAIT … | LOG_ROTATED …`.
 - A `LOG_ROTATED` line after them is **expected** on the first start after 18:35 and is not a failure.
@@ -849,13 +941,20 @@ echo "$(date -Iseconds) DEPLOY $CANDIDATE@<sha> PREV_SHA=$PREV_SHA pin=<12hex> r
 
 ### 6.3 Rollback
 
+Only when FLAT with no working bot orders; never mid-session. `PREV_SHA` is STEP 0's (also in
+`$L/deploys.log`); set `NEXT_SESSION`, and `REASON` to one line saying why, first.
+
 ```bash
-# only when FLAT with no working bot orders; never mid-session
 $CTL shadow agent disable
-git -C .. reset --keep "$PREV_SHA"
-$CTL run --dry-run --date <NEXT_SESSION>   # must show the PREVIOUS pin
+git -C .. reset --keep "${PREV_SHA:?}"
+$CTL run --dry-run --date "${NEXT_SESSION:?}"
+```
+
+The dry run must show the PREVIOUS pin. Only then:
+
+```bash
 $CTL shadow agent enable
-echo "$(date -Iseconds) DEPLOY rollback to $PREV_SHA result=ROLLBACK reason=<…>" >> $L/deploys.log
+echo "$(date -Iseconds) DEPLOY rollback to ${PREV_SHA:?} result=ROLLBACK reason=${REASON:?}" >> $L/deploys.log
 ```
 
 Mid-session emergency is **never** a rollback: it is `/closeall` + `paper stop`.
@@ -867,11 +966,19 @@ The `telegram` child has already checked the port and requested real data at 05:
 ```bash
 nc -z -G 2 127.0.0.1 7497 && echo OPEN || echo CLOSED
 $CTL paper status
-grep -E 'SESSION_WAIT|LAUNCH_REFUSED' $L/supervisor.log | tail -2   # SESSION_WAIT for today, no LAUNCH_REFUSED
-tail -n 3 $L/supervisor.log            # a LOG_ROTATED line from last night's 18:35 rotation may be last: expected
-launchctl list | grep autotrader       # agent loaded, has a PID
-pmset -g batt | head -1                # 'AC Power'
+grep -E 'SESSION_WAIT|LAUNCH_REFUSED' $L/supervisor.log | tail -2
+tail -n 3 $L/supervisor.log
+launchctl list | grep autotrader
+pmset -g batt | head -1
 ```
+
+Expect, line by line:
+1. `OPEN`;
+2. `PAPER kill switch: INACTIVE`, and each identity row as you expect it;
+3. `SESSION_WAIT date=` and today's date, and no `LAUNCH_REFUSED`;
+4. the newest lines; a `LOG_ROTATED` line from last night's 18:35 rotation may be last: expected;
+5. the agent loaded, with a PID;
+6. `AC Power`.
 
 Any failure → Playbook 7.1 / 7.6 and page the owner.
 
@@ -959,9 +1066,12 @@ Format: **Signal → Meaning → Action → Who**. Always log an `INCIDENT` ledg
 - **Action:** page owner immediately with the ref. Recommend `paper stop` (global) until explained.
 
 ### 7.9 Need to stop everything now
-```
-/closeall            (Telegram)   → flatten
-$CTL paper stop --reason "<why>"  → no new entries
+
+On the phone, `/closeall` (Telegram): flatten. In Terminal, no new entries (put your own words in the
+quotes if there is time):
+
+```bash
+$CTL paper stop --reason "owner emergency stop"
 ```
 
 ### 7.10 Competing IBKR login during the session
@@ -1020,19 +1130,47 @@ GATE                      v7c open-risk term deployed before the first step abov
 
 With `max_entries_per_day = 1`, ORB and GAP accrue at most one trade per session: 30 trades ≈ 6+ weeks.
 
-### 8.4 Demotion (risk-reducing, allowed to the runtime) `[PLANNED]` P1-B
+### 8.4 Demotion (risk-reducing, allowed to the runtime) `[NOW]` P1-B (T-9, the Sentinel)
 
 ```
-AUTO-FENCE an identity (paper:<ID> stopped=1) and page the owner when:
-  - realized loss today > max_entries_per_day × 1 R × 1.25 for a capped identity
-    (ORB_V2 / GAP_GO_V2: 1.25 R; VWAP_PB_V2: 2.5 R), or ≥ 2 R for MOMO_HOD_V2
-  - 3 consecutive losing trades across sessions (multi-day ledger)
-  - an unattributed fill
-  - a live/shadow decision mismatch (raised by the nightly replay job itself)
-The Sentinel reads structured state (bridge/<date>.json, the research ledger), never log lines,
-and pages "sentinel blind" when it cannot read state for 5 minutes. One fence per identity per day.
-Resume is always the owner's.
+AUTO-FENCE one sendable identity (row paper:<ID> stopped=1, reason "sentinel: …") and page the owner when:
+  - daily loss: today's realized loss of the identity, in R (each bracket's realized P&L over its
+    own R = qty × (entry − stop), summed), is MORE than max_entries_per_day × 1 R × 1.25 for a
+    capped identity (ORB_V2 / GAP_GO_V2: 1.25 R; VWAP_PB_V2: 2.5 R), or AT LEAST 2 R for
+    MOMO_HOD_V2 (no entries cap). A win offsets a loss: it is the day's realized loss.
+  - losing streak: the identity's last 3 (or more) closed trades across sessions, in entry order,
+    all lost (net R after costs, from the live ledger), and the latest of them closed today
+  - a live/shadow decision mismatch, raised by the nightly replay job itself (reason
+    "sentinel: replay mismatch <n> decisions", announced at the notifier's 07:55 start). A hook
+    only: nothing replays a live run's decisions yet, so it never fires today ("not_compared")
+NOT A TRIGGER: an unattributed fill. The bridge state records no executions or orderRefs, so it
+cannot be seen without reading log lines: Playbook 7.8, by hand.
 ```
+
+- **Where it runs.** Inside the notifier (07:55–16:15 ET on session days), every 30 s. It reads
+  structured state only, never log lines: today's `bridge/<date>.json`, the research live ledger
+  (streaks), and the bridge heartbeat row (freshness).
+- **What it can do.** Exactly one thing: stop one sendable identity's row, through the same store
+  as `paper stop --identity` (4.3.3), in one transaction. It never resumes, never writes the global
+  `paper` row, and never sends, changes or cancels an order. A fence blocks new entries only.
+- **Phone texts.**
+  - `⛔ auto-fence <ID>: <trigger> — new entries blocked; resume: autotraderctl paper resume --identity <ID>`.
+  - A row that is already stopped (an owner `/halt` or `paper stop`, an earlier fence) keeps its
+    reason: `… — new entries already blocked (fenced earlier; its reason is kept); resume: …`.
+  - A fence that cannot be written (the database locked, the fence table unreadable):
+    `⚠️ auto-fence <ID> NOT written (<error>): <trigger> — block it by hand: autotraderctl paper stop --identity <ID> --reason "sentinel: …"`.
+    It is retried at every check and re-paged at most every 30 min.
+  - Blind: inside the bridge's window (09:25 ET to 5 min before the close), an unreadable state
+    file, no state file 5 min into the window, or no update (state file or heartbeat) for 5 min:
+    `⚠️ sentinel blind since HH:MM ET — <why>; no auto-fence while it cannot see`, at most once per
+    30 min, and no fence while blind. Then once: `✅ sentinel sees the bridge state again (HH:MM ET); auto-fence active`.
+- **One fence per identity per day.** Resume is always the owner's: `$CTL paper resume --identity
+  <ID> --reason "…"` (4.3.4). A resume of today's Sentinel fence holds for the rest of the day, even
+  if the notifier's state file is lost (the trace in the row's reason).
+- **The thresholds** are code constants in `backend/trading/operations/sentinel.py` (the owner's
+  numbers of 2026-10-15); changing one is a reviewed constants commit.
+- **A sleeping Mac** stops it together with the notifier and the bridge: the external dead-man's
+  switch (4.12) covers that.
 
 ---
 
@@ -1084,7 +1222,7 @@ This document carries no snapshot. The live sha, the candidate branches, the pin
 |---|---|---|
 | P1 Unattended days | In this order: phone `/status` + `/fences` + `/halt` with nonce · alert hysteresis (one shared state machine) · dead-man's switch **outside** the Mac (external ping monitor) · overnight Gateway watch with quiet hours and a 05:55/07:40 ET page, competing-login page in session hours · restart-count cap that ignores exits while the port is closed and lifts when it reopens · OPS section in the 16:05 report and log rotation. Two deploys at most; none on v7b day or before v7b's first clean session; no bridge change. | `[PLANNED]` |
 | P2 One-command deploy | Read-only half first: `autotraderctl deploy --check` (every STEP 0 refusal, verdict grep over every ledger, I-11 head rule, window check; no writes). Write half after P1 with its own review. | `[PLANNED]` |
-| P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; Stage 2 after the thresholds and five unchanged approvals. v7c (open-risk term) gates the first step up. | `[PLANNED]` |
+| P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; Stage 2 after the thresholds and five unchanged approvals. v7c (open-risk term) gates the first step up. | Auto-fence `[NOW]` (the Sentinel, 8.4); the rest as tagged in 8.2 |
 | P4 C2 replaces the bridge | After v7b's clean paper week: re-review #3, merge, port v7's exact allowlist / caps / fences / preflight / orderRef identity (migration: the ledger's `at1:` CHECK), move readers to the ledger, engine as a pinned child, drill, five clean sessions, manual desk, go-wide book, delete the old stack. | Built, unwired |
 | LIVE | Separate milestone, separate decision | Out of scope |
 
@@ -1144,7 +1282,7 @@ Resolved as stated; `AGENTS.md` wins wherever it speaks.
 | D-3 | Phone `/stop <ID>` for identity stops | `/stop <sym> <price>` is a protective stop order | `/halt <IDENTITY>` |
 | D-4 | 7.7 "re-run once" | The opener already retries; the artefact did not reproduce | A refusal is a defect |
 | D-5 | "telegram forwards CRITICAL lines" | The notifier forwards; telegram handles commands | Corrected in 2.2 |
-| D-6 | Gateway auto-restart listed as machine-owned | Launcher log says auto-restart not enabled; `jts.ini` set by hand | `[UNVERIFIED]` until observed |
+| D-6 | Gateway auto-restart listed as machine-owned | Launcher log says auto-restart not enabled; `jts.ini` set by hand | `[UNVERIFIED]` until observed. Observed 2026-10-17 02:30:04 Israel (`Running in auto-restart mode` in launcher.log, after Configure → Settings → Lock and Exit → Auto restart 02:30), while the log still printed "Daily auto-restart is not enabled.": that line is no evidence; verify by launcher.log (4.5) |
 | D-7 | Snapshot table, pin list, suite baselines | Already stale when written | Pointers to the ledger and status doc |
 | D-8 | Reports in Hebrew | Reports to date in English | Kept, marked editable by the owner |
 | D-9 | Ledger at `docs/ledger.md`, reports `docs/reviews/N1-…` | `docs/reviews/<date>-ledger.md`, `<date>-<subject>-review.md` | Real names |

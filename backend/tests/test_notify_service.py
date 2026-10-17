@@ -1635,7 +1635,11 @@ async def test_the_announced_outage_is_kept_for_the_telegram_watch_and_cleared_w
 
     assert await run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock)) == 0
 
-    assert notifier_gateway_outage(paths, SESSION) == GatewayOutage(since=_et(8, 0, 10), kind="gateway_down", paged=True)
+    outage = notifier_gateway_outage(paths, SESSION)
+    assert outage is not None and outage.checked_at is not None
+    assert outage == GatewayOutage(
+        since=_et(8, 0, 10), kind="gateway_down", paged=True, checked_at=outage.checked_at
+    )
     assert notifier_gateway_outage(paths, date(2026, 10, 14)) is None  # another date's file: none
 
     # The record mirrors the notifier's own watch: with the Gateway back, it is gone.
@@ -1646,6 +1650,93 @@ async def test_the_announced_outage_is_kept_for_the_telegram_watch_and_cleared_w
     assert notifier_gateway_outage(paths, SESSION) is None
     saved = json.loads(state_file(paths, SESSION).read_text(encoding="utf-8"))
     assert "gateway_outage_since" not in saved["alerts"] and "gateway_outage_kind" not in saved["alerts"]
+
+
+@pytest.mark.anyio
+async def test_the_notifier_restamps_its_open_outage_to_its_end_so_the_watch_can_trust_it(
+    tmp_path, monkeypatch, caplog
+):
+    """N15c LOW-1: while the announced outage lasts, the notifier stamps its latest
+    check into the per-date state at least once per ``GATEWAY_OUTAGE_STAMP_INTERVAL``.
+    A notifier that ran to its end left a current outage (the Telegram watch carries
+    it, "paged"); judged against a later end, the same file is a notifier that
+    stopped early: stale, and the watch ignores it."""
+    from datetime import time
+
+    from trading.operations import notify_service
+    from trading.operations.gateway_watch import KnownOutage
+    from trading.operations.notify_service import (
+        GATEWAY_OUTAGE_STAMP_INTERVAL,
+        LOOP_TICK_SECONDS,
+        gateway_outage_current,
+        notifier_gateway_outage,
+    )
+    from trading.operations.overnight_watch import notifier_port_outage
+
+    paths = await _gateway_logs(tmp_path, monkeypatch, caplog, until=time(8, 20))
+    screener = paths.log_directory / "screener.log"
+    clock = FakeTime(_et(7, 55))
+    clock.at(_et(7, 55, 1), _append(paths.log_directory / "supervisor.log", "2026-10-13T11:55:00+00:00 SESSION_START date=2026-10-13"))
+    for at in (_et(8, 0, 10), _et(8, 0, 25), _et(8, 0, 45)):
+        clock.at(at, _append(screener, _SCREENER_FAILED))
+    # The file as a reader finds it every few minutes while the outage lasts.
+    seen: list[tuple[datetime, datetime | None]] = []
+    for minute in range(2, 20, 3):
+        moment = _et(8, minute, 30)
+        clock.at(moment, lambda moment=moment: seen.append(
+            (moment, getattr(notifier_gateway_outage(paths, SESSION), "checked_at", None))
+        ))
+
+    assert await run_notifier(session_date=SESSION, env=_environment(paths, FakeTelegram(), clock)) == 0
+
+    slack = GATEWAY_OUTAGE_STAMP_INTERVAL + timedelta(seconds=2 * LOOP_TICK_SECONDS)
+    assert len(seen) == 6
+    for moment, checked in seen:
+        assert checked is not None and moment - slack <= checked <= moment, (moment, checked)
+    outage = notifier_gateway_outage(paths, SESSION)
+    assert outage is not None and outage.checked_at is not None
+    assert _et(8, 20) - slack <= outage.checked_at < _et(8, 20)
+    assert gateway_outage_current(outage, SESSION)
+    assert notifier_port_outage(paths)(SESSION) == KnownOutage(since=_et(8, 0, 10), paged=True)
+
+    # The same file, for a notifier due to run until 08:30: it stopped ten minutes early.
+    monkeypatch.setattr(notify_service, "SESSION_END", time(8, 30))
+    assert not gateway_outage_current(outage, SESSION)
+    assert notifier_port_outage(paths)(SESSION) is None
+
+
+def test_a_saved_gateway_outage_is_current_only_when_stamped_near_the_notifiers_end():
+    """N15c LOW-1: the freshness bound, named and tied to the notifier's own cadence."""
+    from trading.operations.notify_service import (
+        GATEWAY_OUTAGE_FRESH_FOR,
+        GATEWAY_OUTAGE_STAMP_INTERVAL,
+        LOOP_TICK_SECONDS,
+        SESSION_END,
+        GatewayOutage,
+        gateway_outage_current,
+    )
+    from trading.operations.supervisor import NOTIFIER_WINDOW
+
+    # The Telegram watch takes the Gateway over exactly when the notifier stops.
+    assert SESSION_END == NOTIFIER_WINDOW[1]
+    # A notifier that runs to its end re-stamps well inside the bound, and the bound
+    # stays a few minutes: a notifier that stopped earlier is never "current".
+    assert GATEWAY_OUTAGE_STAMP_INTERVAL + timedelta(seconds=LOOP_TICK_SECONDS) < GATEWAY_OUTAGE_FRESH_FOR
+    assert GATEWAY_OUTAGE_FRESH_FOR <= timedelta(minutes=5)
+
+    def stamped(moment: datetime | None) -> GatewayOutage:
+        return GatewayOutage(since=_et(9, 0), kind="gateway_down", paged=True, checked_at=moment)
+
+    end = _et(16, 15)
+    assert gateway_outage_current(stamped(end - GATEWAY_OUTAGE_FRESH_FOR), SESSION)
+    assert gateway_outage_current(stamped(end - timedelta(seconds=1)), SESSION)
+    assert gateway_outage_current(stamped(end + timedelta(seconds=20)), SESSION)  # the shutdown's last save
+    assert not gateway_outage_current(stamped(end - GATEWAY_OUTAGE_FRESH_FOR - timedelta(seconds=1)), SESSION)
+    assert not gateway_outage_current(stamped(_et(10, 0)), SESSION)  # died mid-outage in the morning
+    assert not gateway_outage_current(stamped(None), SESSION)  # a file from before the stamp
+    # Another ET day's stamp is never this day's, early or late.
+    assert not gateway_outage_current(stamped(end - timedelta(days=1)), SESSION)
+    assert not gateway_outage_current(stamped(end + timedelta(hours=8)), SESSION)
 
 
 @pytest.mark.anyio

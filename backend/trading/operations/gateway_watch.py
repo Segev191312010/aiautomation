@@ -41,7 +41,8 @@ An outage's start is never invented (N15b L-1). When the watch starts looking
 (the first start, a restart, 16:15 after BrokerWatch) and its first check
 already fails, the outage began at some unknown time before: "since before
 HH:MM ET", unless the caller hands it a ``KnownOutage`` (the watch's own state
-saved before a restart, or the notifier's announced outage at 16:15). A known
+saved before a restart, or the notifier's announced outage at 16:15 when the
+notifier was still checking it near its end, N15c LOW-1). A known
 outage keeps its start, and if the phone was already paged it is not paged
 again (a lead still pages, as always) and never goes into the digest as
 "not paged"; its recovery line comes when the port answers.

@@ -248,6 +248,18 @@ GATEWAY_FLAPS = "gateway_flaps"
 # BROKER_UNREACHABLE's alert time is there too.
 GATEWAY_OUTAGE_SINCE_KEY = "gateway_outage_since"
 GATEWAY_OUTAGE_KIND_KEY = "gateway_outage_kind"
+# The announced outage's latest check (BrokerWatch.checked_at), re-stamped at
+# most once per GATEWAY_OUTAGE_STAMP_INTERVAL while the outage lasts (one state
+# write a minute): how the Telegram watch tells a running notifier's outage
+# from the one a notifier that stopped early left in its file (N15c LOW-1).
+GATEWAY_OUTAGE_CHECKED_KEY = "gateway_outage_checked_at"
+GATEWAY_OUTAGE_STAMP_INTERVAL = timedelta(minutes=1)
+# The saved outage is current at the notifier's end (SESSION_END, the
+# supervisor's NOTIFIER_WINDOW end; a test pins them equal) only when it was
+# stamped at most this long before it: the stamp's cadence plus a slow last
+# cycle. Stamped earlier, the notifier stopped early (a crash loop, a
+# suspension, a hang) and its file says nothing about the evening.
+GATEWAY_OUTAGE_FRESH_FOR = timedelta(minutes=5)
 PREFLIGHT_REFUSED = "preflight_refused"
 _PREFLIGHT_REFUSED = re.compile(r"\bPREFLIGHT_REFUSED\b")
 _REGIME_LABELS = {"risk_on": "RISK-ON", "neutral": "NEUTRAL", "risk_off": "RISK-OFF"}
@@ -476,17 +488,33 @@ MAX_STATE_FILE_BYTES = 4 * 1024 * 1024
 
 @dataclass(frozen=True, slots=True)
 class GatewayOutage:
-    """The notifier's announced Gateway outage for a date, as its state file has it."""
+    """The notifier's announced Gateway outage for a date, as its state file has
+    it; ``checked_at``: its latest stamped check (None in a file written before
+    the stamp existed)."""
 
     since: datetime
     kind: str
     paged: bool
+    checked_at: datetime | None = None
+
+
+def gateway_outage_current(outage: GatewayOutage, session_date: date) -> bool:
+    """Whether the saved outage is still the notifier's view at its end (N15c
+    LOW-1): stamped on ``session_date`` (ET), no earlier than
+    ``GATEWAY_OUTAGE_FRESH_FOR`` before ``SESSION_END``. A notifier that stopped
+    early left an outage that may have ended since; a file without a stamp is
+    never current."""
+    checked = outage.checked_at
+    if checked is None or checked.astimezone(MARKET_TIMEZONE).date() != session_date:
+        return False
+    return checked >= market_time(session_date, SESSION_END) - GATEWAY_OUTAGE_FRESH_FOR
 
 
 def notifier_gateway_outage(paths: UserPaths, session_date: date) -> GatewayOutage | None:
     """The announced outage the notifier last saw on ``session_date`` (N15b L-1),
     read-only and never through a link; None when there is none, or when the
-    file is missing, unreadable or not this date's."""
+    file is missing, unreadable or not this date's. Whether it is still current
+    is ``gateway_outage_current``'s question."""
     path = state_file(paths, session_date)
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_STATE_FILE_BYTES:
@@ -503,7 +531,12 @@ def notifier_gateway_outage(paths: UserPaths, session_date: date) -> GatewayOuta
     kind = alerts.get(GATEWAY_OUTAGE_KIND_KEY)
     if since is None or not isinstance(kind, str):
         return None
-    return GatewayOutage(since=since, kind=kind, paged=isinstance(alerts.get(BROKER_UNREACHABLE), str))
+    return GatewayOutage(
+        since=since,
+        kind=kind,
+        paged=isinstance(alerts.get(BROKER_UNREACHABLE), str),
+        checked_at=_parse_time(alerts.get(GATEWAY_OUTAGE_CHECKED_KEY)),
+    )
 
 
 @dataclass(slots=True)
@@ -2455,20 +2488,37 @@ class _NotifierSession:
     def _sync_gateway_outage(self) -> None:
         """The announced outage's start and kind in the per-date alerts map (N15b
         L-1): after 16:15 the Telegram watch starts from them, never from its own
-        first failed check."""
+        first failed check. While it lasts its latest check is stamped there too,
+        at least once per ``GATEWAY_OUTAGE_STAMP_INTERVAL``, so the watch can tell
+        it from one a notifier that stopped early left behind (N15c LOW-1)."""
         alerts, since = self._state.alerts, self._broker.unreachable_since
         wanted = (
             {}
             if since is None
             else {GATEWAY_OUTAGE_SINCE_KEY: since.isoformat(), GATEWAY_OUTAGE_KIND_KEY: self._broker.outage_kind}
         )
+        changed = False
         for key in (GATEWAY_OUTAGE_SINCE_KEY, GATEWAY_OUTAGE_KIND_KEY):
             if alerts.get(key) != wanted.get(key):
                 if key in wanted:
                     alerts[key] = wanted[key]
                 else:
                     alerts.pop(key, None)
-                self._state.dirty = True
+                changed = True
+        checked = self._broker.checked_at if since is not None else None
+        stamped = _parse_time(alerts.get(GATEWAY_OUTAGE_CHECKED_KEY))
+        if checked is None:
+            if alerts.pop(GATEWAY_OUTAGE_CHECKED_KEY, None) is not None:
+                changed = True
+        elif (
+            changed
+            or stamped is None
+            or not stamped <= checked < stamped + GATEWAY_OUTAGE_STAMP_INTERVAL
+        ):
+            alerts[GATEWAY_OUTAGE_CHECKED_KEY] = checked.isoformat()
+            changed = True
+        if changed:
+            self._state.dirty = True
 
     def _ops_counters(self) -> OpsCounters:
         self._sync_gateway_counts()
@@ -3168,8 +3218,12 @@ __all__ = [
     "SENTINEL_CHECK_SECONDS",
     "SignalDecision",
     "bridge_event_text",
+    "GATEWAY_OUTAGE_CHECKED_KEY",
+    "GATEWAY_OUTAGE_FRESH_FOR",
+    "GATEWAY_OUTAGE_STAMP_INTERVAL",
     "GatewayOutage",
     "bridge_state_files",
+    "gateway_outage_current",
     "notifier_gateway_outage",
     "child_exit_code",
     "manager_tripwire",

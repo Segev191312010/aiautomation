@@ -299,17 +299,21 @@ async def test_at_1615_the_watch_starts_from_the_notifiers_announced_outage(tmp_
     the port's return answers the notifier's page."""
     from trading.operations.notify_service import (
         BROKER_UNREACHABLE,
+        GATEWAY_OUTAGE_CHECKED_KEY,
         GATEWAY_OUTAGE_KIND_KEY,
         GATEWAY_OUTAGE_SINCE_KEY,
     )
     from trading.operations.overnight_watch import TOOK_OVER_KEY, notifier_port_outage
     from trading.operations.paths import UserPaths
 
+    # Stamped by a notifier that was still checking at 16:14:30 (N15c LOW-1).
+    checked = et(MONDAY, 16, 14, 30).isoformat()
     paths = UserPaths(home=tmp_path / "home")
     _notifier_state(paths, MONDAY, {
         GATEWAY_OUTAGE_SINCE_KEY: et(MONDAY, 16, 0).isoformat(),
         GATEWAY_OUTAGE_KIND_KEY: "gateway_down",
         BROKER_UNREACHABLE: et(MONDAY, 16, 2).isoformat(),
+        GATEWAY_OUTAGE_CHECKED_KEY: checked,
     })
     clock = Time(et(MONDAY, 16, 10), et(MONDAY, 17, 0))
     port = Port(clock, [(et(MONDAY, 15, 58), et(MONDAY, 16, 40))])
@@ -322,6 +326,7 @@ async def test_at_1615_the_watch_starts_from_the_notifiers_announced_outage(tmp_
     # Announced but not paged yet when the notifier stopped: the watch pages it, with its start.
     _notifier_state(UserPaths(home=tmp_path / "unpaged"), MONDAY, {
         GATEWAY_OUTAGE_SINCE_KEY: et(MONDAY, 16, 0).isoformat(), GATEWAY_OUTAGE_KIND_KEY: "gateway_down",
+        GATEWAY_OUTAGE_CHECKED_KEY: checked,
     })
     clock = Time(et(MONDAY, 16, 10), et(MONDAY, 16, 30))
     watch, _ = make_watch(
@@ -335,10 +340,90 @@ async def test_at_1615_the_watch_starts_from_the_notifiers_announced_outage(tmp_
     # IBKR refusing prices (the port open all along) is no port evidence: no start is borrowed.
     _notifier_state(UserPaths(home=tmp_path / "refused"), MONDAY, {
         GATEWAY_OUTAGE_SINCE_KEY: et(MONDAY, 8, 0).isoformat(), GATEWAY_OUTAGE_KIND_KEY: "data_refused",
-        BROKER_UNREACHABLE: et(MONDAY, 8, 2).isoformat(),
+        BROKER_UNREACHABLE: et(MONDAY, 8, 2).isoformat(), GATEWAY_OUTAGE_CHECKED_KEY: checked,
     })
     assert notifier_port_outage(UserPaths(home=tmp_path / "refused"))(MONDAY) is None
     assert notifier_port_outage(UserPaths(home=tmp_path / "nobody"))(MONDAY) is None
+
+
+def _notifier_outage(since: datetime, *, paged_at: datetime | None, checked_at: datetime | None) -> dict[str, str]:
+    """The notifier's per-date alerts for an announced Gateway outage (``_sync_gateway_outage``)."""
+    from trading.operations.notify_service import (
+        BROKER_UNREACHABLE,
+        GATEWAY_OUTAGE_CHECKED_KEY,
+        GATEWAY_OUTAGE_KIND_KEY,
+        GATEWAY_OUTAGE_SINCE_KEY,
+    )
+
+    alerts = {GATEWAY_OUTAGE_SINCE_KEY: since.isoformat(), GATEWAY_OUTAGE_KIND_KEY: "gateway_down"}
+    if paged_at is not None:
+        alerts[BROKER_UNREACHABLE] = paged_at.isoformat()
+    if checked_at is not None:
+        alerts[GATEWAY_OUTAGE_CHECKED_KEY] = checked_at.isoformat()
+    return alerts
+
+
+async def _evening(
+    tmp_path: Path, alerts: dict[str, str], closed: list[tuple[datetime, datetime]], *, start: datetime
+) -> list[str]:
+    """The watch from ``start`` (16:10: the take-over; later: a telegram child that was
+    down at 16:15) to 18:25, with the notifier's state file holding ``alerts``."""
+    from trading.operations.overnight_watch import notifier_port_outage
+    from trading.operations.paths import UserPaths
+
+    paths = UserPaths(home=tmp_path / "home")
+    _notifier_state(paths, MONDAY, alerts)
+    clock = Time(start, et(MONDAY, 18, 25))
+    watch, _ = make_watch(
+        tmp_path, clock, Port(clock, closed), memory={}, notifier_outage=notifier_port_outage(paths)
+    )
+    return await drive(watch)
+
+
+async def test_a_notifier_that_died_mid_outage_lends_no_evidence_and_the_evening_outage_is_paged(tmp_path):
+    """N15c LOW-1, the reviewer's probe: the notifier paged a 09:00 outage, then
+    stopped at 10:00 (a crash loop, a suspension); its file keeps "paged outage since
+    09:00", last checked 10:00. The port came back at 10:30 with nobody watching.
+    At 16:15 that outage is stale: the evening starts from the watch's own checks,
+    so a closure is paged within minutes, never left to the 05:55 lead (before the
+    fix: nothing until 05:55, or a recovery line for the 09:00 outage at 16:15)."""
+    stale = _notifier_outage(et(MONDAY, 9, 0), paged_at=et(MONDAY, 9, 2), checked_at=et(MONDAY, 10, 0))
+    morning = (et(MONDAY, 9, 0), et(MONDAY, 10, 30))
+
+    # Closed again at 15:30, before the take-over: paged at the second check.
+    assert await _evening(tmp_path / "probe", stale, [morning, (et(MONDAY, 15, 30), et(MONDAY, 23, 0))],
+                          start=et(MONDAY, 16, 10)) == [
+        "⛔ IB Gateway closed since before 16:15 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+    # A new outage from 16:30: paged with its own start, and nothing about the stale one.
+    assert await _evening(tmp_path / "evening", stale, [morning, (et(MONDAY, 16, 30), et(MONDAY, 23, 0))],
+                          start=et(MONDAY, 16, 10)) == [
+        "⛔ IB Gateway closed since 16:30 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+    # A telegram child down at 16:15 that starts at 16:40 takes over from the same stale file.
+    assert await _evening(tmp_path / "restart", stale, [morning, (et(MONDAY, 15, 30), et(MONDAY, 23, 0))],
+                          start=et(MONDAY, 16, 40)) == [
+        "⛔ IB Gateway closed since before 16:40 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+    # A file written before the stamp existed is never current either.
+    unstamped = _notifier_outage(et(MONDAY, 9, 0), paged_at=et(MONDAY, 9, 2), checked_at=None)
+    assert await _evening(tmp_path / "unstamped", unstamped, [morning, (et(MONDAY, 15, 30), et(MONDAY, 23, 0))],
+                          start=et(MONDAY, 16, 10)) == [
+        "⛔ IB Gateway closed since before 16:15 ET (its API port does not answer) — log in to IB Gateway"
+    ]
+
+
+async def test_an_outage_the_notifier_paged_at_1605_and_checked_to_its_end_is_never_paged_twice(tmp_path):
+    """N15c LOW-1, the normal case: paged at 16:05 and still open at 16:15, the
+    notifier checking it to its end (stamped 16:14:59): carried as paged, no second
+    page, and its recovery line answers the notifier's page. A telegram child down
+    at 16:15 that starts at 16:40 carries it the same way."""
+    current = _notifier_outage(et(MONDAY, 16, 5), paged_at=et(MONDAY, 16, 5), checked_at=et(MONDAY, 16, 14, 59))
+    closed = [(et(MONDAY, 16, 4), et(MONDAY, 17, 10))]
+    recovery = ["✅ IB Gateway port open again 17:10 ET (closed since 16:05 ET)"]
+
+    assert await _evening(tmp_path / "handover", current, closed, start=et(MONDAY, 16, 10)) == recovery
+    assert await _evening(tmp_path / "restart", current, closed, start=et(MONDAY, 16, 40)) == recovery
 
 
 async def test_a_telegram_restart_keeps_the_outage_start_and_that_it_was_paged(tmp_path):

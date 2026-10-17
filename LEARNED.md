@@ -49,10 +49,16 @@
   (TWS 2110, data farms broken) while its port is open: every screener
   qualification timed out from 08:00 ET and no sweep came until 10:00. The fix, in
   order: log out of the IBKR app and website (the orders came back), then restart
-  IB Gateway (the price history came back). IB Gateway 10.46 reads AutoRestart
-  from the jts.ini `[u:<userDirname>]` section, not the settings-folder section;
-  the only reliable way to set it is Configure → Settings → Lock and Exit. Verify
-  with "Daily auto-restart is enabled." in launcher.log.
+  IB Gateway (the price history came back). Set the nightly restart in the
+  Gateway itself: Configure → Settings → Lock and Exit → Auto restart.
+  Corrected 2026-10-17: verify an auto-restart by `~/Jts/launcher.log`'s first
+  line (its date and time: the restart's) and its line "Running in auto-restart
+  mode: restoring session token and session ID" (02:30:04 Israel on 2026-10-17,
+  after the owner set Auto restart 02:30), never by "Daily auto-restart is
+  enabled.": the same log still printed "Daily auto-restart is not enabled."
+  after that real auto-restart, and jts.ini still had AutoRestart only under the
+  settings-folder section (so "10.46 reads it from the `[u:<userDirname>]`
+  section" was never shown).
 
 ## Read-only SQLite opens in the data directory
 - `mode=ro` is safe on the live WAL database in its writable data directory: SQLite recreates a missing `-shm`. `immutable=1` returns a stale view of a WAL database with an un-checkpointed `-wal` ("no such table" on an existing table): use it only on a checkpointed copy.
