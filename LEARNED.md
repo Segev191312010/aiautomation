@@ -65,3 +65,6 @@
 
 ## Test through the production path
 - A value threaded through a constructor is only proven when a test drives the path production uses. The identity size factor passed every unit test of `ShadowPipeline` and four reviews, yet `RepositoryBackedShadowRunner.open_session` rebuilt the pipeline without it (found 2026-10-16, before v7b sent anything). The dropped keyword also bypassed the fail-closed missing-row block (`identity_sizing_missing`) on v7a and v7b; only the launch preflight `registry_problems` held the line. Copy objects with a method tied to the constructor's signature, and replay a recorded day through the runner. A copy test ties the copy to the signature only when its fixture sets every argument off its default: v7b.1's test did not, v7b.2's does for every argument.
+
+## Test fixtures copy the real log format
+- One screener sweep logs TWO `sweep D:` lines (the main `qualified=… quoted=…` line and, since 2026-10-14, a `day universe …` line about 10 ms later). P1-A.4's "3 successes" rule was correct against one-line fixtures and wrong in production, where it cleared after two real sweeps (review N14b, 2026-10-17). Build alert-counting fixtures from real log lines, and add a meta-test that the fixture has the production shape.
