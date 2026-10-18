@@ -481,9 +481,9 @@ EFFECT  Global fence stopped=1. Stop-only: there is no global resume.
 ```
 STATUS  [NOW]
 WHO     OWNER / AGENT+ (only when the owner asked for this exact stop in the current session; never unattended).
-        The runtime auto-fence (the Sentinel, Part 8.4, [NOW]) is deterministic code with owner-set thresholds,
-        not an agent action: once live it writes this same row, stopped=1, with a reason starting "sentinel: ".
-        It ships log-only (8.4): until the owner turns it live it writes no row at all.
+        The runtime auto-fence (the Sentinel, Part 8.4, [NOW], live) is deterministic code with owner-set
+        thresholds, not an agent action: it writes this same row, stopped=1, with a reason starting "sentinel: ".
+        History: shipped log-only in P1-B on 2026-10-18; live from P1-B.4, install date in the ledger DEPLOY line.
 EXAMPLE $CTL paper stop --identity ORB_V2 --reason "slippage 3x shadow on 2 fills"
 EFFECT  Row paper:ORB_V2 stopped=1 → next ORB_V2 entry skipped "identity_stopped:ORB_V2" (forwarded to the phone).
         Bridge connect line becomes CRITICAL while any identity row is stopped.
@@ -1144,7 +1144,7 @@ GATE                      v7c open-risk term deployed before the first step abov
 
 With `max_entries_per_day = 1`, ORB and GAP accrue at most one trade per session: 30 trades ≈ 6+ weeks.
 
-### 8.4 Demotion (risk-reducing, allowed to the runtime) `[NOW]` P1-B (T-9, the Sentinel)
+### 8.4 Demotion (risk-reducing, allowed to the runtime) `[NOW]` P1-B, live from P1-B.4 (T-9, the Sentinel)
 
 ```
 AUTO-FENCE one sendable identity (row paper:<ID> stopped=1, reason "sentinel: …") and page the owner when:
@@ -1162,41 +1162,36 @@ NOT A TRIGGER: an unattributed fill. The bridge state records no executions or o
 cannot be seen without reading log lines: Playbook 7.8, by hand.
 ```
 
-- **Log-only first (owner, 2026-10-17).** The Sentinel ships with `SENTINEL_FENCES_LIVE = False`
-  (`backend/trading/operations/sentinel.py`): it runs log-only for its first session and fences
-  only after the owner agrees. Log-only it judges every trigger exactly as when live, but it writes
-  no fence row, and neither does the nightly replay hook (the switch is read inside
-  `fence_identity`, the one write path both use). Instead:
-  - the phone gets `🔎 auto-fence (log-only): would stop <ID> — <trigger> <numbers>`, e.g.
-    `🔎 auto-fence (log-only): would stop ORB_V2 — daily loss 1.30 R > 1.25 R (realized -$130.00)`,
-    once per identity per day (not every 30-second check; a notifier restart the same day does not
-    repeat it);
-  - the log gets one WARNING `sentinel would fence <ID>: <trigger> <numbers>` per 🔎 line
-    (`notifier.log` and `shadow.log`); the nightly replay hook logs the same line for a replay
-    mismatch (`sentinel would fence <ID>: replay mismatch <n> decisions`) and lists the identity
-    under `decision_parity.would_fence` in that night's `evidence.json`;
-  - the "sees again" line ends `auto-fence log-only` instead of `auto-fence active`.
+- **Live `[NOW]` (owner, P1-B.4).** `SENTINEL_FENCES_LIVE = True`
+  (`backend/trading/operations/sentinel.py`). History: shipped log-only in P1-B on 2026-10-18
+  (`False`: a `🔎 auto-fence (log-only): would stop <ID> — …` line, no fence row); live from P1-B.4,
+  the owner's decision after reviewing the 🔎 WOULD_FENCE lines, install date in the ledger DEPLOY
+  line. What the owner sees now:
+  - a trigger writes the row `paper:<ID>` stopped=1 (reason `sentinel: <trigger> <numbers>`) and
+    the phone gets the ⛔ fence page (below) instead of the 🔎 would-fence line, once per identity
+    per day; the identity takes no new entries until the owner resumes it (its open position keeps
+    its stop, target and the 15:45 flatten);
+  - the nightly replay hook writes the same kind of row for a replay mismatch (reason
+    `sentinel: replay mismatch <n> decisions`), lists the identity under `decision_parity.fenced`
+    in that night's `evidence.json`, and the notifier announces it at its 07:55 start;
+  - `$CTL paper status` shows `identity <ID>: STOPPED (sentinel: …)`; the "sees again" line ends
+    `auto-fence active`.
 
-  A 🔎 line asks for nothing: the identity keeps trading. Read the lines with Claude after the
-  session (`L` as in the preamble; each line starts with its local Mac time):
+  Resume is always the owner's: `autotraderctl paper resume --identity <ID>` (4.3.4); the Sentinel
+  never resumes.
 
-  ```bash
-  grep -h 'sentinel would fence ' $L/notifier.log* $L/shadow.log* | sort -u
-  ```
-
-  **Turning it live** is a code change, never a setting or an environment variable: the one line
-  `SENTINEL_FENCES_LIVE = False` becomes `SENTINEL_FENCES_LIVE = True` (P1-B.4), then the usual
-  path: an independent review, the quality gates, a verdict that names the head, and a deploy in the
-  window (6.2). Live, every fence row, reason and phone text below is exactly what it was before the
-  switch existed. Undo is the same one-line change back.
+  **The switch** is a code change, never a setting or an environment variable: one constant, read
+  inside `fence_identity`, the one write path both writers use (the Sentinel and the nightly replay
+  hook), and pinned by a test. Back to log-only is the same one-line change back
+  (`SENTINEL_FENCES_LIVE = False`), then the usual path: an independent review, the quality gates,
+  a verdict that names the head, and a deploy in the window (6.2).
 - **Where it runs.** Inside the notifier (07:55–16:15 ET on session days), every 30 s. It reads
   structured state only, never log lines: today's `bridge/<date>.json`, the research live ledger
   (streaks), and the bridge heartbeat row (freshness).
 - **What it can do.** Exactly one thing: stop one sendable identity's row, through the same store
   as `paper stop --identity` (4.3.3), in one transaction. It never resumes, never writes the global
   `paper` row, and never sends, changes or cancels an order. A fence blocks new entries only.
-- **Phone texts** (live. Log-only, the 🔎 line above replaces the first three; the blind line is
-  the same, and the "sees again" line ends `auto-fence log-only`).
+- **Phone texts** (live, `[NOW]`; the log-only 🔎 line no longer appears).
   - `⛔ auto-fence <ID>: <trigger> — new entries blocked; resume: autotraderctl paper resume --identity <ID>`.
   - A row that is already stopped (an owner `/halt` or `paper stop`, an earlier fence) keeps its
     reason: `… — new entries already blocked (fenced earlier; its reason is kept); resume: …`.

@@ -46,16 +46,17 @@ Triggers (each fences the identity once per day; the first to fire wins):
     orderRefs, live only in the bridge process's memory and are never written
     to any structured state. It cannot be detected without reading log lines.
 
-Log-only first (owner, 2026-10-17): ``SENTINEL_FENCES_LIVE`` is False, so the
-Sentinel runs log-only for its first session and fences only after the owner
-agrees, through a reviewed one-line change of that constant (never an
-environment variable or a setting). The switch is read inside
-``fence_identity``, the one write path, so both writers obey it: the Sentinel's
-triggers and the nightly replay-mismatch hook. Log-only, ``fence_identity``
-never calls the store: it logs ``sentinel would fence <ID>: <trigger>`` and
-returns ``WOULD_FENCE``, and the phone gets ``🔎 auto-fence (log-only): would
-stop <ID> — <trigger>`` once per identity per day (its own memory key). Live,
-every row, reason and text is as it was before the switch existed.
+Log-only first (owner, 2026-10-17), live since P1-B.4: ``SENTINEL_FENCES_LIVE``
+shipped False for the first session(s) (P1-B, installed 2026-10-18) and is True
+since the owner, after reviewing the 🔎 lines, agreed through a reviewed
+one-line change of that constant (never an environment variable or a setting).
+The switch is read inside ``fence_identity``, the one write path, so both
+writers obey it: the Sentinel's triggers and the nightly replay-mismatch hook.
+Log-only (False), ``fence_identity`` never calls the store: it logs ``sentinel
+would fence <ID>: <trigger>`` and returns ``WOULD_FENCE``, and the phone gets
+``🔎 auto-fence (log-only): would stop <ID> — <trigger>`` once per identity per
+day (its own memory key). Live (True), every row, reason and text is as it was
+before the switch existed.
 
 A Sentinel that cannot see is loud, and never fences: inside the bridge's own
 window (09:25 ET to 5 minutes before the close) an unreadable state file, no
@@ -138,10 +139,12 @@ _MISSING_CAPS_ENTRIES = 1
 MAX_STATE_BYTES = 5 * 1024 * 1024
 
 # -- the owner's switch (2026-10-17) -----------------------------------------------------
-# False: log-only (no fence row is ever written; WOULD_FENCE and one 🔎 line per
-# identity per day instead). The owner turns fences on after the first session
-# with a reviewed one-line change of this constant (P1-B.4), never otherwise.
-SENTINEL_FENCES_LIVE = False
+# It shipped False, log-only, for its first session(s) (P1-B, 2026-10-18 install:
+# no fence row ever written; WOULD_FENCE and one 🔎 line per identity per day
+# instead). It went live in P1-B.4, on the owner's decision after reviewing the
+# 🔎 WOULD_FENCE lines: True writes the ``paper:<IDENTITY>`` stop row. It changes
+# only through a reviewed one-line change of this constant, never otherwise.
+SENTINEL_FENCES_LIVE = True
 
 REASON_PREFIX = "sentinel: "
 DAILY_LOSS = "daily loss"
