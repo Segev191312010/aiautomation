@@ -212,7 +212,7 @@ def test_paper_identity_commands_refuse_names_that_are_not_sendable(tmp_path, ca
         assert database.execute("SELECT count(*) FROM autotrader_execution_fences").fetchone() == (0,)
 
 
-def test_deploy_exposes_only_the_read_only_check(capsys):
+def test_deploy_exposes_check_apply_and_undo_but_never_merge(capsys):
     from pathlib import Path
 
     from trading.cli import _parser
@@ -245,10 +245,24 @@ def test_deploy_exposes_only_the_read_only_check(capsys):
     assert error.value.code == 2
     assert "the following arguments are required: --repo" in capsys.readouterr().err
 
-    # The write half is a separate, reviewed ticket: no apply, merge or launchctl here.
-    for action in (["apply"], ["merge"], ["check"]):
+    # Ticket P2 (plan P2-1..P2-4, rewritten explicitly, not weakened): the write
+    # half now exists as `deploy apply` and `deploy undo`, owner-run only (a TTY
+    # and the typed short sha) and reviewed under scope P2. Both are valid verbs
+    # whose required arguments are enforced; `merge` stays an invalid choice: the
+    # fast-forward exists only inside `apply`, never as a verb of its own.
+    for action, required in (
+        (["apply"], "--candidate, --repo, --expect-parent, --expect-pin, --scope"),
+        (["undo"], "--repo, --to, --reason"),
+        (["check"], "--candidate, --repo"),
+    ):
         with pytest.raises(SystemExit) as error:
             main(["deploy", *action])
         assert error.value.code == 2
+        err = capsys.readouterr().err
+        assert "invalid choice" not in err
+        assert f"the following arguments are required: {required}" in err
+    with pytest.raises(SystemExit) as error:
+        main(["deploy", "merge"])
+    assert error.value.code == 2
     err = capsys.readouterr().err
-    assert "invalid choice: 'apply'" in err and "--candidate" in err
+    assert "invalid choice: 'merge' (choose from 'check', 'apply', 'undo')" in err

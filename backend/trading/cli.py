@@ -344,7 +344,11 @@ def _parser() -> argparse.ArgumentParser:
     database_status.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
 
     deploy = domains.add_parser(
-        "deploy", help="deploy pre-checks (runbook 6.2 STEP 0); read-only, applies nothing"
+        "deploy",
+        help=(
+            "deploy pre-checks (runbook 6.2 STEP 0, read-only `check`) and the owner-run"
+            " install and rollback (`apply`, `undo`: a terminal and a typed sha required)"
+        ),
     )
     deploy_actions = deploy.add_subparsers(dest="action", required=True)
     deploy_check = deploy_actions.add_parser(
@@ -380,6 +384,75 @@ def _parser() -> argparse.ArgumentParser:
     deploy_check.add_argument(
         "--skip-clock", action="store_true", help="no sntp query (the clock check warns instead)"
     )
+    deploy_check.add_argument(
+        "--expect-migration",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="the one pending migration must be exactly N, and the verdict line must carry migration=N",
+    )
+
+    # P2: the write half. Owner-run only: it refuses without a terminal and
+    # changes nothing until the candidate's short sha is typed back.
+    deploy_apply = deploy_actions.add_parser(
+        "apply",
+        help=(
+            "owner-run install of a reviewed candidate (runbook 6.2 STEP 0-5): pre-checks, stop,"
+            " fast-forward, [migrate,] dry run, start, post-checks; a failure undoes it by itself"
+            " (exit 0 pass, 78 refused, 3 rolled back, 4 halted, 5 undo failed)"
+        ),
+    )
+    deploy_apply.add_argument("--candidate", required=True, metavar="REF", help="branch or sha to deploy")
+    deploy_apply.add_argument(
+        "--repo", type=Path, required=True, help="the live checkout (run from the candidate's worktree)"
+    )
+    deploy_apply.add_argument(
+        "--expect-parent", required=True, metavar="SHA40", help="the live HEAD now, 40 hex (PREV_SHA)"
+    )
+    deploy_apply.add_argument(
+        "--expect-pin", required=True, metavar="SHA256", help="the reviewed bridge sha256, 64 hex"
+    )
+    deploy_apply.add_argument(
+        "--scope", required=True, metavar="A,B", help="the verdict line's scope= must list these slices"
+    )
+    deploy_apply.add_argument(
+        "--expect-migration",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="migrate exactly migration N after the fast-forward (a failure then halts, never undoes)",
+    )
+    deploy_apply.add_argument(
+        "--expect-fenced",
+        default=None,
+        metavar="A,B",
+        help="sendable identities expected fenced (default: none)",
+    )
+    deploy_apply.add_argument(
+        "--label", default=None, metavar="LABEL", help="the deploys.log label (default: the verdict's)"
+    )
+    deploy_apply.add_argument(
+        "--ledger",
+        default=None,
+        metavar="GLOB",
+        help="ledgers on the candidate to search (default: every docs/reviews/*ledger*.md)",
+    )
+    deploy_apply.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
+    deploy_undo = deploy_actions.add_parser(
+        "undo",
+        help=(
+            "owner-run rollback of the last deploy (runbook 6.3) to its PREV_SHA: only flat, in the"
+            " window, and never across a migration (exit 3 rolled back, 78 refused, 5 undo failed)"
+        ),
+    )
+    deploy_undo.add_argument("--repo", type=Path, required=True, help="the live checkout")
+    deploy_undo.add_argument(
+        "--to", required=True, metavar="SHA40", help="the PREV_SHA of the DEPLOY line for HEAD, 40 hex"
+    )
+    deploy_undo.add_argument(
+        "--reason", required=True, metavar="TOKEN", help="why, as one token (e.g. dry_run_bang)"
+    )
+    deploy_undo.add_argument("--db-path", type=Path, default=argparse.SUPPRESS)
 
     session = domains.add_parser(
         "session", help="read-only checks of one PAPER bridge session (no writes, no migration)"
@@ -962,9 +1035,12 @@ def _database_command(arguments: argparse.Namespace) -> int:
 
 
 def _deploy_command(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    """``deploy check``: runbook 6.2 STEP 0, read-only; exit 0, or 78 on any refusal."""
+    """``deploy check``: runbook 6.2 STEP 0, read-only; exit 0, or 78 on any refusal.
+    ``deploy apply`` / ``deploy undo``: the owner-run write half (P2)."""
     from trading.operations import deploy_check
 
+    if arguments.action in ("apply", "undo"):
+        return _deploy_write_command(arguments, parser)
     try:
         candidate = deploy_check.validate_ref(arguments.candidate, option="--candidate")
         expect_parent = (
@@ -985,8 +1061,61 @@ def _deploy_command(arguments: argparse.Namespace, parser: argparse.ArgumentPars
         expect_parent=expect_parent,
         now=now,
         skip_clock=arguments.skip_clock,
+        expect_migration=arguments.expect_migration,
     )
     return deploy_check.run_deploy_check(request)
+
+
+def _deploy_write_command(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """``deploy apply`` / ``deploy undo``: arguments are validated before anything runs."""
+    import re
+
+    from trading.operations import deploy_apply, deploy_check
+
+    def full_sha(value: str, option: str, length: int) -> str:
+        sha = deploy_check.validate_ref(value, option=option)
+        if re.fullmatch(rf"[0-9a-f]{{{length}}}", sha) is None:
+            raise ValueError(f"{option} must be {length} lowercase hex characters, got {value!r}")
+        return sha
+
+    requested_db_path = getattr(arguments, "db_path", None)
+    database = (requested_db_path or Path(cfg.DB_PATH)).expanduser()
+    try:
+        if arguments.action == "undo":
+            reason = arguments.reason.strip()
+            if deploy_apply.REASON_PATTERN.fullmatch(reason) is None:
+                raise ValueError(f"--reason must be one lowercase token like dry_run_bang, got {arguments.reason!r}")
+            undo = deploy_apply.DeployUndoRequest(
+                repo=arguments.repo.expanduser(), to=full_sha(arguments.to, "--to", 40), reason=reason
+            )
+        else:
+            scope = deploy_check.parse_scope(arguments.scope)
+            if not scope:
+                raise ValueError("--scope must name at least one reviewed slice")
+            fenced = deploy_check.parse_scope(arguments.expect_fenced)
+            unknown = [name for name in fenced if name not in SENDABLE_IDENTITIES]
+            if unknown:
+                raise ValueError(f"--expect-fenced names a non-sendable identity: {', '.join(unknown)}")
+            label = None if arguments.label is None else arguments.label.strip()
+            if label is not None and deploy_apply.LABEL_PATTERN.fullmatch(label) is None:
+                raise ValueError(f"--label must be one release word like P2 or v7c, got {arguments.label!r}")
+            apply = deploy_apply.DeployApplyRequest(
+                candidate=deploy_check.validate_ref(arguments.candidate, option="--candidate"),
+                repo=arguments.repo.expanduser(),
+                expect_parent=full_sha(arguments.expect_parent, "--expect-parent", 40),
+                expect_pin=full_sha(arguments.expect_pin, "--expect-pin", 64),
+                scope=scope,
+                expect_migration=arguments.expect_migration,
+                expect_fenced=tuple(sorted(fenced)),
+                label=label,
+                ledger_glob=arguments.ledger or deploy_check.DEFAULT_LEDGER_GLOB,
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
+    environment = deploy_apply.default_environment(database)
+    if arguments.action == "undo":
+        return deploy_apply.run_deploy_undo(undo, environment)
+    return deploy_apply.run_deploy_apply(apply, environment)
 
 
 def _session_command(arguments: argparse.Namespace) -> int:

@@ -1068,3 +1068,87 @@ def test_the_cli_refuses_a_candidate_that_looks_like_an_option(tmp_path, capsys)
 
     assert error.value.code == 2
     assert "--candidate must be a git ref or sha" in capsys.readouterr().err
+
+
+# --- P2: readers for deploy apply (deploy_check itself stays read-only) ----------------------------
+
+
+def test_reviewed_pins_reads_every_reviewed_constant():
+    source = (
+        '"""supervisor"""\n'
+        f'REVIEWED_BRIDGE_SHA256 = "{"a" * 64}"\n'
+        f'REVIEWED_BRIDGE_IMPORTS_SHA256: dict[str, str] = {{"config.py": "{"b" * 64}"}}\n'
+        'NOT_A_PIN = "x"\n'
+        '__all__ = ["REVIEWED_BRIDGE_SHA256"]\n'
+    )
+
+    assert deploy_check.reviewed_pins(source) == {
+        "REVIEWED_BRIDGE_SHA256": "a" * 64,
+        "REVIEWED_BRIDGE_IMPORTS_SHA256": {"config.py": "b" * 64},
+    }
+    for bad in (
+        f'REVIEWED_BRIDGE_SHA256 = "{"a" * 64}"\nREVIEWED_BRIDGE_SHA256 = "{"c" * 64}"\n',
+        "REVIEWED_BRIDGE_SHA256 = compute()\n",
+    ):
+        with pytest.raises(ValueError):
+            deploy_check.reviewed_pins(bad)
+
+
+def test_reviewed_pins_sees_the_real_supervisor_pin():
+    from trading.operations import supervisor
+
+    source = Path(supervisor.__file__).read_text()
+
+    assert deploy_check.reviewed_pins(source) == {"REVIEWED_BRIDGE_SHA256": supervisor.REVIEWED_BRIDGE_SHA256}
+    assert deploy_check.PIN_PATTERN.findall(source) == [supervisor.REVIEWED_BRIDGE_SHA256]
+
+
+@pytest.mark.parametrize(
+    "line, tokens, label",
+    [
+        (
+            f"2026-10-18T08:40:05+03:00 | P1-B 0217e105d566 verdict=GO scope=T-3 bridge_sha={'7' * 64} | x | y",
+            {"bridge_sha": ("7" * 64,)},
+            "P1-B",
+        ),
+        (
+            "05:43 | v7a 3354c3c verdict=GO bridge_sha=a63982cc01c3 migration=17 | GO bridge_sha=ffff | r.md",
+            {"bridge_sha": ("a63982cc01c3",), "migration": ("17",)},
+            "v7a",
+        ),
+        ("05:15 | 904af38 verdict=GO scope=A6 | GO; migration=17 in the result field | r.md", {}, ""),
+        ("05:15 | P1-B v7b 664c93b verdict=GO migration=17 migration=18 | x", {"migration": ("17", "18")}, "P1-B v7b"),
+        # A label needs a digit (deploy_check grammar): `R-B v7a ...` is not a verdict line.
+        ("05:15 | R-B v7a 664c93b verdict=GO migration=17 | x", {}, ""),
+        ("not a ledger line bridge_sha=abc", {}, ""),
+    ],
+)
+def test_verdict_tokens_and_label_come_from_the_check_field_after_the_verdict(line, tokens, label):
+    assert deploy_check.verdict_tokens(line) == tokens
+    assert deploy_check.verdict_label(line) == label
+
+
+def test_match_verdict_returns_the_lines_it_matched(scenario):
+    git = Git(scenario.repo.path)
+
+    result, matched = deploy_check.match_verdict(
+        git, candidate="cand", head=scenario.head, ledger_glob=deploy_check.DEFAULT_LEDGER_GLOB, scope=("A1",)
+    )
+
+    assert result == _verdict_result(scenario, scope=("A1",))
+    assert [(line.path, line.line_number, line.sha) for line in matched] == [(LEDGER, 2, scenario.reviewed[:7])]
+    refused, none = deploy_check.match_verdict(
+        git, candidate="cand", head=scenario.head, ledger_glob=deploy_check.DEFAULT_LEDGER_GLOB, scope=("A9",)
+    )
+    assert refused.status == REFUSE and none == ()
+
+
+def test_the_git_environment_is_shared_and_scrubbed(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/elsewhere")
+
+    env = deploy_check.git_environment(tmp_path / "repo")
+
+    assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
+    assert env["GIT_CEILING_DIRECTORIES"] == str(tmp_path.resolve())
+    assert (env["GIT_OPTIONAL_LOCKS"], env["GIT_TERMINAL_PROMPT"], env["LC_ALL"]) == ("0", "0", "C")

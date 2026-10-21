@@ -4,8 +4,8 @@ The read-only half of a one-command deploy. It answers "may this candidate be
 fast-forwarded now?" and changes nothing: no merge, no launchctl, no database
 write (one ``mode=ro`` handle, the schema status helper of ``db_admin``), and
 every git call passes ``--no-optional-locks`` so not even the index's stat
-cache is refreshed in the live checkout. The write half (``deploy apply``) is a
-separate ticket with its own review.
+cache is refreshed in the live checkout. The write half (``deploy apply`` and
+``deploy undo``) is ``trading.operations.deploy_apply``, with its own review.
 
 Each check prints one line, ``OK <token>``, ``WARN <token>: <detail>`` or
 ``REFUSE <token>: <detail>``, followed by indented evidence lines; the run ends
@@ -28,14 +28,23 @@ Tokens, in the runbook's order:
 * ``files`` (warn only): the candidate changes nothing outside the deployable
   top-level paths.
 * ``schema``: the database is at exactly this code's schema; never migrates.
+  With ``--expect-migration N`` (P2-3) the one pending migration must be
+  exactly ``N`` (``migration_unexpected``), and the verdict line must carry
+  ``migration=N`` (``verdict_migration_missing``).
 * ``fence``: the global ``paper`` kill switch is not stopped.
 * ``clock``: the ``sntp`` offset is at most 2 s (``--skip-clock``: WARN).
 * ``window``: now is inside the deploy window 18:30 -> 07:20 ET (I-4).
 * ``pin`` (I-5): the candidate's bridge hashes to the candidate's own
   ``REVIEWED_BRIDGE_SHA256``.
+
+The readers ``match_verdict`` (the matched verdict lines), ``verdict_tokens``
+(their ``bridge_sha=``/``migration=``/``imports_sha=``) and ``reviewed_pins``
+(every ``REVIEWED_*`` constant of a supervisor.py) serve ``deploy apply``
+(``trading.operations.deploy_apply``), which compares the pins three ways.
 """
 from __future__ import annotations
 
+import ast
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import closing
@@ -88,6 +97,12 @@ DEPLOYABLE_FILES = ("AGENTS.md", "CLAUDE.md", "LEARNED.md", "README.md")
 BRIDGE_PATH = "backend/scripts_local/paper_bridge.py"
 SUPERVISOR_PATH = "backend/trading/operations/supervisor.py"
 PIN_NAME = "REVIEWED_BRIDGE_SHA256"
+# Every reviewed pin constant in supervisor.py starts with this (P3-B0 adds
+# REVIEWED_BRIDGE_IMPORTS_SHA256); deploy apply reads them all generically.
+REVIEWED_PREFIX = "REVIEWED_"
+# P2-3 refusal tokens, the first word of the refusing check's detail.
+MIGRATION_UNEXPECTED = "migration_unexpected"
+VERDICT_MIGRATION_MISSING = "verdict_migration_missing"
 
 # I-4: start a deploy only 18:30 -> 07:20 ET; the session, the recorder and
 # the replay are children of the supervisor a deploy restarts.
@@ -119,6 +134,8 @@ VERDICT_PATTERN = re.compile(
     r"(?:(?=[\w.-]*\d)[A-Za-z][\w.-]* ){0,2}(?<![\w`])([0-9a-f]{7,40}) verdict=GO(?![\w-])"
 )
 SCOPE_PATTERN = re.compile(r"\bscope=([^\s|`]+)")
+# The machine-read tokens of a verdict's check field, after the verdict itself.
+VERDICT_TOKEN_PATTERN = re.compile(r"\b(bridge_sha|migration|imports_sha)=([^\s|`]+)")
 PIN_PATTERN = re.compile(
     rf"^{PIN_NAME}\s*(?::\s*[\w\[\]]+\s*)?=\s*[\"']([0-9a-fA-F]{{64}})[\"']", re.MULTILINE
 )
@@ -173,6 +190,8 @@ class DeployCheckRequest:
     now: datetime | None = None
     skip_clock: bool = False
     benign_paths: tuple[str, ...] = DEFAULT_BENIGN_PATHS
+    # P2-3: the one migration this deploy applies (None: nothing may be pending).
+    expect_migration: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,18 +224,11 @@ class Git:
         ]
 
     def run(self, *args: str, accept: Sequence[int] = (0,)) -> subprocess.CompletedProcess[bytes]:
-        env = {key: value for key, value in os.environ.items() if key not in _GIT_LOCATION_VARIABLES}
-        # --repo is the repository root: a plain directory inside another
-        # repository must fail, never check the enclosing one.
-        env["GIT_CEILING_DIRECTORIES"] = str(self.repo.expanduser().resolve().parent)
-        env["GIT_OPTIONAL_LOCKS"] = "0"
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        env["LC_ALL"] = "C"
         try:
             completed = subprocess.run(
                 self.argv(*args),
                 capture_output=True,
-                env=env,
+                env=git_environment(self.repo),
                 stdin=subprocess.DEVNULL,
                 timeout=GIT_TIMEOUT_SECONDS,
                 check=False,
@@ -282,6 +294,19 @@ class Git:
                 if origin:
                     entries.append(f"{item[:2]} {origin}")
         return entries
+
+
+def git_environment(repo: Path) -> dict[str, str]:
+    """The environment of every git call on ``repo`` (read-only here, and the
+    two writes of ``deploy_apply.GitWriter``): nothing points git elsewhere."""
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_LOCATION_VARIABLES}
+    # --repo is the repository root: a plain directory inside another
+    # repository must fail, never check the enclosing one.
+    env["GIT_CEILING_DIRECTORIES"] = str(repo.expanduser().resolve().parent)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LC_ALL"] = "C"
+    return env
 
 
 # --- pure helpers ---------------------------------------------------------------
@@ -356,6 +381,62 @@ def verdict_lines(path: str, text: str, scope: Sequence[str] = ()) -> list[Verdi
     return found
 
 
+def _verdict_match(line: str) -> tuple[str, re.Match[str]] | None:
+    field = verdict_field(line)
+    match = VERDICT_PATTERN.match(field) if field is not None else None
+    return None if field is None or match is None else (field, match)
+
+
+def verdict_tokens(line: str) -> dict[str, tuple[str, ...]]:
+    """``bridge_sha=``, ``migration=`` and ``imports_sha=`` of a verdict line's
+    check field (after the verdict, as ``scope=``); every value, in order."""
+    found = _verdict_match(line)
+    if found is None:
+        return {}
+    field, match = found
+    tokens: dict[str, tuple[str, ...]] = {}
+    for key, value in VERDICT_TOKEN_PATTERN.findall(field, match.end()):
+        tokens[key] = (*tokens.get(key, ()), value)
+    return tokens
+
+
+def verdict_label(line: str) -> str:
+    """The release label(s) before the sha in a verdict's check field (``P1-B``,
+    ``v7a.1``), or ``""``."""
+    found = _verdict_match(line)
+    if found is None:
+        return ""
+    field, match = found
+    return field[: match.start(1)].strip()
+
+
+def reviewed_pins(source: str) -> dict[str, object]:
+    """Every module-level ``REVIEWED_*`` constant of a supervisor.py, as a literal.
+
+    Raises ``ValueError`` for a constant assigned twice or to anything but a
+    literal (a pin that cannot be read is no pin).
+    """
+    tree = ast.parse(source)
+    pins: dict[str, object] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name) or not target.id.startswith(REVIEWED_PREFIX):
+                continue
+            if target.id in pins:
+                raise ValueError(f"{target.id} is assigned more than once")
+            try:
+                pins[target.id] = ast.literal_eval(value)
+            except ValueError as exc:
+                raise ValueError(f"{target.id} is not a literal") from exc
+    return pins
+
+
 def is_review_path(path: str) -> bool:
     """I-11: the only path an addendum commit after a verdict may touch."""
     return path.startswith(REVIEW_ONLY_PREFIX)
@@ -424,20 +505,70 @@ def _missing_candidate(token: str, candidate: str, repo: Path) -> CheckResult:
 
 
 def check_verdict(
-    git: Git, *, candidate: str, head: str | None, ledger_glob: str, scope: Sequence[str]
+    git: Git,
+    *,
+    candidate: str,
+    head: str | None,
+    ledger_glob: str,
+    scope: Sequence[str],
+    expect_migration: int | None = None,
 ) -> CheckResult:
+    return match_verdict(
+        git,
+        candidate=candidate,
+        head=head,
+        ledger_glob=ledger_glob,
+        scope=scope,
+        expect_migration=expect_migration,
+    )[0]
+
+
+def match_verdict(
+    git: Git,
+    *,
+    candidate: str,
+    head: str | None,
+    ledger_glob: str,
+    scope: Sequence[str],
+    expect_migration: int | None = None,
+) -> tuple[CheckResult, tuple[VerdictLine, ...]]:
+    """``check_verdict``'s result and, when it passes, the verdict lines it matched."""
+    result, matched = _match_verdict(
+        git, candidate=candidate, head=head, ledger_glob=ledger_glob, scope=scope
+    )
+    if result.status != OK or expect_migration is None:
+        return result, matched
+    wanted = str(expect_migration)
+    missing = [line for line in matched if verdict_tokens(line.text).get("migration") != (wanted,)]
+    if missing:
+        return (
+            CheckResult(
+                VERDICT,
+                REFUSE,
+                f"{VERDICT_MIGRATION_MISSING}: --expect-migration {wanted} needs `migration={wanted}`"
+                f" (and no other migration=) on every matched verdict line; {len(missing)} without it",
+                tuple(line.describe() for line in missing[:3]),
+            ),
+            (),
+        )
+    return result, matched
+
+
+def _match_verdict(
+    git: Git, *, candidate: str, head: str | None, ledger_glob: str, scope: Sequence[str]
+) -> tuple[CheckResult, tuple[VerdictLine, ...]]:
     if head is None:
-        return _missing_candidate(VERDICT, candidate, git.repo)
+        return _missing_candidate(VERDICT, candidate, git.repo), ()
     ledgers = sorted(
         path for path in git.tree_paths(head, static_prefix(ledger_glob)) if glob_matches(path, ledger_glob)
     )
     if not ledgers:
-        return CheckResult(VERDICT, REFUSE, f"no ledger matches {ledger_glob} on {candidate}")
+        return CheckResult(VERDICT, REFUSE, f"no ledger matches {ledger_glob} on {candidate}"), ()
     lines: list[VerdictLine] = []
     for path in ledgers:
         content = git.blob(head, path)
         if content is None:
-            return CheckResult(VERDICT, REFUSE, f"cannot read {candidate}:{path}")
+            return CheckResult(VERDICT, REFUSE, f"cannot read {candidate}:{path}"), ()
         lines += verdict_lines(path, content.decode("utf-8", "replace"), scope)
     scope_text = f" scope={','.join(scope)}" if scope else ""
     searched = f"{len(ledgers)} ledger(s): {', '.join(ledgers)}"
@@ -447,7 +578,7 @@ def check_verdict(
             REFUSE,
             f"no `<sha> verdict=GO{scope_text}` line (ledger grammar"
             f" `<time> | [<label>] <sha> verdict=GO ... | ...`) in {searched}",
-        )
+        ), ()
     by_sha: dict[str, list[VerdictLine]] = {}
     unresolved: list[VerdictLine] = []
     for line in lines:
@@ -457,7 +588,10 @@ def check_verdict(
             continue
         by_sha.setdefault(resolved, []).append(line)
     if head in by_sha:
-        return CheckResult(VERDICT, OK, notes=tuple(line.describe() for line in by_sha[head]))
+        return (
+            CheckResult(VERDICT, OK, notes=tuple(line.describe() for line in by_sha[head])),
+            tuple(by_sha[head]),
+        )
     # I-11 exception: an ancestor verdict followed only by docs/reviews/ changes.
     qualifying: list[tuple[int, str, list[str]]] = []
     rejected: list[tuple[int, str, str]] = []
@@ -489,7 +623,7 @@ def check_verdict(
             f" touching only {REVIEW_ONLY_PREFIX}:"
         )
         notes += [f"+ {commit}" for commit in commits]
-        return CheckResult(VERDICT, OK, notes=tuple(_limited(notes, NOTE_LIMIT * 2)))
+        return CheckResult(VERDICT, OK, notes=tuple(_limited(notes, NOTE_LIMIT * 2))), tuple(by_sha[sha])
     notes = [reason for _count, _sha, reason in sorted(rejected, key=lambda item: item[0])[:3]]
     notes += [f"{line.describe()} -> {line.sha} is not a commit in {git.repo}" for line in unresolved[:3]]
     return CheckResult(
@@ -498,7 +632,7 @@ def check_verdict(
         f"no GO verdict{scope_text} names {candidate} {_short(head)}, and none is followed only by"
         f" {REVIEW_ONLY_PREFIX} changes (I-11; {len(lines)} verdict line(s) in {searched})",
         tuple(notes),
-    )
+    ), ()
 
 
 def check_tree_clean(git: Git, *, benign_paths: Sequence[str]) -> CheckResult:
@@ -574,7 +708,7 @@ def check_files(git: Git, *, candidate: str, head: str | None) -> CheckResult:
     return CheckResult(FILES, OK, notes=(summary,))
 
 
-def check_schema(db_path: Path, *, now: datetime) -> CheckResult:
+def check_schema(db_path: Path, *, now: datetime, expect_migration: int | None = None) -> CheckResult:
     from trading.operations.db_admin import run_status
 
     buffer = io.StringIO()
@@ -583,9 +717,27 @@ def check_schema(db_path: Path, *, now: datetime) -> CheckResult:
         (line.split(None, 1)[1] for line in buffer.getvalue().splitlines() if line.startswith("state ")),
         "state unknown",
     )
+    if expect_migration is not None:
+        return _check_expected_migration(db_path, expect_migration, state)
     if exit_code == 0:
         return CheckResult(SCHEMA, OK, notes=(f"{db_path}: {state}",))
     return CheckResult(SCHEMA, REFUSE, f"{db_path}: {state} (never migrated here: `autotraderctl db migrate`)")
+
+
+def _check_expected_migration(db_path: Path, expected: int, state: str) -> CheckResult:
+    """P2-3: exactly ``(expected,)`` pending on an existing, sound database; still read-only."""
+    from trading.storage.migrations import inspect_schema
+
+    status = inspect_schema(db_path)
+    if status.exists and not status.problems and status.pending == (expected,):
+        return CheckResult(SCHEMA, OK, notes=(f"{db_path}: {state}; pending ({expected},) as expected",))
+    pending = ", ".join(str(version) for version in status.pending) or "none"
+    return CheckResult(
+        SCHEMA,
+        REFUSE,
+        f"{MIGRATION_UNEXPECTED}: {db_path}: {state}; pending ({pending}) is not exactly"
+        f" --expect-migration {expected}",
+    )
 
 
 def check_fence(db_path: Path) -> CheckResult:
@@ -721,6 +873,7 @@ def run_checks(
                 head=head,
                 ledger_glob=request.ledger_glob,
                 scope=request.scope,
+                expect_migration=request.expect_migration,
             ),
         ),
         (TREE_CLEAN, lambda: check_tree_clean(repository, benign_paths=request.benign_paths)),
@@ -731,7 +884,7 @@ def run_checks(
             ),
         ),
         (FILES, lambda: check_files(repository, candidate=request.candidate, head=head)),
-        (SCHEMA, lambda: check_schema(request.db_path, now=now)),
+        (SCHEMA, lambda: check_schema(request.db_path, now=now, expect_migration=request.expect_migration)),
         (FENCE, lambda: check_fence(request.db_path)),
         (CLOCK, lambda: check_clock(skip=request.skip_clock, sntp=probe)),
         (WINDOW, lambda: check_window(now)),
@@ -765,7 +918,8 @@ def run_deploy_check(
     print(
         f"deploy check: candidate {request.candidate} = {_short(head)} in {request.repo}"
         f" at {local:%Y-%m-%d %H:%M} {local.tzname()}"
-        + (f" scope={','.join(request.scope)}" if request.scope else ""),
+        + (f" scope={','.join(request.scope)}" if request.scope else "")
+        + (f" expect-migration={request.expect_migration}" if request.expect_migration is not None else ""),
         file=stream,
     )
     results = run_checks(request, sntp=sntp, git=git, head=head)
@@ -787,9 +941,12 @@ __all__ = [
     "EXIT_REFUSED",
     "Git",
     "GitError",
+    "MIGRATION_UNEXPECTED",
+    "REVIEWED_PREFIX",
     "REVIEW_ONLY_PREFIX",
     "SUPERVISOR_PATH",
     "TOKENS",
+    "VERDICT_MIGRATION_MISSING",
     "check_clock",
     "check_fence",
     "check_files",
@@ -799,19 +956,24 @@ __all__ = [
     "check_tree_clean",
     "check_verdict",
     "check_window",
+    "git_environment",
     "glob_matches",
     "in_deploy_window",
     "is_deployable",
     "is_review_path",
+    "match_verdict",
     "parse_now",
     "parse_scope",
     "parse_sntp_offset",
     "resolve_candidate",
+    "reviewed_pins",
     "run_checks",
     "run_deploy_check",
     "summary_line",
     "system_sntp",
     "validate_ref",
     "verdict_field",
+    "verdict_label",
     "verdict_lines",
+    "verdict_tokens",
 ]
