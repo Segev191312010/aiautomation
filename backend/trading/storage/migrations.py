@@ -43,7 +43,11 @@ from trading.storage.manager_schema import (
     MANAGER_PHASE2_MIGRATION,
     MANAGER_SETUPS_SCHEMA,
 )
-from trading.storage.manual_orders_schema import MANUAL_ORDERS_SCHEMA
+from trading.storage.manual_orders_schema import (
+    MANUAL_ENTRY_STOP_MIGRATION,
+    MANUAL_ENTRY_STOP_SCHEMA,
+    MANUAL_ORDERS_SCHEMA,
+)
 
 
 MigrationApply = Callable[[aiosqlite.Connection], Awaitable[None]]
@@ -286,6 +290,12 @@ async def _manual_orders_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANUAL_ORDERS_SCHEMA)
 
 
+async def _manual_entry_stop(db: aiosqlite.Connection) -> None:
+    if "entry_stop_price" not in await _table_columns(db, "autotrader_manual_orders"):
+        await db.execute(MANUAL_ENTRY_STOP_SCHEMA[0])
+    await _execute_all(db, MANUAL_ENTRY_STOP_SCHEMA[1:])
+
+
 async def _manager_setups_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANAGER_SETUPS_SCHEMA)
 
@@ -435,6 +445,12 @@ MIGRATIONS = (
     Migration(
         MANAGER_PHASE2_MIGRATION, "manager-day-plans", "v1-manager-day-plans-20261013",
         _manager_day_plans_ledger, MANAGER_PHASE2_DDL,
+    ),
+    # v7c (owner decision D5): an owner buy carries its protective stop, in its
+    # own column, refused by the database when missing. Bridge v7c sends it.
+    Migration(
+        MANUAL_ENTRY_STOP_MIGRATION, "manual-entry-stop", "v1-manual-entry-stop-20261021",
+        _manual_entry_stop, MANUAL_ENTRY_STOP_SCHEMA,
     ),
 )
 

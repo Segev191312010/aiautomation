@@ -388,6 +388,18 @@ def dry_run_text(world: "World", day: date) -> str:
         bridge_lines = _BRIDGE_LINES.format(
             pin12=actual[:12], pin=actual, fenced=f"{level} fenced identities = {', '.join(fenced) or 'none'}"
         )
+        # P3-B0, as supervisor.bridge_imports_lines: only code that pins the imports prints this.
+        imports = deploy_check.reviewed_pins((repo / SUPERVISOR).read_text()).get(deploy_check.IMPORTS_PIN_NAME)
+        if imports is not None:
+            bad = [
+                path for path, digest in sorted(imports.items())
+                if not (repo / "backend" / path).is_file()
+                or hashlib.sha256((repo / "backend" / path).read_bytes()).hexdigest() != digest
+            ]
+            bridge_lines += "".join(
+                f"\nWARNING: bridge import {path} is not the reviewed one: the supervisor will refuse to start"
+                " the bridge (no orders)" for path in bad
+            ) or f"\nbridge       imports reviewed ({len(imports)} files)"
     else:
         bridge_lines = (
             f"WARNING: bridge sha256 {actual[:12]} is not the reviewed {pin[:12]}:"
@@ -432,6 +444,7 @@ def _scenario(
     label: str = "P2",
     candidate_pin: str = PIN_V2,
     base_pinned: bool = True,
+    imports: bool = False,
 ) -> Scenario:
     repo = Repo(root / "live")
     repo.path.mkdir(parents=True)
@@ -450,12 +463,23 @@ def _scenario(
     repo.write(BRIDGE, BRIDGE_V2)
     repo.write(SUPERVISOR, f'"""supervisor"""\nREVIEWED_BRIDGE_SHA256 = "{candidate_pin}"\n')
     repo.write("backend/trading/feature.py", "FEATURE = 2\n")
+    imports_sha = None
+    if imports:  # P3-B0: the candidate pins one file its bridge imports lazily
+        repo.write("backend/trading/execution/manual_orders.py", "LEDGER = 1\n")
+        pins = {"trading/execution/manual_orders.py": hashlib.sha256(b"LEDGER = 1\n").hexdigest()}
+        repo.write(
+            SUPERVISOR,
+            f'"""supervisor"""\nREVIEWED_BRIDGE_SHA256 = "{candidate_pin}"\n'
+            f"REVIEWED_BRIDGE_IMPORTS_SHA256: dict[str, str] = {pins!r}\n",
+        )
+        imports_sha = deploy_check.imports_digest(pins)[:12]
     if tool_change:
         repo.write(TOOL_FILE, "# the deploy tool changes\n")
     reviewed = repo.commit("feature")
-    repo.append(
-        LEDGER, _verdict_line(reviewed[:7], scope=scope, bridge_sha=bridge_sha, migration=migration, label=label)
-    )
+    verdict = _verdict_line(reviewed[:7], scope=scope, bridge_sha=bridge_sha, migration=migration, label=label)
+    if imports_sha is not None:
+        verdict = verdict.replace(" | GO; test", f" imports_sha={imports_sha} | GO; test")
+    repo.append(LEDGER, verdict)
     head = repo.commit("docs(reviews): verdict")
     repo.git("checkout", "-q", "main")
     python = repo.path / "backend" / ".venv" / "bin" / "python"
@@ -739,6 +763,33 @@ def test_apply_happy_path_writes_prev_then_deploy_line_and_prints_ledger_line(wo
         assert expected in lines, expected
     # The PASS line is written last, after every post-check.
     assert world.output.index("OK started:") < world.output.index("deploy apply: PASS")
+
+
+def test_apply_of_a_candidate_that_pins_its_imports_requires_the_imports_line(tmp_path):
+    # P3-B0 through the production path: the plan reads the candidate's
+    # REVIEWED_BRIDGE_IMPORTS_SHA256, the live dry run after the fast-forward
+    # must print `bridge       imports reviewed (<n> files)` once, else the
+    # code-only deploy undoes itself.
+    passed = _make_world(tmp_path / "pass", imports=True)
+    try:
+        assert passed.apply() == deploy_apply.EXIT_OK, passed.output
+    finally:
+        passed.robot.release_lock()
+    lines = passed.output.splitlines()
+    assert "  | bridge       imports reviewed (1 files)" in lines
+    assert "OK dry run: 10 required lines, no !!!, no WARNING:" in lines
+    assert any("imports_sha=" in line and "bridge imports 1 files" in line for line in lines)
+
+    dropped = _make_world(tmp_path / "dropped", imports=True)
+    dropped.live.dry_run_edit = lambda text: text.replace("bridge       imports reviewed (1 files)\n", "")
+    try:
+        assert dropped.apply() == deploy_apply.EXIT_ROLLED_BACK, dropped.output
+    finally:
+        dropped.robot.release_lock()
+    assert dropped.deploys()[-1].endswith(
+        f"DEPLOY rollback to {dropped.scenario.base} result=ROLLBACK reason=dry_run_imports"
+    )
+    assert dropped.live_head() == dropped.scenario.base
 
 
 def test_live_subprocesses_use_live_checkout_python_and_cwd(world, tmp_path, monkeypatch):
@@ -1076,6 +1127,70 @@ def test_expect_pin_three_way(world, tmp_path):
             deploy_apply.pinned_files(bad)
 
 
+def test_the_real_imports_pin_is_verified_file_by_file():
+    # P3-B0: the shipped supervisor's two pins flatten into one {path: sha256}
+    # map that the apply checks after the fast-forward, and every entry is the
+    # file on disk in this checkout.
+    source = (supervisor.BACKEND_DIR / "trading" / "operations" / "supervisor.py").read_text()
+    files = deploy_apply.pinned_files(deploy_check.reviewed_pins(source))
+    assert files == {
+        BRIDGE: supervisor.REVIEWED_BRIDGE_SHA256,
+        **{f"backend/{path}": digest for path, digest in supervisor.REVIEWED_BRIDGE_IMPORTS_SHA256.items()},
+    }
+    repo_root = supervisor.BACKEND_DIR.parent
+    assert {path: hashlib.sha256((repo_root / path).read_bytes()).hexdigest() for path in files} == files
+
+
+def _imports_candidate(tmp_path: Path, *, file_text: str = "LEDGER = 1\n") -> tuple[deploy_check.Git, str, dict]:
+    """A candidate whose supervisor pins one bridge import (P3-B0); its file says ``file_text``."""
+    scenario = _scenario(tmp_path)
+    repo = scenario.repo
+    pins = {"trading/execution/manual_orders.py": hashlib.sha256(b"LEDGER = 1\n").hexdigest()}
+    repo.git("checkout", "-q", "cand")
+    repo.write("backend/trading/execution/manual_orders.py", file_text)
+    repo.write(
+        SUPERVISOR,
+        f'"""supervisor"""\nREVIEWED_BRIDGE_SHA256 = "{PIN_V2}"\n'
+        f"REVIEWED_BRIDGE_IMPORTS_SHA256: dict[str, str] = {pins!r}\n",
+    )
+    head = repo.commit("pin the bridge imports")
+    repo.git("checkout", "-q", "main")
+    return deploy_check.Git(repo.path), head, pins
+
+
+def test_the_verdict_names_the_imports_pin(tmp_path):
+    git, head, pins = _imports_candidate(tmp_path / "ok")
+    wanted = deploy_check.imports_digest(pins)[:12]
+
+    def problems(*extra: str, at: str = head, repo_git=git):
+        text = _verdict_line("abc1234", scope="P2", bridge_sha=PIN_V2, migration=None, label="v7c")
+        text = text.replace(f"bridge_sha={PIN_V2}", " ".join((f"bridge_sha={PIN_V2}", *extra)))
+        return deploy_apply.pin_problems(repo_git, at, PIN_V2, [deploy_check.VerdictLine("x", 1, text, "abc1234")])
+
+    found, files = problems(f"imports_sha={wanted}")
+    assert found == []
+    assert files == {BRIDGE: PIN_V2, "backend/trading/execution/manual_orders.py": pins[
+        "trading/execution/manual_orders.py"]}
+    assert deploy_apply.pinned_imports_count(git, head) == 1
+    # No imports_sha= on the verdict: the review did not name the import files.
+    found, _ = problems()
+    assert [token for token, _ in found] == ["pin_verdict_missing"] and "no imports_sha=" in found[0][1]
+    # A different digest: reviewed a different set of import files.
+    found, _ = problems("imports_sha=000000000000")
+    assert [token for token, _ in found] == ["pin_expected"] and f"digest {wanted}" in found[0][1]
+    # The verdict is right, the candidate's file is not the pinned one.
+    stale_git, stale_head, _ = _imports_candidate(tmp_path / "stale", file_text="LEDGER = 2\n")
+    found, _ = problems(f"imports_sha={wanted}", at=stale_head, repo_git=stale_git)
+    assert [token for token, _ in found] == ["pin_expected"]
+    assert "backend/trading/execution/manual_orders.py sha256" in found[0][1]
+    # Code from before P3-B0 pins no imports: a verdict naming some is refused.
+    world = _scenario(tmp_path / "old")
+    old_git = deploy_check.Git(world.repo.path)
+    found, _ = problems(f"imports_sha={wanted}", at=world.head, repo_git=old_git)
+    assert [token for token, _ in found] == ["pin_expected"] and "pins no bridge imports" in found[0][1]
+    assert deploy_apply.pinned_imports_count(old_git, world.head) is None
+
+
 def test_verdict_without_bridge_sha_refuses(tmp_path):
     world = _make_world(tmp_path, bridge_sha=None)
     try:
@@ -1217,6 +1332,11 @@ DRY_RUN_VARIANTS = {
             "heartbeat    not configured (no Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url)",
         ), {}, 0),
     "dry_run_budget": (None, {"budget": True}, 0),
+    # P3-B0: a candidate that pins the bridge's imports must print the line once.
+    "dry_run_imports": (None, {"imports": 3}, 0),
+    "dry_run_imports_count": (lambda t: t + "bridge       imports reviewed (2 files)\n", {"imports": 3}, 0),
+    "dry_run_imports_twice": (
+        lambda t: t + "bridge       imports reviewed (3 files)\n" * 2, {"imports": 3}, 0),
 }
 
 
@@ -1267,6 +1387,40 @@ def test_dry_run_fixture_has_the_production_shape(world, tmp_path):
     )
     assert fixture.ok and fixture.evidence == real.evidence
     assert len(real.evidence) == 9
+
+
+def test_dry_run_imports_line_has_the_production_shape(world, tmp_path):
+    """P3-B0: the real dry run of this checkout prints the imports line the apply
+    expects for a candidate that pins its bridge imports, once."""
+    real_lines = _BRIDGE_LINES.format(
+        pin12=supervisor.REVIEWED_BRIDGE_SHA256[:12],
+        pin=supervisor.REVIEWED_BRIDGE_SHA256,
+        fenced="INFO fenced identities = none",
+    ).splitlines()
+
+    def preflight(_session_date, **_kwargs):
+        lines = [line.removeprefix("bridge       ") for line in real_lines[1:]]
+        return 0, "".join(f"22:10:01 ET  {line}\n" for line in lines)
+
+    report = supervisor.dry_run_report(
+        session_date=NEXT_SESSION,
+        now=datetime(2026, 10, 24, 23, 0, tzinfo=timezone.utc),
+        user_paths=UserPaths(home=tmp_path / "dry-home"),
+        unsupervised=list,
+        database=world.db,
+        registry=list,
+        preflight=preflight,
+        heartbeat_present=lambda: True,
+    )
+    count = len(supervisor.REVIEWED_BRIDGE_IMPORTS_SHA256)
+    expect = _expect(world, pin=supervisor.REVIEWED_BRIDGE_SHA256, imports=count)
+    real = DryRunCheck.parse(report, 0, expect)
+    assert real.ok, real.failures
+    assert deploy_apply.imports_line(count) in real.evidence and len(real.evidence) == 10
+    # The template with that one line passes too; the template without it does not.
+    fixture = _template(world).replace(PIN_V1, expect.pin).replace(PIN_V1[:12], expect.pin[:12])
+    assert DryRunCheck.parse(fixture + deploy_apply.imports_line(count) + "\n", 0, expect).ok
+    assert [token for token, _ in DryRunCheck.parse(fixture, 0, expect).failures] == ["dry_run_imports"]
 
 
 # --- P2-1: deploys.log --------------------------------------------------------------------------------------

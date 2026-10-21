@@ -416,6 +416,126 @@ def test_the_pinned_bridge_is_the_file_on_disk():
     assert supervisor_module.file_sha256(bridge) == supervisor_module.REVIEWED_BRIDGE_SHA256
 
 
+def test_imports_pin_matches_files_on_disk():
+    # P3-B0 (C1): the files the bridge imports lazily are reviewed with it. A
+    # change to one of them without a new review fails here, and the supervisor
+    # would refuse to launch the bridge.
+    pins = supervisor_module.REVIEWED_BRIDGE_IMPORTS_SHA256
+    assert sorted(pins) == ["config.py", "trading/execution/manual_orders.py", "trading/scheduler/sessions.py"]
+    assert {path: supervisor_module.file_sha256(BACKEND_DIR / path) for path in pins} == pins
+    assert supervisor_module.bridge_imports_lines() == ("bridge       imports reviewed (3 files)",)
+
+
+def _fake_backend_with_imports(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    backend = tmp_path / "backend"
+    script = backend / "scripts_local" / "paper_bridge.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('bridge ran')\n", encoding="utf-8")
+    pins: dict[str, str] = {}
+    for relative in supervisor_module.REVIEWED_BRIDGE_IMPORTS_SHA256:
+        path = backend / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {relative}\n", encoding="utf-8")
+        pins[relative] = supervisor_module.file_sha256(path)
+    return backend, pins
+
+
+async def test_changed_manual_orders_refuses_launch(tmp_path, caplog):
+    backend, imports = _fake_backend_with_imports(tmp_path)
+    script = backend / "scripts_local" / "paper_bridge.py"
+    logs = tmp_path / "logs"
+    launcher = SubprocessLauncher(
+        logs, cwd=tmp_path, pinned={"bridge": supervisor_module.file_sha256(script)},
+        pinned_imports={"bridge": imports},
+    )
+    process = await launcher.start(_pinned_plan(script))
+    assert await process.wait() == 0
+    assert "bridge ran" in (logs / "bridge.log").read_text()
+    runs = (logs / "bridge.log").read_text().count("bridge ran")
+
+    # The bridge's own bytes are unchanged; only the ledger it imports was edited.
+    ledger = backend / "trading" / "execution" / "manual_orders.py"
+    ledger.write_text("# edited after the review\n", encoding="utf-8")
+    edited = supervisor_module.file_sha256(ledger)
+    reviewed = imports["trading/execution/manual_orders.py"]
+    for _ in range(2):  # at every (re)start
+        caplog.clear()
+        with caplog.at_level("CRITICAL", logger=supervisor_module.__name__):
+            with pytest.raises(LaunchRefused) as refused:
+                await launcher.start(_pinned_plan(script))
+        assert refused.value.code == 78
+        assert refused.value.reason == (
+            f"unreviewed import trading/execution/manual_orders.py sha256={edited[:12]} reviewed={reviewed[:12]}"
+        )
+        [record] = [record for record in caplog.records if record.levelname == "CRITICAL"]
+        assert "unreviewed import trading/execution/manual_orders.py" in record.getMessage()
+        assert record.stack_info  # a tripwire, with where it fired
+    assert (logs / "bridge.log").read_text().count("bridge ran") == runs  # never exec'd again
+
+    ledger.unlink()
+    with pytest.raises(LaunchRefused) as missing:
+        await launcher.start(_pinned_plan(script))
+    assert missing.value.reason == "unreviewed import trading/execution/manual_orders.py unreadable error=FileNotFoundError"
+
+    # The phone hears it as an unreviewed bridge, like an edited bridge file.
+    from trading.operations.notify_service import supervisor_event_text
+
+    line = f"2026-10-30T13:25:00+00:00 LAUNCH_REFUSED bridge code=78 reason={refused.value.reason}"
+    assert supervisor_event_text(line).startswith("⛔ bridge NOT started: its code is not the reviewed version")
+
+
+def test_run_supervisor_launches_the_bridge_only_with_its_reviewed_imports(tmp_path, monkeypatch):
+    captured: dict[str, object] = {}
+
+    class CapturingSupervisor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def request_stop(self, signum: int | None = None) -> None:
+            pass
+
+        async def run(self, *, session_date: date | None = None) -> int:
+            return 0
+
+    monkeypatch.setattr(supervisor_module, "Supervisor", CapturingSupervisor)
+    assert supervisor_module.run_supervisor(
+        user_paths=UserPaths(home=tmp_path), echo=io.StringIO(), unsupervised=list, heartbeat_url=lambda: None
+    ) == 0
+    launcher = captured["launcher"]
+    assert isinstance(launcher, SubprocessLauncher)
+    assert launcher._pinned == {"bridge": supervisor_module.REVIEWED_BRIDGE_SHA256}
+    assert launcher._pinned_imports == {"bridge": supervisor_module.REVIEWED_BRIDGE_IMPORTS_SHA256}
+    # The production launcher's own check passes on this checkout's real files.
+    launcher._check_pinned(_pinned_plan(BACKEND_DIR / "scripts_local" / "paper_bridge.py"))
+    # And refuses the same bridge once one pinned import is not the reviewed one.
+    monkeypatch.setitem(launcher._pinned_imports["bridge"], "trading/scheduler/sessions.py", "f" * 64)
+    with pytest.raises(LaunchRefused) as refused:
+        launcher._check_pinned(_pinned_plan(BACKEND_DIR / "scripts_local" / "paper_bridge.py"))
+    assert refused.value.reason.startswith("unreviewed import trading/scheduler/sessions.py sha256=")
+
+
+def test_the_dry_run_names_each_unreviewed_bridge_import(tmp_path, monkeypatch):
+    backend, imports = _fake_backend_with_imports(tmp_path)
+    monkeypatch.setattr(supervisor_module, "REVIEWED_BRIDGE_IMPORTS_SHA256", imports)
+    assert supervisor_module.bridge_imports_lines(backend) == ("bridge       imports reviewed (3 files)",)
+
+    (backend / "config.py").write_text("# edited\n", encoding="utf-8")
+    (backend / "trading" / "scheduler" / "sessions.py").unlink()
+    lines = supervisor_module.bridge_imports_lines(backend)
+    assert lines == (
+        f"WARNING: bridge import config.py sha256 {supervisor_module.file_sha256(backend / 'config.py')[:12]}"
+        f" is not the reviewed {imports['config.py'][:12]}: the supervisor will refuse to start the bridge (no orders)",
+        "WARNING: bridge import trading/scheduler/sessions.py unreadable: the supervisor will refuse to start"
+        " the bridge (no orders)",
+    )
+    report = dry_run_report(
+        session_date=TUESDAY, now=et(date(2026, 10, 12), 22, 0), user_paths=UserPaths(home=tmp_path / "home"),
+        unsupervised=list, registry=list, python=Path(sys.executable), backend=backend, preflight=_PREFLIGHT_OK,
+    )
+    assert all(line in report.splitlines() for line in lines)
+    assert "imports reviewed" not in report
+
+
 def test_the_dry_run_says_whether_the_bridge_is_the_reviewed_one(tmp_path, monkeypatch):
     script = tmp_path / "scripts_local" / "paper_bridge.py"
     script.parent.mkdir()

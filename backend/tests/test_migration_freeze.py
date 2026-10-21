@@ -45,7 +45,9 @@ PRODUCTION_MIGRATIONS: dict[int, tuple[str, str]] = {
 # PRODUCTION_MIGRATIONS and is frozen like the others.
 PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     **PRODUCTION_MIGRATIONS,
-    # Not yet applied in production: none.
+    # Not yet applied in production: v7c's owner-buy stop (owner decision D5,
+    # 2026-10-18), applied by the L-v7c `deploy apply --expect-migration 17`.
+    17: ("manual-entry-stop", "3819025e3c91b79e401587ecc0fdd327b6b14136999f204eedc81133ac6fe735"),
 }
 
 

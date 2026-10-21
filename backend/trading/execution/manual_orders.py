@@ -18,6 +18,15 @@ confirmation step):
   IMMEDIATE transaction before it is sent, expires 90 s after the message, and
   a ``sending`` row that IBKR does not know after a restart becomes ``unknown``
   and is never resent.
+* A buy must carry its protective stop (owner decision D5, 2026-10-18, v7c):
+  ``/buy 100 AAPL at 180 stop 175``, ``/buy $5k NVDA stop 170``. The stop is
+  below the entry (``stop_not_below_entry``) and the entry's risk, quantity x
+  (entry - stop), is at most 1 % of net liquidation, the bot's own per-order
+  ceiling (``manual_entry_risk_over_1pct``). A buy without one is refused by
+  the parser (``missing_entry_stop``), by ``revalidate_claimed`` for an older
+  row, and by migration 17's trigger. Exits are never subject to any of this.
+  Until migration 17 is applied a buy cannot be recorded
+  (``manual_schema_pending``); every other order still works.
 """
 from __future__ import annotations
 
@@ -57,6 +66,7 @@ RefusalCode = Literal[
     "multiple_symbols", "multiple_quantities", "fractional_shares", "ambiguous_amount",
     "missing_symbol", "missing_quantity", "missing_price", "bad_quantity", "bad_price",
     "word_ticker_needs_cashtag", "ticker_case", "unknown_word", "bad_cancel_ref",
+    "missing_entry_stop", "stop_not_below_entry",
 ]
 RejectCode = Literal[
     "not_paper", "stale_message", "market_closed", "bridge_offline", "unknown_symbol",
@@ -64,6 +74,7 @@ RejectCode = Literal[
     "spread_too_wide", "price_out_of_band", "invalid_tick", "stop_above_bid",
     "amount_too_small", "order_too_large", "manual_exposure_cap", "rate_limited",
     "insufficient_shares", "state_changed",
+    "missing_entry_stop", "stop_not_below_entry", "manual_entry_risk_over_1pct",
 ]
 CancelResult = Literal["applied", "no_active_order", "ambiguous_order_ref"]
 
@@ -119,6 +130,15 @@ MAX_SPREAD_FRACTION = Decimal("0.01")
 PRICE_BAND_FRACTION = Decimal("0.10")
 MAX_ORDER_FRACTION_OF_NET_LIQ = Decimal("0.25")
 MAX_MANUAL_EXPOSURE_FRACTION_OF_NET_LIQ = Decimal("0.50")
+# D5 (v7c): a buy's risk, quantity x (entry - its stop), may be at most this
+# share of net liquidation: the bot's own per-order ceiling (the bridge's
+# MAX_ORDER_RISK_PCT = 1). The account-level 3 % day budget is the bridge's.
+MAX_MANUAL_ENTRY_RISK_FRACTION_OF_NET_LIQ = Decimal("0.01")
+# The word that introduces a buy's protective stop; it must be written last.
+ENTRY_STOP_WORD = "stop"
+# Migration 17's column; a database without it (v17 pending) records no buy.
+ENTRY_STOP_COLUMN = "entry_stop_price"
+MANUAL_SCHEMA_PENDING = "manual_schema_pending"
 RATE_LIMIT_MAX_ORDERS = 10
 RATE_LIMIT_WINDOW = timedelta(minutes=10)
 MANUAL_CUTOFF_BEFORE_CLOSE = timedelta(minutes=6)  # 15:54 ET on a full session
@@ -137,6 +157,12 @@ _SUB_DOLLAR_TICK = Decimal("0.0001")
 
 class ManualOrderNotFound(LookupError):
     """A manual-order row id does not exist in the ledger."""
+
+
+class ManualSchemaPending(RuntimeError):
+    """A buy reached a ledger without migration 17's stop column; nothing was recorded."""
+
+    code = MANUAL_SCHEMA_PENDING
 
 
 def _require_aware(value: datetime, name: str) -> datetime:
@@ -203,6 +229,9 @@ class ParsedOrder:
     limit_price: Decimal | None = None
     stop_price: Decimal | None = None
     cancel_ref: str | None = None
+    # A BUY's protective stop (D5); never on any other action. ``stop_price``
+    # stays the SELL_STOP trigger only, as migration 12's CHECKs require.
+    entry_stop_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.action not in ACTIONS:
@@ -219,6 +248,8 @@ class ParsedOrder:
             _require_decimal(self.limit_price, "limit_price", positive=True)
         if self.stop_price is not None:
             _require_decimal(self.stop_price, "stop_price", positive=True)
+        if self.entry_stop_price is not None:
+            _require_decimal(self.entry_stop_price, "entry_stop_price", positive=True)
         if self.fraction is not None and self.fraction not in ("all", "half"):
             raise ValueError("fraction must be 'all' or 'half'")
         amounts = sum(value is not None for value in (self.quantity, self.notional, self.fraction))
@@ -239,6 +270,12 @@ class ParsedOrder:
                 raise ValueError("a limit price is required exactly for LMT")
             if self.stop_price is not None:
                 raise ValueError(f"{action} takes no stop price")
+            if action == "BUY":
+                # Tripwire (D5): a buy without its protective stop cannot even be represented.
+                if self.entry_stop_price is None:
+                    raise ValueError("BUY requires its protective stop (entry_stop_price)")
+                if self.limit_price is not None and self.entry_stop_price >= self.limit_price:
+                    raise ValueError("a BUY stop must be below its limit price")
         elif action == "SELL_STOP":
             if amounts != 1 or self.notional is not None:
                 raise ValueError("SELL_STOP requires a share count or all/half")
@@ -251,6 +288,8 @@ class ParsedOrder:
             or self.stop_price is not None
         ):
             raise ValueError(f"{action} takes no amount, order type or price")
+        if action != "BUY" and self.entry_stop_price is not None:
+            raise ValueError(f"{action} takes no entry stop")
         if action == "CANCEL":
             if self.cancel_ref is None or not _SHORT_ID_RE.fullmatch(self.cancel_ref):
                 raise ValueError("CANCEL requires a lowercase short order id")
@@ -384,9 +423,11 @@ WORD_TICKERS: frozenset[str] = frozenset(
 )
 
 _HINT = (
-    "Examples: /buy 100 AAPL, /buy $5k NVDA at 180, /sell half TSLA, /stop TSLA 240, "
-    "/close NVDA, /cancel a3f9c2."
+    "Examples: /buy 100 AAPL at 180 stop 175, /buy $5k NVDA stop 170, /sell half TSLA, "
+    "/stop TSLA 240, /close NVDA, /cancel a3f9c2."
 )
+# D5 (v7c): replaces the old "buy first, then /stop SYMBOL PRICE" advice.
+_ENTRY_STOP_EXAMPLE = "/buy 100 AAPL at 180 stop 175 or /buy $5k NVDA stop 170"
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,7 +574,8 @@ _RED_FLAGS: tuple[tuple[RefusalCode, str, Callable[[str], bool]], ...] = (
     ),
     (
         "unsupported_order_type",
-        "No brackets or targets in one message; buy first, then /stop SYMBOL PRICE.",
+        "No targets, trailing stops or brackets; a buy takes one protective stop, written last "
+        f"({_ENTRY_STOP_EXAMPLE}), and a stop on shares you hold is /stop SYMBOL PRICE.",
         lambda word: word in _BRACKET_WORDS,
     ),
     (
@@ -621,6 +663,7 @@ class _TradeState:
     symbol: str | None = None
     price: Decimal | None = None
     explicit_market: bool = False
+    entry_stop: Decimal | None = None
 
 
 def _take_symbol(state: _TradeState, symbol: str, tokens: list[_Tok], index: int) -> int:
@@ -639,12 +682,40 @@ _MULTIPLE_SYMBOLS = "One ticker per order. Nothing sent."
 _CLOSE_ALL_ONLY = "To close every position send exactly /closeall. Nothing sent."
 
 
+def _split_entry_stop(tokens: list[_Tok]) -> tuple[list[_Tok], Decimal | None] | ParseRefusal:
+    """A buy's ``stop <price>`` clause (D5), which must come last (politeness may follow).
+
+    Returns the other tokens and the stop price (None when the buy names none);
+    any other use of the word, a second stop or a stop without a price is refused.
+    """
+    end = len(tokens)
+    while end > 0 and tokens[end - 1].low in _TRAILING_FILLERS:
+        end -= 1
+    marks = [index for index, token in enumerate(tokens) if token.low == ENTRY_STOP_WORD]
+    if not marks:
+        return tokens, None
+    if len(marks) > 1:
+        return _refuse("bad_price", f"Give one stop price, written last ({_ENTRY_STOP_EXAMPLE}). Nothing sent.",
+                       attempt=True)
+    index = marks[0]
+    if index == end - 1:
+        return _refuse("missing_price", f"The stop needs a price ({_ENTRY_STOP_EXAMPLE}). Nothing sent.",
+                       attempt=True)
+    if index != end - 2:
+        return _refuse("bad_price", f"Write the stop last ({_ENTRY_STOP_EXAMPLE}). Nothing sent.", attempt=True)
+    price = _price_from(tokens[index + 1])
+    if isinstance(price, ParseRefusal):
+        return price
+    return tokens[:index] + tokens[end:], price
+
+
 def _parse_trade(
-    action: Action, tokens: list[_Tok], *, source: Source, positional_price: bool
+    action: Action, tokens: list[_Tok], *, source: Source, positional_price: bool,
+    entry_stop: Decimal | None = None,
 ) -> ParsedOrder | ParseRefusal:
     state = _TradeState(
         action=action, source=source, positional_price=positional_price,
-        phase="amount_or_symbol" if action == "SELL_STOP" else "amount",
+        phase="amount_or_symbol" if action == "SELL_STOP" else "amount", entry_stop=entry_stop,
     )
     index = 0
     while index < len(tokens):
@@ -784,10 +855,24 @@ def _finish_trade(state: _TradeState) -> ParsedOrder | ParseRefusal:
             action="SELL_STOP", source=state.source, symbol=state.symbol, quantity=quantity,
             fraction=fraction, order_type="STP", stop_price=state.price,
         )
+    if action == "BUY":
+        if state.entry_stop is None:
+            return _refuse(
+                "missing_entry_stop",
+                f"A buy needs its protective stop, written last: {_ENTRY_STOP_EXAMPLE}. Nothing sent.",
+                attempt=True,
+            )
+        if state.price is not None and state.entry_stop >= state.price:
+            return _refuse(
+                "stop_not_below_entry",
+                f"The stop {state.entry_stop} must be below the limit {state.price}. Nothing sent.",
+                attempt=True,
+            )
     return ParsedOrder(
         action=action, source=state.source, symbol=state.symbol, quantity=quantity,
         notional=notional, fraction=fraction,
         order_type="LMT" if state.price is not None else "MKT", limit_price=state.price,
+        entry_stop_price=state.entry_stop if action == "BUY" else None,
     )
 
 
@@ -853,14 +938,18 @@ def parse_order_text(text: str) -> ParsedOrder | ParseRefusal:
     """Parse one owner message into an order, or refuse it with a human reason.
 
     Accepted (verbs any case; tickers in capitals or as $cashtags; one order):
-      /buy 100 AAPL · /buy 100 AAPL 180.5 · /buy $5000 NVDA · /buy 5k NVDA at 180
+      /buy 100 AAPL stop 175 · /buy 100 AAPL 180.5 stop 175 · /buy $5000 NVDA stop 170
+      /buy 5k NVDA at 180 stop 170
       /sell 50 TSLA [price] · /sell all TSLA · /sell half TSLA
       /stop [N|all|half] TSLA 240 · /close TSLA · /closeall · /cancel a3f9c2 · /cancel all
-      buy 100 AAPL · buy 100 shares of $AAPL at 180 · sell half my TSLA · sell all $TSLA
-      close NVDA · cancel a3f9c2 · cancel all
+      buy 100 AAPL stop 175 · buy 100 shares of $AAPL at 180 stop 175 · sell half my TSLA
+      sell all $TSLA · close NVDA · cancel a3f9c2 · cancel all
     "$" or a "k" suffix marks dollars (notional, sized later from a fresh quote);
     a bare whole number is shares. A bare price after the ticker is a limit
-    only in slash commands; sentences need "at"/"@"/"limit".
+    only in slash commands; sentences need "at"/"@"/"limit". A buy must end
+    with its protective stop, ``stop <price>`` (D5): without one it is refused
+    (``missing_entry_stop``), as is a stop at or above its limit
+    (``stop_not_below_entry``).
     """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
@@ -896,6 +985,12 @@ def _parse_command(normalized: str, words: list[str]) -> ParsedOrder | ParseRefu
             )
         return ParsedOrder(action="CLOSE_ALL", source="command")
     tokens = _tokenize(args)
+    entry_stop: Decimal | None = None
+    if name == "buy":  # the buy's own stop clause is not a bracket word
+        split = _split_entry_stop(tokens)
+        if isinstance(split, ParseRefusal):
+            return split
+        tokens, entry_stop = split
     flagged = _red_flag(tokens)
     if flagged is not None:
         return flagged
@@ -904,7 +999,7 @@ def _parse_command(normalized: str, words: list[str]) -> ParsedOrder | ParseRefu
     if name == "close":
         return _parse_close(tokens, "command")
     action: Action = "BUY" if name == "buy" else "SELL" if name == "sell" else "SELL_STOP"
-    return _parse_trade(action, tokens, source="command", positional_price=True)
+    return _parse_trade(action, tokens, source="command", positional_price=True, entry_stop=entry_stop)
 
 
 def _parse_sentence(normalized: str, words: list[str]) -> ParsedOrder | ParseRefusal:
@@ -943,6 +1038,12 @@ def _parse_sentence(normalized: str, words: list[str]) -> ParsedOrder | ParseRef
     if len(normalized) > MAX_TEXT_LENGTH:
         return _refuse("too_long", "Order messages must be short. Nothing sent.", attempt=True)
     tokens = _tokenize(words[start + 1:])
+    entry_stop: Decimal | None = None
+    if first == "buy":  # the buy's own stop clause is not a bracket word
+        split = _split_entry_stop(tokens)
+        if isinstance(split, ParseRefusal):
+            return split
+        tokens, entry_stop = split
     flagged = _red_flag(tokens)
     if flagged is not None:
         return flagged
@@ -950,7 +1051,9 @@ def _parse_sentence(normalized: str, words: list[str]) -> ParsedOrder | ParseRef
         return _parse_cancel(tokens, "text")
     if first == "close":
         return _parse_close(tokens, "text")
-    return _parse_trade("BUY" if first == "buy" else "SELL", tokens, source="text", positional_price=False)
+    return _parse_trade(
+        "BUY" if first == "buy" else "SELL", tokens, source="text", positional_price=False, entry_stop=entry_stop
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1067,10 +1170,12 @@ class ValidatedOrder:
     reference_price: Decimal | None = None
     estimated_notional: Decimal | None = None
     cancel_ref: str | None = None
+    # D5: a BUY's protective stop, the bridge sends it attached to the entry.
+    entry_stop_price: Decimal | None = None
 
     def __post_init__(self) -> None:
-        # Mirrors the migration-12 CHECKs so an inconsistent order fails here,
-        # not halfway through queue_order.
+        # Mirrors the migration-12 and migration-17 CHECKs so an inconsistent
+        # order fails here, not halfway through queue_order.
         if self.action != self.parsed.action:
             raise ValueError("validated action does not match the parsed order")
         allowed_kinds = {
@@ -1097,6 +1202,21 @@ class ValidatedOrder:
             raise ValueError("a limit price is required exactly for LMT")
         if (self.order_type == "STP") != (self.stop_price is not None):
             raise ValueError("a stop price is required exactly for STP")
+        if (self.action == "BUY" and self.kind == "order") != (self.entry_stop_price is not None):
+            raise ValueError("an entry stop is required exactly for a BUY")
+        if self.entry_stop_price is not None:
+            _require_decimal(self.entry_stop_price, "entry_stop_price", positive=True)
+            if self.entry_stop_price != self.parsed.entry_stop_price:
+                raise ValueError("validated entry stop does not match the parsed order")
+            if self.reference_price is None or self.entry_stop_price >= self.reference_price:
+                raise ValueError("a BUY stop must be below its entry")
+
+    @property
+    def entry_risk(self) -> Decimal | None:
+        """A BUY's risk to its stop: quantity x (entry - stop), at the limit or the ask it was sized at."""
+        if self.entry_stop_price is None or self.reference_price is None or self.quantity is None:
+            return None
+        return self.quantity * (self.reference_price - self.entry_stop_price)
 
     def summary(self) -> str:
         return _summary(
@@ -1263,6 +1383,7 @@ def _validated(
     limit_price: Decimal | None = None,
     stop_price: Decimal | None = None,
     reference_price: Decimal | None = None,
+    entry_stop_price: Decimal | None = None,
 ) -> ValidatedOrder:
     return ValidatedOrder(
         kind=kind, action=parsed.action, parsed=parsed, symbol=parsed.symbol,
@@ -1273,6 +1394,7 @@ def _validated(
         estimated_notional=(
             None if reference_price is None or quantity is None else reference_price * quantity
         ),
+        entry_stop_price=entry_stop_price,
     )
 
 
@@ -1308,11 +1430,12 @@ def _validate_buy(parsed: ParsedOrder, *, facts: LiveFacts, contract: ContractRe
     net_liq = facts.net_liquidation
     if net_liq is None or net_liq <= 0:
         return _reject("account_unavailable", "Net liquidation is unknown, so buys are blocked. Nothing sent.")
+    floor: Decimal  # the stop must be below this: the bid, and a limit buy's limit
     if parsed.order_type == "MKT":
         book = _market_book(facts)
         if isinstance(book, Rejection):
             return book
-        price = book[1]
+        floor, price = book
     else:
         assert parsed.limit_price is not None
         reference = _band_reference(facts)
@@ -1321,7 +1444,10 @@ def _validate_buy(parsed: ParsedOrder, *, facts: LiveFacts, contract: ContractRe
         failure = _price_checks(parsed.limit_price, reference, "Limit")
         if failure is not None:
             return failure
-        price = parsed.limit_price
+        price = floor = parsed.limit_price
+        book = _valid_book(facts.quote) if facts.quote is not None else None
+        if book is not None and book[0] < floor:  # a marketable limit fills near the bid
+            floor = book[0]
     if parsed.notional is not None:
         quantity = _floor_int(parsed.notional / price)
         if quantity < 1:
@@ -1349,10 +1475,40 @@ def _validate_buy(parsed: ParsedOrder, *, facts: LiveFacts, contract: ContractRe
         )
     if facts.recent_manual_orders_10min >= RATE_LIMIT_MAX_ORDERS:
         return _reject("rate_limited", "At most 10 manual buys per 10 minutes; exits still work. Nothing sent.")
+    stop_failure = _entry_stop_checks(parsed, quantity=quantity, price=price, floor=floor, net_liq=net_liq)
+    if stop_failure is not None:
+        return stop_failure
     return _validated(
         parsed, contract, kind="order", quantity=quantity, order_type=parsed.order_type,
-        limit_price=parsed.limit_price, reference_price=price,
+        limit_price=parsed.limit_price, reference_price=price, entry_stop_price=parsed.entry_stop_price,
     )
+
+
+def _entry_stop_checks(
+    parsed: ParsedOrder, *, quantity: int, price: Decimal, floor: Decimal, net_liq: Decimal
+) -> Rejection | None:
+    """D5: a buy's protective stop is a valid tick, below ``floor`` (the bid, and a limit
+    buy's limit: a stop at or above the bid fires at once) and risks at most 1 % of net
+    liquidation, measured from ``price`` (the ask a market buy fills at, else the limit)."""
+    stop = parsed.entry_stop_price
+    if stop is None:  # pragma: no cover - ParsedOrder refuses a BUY without one
+        return _reject("missing_entry_stop", f"A buy needs its protective stop: {_ENTRY_STOP_EXAMPLE}. Nothing sent.")
+    if not _tick_ok(stop):
+        return _reject("invalid_tick", f"Stop {stop} is not a valid tick (cents above $1). Nothing sent.")
+    if stop >= floor:
+        where = "limit" if parsed.order_type == "LMT" and floor == parsed.limit_price else "bid"
+        return _reject(
+            "stop_not_below_entry", f"The stop {stop} must be below the {where} {floor}. Nothing sent."
+        )
+    risk = quantity * (price - stop)
+    ceiling = net_liq * MAX_MANUAL_ENTRY_RISK_FRACTION_OF_NET_LIQ
+    if risk > ceiling:
+        return _reject(
+            "manual_entry_risk_over_1pct",
+            f"BUY {quantity} {parsed.symbol} at {price} with stop {stop} risks {_usd(risk)}, over 1% of net"
+            f" liquidation ({_usd(ceiling)} max); move the stop up or buy fewer. Nothing sent.",
+        )
+    return None
 
 
 def _validate_sell(
@@ -1449,9 +1605,10 @@ def validate(
     unknown_symbol → exclusivity (CLOSE on a bot symbol becomes ``bot_flatten``;
     anything else there is ``bot_holds_symbol``) → BUY rules (kill_switch,
     account_unavailable, quote/price, amount_too_small, order_too_large,
-    manual_exposure_cap, rate_limited) or sell rules (insufficient_shares,
-    quote/price, stop_above_bid). Exits never see the kill switch, the rate
-    limit or the exposure budget.
+    manual_exposure_cap, rate_limited, then the stop: invalid_tick,
+    stop_not_below_entry, manual_entry_risk_over_1pct) or sell rules
+    (insufficient_shares, quote/price, stop_above_bid). Exits never see the
+    kill switch, the rate limit, the exposure budget or any entry-stop rule.
     """
     if not isinstance(parsed, ParsedOrder) or not isinstance(facts, LiveFacts):
         raise TypeError("validate takes a ParsedOrder and LiveFacts")
@@ -1515,9 +1672,16 @@ def revalidate_claimed(
             order_type="STP", stop_price=row.stop_price,
         )
     else:
+        if row.action == "BUY" and row.entry_stop_price is None:
+            # A row queued before migration 17 (or written around the parser): never sent without its stop.
+            return _reject(
+                "missing_entry_stop",
+                f"This buy has no protective stop, so it is not sent; send it again as {_ENTRY_STOP_EXAMPLE}.",
+            )
         parsed = ParsedOrder(
             action=row.action, source=row.source, symbol=row.symbol, quantity=row.quantity,
             order_type=row.order_type, limit_price=row.limit_price,
+            entry_stop_price=row.entry_stop_price if row.action == "BUY" else None,
         )
     result = _validate_symbol_order(parsed, facts=facts, contract=contract, fixed_quantity=fixed)
     if isinstance(result, ValidatedOrder):
@@ -1583,8 +1747,16 @@ _COLUMNS = (
     "ibkr_order_id", "perm_id", "filled_qty", "avg_fill_price", "expires_at",
     "cancel_requested", "audit_json",
 )
-_SELECT = f"SELECT {', '.join(_COLUMNS)} FROM autotrader_manual_orders"
-_INSERT = (
+# Migration 17's column is read when the database has it and is NULL
+# otherwise, so every exit keeps working while v17 is still pending; a buy
+# needs it to be recorded at all (ManualSchemaPending).
+_SELECT_V17 = f"SELECT {', '.join(_COLUMNS)}, {ENTRY_STOP_COLUMN} FROM autotrader_manual_orders"
+_SELECT_V12 = f"SELECT {', '.join(_COLUMNS)}, NULL AS {ENTRY_STOP_COLUMN} FROM autotrader_manual_orders"
+_INSERT_V17 = (
+    f"INSERT INTO autotrader_manual_orders ({', '.join(_COLUMNS)}, {ENTRY_STOP_COLUMN}) "
+    f"VALUES ({', '.join('?' for _ in _COLUMNS)}, ?)"
+)
+_INSERT_V12 = (
     f"INSERT INTO autotrader_manual_orders ({', '.join(_COLUMNS)}) "
     f"VALUES ({', '.join('?' for _ in _COLUMNS)})"
 )
@@ -1619,6 +1791,9 @@ class ManualOrderRow:
     expires_at: datetime
     cancel_requested: bool
     audit: dict[str, object] = field(compare=False)
+    # D5: a BUY's protective stop (migration 17); None on every other row and
+    # on a buy recorded before it (never sent: revalidate_claimed refuses it).
+    entry_stop_price: Decimal | None = None
 
     @property
     def short_id(self) -> str:
@@ -1729,7 +1904,7 @@ def _dumps(value: object) -> str:
 
 
 def _row(values: tuple[object, ...]) -> ManualOrderRow:
-    data = dict(zip(_COLUMNS, values, strict=True))
+    data = dict(zip((*_COLUMNS, ENTRY_STOP_COLUMN), values, strict=True))
     audit = json.loads(str(data["audit_json"]))
     return ManualOrderRow(
         id=str(data["id"]),
@@ -1759,19 +1934,40 @@ def _row(values: tuple[object, ...]) -> ManualOrderRow:
         expires_at=_from_ts(data["expires_at"]),
         cancel_requested=bool(data["cancel_requested"]),
         audit=audit if isinstance(audit, dict) else {"raw": audit},
+        entry_stop_price=_optional_decimal(data[ENTRY_STOP_COLUMN]),
     )
 
 
+async def _has_entry_stop_column(db: aiosqlite.Connection) -> bool:
+    """Whether migration 17 is applied to this ledger (its column exists)."""
+    async with db.execute(
+        "SELECT 1 FROM pragma_table_info('autotrader_manual_orders') WHERE name=?", (ENTRY_STOP_COLUMN,)
+    ) as cursor:
+        return await cursor.fetchone() is not None
+
+
+async def _select(db: aiosqlite.Connection) -> str:
+    return _SELECT_V17 if await _has_entry_stop_column(db) else _SELECT_V12
+
+
 async def _fetch_one(db: aiosqlite.Connection, where: str, params: tuple[object, ...]) -> ManualOrderRow | None:
-    async with db.execute(f"{_SELECT} WHERE {where}", params) as cursor:
+    async with db.execute(f"{await _select(db)} WHERE {where}", params) as cursor:
         values = await cursor.fetchone()
     return None if values is None else _row(tuple(values))
 
 
 async def _fetch_all(db: aiosqlite.Connection, where: str, params: tuple[object, ...]) -> list[ManualOrderRow]:
-    async with db.execute(f"{_SELECT} WHERE {where}", params) as cursor:
+    async with db.execute(f"{await _select(db)} WHERE {where}", params) as cursor:
         rows = await cursor.fetchall()
     return [_row(tuple(values)) for values in rows]
+
+
+async def entry_stop_ready() -> bool:
+    """True once migration 17 is applied: only then can a buy, which must carry its
+    stop, be recorded. The assistant refuses /buy with ``manual_schema_pending``
+    before that and keeps every exit working (it tolerates a pending v17)."""
+    async with get_db() as db:
+        return await _has_entry_stop_column(db)
 
 
 def _with_event(audit: Mapping[str, object], event: Mapping[str, object]) -> str:
@@ -1926,7 +2122,9 @@ async def queue_order(
     CANCEL_ALL are applied in the same transaction (see request_cancel); their
     own row is stored ``sent`` when applied, else ``rejected`` with reject_code
     ``no_active_order`` or ``ambiguous_order_ref``. Every other kind is
-    stored ``queued`` for the bridge.
+    stored ``queued`` for the bridge. A BUY is stored with its entry stop and
+    raises ``ManualSchemaPending`` (nothing recorded) on a ledger without
+    migration 17; every other order is recorded either way.
     """
     if not isinstance(validated, ValidatedOrder):
         raise TypeError("queue_order takes a ValidatedOrder")
@@ -1955,6 +2153,8 @@ async def queue_order(
             "tif": validated.tif,
             "reference_price": validated.reference_price,
             "estimated_notional": validated.estimated_notional,
+            "entry_stop_price": validated.entry_stop_price,
+            "entry_risk": validated.entry_risk,
             "message_date": message_date,
         },
     }
@@ -1966,6 +2166,11 @@ async def queue_order(
             existing = await cursor.fetchone()
         if existing is not None:
             return str(existing[0])
+        has_stop_column = await _has_entry_stop_column(db)
+        if validated.action == "BUY" and not has_stop_column:
+            raise ManualSchemaPending(
+                "a buy needs migration 17 (manual-entry-stop) to record its stop; nothing was recorded"
+            )
         order_id = await _unique_order_id(db)
         status: OrderStatus = "queued"
         reject_code: str | None = None
@@ -1981,18 +2186,20 @@ async def queue_order(
             else:
                 status, reject_code, error = "rejected", outcome.result, outcome.detail
         payload["events"] = [{"at": stamp, "event": "created", "status": status}]
-        await db.execute(
-            _INSERT,
-            (
-                order_id, stamp, stamp, chat_id, message_id, update_id, source, raw_text,
-                validated.action, validated.symbol, validated.con_id, validated.primary_exchange,
-                validated.quantity, validated.order_type,
-                None if validated.limit_price is None else str(validated.limit_price),
-                None if validated.stop_price is None else str(validated.stop_price),
-                target_ref, status, reject_code, error, None, None, 0, None, expires_at,
-                0, _dumps(payload),
-            ),
+        values: tuple[object, ...] = (
+            order_id, stamp, stamp, chat_id, message_id, update_id, source, raw_text,
+            validated.action, validated.symbol, validated.con_id, validated.primary_exchange,
+            validated.quantity, validated.order_type,
+            None if validated.limit_price is None else str(validated.limit_price),
+            None if validated.stop_price is None else str(validated.stop_price),
+            target_ref, status, reject_code, error, None, None, 0, None, expires_at,
+            0, _dumps(payload),
         )
+        if has_stop_column:
+            entry_stop = None if validated.entry_stop_price is None else str(validated.entry_stop_price)
+            await db.execute(_INSERT_V17, (*values, entry_stop))
+        else:
+            await db.execute(_INSERT_V12, values)
         return order_id
 
 
@@ -2337,12 +2544,13 @@ async def bridge_heartbeat_age(now: datetime) -> float | None:
 
 
 __all__ = [
-    "ACTIONS", "CANCEL_ACTIONS", "EXIT_ACTIONS", "LIVE_STATUSES", "ORDER_STATUSES",
+    "ACTIONS", "CANCEL_ACTIONS", "ENTRY_STOP_COLUMN", "ENTRY_STOP_WORD", "EXIT_ACTIONS", "LIVE_STATUSES",
+    "MANUAL_SCHEMA_PENDING", "MAX_MANUAL_ENTRY_RISK_FRACTION_OF_NET_LIQ", "ORDER_STATUSES",
     "REFUSAL_CODES", "REJECT_CODES", "TERMINAL_STATUSES", "WORD_TICKERS",
     "BridgeHeartbeat", "CancelOutcome", "ChatUsage", "ContractRef", "LedgerFacts", "LiveFacts",
-    "ManualOrderNotFound", "ManualOrderRow", "ParseRefusal", "ParsedOrder", "Quote", "Rejection",
-    "ValidatedOrder", "bridge_heartbeat_age", "chat_usage", "chat_usage_reserve",
-    "chat_usage_settle", "claim_next_order", "facts_to_audit", "get_order",
+    "ManualOrderNotFound", "ManualOrderRow", "ManualSchemaPending", "ParseRefusal", "ParsedOrder", "Quote",
+    "Rejection", "ValidatedOrder", "bridge_heartbeat_age", "chat_usage", "chat_usage_reserve",
+    "chat_usage_settle", "claim_next_order", "entry_stop_ready", "facts_to_audit", "get_order",
     "is_kill_switch_command", "is_manual_window_open", "ledger_facts", "list_active_orders",
     "list_cancel_requests", "list_orders_updated_since", "manual_order_window",
     "mark_unknown_sending_rows", "mark_update_processed", "max_update_id", "normalize_symbol",

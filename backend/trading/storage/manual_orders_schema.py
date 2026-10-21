@@ -6,6 +6,8 @@ the PAPER bridge. The triggers make the ledger append-only, its order intent
 immutable, and its status monotonic: an order can never return to ``queued``,
 only ``queued`` can become ``sending``, and terminal rows never change status,
 so no code path can resend, resize or resurrect an order.
+
+Migration 17 (``MANUAL_ENTRY_STOP_SCHEMA``) adds a buy's protective stop.
 """
 from __future__ import annotations
 
@@ -136,4 +138,39 @@ MANUAL_ORDERS_SCHEMA = (
 )
 
 
-__all__ = ["MANUAL_ORDERS_SCHEMA"]
+# Migration 17 (v7c, owner decision D5 of 2026-10-18): an owner buy must carry
+# its protective stop. The stop gets its own column because migration 12's
+# CHECKs keep ``stop_price`` for SELL_STOP's trigger alone. Spike V-3
+# (2026-10-21, SQLite 3.50.4): ADD COLUMN with this CHECK works inside the
+# migration's transaction and leaves every earlier row NULL; migration 12's
+# intent trigger lists its columns (BEFORE UPDATE OF ...), so it cannot see
+# the new one, and a separate trigger keeps it immutable instead of
+# recreating the reviewed v12 trigger. The INSERT trigger is the database's
+# own refusal of a buy without a stop; earlier buy rows are never re-checked
+# (revalidate_claimed refuses to send one).
+MANUAL_ENTRY_STOP_MIGRATION = 17
+MANUAL_BUY_NEEDS_STOP = "manual_buy_needs_stop"
+MANUAL_ENTRY_STOP_SCHEMA = (
+    """ALTER TABLE autotrader_manual_orders ADD COLUMN entry_stop_price TEXT NULL
+        CHECK(entry_stop_price IS NULL OR (
+            action = 'BUY'
+            AND CAST(entry_stop_price AS REAL) > 0
+            AND (limit_price IS NULL OR CAST(entry_stop_price AS REAL) < CAST(limit_price AS REAL))
+        ))""",
+    f"""CREATE TRIGGER IF NOT EXISTS autotrader_manual_orders_buy_needs_stop
+    BEFORE INSERT ON autotrader_manual_orders
+    WHEN NEW.action = 'BUY' AND NEW.entry_stop_price IS NULL
+    BEGIN SELECT RAISE(ABORT, '{MANUAL_BUY_NEEDS_STOP}'); END""",
+    """CREATE TRIGGER IF NOT EXISTS autotrader_manual_orders_entry_stop_immutable
+    BEFORE UPDATE OF entry_stop_price ON autotrader_manual_orders
+    WHEN NEW.entry_stop_price IS NOT OLD.entry_stop_price
+    BEGIN SELECT RAISE(ABORT, 'manual order intent is immutable'); END""",
+)
+
+
+__all__ = [
+    "MANUAL_BUY_NEEDS_STOP",
+    "MANUAL_ENTRY_STOP_MIGRATION",
+    "MANUAL_ENTRY_STOP_SCHEMA",
+    "MANUAL_ORDERS_SCHEMA",
+]

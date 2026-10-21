@@ -147,6 +147,7 @@ import fcntl
 from functools import partial
 import hashlib
 import itertools
+import logging
 import os
 from pathlib import Path
 import re
@@ -185,6 +186,8 @@ from trading.scheduler.sessions import (
     market_session,
     next_market_session,
 )
+
+logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -236,6 +239,20 @@ _BRIDGE_EVENT_CLOCK = re.compile(r"^\d{2}:\d{2}:\d{2} ET  (?=[A-Z]+ )")
 # this only in the commit that records that review in
 # docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
 REVIEWED_BRIDGE_SHA256 = "7d313fd075d29e1e62c11eab52fd7832a0aaab21fd0b616c0ce2ee3f47962af4"
+# The backend files the bridge imports lazily (its session calendar, config
+# and the manual-order ledger; tests/test_bridge_imports.py lists the
+# statements), by path under backend/. They decide the bridge's close and
+# every owner order as much as its own bytes do (P3-B0, C1), so the review
+# covers them too: a file that differs refuses the launch like an edited
+# bridge (exit 78). A plain literal: `deploy check` and `deploy apply` read it
+# from the candidate's source, and the verdict line carries the first 12 hex
+# of deploy_check.imports_digest(this map) as `imports_sha=`. Change it only
+# together with REVIEWED_BRIDGE_SHA256's review record.
+REVIEWED_BRIDGE_IMPORTS_SHA256: dict[str, str] = {
+    "config.py": "4a991d6a0fa2bd8cd6b4691d8f684bea4ac389a46265501c7e4a561c1ef1c7ff",
+    "trading/execution/manual_orders.py": "2fb0345557d732b86ab9d082216f4184d8fef7cb72b30001568831aa2fcc4b13",
+    "trading/scheduler/sessions.py": "8134bca0dbd74716e15bf9e0ac928394cd25e44aab12ec46fb9ab3d56afe5648",
+}
 # The all-session simulations (orb-v2, gap-v2, vwap-v2) replace ORB_V1,
 # GAP_GO_V1 and VWAP_PB_V1 here (owner decision "Both", 2026-10-13); the V1
 # strategies stay registered for the CLI and the replay but are not scheduled.
@@ -1359,6 +1376,11 @@ class SubprocessLauncher:
 
     ``pinned`` maps a child name to the sha256 its script (``argv[1]``) must
     have; any other content is refused before exec, at every (re)start.
+    ``pinned_imports`` maps a child name to ``{path under backend/: sha256}``
+    for the backend files that script imports, where the script itself looks
+    for them (the backend above its own ``scripts_local``, resolved, as the
+    bridge's ``backend_modules`` does); a file that differs or cannot be read
+    is refused the same way (P3-B0).
     """
 
     def __init__(
@@ -1369,12 +1391,14 @@ class SubprocessLauncher:
         environment: Mapping[str, str] | None = None,
         clock: Clock = _utc_now,
         pinned: Mapping[str, str] | None = None,
+        pinned_imports: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         self._log_directory = log_directory
         self._cwd = cwd
         self._environment = child_environment(environment)
         self._clock = clock
         self._pinned = dict(pinned or {})
+        self._pinned_imports = {name: dict(files) for name, files in (pinned_imports or {}).items()}
 
     def log_path(self, name: str) -> Path:
         return self._log_directory / f"{name}.log"
@@ -1394,6 +1418,26 @@ class SubprocessLauncher:
                 BRIDGE_REFUSED_CODE,
                 f"unreviewed sha256={actual[:12]} reviewed={expected[:12]}",
             )
+        self._check_pinned_imports(plan)
+
+    def _check_pinned_imports(self, plan: ChildPlan) -> None:
+        files = self._pinned_imports.get(plan.name)
+        if not files:
+            return
+        backend = Path(plan.argv[1]).resolve().parents[1]
+        for relative, expected in sorted(files.items()):
+            try:
+                actual = file_sha256(backend / relative)
+            except OSError as exc:
+                reason = f"unreviewed import {relative} unreadable error={type(exc).__name__}"
+            else:
+                if actual == expected:
+                    continue
+                reason = f"unreviewed import {relative} sha256={actual[:12]} reviewed={expected[:12]}"
+            # Tripwire: the bridge's own bytes passed, so only a backend change
+            # that skipped the bridge's review can get here (C1).
+            logger.critical("LAUNCH_REFUSED %s: %s", plan.name, reason, stack_info=True)
+            raise LaunchRefused(BRIDGE_REFUSED_CODE, reason)
 
     async def start(self, plan: ChildPlan) -> ChildProcess:
         self._check_pinned(plan)
@@ -1882,6 +1926,7 @@ def run_supervisor(
                         paths.log_directory,
                         cwd=backend,
                         pinned={BRIDGE_CHILD: REVIEWED_BRIDGE_SHA256},
+                        pinned_imports={BRIDGE_CHILD: REVIEWED_BRIDGE_IMPORTS_SHA256},
                     ),
                     emit=log,
                     planner=partial(plan_session, python=python, backend=backend),
@@ -1912,6 +1957,29 @@ def bridge_review_line(backend: Path = BACKEND_DIR) -> str:
         f"WARNING: bridge sha256 {actual[:12]} is not the reviewed {REVIEWED_BRIDGE_SHA256[:12]}:"
         " the supervisor will refuse to start it (no orders)"
     )
+
+
+def bridge_imports_lines(backend: Path = BACKEND_DIR) -> tuple[str, ...]:
+    """Whether the backend files the bridge imports lazily are the reviewed ones (P3-B0):
+    one line when they all are, else one ``WARNING:`` per file the launch would refuse."""
+    problems: list[str] = []
+    for relative, expected in sorted(REVIEWED_BRIDGE_IMPORTS_SHA256.items()):
+        try:
+            actual = file_sha256(backend / relative)
+        except OSError:
+            problems.append(
+                f"WARNING: bridge import {relative} unreadable: the supervisor will refuse to start"
+                " the bridge (no orders)"
+            )
+            continue
+        if actual != expected:
+            problems.append(
+                f"WARNING: bridge import {relative} sha256 {actual[:12]} is not the reviewed {expected[:12]}:"
+                " the supervisor will refuse to start the bridge (no orders)"
+            )
+    if problems:
+        return tuple(problems)
+    return (f"bridge       imports reviewed ({len(REVIEWED_BRIDGE_IMPORTS_SHA256)} files)",)
 
 
 def schema_lines(database: str | Path) -> tuple[str, ...]:
@@ -2105,6 +2173,7 @@ def dry_run_report(
                 session.session_date, python=python, backend=backend, preflight=preflight
             )
         )
+    lines.extend(bridge_imports_lines(backend))
     lines.extend(registry_report)
     lines.extend(schema)
     for pid, command in unsupervised():
@@ -2133,6 +2202,7 @@ __all__ = [
     "RESTART_CAP",
     "RESTART_WINDOW",
     "RestartLedger",
+    "REVIEWED_BRIDGE_IMPORTS_SHA256",
     "REVIEWED_BRIDGE_SHA256",
     "SERVICE_BACKOFF",
     "STRATEGY_BACKOFF",
@@ -2147,6 +2217,7 @@ __all__ = [
     "bridge_window",
     "bridge_preflight_argv",
     "bridge_preflight_lines",
+    "bridge_imports_lines",
     "bridge_review_line",
     "child_environment",
     "child_exit_line",

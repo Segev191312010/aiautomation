@@ -1495,8 +1495,8 @@ async def test_the_desk_parses_with_the_ledgers_own_parser(tmp_path, monkeypatch
     world = await desk_world(tmp_path, monkeypatch)
     desk = world.desk
 
-    assert desk.parse("/buy 100 AAPL").kind == "order"
-    assert desk.parse("buy 100 shares of $AAPL at 180").kind == "order"
+    assert desk.parse("/buy 100 AAPL stop 220").kind == "order"
+    assert desk.parse("buy 100 shares of $AAPL at 180 stop 175").kind == "order"
     assert desk.parse("/cancel a3f9c2").is_cancel
     refused = desk.parse("sell everything")
     assert (refused.kind, refused.code) == ("refused", "closeall_exact")
@@ -1505,7 +1505,7 @@ async def test_the_desk_parses_with_the_ledgers_own_parser(tmp_path, monkeypatch
     assert desk.parse("how are we doing today?").kind == "not_order"
     assert desk.is_kill_switch("/stop") and not desk.is_kill_switch("/stop TSLA 240")
     assert desk.is_exit("sell 50 TSLA") and desk.is_exit("/close NVDA") and desk.is_exit("/stop")
-    assert not desk.is_exit("/buy 100 AAPL")
+    assert not desk.is_exit("/buy 100 AAPL stop 220")
 
 
 async def test_updates_are_recorded_once_with_their_outcome(tmp_path, monkeypatch):
@@ -1521,11 +1521,11 @@ async def test_updates_are_recorded_once_with_their_outcome(tmp_path, monkeypatc
 async def test_a_valid_buy_is_queued_with_the_exact_reply_and_reported_as_it_fills(tmp_path, monkeypatch):
     world = await desk_world(tmp_path, monkeypatch)
 
-    submission = await world.send("/buy 100 AAPL")
+    submission = await world.send("/buy 100 AAPL stop 220")
 
     assert submission.accepted, submission.reply
     short = submission.order_id[:6]
-    assert submission.reply == f"🟢 Queued BUY 100 AAPL MKT · #{short} · /cancel {short}"
+    assert submission.reply == f"🟢 Queued BUY 100 AAPL MKT stop 220.00 · #{short} · /cancel {short}"
     row = await world.ledger.get_order(submission.order_id)
     assert (row.status, row.action, row.quantity, row.con_id, row.source) == ("queued", "BUY", 100, 265598, "command")
     assert row.audit["caller"]["facts"]["accounts_all_paper"] is True
@@ -1538,7 +1538,46 @@ async def test_a_valid_buy_is_queued_with_the_exact_reply_and_reported_as_it_fil
         claimed.id, "filled", now=TRADE_NOW, filled_qty=100, avg_fill_price=Decimal("227.15")
     )
     (current,) = await world.desk.orders([submission.order_id])
-    assert bot.status_change_text(current) == f"✅ Filled #{short} BUY 100 AAPL MKT @ avg 227.15"
+    assert bot.status_change_text(current) == f"✅ Filled #{short} BUY 100 AAPL MKT stop 220.00 @ avg 227.15"
+
+
+async def test_a_buy_without_its_stop_is_refused_with_the_new_advice(tmp_path, monkeypatch):
+    # D5 (v7c): the old "buy first, then /stop" advice is replaced by the buy's own stop.
+    world = await desk_world(tmp_path, monkeypatch)
+
+    refused = world.desk.parse("/buy 100 AAPL")
+
+    assert (refused.kind, refused.code) == ("refused", "missing_entry_stop")
+    assert "/buy 100 AAPL at 180 stop 175" in refused.reason and "then /stop" not in refused.reason
+    assert await world.ledger.list_active_orders() == ()
+    for text in (bot.HELP_TEXT, bot.ORDER_SYNTAX, bot.SYSTEM_PROMPT):
+        assert "stop 175" in text and "then /stop" not in text
+
+
+async def test_only_buys_wait_for_migration_17_and_the_assistant_still_requires_12(tmp_path, monkeypatch):
+    # The assistant runs while v17 is pending (it requires 12): /buy alone is refused,
+    # with nothing recorded and no TWS call; cancels and exits are still recorded.
+    from config import cfg
+    from tests.schema_support import apply_up_to
+    from trading.operations.schema_gate import TELEGRAM_ASSISTANT_REQUIRES
+
+    assert TELEGRAM_ASSISTANT_REQUIRES == 12
+    world = await desk_world(tmp_path, monkeypatch)
+    pending = tmp_path / "v16.db"
+    await apply_up_to(pending, 16)
+    monkeypatch.setattr(cfg, "DB_PATH", str(pending))
+    await world.ledger.write_bridge_heartbeat("loop", now=TRADE_NOW - timedelta(seconds=3), pid=4242)
+    connects = world.actor.connects
+
+    buy = await world.send("/buy 100 AAPL stop 220")
+
+    assert not buy.accepted and buy.code == "manual_schema_pending"
+    assert buy.reply == f"❌ Not sent — {bot.MANUAL_SCHEMA_PENDING_MESSAGE} (manual_schema_pending)"
+    assert "autotraderctl db migrate" in buy.reply
+    assert world.actor.connects == connects
+    assert await world.ledger.list_active_orders() == ()
+    cancel = await world.send("/cancel all")
+    assert cancel.order_id and (await world.ledger.get_order(cancel.order_id)) is not None
 
 
 async def test_after_hours_the_desk_says_market_closed_without_touching_tws(tmp_path, monkeypatch):
@@ -1546,7 +1585,7 @@ async def test_after_hours_the_desk_says_market_closed_without_touching_tws(tmp_
     tonight = datetime(2026, 10, 12, 23, 30, tzinfo=ET).astimezone(UTC)
 
     sent_two_seconds_ago = (TRADE_NOW - tonight).total_seconds() + 2
-    submission = await world.send("/buy 100 AAPL", now=tonight, age=sent_two_seconds_ago)
+    submission = await world.send("/buy 100 AAPL stop 220", now=tonight, age=sent_two_seconds_ago)
 
     assert submission.reply == (
         "❌ Not sent — Market closed: manual orders run 09:30-15:54 ET on trading days. Nothing sent. (market_closed)"
@@ -1558,16 +1597,16 @@ async def test_after_hours_the_desk_says_market_closed_without_touching_tws(tmp_
 @pytest.mark.parametrize(
     ("setup", "text", "code"),
     [
-        ("no_heartbeat", "/buy 100 AAPL", "bridge_offline"),
-        ("live_account", "/buy 100 AAPL", "not_paper"),
-        ("tws_down", "/buy 100 AAPL", "account_unavailable"),
-        ("kill_switch", "/buy 100 AAPL", "kill_switch"),
-        ("no_quote", "/buy 100 AAPL", "no_fresh_quote"),
-        ("wide_spread", "/buy 100 AAPL", "spread_too_wide"),
+        ("no_heartbeat", "/buy 100 AAPL stop 220", "bridge_offline"),
+        ("live_account", "/buy 100 AAPL stop 220", "not_paper"),
+        ("tws_down", "/buy 100 AAPL stop 220", "account_unavailable"),
+        ("kill_switch", "/buy 100 AAPL stop 220", "kill_switch"),
+        ("no_quote", "/buy 100 AAPL stop 220", "no_fresh_quote"),
+        ("wide_spread", "/buy 100 AAPL stop 220", "spread_too_wide"),
         ("none", "/sell 50 TSLA", "insufficient_shares"),
-        ("none", "/buy 100 ZZZZ", "unknown_symbol"),
-        ("none", "/buy 2000 AAPL", "order_too_large"),
-        ("none", "/buy 100 AAPL 300", "price_out_of_band"),
+        ("none", "/buy 100 ZZZZ stop 220", "unknown_symbol"),
+        ("none", "/buy 2000 AAPL stop 220", "order_too_large"),
+        ("none", "/buy 100 AAPL 300 stop 220", "price_out_of_band"),
     ],
 )
 async def test_the_validator_refuses_with_named_codes(tmp_path, monkeypatch, setup, text, code):
@@ -1593,7 +1632,7 @@ async def test_the_validator_refuses_with_named_codes(tmp_path, monkeypatch, set
 async def test_a_too_old_message_is_refused_by_the_ledger_too(tmp_path, monkeypatch):
     world = await desk_world(tmp_path, monkeypatch)
 
-    submission = await world.send("/buy 100 AAPL", age=75)
+    submission = await world.send("/buy 100 AAPL stop 220", age=75)
 
     assert submission.code == "stale_message"
 
@@ -1617,7 +1656,7 @@ async def test_bot_held_symbols_only_allow_close_which_flattens_the_bracket(tmp_
     world = await desk_world(tmp_path, monkeypatch, DeskActor(positions=[("AAPL", 265598, 100)]))
     bridge_state(world.paths, {"d1": {"symbol": "AAPL", "status": "open", "qty": 100, "filled": 100}})
 
-    buy = await world.send("/buy 10 AAPL")
+    buy = await world.send("/buy 10 AAPL stop 220")
     assert buy.code == "bot_holds_symbol"
     close = await world.send("/close AAPL")
     assert close.accepted, close.reply
@@ -1667,7 +1706,7 @@ async def test_l1_an_unreadable_kill_switch_blocks_buys_and_never_sells(tmp_path
 
     world.kill.is_stopped = unreadable  # type: ignore[method-assign]
 
-    buy = await world.send("/buy 100 AAPL")
+    buy = await world.send("/buy 100 AAPL stop 220")
     assert buy.code == "kill_switch", buy.reply
     sell = await world.send("/sell 10 TSLA")
     assert sell.accepted, sell.reply
@@ -1681,7 +1720,7 @@ async def test_l1_an_unreadable_bridge_heartbeat_counts_as_offline(tmp_path, mon
 
     monkeypatch.setattr(world.ledger, "bridge_heartbeat_age", unreadable)
 
-    submission = await world.send("/buy 100 AAPL")
+    submission = await world.send("/buy 100 AAPL stop 220")
 
     assert submission.code == "bridge_offline", submission.reply
 
@@ -1692,19 +1731,19 @@ async def test_an_unreadable_bridge_state_fails_closed(tmp_path, monkeypatch):
     path.parent.mkdir(parents=True)
     path.write_text("{not json")
 
-    submission = await world.send("/buy 100 AAPL")
+    submission = await world.send("/buy 100 AAPL stop 220")
 
     assert submission.code == "bot_state_unavailable"
 
 
 async def test_closeall_and_cancels(tmp_path, monkeypatch):
     world = await desk_world(tmp_path, monkeypatch)
-    buy = await world.send("/buy 100 AAPL")
+    buy = await world.send("/buy 100 AAPL stop 220")
     short = buy.order_id[:6]
 
     cancel = await world.send(f"/cancel {short}")
     assert cancel.accepted
-    assert cancel.reply == f"↩️ Cancel #{short}:\n• #{short} BUY 100 AAPL MKT: cancelled before it was sent"
+    assert cancel.reply == f"↩️ Cancel #{short}:\n• #{short} BUY 100 AAPL MKT stop 220.00: cancelled before it was sent"
     assert [view.status for view in cancel.watch] == ["cancelled"]
 
     again = await world.send(f"/cancel {short}")
@@ -1720,7 +1759,7 @@ async def test_a_cancel_works_from_a_recent_handshake_while_tws_is_away(tmp_path
     from trading.market.tws_actor import TWSConnectionError
 
     world = await desk_world(tmp_path, monkeypatch)
-    buy = await world.send("/buy 100 AAPL")
+    buy = await world.send("/buy 100 AAPL stop 220")
     await world.desk.tools.tws.close()
     world.actor.connect_error = TWSConnectionError("TWS restarting")
 
@@ -1731,7 +1770,7 @@ async def test_a_cancel_works_from_a_recent_handshake_while_tws_is_away(tmp_path
 
 async def test_todays_orders_skip_cancel_rows(tmp_path, monkeypatch):
     world = await desk_world(tmp_path, monkeypatch)
-    buy = await world.send("/buy 100 AAPL")
+    buy = await world.send("/buy 100 AAPL stop 220")
     await world.send(f"/cancel {buy.order_id[:6]}")
 
     views = await world.desk.todays_orders(TRADE_NOW)
@@ -1770,8 +1809,8 @@ async def test_end_to_end_the_owners_order_is_queued_and_reported_a_strangers_is
     time = FakeTime(TRADE_NOW)
     replies = FakeReplies()
     updates = FakeUpdates([[
-        message(1, "/buy 100 AAPL", sent_at=TRADE_NOW - timedelta(seconds=2)),
-        message(2, "/buy 100 AAPL", chat_id=STRANGER, sender=STRANGER, sent_at=TRADE_NOW),
+        message(1, "/buy 100 AAPL stop 220", sent_at=TRADE_NOW - timedelta(seconds=2)),
+        message(2, "/buy 100 AAPL stop 220", chat_id=STRANGER, sender=STRANGER, sent_at=TRADE_NOW),
     ]])
     assistant = TelegramAssistant(
         owner_id=OWNER, updates=updates, replies=replies, tools=world.desk.tools, desk=world.desk,
@@ -1783,13 +1822,13 @@ async def test_end_to_end_the_owners_order_is_queued_and_reported_a_strangers_is
         await assistant.poll_once()
         (row,) = await world.ledger.list_active_orders()
         short = row.id[:6]
-        assert replies.texts == [f"🟢 Queued BUY 100 AAPL MKT · #{short} · /cancel {short}"]
+        assert replies.texts == [f"🟢 Queued BUY 100 AAPL MKT stop 220.00 · #{short} · /cancel {short}"]
         assert row.chat_id == OWNER and row.update_id == 1
 
         claimed = await world.ledger.claim_next_order(TRADE_NOW + timedelta(seconds=1))
         await world.ledger.update_order_status(claimed.id, "sent", now=TRADE_NOW, ibkr_order_id=11)
         await assistant.check_orders()
-        assert replies.texts[-1] == f"📤 Sent to IBKR: #{short} BUY 100 AAPL MKT"
+        assert replies.texts[-1] == f"📤 Sent to IBKR: #{short} BUY 100 AAPL MKT stop 220.00"
     finally:
         await assistant.stop()
 
@@ -1806,8 +1845,8 @@ async def test_end_to_end_the_owners_order_is_queued_and_reported_a_strangers_is
 
 @pytest.mark.parametrize("bad_date", [10**20, -5, 0, "yesterday", None])
 async def test_an_unusable_message_date_makes_an_order_stale_and_never_crashes(harness, bad_date):
-    harness.desk.parse_table["/buy 100 AAPL"] = BUY
-    update = message(1, "/buy 100 AAPL")
+    harness.desk.parse_table["/buy 100 AAPL stop 220"] = BUY
+    update = message(1, "/buy 100 AAPL stop 220")
     update["message"]["date"] = bad_date
 
     await harness.feed(update)
@@ -1817,9 +1856,9 @@ async def test_an_unusable_message_date_makes_an_order_stale_and_never_crashes(h
 
 
 async def test_an_order_the_bridge_never_picks_up_is_reported_once_as_not_sent(harness):
-    harness.desk.parse_table["/buy 100 AAPL"] = BUY
+    harness.desk.parse_table["/buy 100 AAPL stop 220"] = BUY
     harness.desk.queued = view("queued", expires_at=NOW + timedelta(seconds=88))
-    await harness.feed(message(1, "/buy 100 AAPL"))
+    await harness.feed(message(1, "/buy 100 AAPL stop 220"))
 
     await harness.assistant.check_orders()
     assert len(harness.replies.texts) == 1  # still within its 90 s

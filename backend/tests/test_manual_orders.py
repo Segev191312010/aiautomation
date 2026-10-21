@@ -130,16 +130,16 @@ def rejected(result: ValidatedOrder | Rejection) -> str:
 # ---------------------------------------------------------------- parser
 
 ACCEPTED: list[tuple[str, dict[str, Any]]] = [
-    ("/buy 100 AAPL", {"action": "BUY", "source": "command", "symbol": "AAPL", "quantity": 100, "order_type": "MKT"}),
-    ("/buy 100 AAPL 180.5", {"action": "BUY", "quantity": 100, "order_type": "LMT", "limit_price": Decimal("180.5")}),
-    ("/buy $5000 NVDA", {"action": "BUY", "symbol": "NVDA", "notional": Decimal("5000"), "order_type": "MKT"}),
-    ("/buy 5k NVDA at 180", {"notional": Decimal("5000"), "order_type": "LMT", "limit_price": Decimal("180")}),
-    ("/buy $5k NVDA", {"notional": Decimal("5000"), "order_type": "MKT"}),
-    ("/buy 5k$ NVDA", {"notional": Decimal("5000")}),
-    ("/buy 5000$ NVDA", {"notional": Decimal("5000")}),
-    ("/buy $5,000 NVDA", {"notional": Decimal("5000")}),
-    ("/buy $2.5k NVDA", {"notional": Decimal("2500")}),
-    ("/buy 5K NVDA", {"notional": Decimal("5000")}),
+    ("/buy 100 AAPL stop 95", {"action": "BUY", "source": "command", "symbol": "AAPL", "quantity": 100, "order_type": "MKT", "entry_stop_price": Decimal("95")}),
+    ("/buy 100 AAPL 180.5 stop 175", {"action": "BUY", "quantity": 100, "order_type": "LMT", "limit_price": Decimal("180.5"), "entry_stop_price": Decimal("175")}),
+    ("/buy $5000 NVDA stop 170", {"action": "BUY", "symbol": "NVDA", "notional": Decimal("5000"), "order_type": "MKT", "entry_stop_price": Decimal("170")}),
+    ("/buy 5k NVDA at 180 stop 170", {"notional": Decimal("5000"), "order_type": "LMT", "limit_price": Decimal("180"), "entry_stop_price": Decimal("170")}),
+    ("/buy $5k NVDA stop 170", {"notional": Decimal("5000"), "order_type": "MKT", "entry_stop_price": Decimal("170")}),
+    ("/buy 5k$ NVDA stop 170", {"notional": Decimal("5000")}),
+    ("/buy 5000$ NVDA stop 170", {"notional": Decimal("5000")}),
+    ("/buy $5,000 NVDA stop 170", {"notional": Decimal("5000")}),
+    ("/buy $2.5k NVDA stop 170", {"notional": Decimal("2500")}),
+    ("/buy 5K NVDA stop 170", {"notional": Decimal("5000")}),
     ("/sell 50 TSLA", {"action": "SELL", "symbol": "TSLA", "quantity": 50, "order_type": "MKT"}),
     ("/sell 50 TSLA 250", {"action": "SELL", "quantity": 50, "order_type": "LMT", "limit_price": Decimal("250")}),
     ("/sell all TSLA", {"action": "SELL", "fraction": "all", "order_type": "MKT"}),
@@ -155,8 +155,8 @@ ACCEPTED: list[tuple[str, dict[str, Any]]] = [
     ("/cancel #A3F9C2", {"action": "CANCEL", "cancel_ref": "a3f9c2"}),
     ("/cancel 424242", {"action": "CANCEL", "cancel_ref": "424242"}),
     ("/cancel all", {"action": "CANCEL_ALL", "cancel_ref": None}),
-    ("buy 100 AAPL", {"action": "BUY", "source": "text", "symbol": "AAPL", "quantity": 100, "order_type": "MKT"}),
-    ("buy 100 shares of $AAPL at 180", {"source": "text", "quantity": 100, "order_type": "LMT", "limit_price": Decimal("180")}),
+    ("buy 100 AAPL stop 95", {"action": "BUY", "source": "text", "symbol": "AAPL", "quantity": 100, "order_type": "MKT", "entry_stop_price": Decimal("95")}),
+    ("buy 100 shares of $AAPL at 180 stop 175", {"source": "text", "quantity": 100, "order_type": "LMT", "limit_price": Decimal("180"), "entry_stop_price": Decimal("175")}),
     ("sell half my TSLA", {"action": "SELL", "source": "text", "fraction": "half"}),
     ("sell all $TSLA", {"action": "SELL", "fraction": "all", "symbol": "TSLA"}),
     ("close NVDA", {"action": "CLOSE", "source": "text", "symbol": "NVDA"}),
@@ -165,28 +165,33 @@ ACCEPTED: list[tuple[str, dict[str, Any]]] = [
     ("cancel order a3f9c2", {"action": "CANCEL", "cancel_ref": "a3f9c2"}),
     ("cancel all", {"action": "CANCEL_ALL", "source": "text"}),
     ("cancel all my orders", {"action": "CANCEL_ALL"}),
-    ("Buy 100 AAPL.", {"action": "BUY", "quantity": 100}),
-    ("BUY 100 SHARES OF AAPL AT 180", {"quantity": 100, "limit_price": Decimal("180")}),
-    ("BUY 100 SHARES OF AAPL NOW", {"quantity": 100, "order_type": "MKT"}),
-    ("please buy 100 AAPL please", {"quantity": 100}),
-    ("buy 100 AAPL @ 180", {"limit_price": Decimal("180")}),
-    ("buy 100 AAPL @180", {"limit_price": Decimal("180")}),
-    ("buy 100 AAPL limit 180.25", {"limit_price": Decimal("180.25")}),
-    ("buy 100 AAPL at $180.25", {"limit_price": Decimal("180.25")}),
-    ("buy 100 AAPL at market", {"order_type": "MKT", "limit_price": None}),
-    ("/buy 100 AAPL mkt", {"order_type": "MKT"}),
-    ("buy 1,000 F", {"symbol": "F", "quantity": 1000}),
-    ("buy 10 BRK.B", {"symbol": "BRK B", "quantity": 10}),
-    ("buy 10 BRK B", {"symbol": "BRK B", "quantity": 10}),
-    ("buy 10 BRK-B", {"symbol": "BRK B"}),
-    ("buy 10 $brk.b", {"symbol": "BRK B"}),
-    ("/buy 10 BRK B 300", {"symbol": "BRK B", "limit_price": Decimal("300")}),
-    ("buy 100 $IT", {"symbol": "IT", "quantity": 100}),
-    ("buy 100 $aapl", {"symbol": "AAPL"}),
-    ("/buy@AutotraderBot 100 AAPL", {"source": "command", "quantity": 100}),
-    ("/BUY 100 AAPL", {"action": "BUY", "source": "command"}),
-    ("  /buy   100   AAPL  ", {"quantity": 100}),
-    ("ｂuy １００ ＡＡＰＬ", {"symbol": "AAPL", "quantity": 100}),  # full-width
+    ("Buy 100 AAPL stop 95.", {"action": "BUY", "quantity": 100, "entry_stop_price": Decimal("95")}),
+    ("BUY 100 SHARES OF AAPL AT 180 STOP 170", {"quantity": 100, "limit_price": Decimal("180"), "entry_stop_price": Decimal("170")}),
+    ("BUY 100 SHARES OF AAPL NOW STOP 95", {"quantity": 100, "order_type": "MKT"}),
+    ("please buy 100 AAPL stop 95 please", {"quantity": 100, "entry_stop_price": Decimal("95")}),
+    ("buy 100 AAPL @ 180 stop 175", {"limit_price": Decimal("180")}),
+    ("buy 100 AAPL @180 stop 175", {"limit_price": Decimal("180")}),
+    ("buy 100 AAPL limit 180.25 stop 175.5", {"limit_price": Decimal("180.25"), "entry_stop_price": Decimal("175.5")}),
+    ("buy 100 AAPL at $180.25 stop $175", {"limit_price": Decimal("180.25"), "entry_stop_price": Decimal("175")}),
+    ("buy 100 AAPL at market stop 95", {"order_type": "MKT", "limit_price": None}),
+    ("/buy 100 AAPL mkt stop 95", {"order_type": "MKT"}),
+    ("buy 1,000 F stop 9.5", {"symbol": "F", "quantity": 1000, "entry_stop_price": Decimal("9.5")}),
+    ("buy 10 BRK.B stop 290", {"symbol": "BRK B", "quantity": 10}),
+    ("buy 10 BRK B stop 290", {"symbol": "BRK B", "quantity": 10}),
+    ("buy 10 BRK-B stop 290", {"symbol": "BRK B"}),
+    ("buy 10 $brk.b stop 290", {"symbol": "BRK B"}),
+    ("/buy 10 BRK B 300 stop 290", {"symbol": "BRK B", "limit_price": Decimal("300"), "entry_stop_price": Decimal("290")}),
+    ("buy 100 $IT stop 95", {"symbol": "IT", "quantity": 100}),
+    ("buy 100 $aapl stop 95", {"symbol": "AAPL"}),
+    ("/buy@AutotraderBot 100 AAPL stop 95", {"source": "command", "quantity": 100}),
+    ("/BUY 100 AAPL STOP 95", {"action": "BUY", "source": "command", "entry_stop_price": Decimal("95")}),
+    ("  /buy   100   AAPL   stop  95 ", {"quantity": 100, "entry_stop_price": Decimal("95")}),
+    ("ｂuy １００ ＡＡＰＬ ｓｔｏｐ ９５", {"symbol": "AAPL", "quantity": 100, "entry_stop_price": Decimal("95")}),  # full-width
+    # D5 (v7c): every buy ends with its protective stop; nothing else ever carries one.
+    ("/buy 100 AAPL at 180 stop 175", {"action": "BUY", "order_type": "LMT", "limit_price": Decimal("180"), "entry_stop_price": Decimal("175")}),
+    ("/buy $5k NVDA stop 170", {"action": "BUY", "order_type": "MKT", "notional": Decimal("5000"), "entry_stop_price": Decimal("170")}),
+    ("/sell 50 TSLA", {"action": "SELL", "entry_stop_price": None}),
+    ("/stop TSLA 240", {"action": "SELL_STOP", "stop_price": Decimal("240"), "entry_stop_price": None}),
 ]
 
 
@@ -245,7 +250,22 @@ REFUSED: list[tuple[str, str, bool]] = [
     ("buy 1 AAPL call", "unsupported_instrument", True),
     ("buy 10 TSLA puts", "unsupported_instrument", True),
     ("buy 1 AAPL option", "unsupported_instrument", True),
-    ("buy 100 AAPL stop 170", "unsupported_order_type", True),
+    # Rewritten for D5 (v7c): "stop <price>" written last is now a buy's own protective stop,
+    # so the bracket refusal is tested on what stays refused around it.
+    ("buy 100 AAPL trailing stop 170", "unsupported_order_type", True),
+    ("buy 100 AAPL stoploss 170", "unsupported_order_type", True),
+    ("/sell 50 TSLA stop 240", "unsupported_order_type", True),
+    # D5 (v7c): a buy without its stop, a stop not below the limit, a stop not written last.
+    ("/buy 100 AAPL", "missing_entry_stop", True),
+    ("buy 100 AAPL at 180", "missing_entry_stop", True),
+    ("/buy $5k NVDA", "missing_entry_stop", True),
+    ("/buy 100 AAPL 180 stop 180", "stop_not_below_entry", True),
+    ("buy 100 AAPL at 180 stop 181", "stop_not_below_entry", True),
+    ("/buy 100 AAPL stop", "missing_price", True),
+    ("/buy 100 AAPL stop 95 stop 94", "bad_price", True),
+    ("/buy 100 AAPL stop 95 at 100", "bad_price", True),
+    ("/buy 100 AAPL stop 5k", "bad_price", True),
+    ("/buy 100 AAPL stop 0", "bad_price", True),
     ("buy 100 AAPL target 190", "unsupported_order_type", True),
     ("buy 100 AAPL and 100 MSFT", "multiple_actions", True),
     ("sell 50 TSLA buy 50 AAPL", "multiple_actions", True),
@@ -339,7 +359,7 @@ def test_word_tickers_need_a_cashtag(word: str) -> None:
         result = parse_order_text(text)
         assert isinstance(result, ParseRefusal), text
         assert result.code in ("word_ticker_needs_cashtag", "closeall_exact"), (text, result)
-    assert parsed(f"/buy 100 ${word}").symbol == word
+    assert parsed(f"/buy 100 ${word} stop 9").symbol == word
     assert parsed(f"close ${word}").symbol == word
 
 
@@ -347,7 +367,7 @@ def test_word_tickers_need_a_cashtag(word: str) -> None:
 def test_no_listed_word_ever_parses_as_a_bare_ticker(word: str) -> None:
     for text in (f"/buy 100 {word}", f"sell all {word}", f"/stop {word} 10"):
         assert isinstance(parse_order_text(text), ParseRefusal), text
-    assert parsed(f"/buy 100 ${word}").symbol == word
+    assert parsed(f"/buy 100 ${word} stop 9").symbol == word
 
 
 def test_only_a_bare_stop_is_the_kill_switch() -> None:
@@ -414,7 +434,7 @@ def test_parser_never_raises_and_orders_come_only_from_literal_text() -> None:
 
 
 def test_validated_orders_are_internally_consistent() -> None:
-    buy = parsed("/buy 1 AAPL")
+    buy = parsed("/buy 1 AAPL stop 99")
     with pytest.raises(ValueError):
         ValidatedOrder(kind="cancel", action="BUY", parsed=buy)
     with pytest.raises(ValueError):
@@ -426,11 +446,16 @@ def test_validated_orders_are_internally_consistent() -> None:
     with pytest.raises(ValueError):
         ValidatedOrder(kind="order", action="BUY", parsed=buy, symbol="AAPL", con_id=1, side="BUY",
                        quantity=1, order_type="MKT", tif="GTC")  # type: ignore[arg-type]
+    # D5: a valid buy carries the parsed stop below the price it was sized at.
     good = dict(kind="order", action="BUY", parsed=buy, symbol="AAPL", con_id=1, primary_exchange="NASDAQ",
-                side="BUY", quantity=1, order_type="MKT")
+                side="BUY", quantity=1, order_type="MKT", reference_price=Decimal("100.01"),
+                entry_stop_price=Decimal("99"))
     assert ValidatedOrder(**good).summary() == "BUY 1 AAPL MKT"  # type: ignore[arg-type]
+    assert ValidatedOrder(**good).entry_risk == Decimal("1.01")  # type: ignore[arg-type]
     for overrides in ({"side": "SELL"}, {"order_type": "STP"}, {"limit_price": Decimal("1")},
-                      {"primary_exchange": None}, {"kind": "bot_flatten"}):
+                      {"primary_exchange": None}, {"kind": "bot_flatten"}, {"entry_stop_price": None},
+                      {"entry_stop_price": Decimal("98")}, {"entry_stop_price": Decimal("100.01")},
+                      {"reference_price": None}):
         with pytest.raises(ValueError):
             ValidatedOrder(**{**good, **overrides})  # type: ignore[arg-type]
     with pytest.raises(ValueError):
@@ -455,7 +480,7 @@ def test_order_refs_round_trip() -> None:
 
 
 def test_valid_market_buy_is_sized_from_the_ask() -> None:
-    order = accepted(check("/buy 100 AAPL"))
+    order = accepted(check("/buy 100 AAPL stop 99"))
     assert (order.kind, order.side, order.quantity, order.order_type, order.tif) == ("order", "BUY", 100, "MKT", "DAY")
     assert (order.con_id, order.primary_exchange) == (265598, "NASDAQ")
     assert order.reference_price == Decimal("100.01")
@@ -464,12 +489,12 @@ def test_valid_market_buy_is_sized_from_the_ask() -> None:
 
 
 def test_notional_buys_floor_to_whole_shares() -> None:
-    assert accepted(check("/buy $5000 NVDA")).quantity == 49  # 5000 / 100.01
-    assert accepted(check("/buy 5k NVDA at 100")).quantity == 50
-    assert rejected(check("/buy $50 NVDA")) == "amount_too_small"
+    assert accepted(check("/buy $5000 NVDA stop 99")).quantity == 49  # 5000 / 100.01
+    assert accepted(check("/buy 5k NVDA at 100 stop 99")).quantity == 50
+    assert rejected(check("/buy $50 NVDA stop 99")) == "amount_too_small"
 
 
-@pytest.mark.parametrize("text", ["/buy 1 AAPL", "/sell 1 AAPL", "/cancel a3f9c2", "/closeall", "/close AAPL"])
+@pytest.mark.parametrize("text", ["/buy 1 AAPL stop 99", "/sell 1 AAPL", "/cancel a3f9c2", "/closeall", "/close AAPL"])
 def test_not_paper_blocks_everything(text: str) -> None:
     assert rejected(check(text, make_facts(accounts_all_paper=False, owner_position_qty=Decimal(5)))) == "not_paper"
 
@@ -484,7 +509,7 @@ def test_not_paper_blocks_everything(text: str) -> None:
     ],
 )
 def test_stale_message_boundary(age: timedelta, ok: bool) -> None:
-    result = check("/buy 1 AAPL", message_age=age)
+    result = check("/buy 1 AAPL stop 99", message_age=age)
     assert isinstance(result, ValidatedOrder) if ok else rejected(result) == "stale_message"
 
 
@@ -505,7 +530,7 @@ def test_stale_message_boundary(age: timedelta, ok: bool) -> None:
 def test_market_window_boundaries(now: datetime, open_: bool) -> None:
     assert is_manual_window_open(now) is open_
     assert is_manual_window_open(now.astimezone(UTC)) is open_
-    result = check("/buy 1 AAPL", make_facts(now=now))
+    result = check("/buy 1 AAPL stop 99", make_facts(now=now))
     assert isinstance(result, ValidatedOrder) if open_ else rejected(result) == "market_closed"
 
 
@@ -548,12 +573,12 @@ def test_bridge_heartbeat_boundary(age: float | None, ok: bool) -> None:
     ],
 )
 def test_unresolved_or_mismatched_contract_is_unknown_symbol(contract: ContractRef | None) -> None:
-    assert rejected(check("/buy 1 AAPL", contract=contract)) == "unknown_symbol"
+    assert rejected(check("/buy 1 AAPL stop 99", contract=contract)) == "unknown_symbol"
 
 
 def test_bot_symbols_allow_only_close_which_becomes_bot_flatten() -> None:
     facts = make_facts(bot_symbols=frozenset({"AAPL", "brk.b"}), owner_position_qty=Decimal(100), kill_switch_active=True)
-    for text in ("/buy 1 AAPL", "/sell 1 AAPL", "/sell all AAPL", "/stop AAPL 95"):
+    for text in ("/buy 1 AAPL stop 99", "/sell 1 AAPL", "/sell all AAPL", "/stop AAPL 95"):
         assert rejected(check(text, facts)) == "bot_holds_symbol", text
     flatten = accepted(check("/close AAPL", facts))
     assert (flatten.kind, flatten.side, flatten.quantity, flatten.order_type) == ("bot_flatten", "SELL", None, None)
@@ -562,38 +587,38 @@ def test_bot_symbols_allow_only_close_which_becomes_bot_flatten() -> None:
 
 def test_kill_switch_blocks_buys_only() -> None:
     facts = make_facts(kill_switch_active=True, owner_position_qty=Decimal(100))
-    assert rejected(check("/buy 1 AAPL", facts)) == "kill_switch"
-    assert rejected(check("/buy 1 AAPL 100", facts)) == "kill_switch"
+    assert rejected(check("/buy 1 AAPL stop 99", facts)) == "kill_switch"
+    assert rejected(check("/buy 1 AAPL 100 stop 99", facts)) == "kill_switch"
     for text in ("/sell 10 AAPL", "/stop AAPL 95", "/close AAPL", "/closeall", "/cancel all"):
         assert isinstance(check(text, facts), ValidatedOrder), text
 
 
 @pytest.mark.parametrize(("quantity", "ok"), [(250, True), (251, False)])
 def test_order_notional_cap_is_25_percent_of_net_liq(quantity: int, ok: bool) -> None:
-    result = check(f"/buy {quantity} AAPL 100", make_facts())  # 250 x 100 = 25,000 = 25% of 100k
+    result = check(f"/buy {quantity} AAPL 100 stop 99", make_facts())  # 250 x 100 = 25,000 = 25% of 100k
     assert isinstance(result, ValidatedOrder) if ok else rejected(result) == "order_too_large"
 
 
 def test_market_buy_cap_uses_the_ask() -> None:
-    assert accepted(check("/buy 249 AAPL")).estimated_notional == Decimal("24902.49")
-    assert rejected(check("/buy 250 AAPL")) == "order_too_large"  # 250 x 100.01
+    assert accepted(check("/buy 249 AAPL stop 99")).estimated_notional == Decimal("24902.49")
+    assert rejected(check("/buy 250 AAPL stop 99")) == "order_too_large"  # 250 x 100.01
 
 
 @pytest.mark.parametrize(("today", "ok"), [(Decimal("25000"), True), (Decimal("25000.01"), False)])
 def test_manual_exposure_cap_is_50_percent_of_net_liq(today: Decimal, ok: bool) -> None:
-    result = check("/buy 250 AAPL 100", make_facts(manual_open_buy_notional_today=today))
+    result = check("/buy 250 AAPL 100 stop 99", make_facts(manual_open_buy_notional_today=today))
     assert isinstance(result, ValidatedOrder) if ok else rejected(result) == "manual_exposure_cap"
 
 
 @pytest.mark.parametrize(("recent", "ok"), [(0, True), (9, True), (10, False), (50, False)])
 def test_rate_limit_is_ten_buys_per_ten_minutes(recent: int, ok: bool) -> None:
-    result = check("/buy 1 AAPL", make_facts(recent_manual_orders_10min=recent))
+    result = check("/buy 1 AAPL stop 99", make_facts(recent_manual_orders_10min=recent))
     assert isinstance(result, ValidatedOrder) if ok else rejected(result) == "rate_limited"
 
 
 @pytest.mark.parametrize("net_liq", [None, Decimal("0"), Decimal("-5")])
 def test_buys_need_a_known_net_liquidation(net_liq: Decimal | None) -> None:
-    assert rejected(check("/buy 1 AAPL", make_facts(net_liquidation=net_liq))) == "account_unavailable"
+    assert rejected(check("/buy 1 AAPL stop 99", make_facts(net_liquidation=net_liq))) == "account_unavailable"
 
 
 EXITS = ["/sell 10 AAPL", "/sell all AAPL", "/sell half AAPL", "/stop AAPL 95", "/close AAPL",
@@ -608,7 +633,7 @@ def test_exits_are_never_blocked_by_kill_switch_rate_limit_or_budget(text: str) 
         owner_position_qty=Decimal(100),
     )
     assert isinstance(check(text, facts), ValidatedOrder)
-    assert isinstance(check("/buy 1 AAPL", facts), Rejection)
+    assert isinstance(check("/buy 1 AAPL stop 99", facts), Rejection)
 
 
 def test_cancels_are_never_blocked_by_hours_staleness_or_bridge() -> None:
@@ -642,22 +667,22 @@ def test_close_all_checks_only_the_environment() -> None:
 )
 def test_market_orders_need_a_fresh_tight_quote(quote: Quote | None, code: str) -> None:
     facts = make_facts(quote=quote, owner_position_qty=Decimal(100))
-    for text in ("/buy 1 AAPL", "/sell 1 AAPL", "/close AAPL"):
+    for text in ("/buy 1 AAPL stop 99", "/sell 1 AAPL", "/close AAPL"):
         assert rejected(check(text, facts)) == code, text
 
 
 def test_market_quote_boundaries_are_inclusive() -> None:
     facts = make_facts(quote=make_quote(bid="99.50", ask="100.50", age=timedelta(seconds=5)))
-    assert accepted(check("/buy 1 AAPL", facts)).reference_price == Decimal("100.50")  # spread exactly 1%
+    assert accepted(check("/buy 1 AAPL stop 99", facts)).reference_price == Decimal("100.50")  # spread exactly 1%
 
 
 @pytest.mark.parametrize(
     ("text", "ok"),
     [
-        ("/buy 1 AAPL 110", True),
-        ("/buy 1 AAPL 110.01", False),
-        ("/buy 1 AAPL 90", True),
-        ("/buy 1 AAPL 89.99", False),
+        ("/buy 1 AAPL 110 stop 99", True),
+        ("/buy 1 AAPL 110.01 stop 99", False),
+        ("/buy 1 AAPL 90 stop 89", True),
+        ("/buy 1 AAPL 89.99 stop 88", False),
         ("/sell 1 AAPL 110", True),
         ("/sell 1 AAPL 110.01", False),
         ("/stop AAPL 90", True),
@@ -671,18 +696,18 @@ def test_limit_and_stop_prices_must_be_within_ten_percent(text: str, ok: bool) -
 
 def test_limit_orders_accept_a_minute_old_or_delayed_reference() -> None:
     delayed = make_facts(quote=make_quote(age=timedelta(seconds=60), real_time=False))
-    assert accepted(check("/buy 1 AAPL 100", delayed)).order_type == "LMT"
+    assert accepted(check("/buy 1 AAPL 100 stop 99", delayed)).order_type == "LMT"
     stale = make_facts(quote=make_quote(age=timedelta(seconds=61)))
-    assert rejected(check("/buy 1 AAPL 100", stale)) == "no_fresh_quote"
+    assert rejected(check("/buy 1 AAPL 100 stop 99", stale)) == "no_fresh_quote"
     last_only = make_facts(quote=make_quote(bid=None, ask=None, last="100"))
-    assert accepted(check("/buy 1 AAPL 105", last_only)).limit_price == Decimal("105")
-    assert rejected(check("/buy 1 AAPL 100", make_facts(quote=None))) == "no_fresh_quote"
+    assert accepted(check("/buy 1 AAPL 105 stop 99", last_only)).limit_price == Decimal("105")
+    assert rejected(check("/buy 1 AAPL 100 stop 99", make_facts(quote=None))) == "no_fresh_quote"
 
 
 def test_prices_must_be_on_a_valid_tick() -> None:
-    assert rejected(check("/buy 1 AAPL 100.005")) == "invalid_tick"
+    assert rejected(check("/buy 1 AAPL 100.005 stop 99")) == "invalid_tick"
     penny = make_facts(quote=make_quote(bid="0.5120", ask="0.5130", last="0.5125"))
-    assert accepted(check("/buy 100 AAPL 0.5123", penny)).limit_price == Decimal("0.5123")
+    assert accepted(check("/buy 100 AAPL 0.5123 stop 0.5", penny)).limit_price == Decimal("0.5123")
 
 
 def test_sell_stops_must_sit_below_a_live_bid() -> None:
@@ -760,13 +785,13 @@ def test_live_facts_validate_their_inputs() -> None:
     assert facts.owner_position_qty == Decimal(7)
     assert facts.bot_symbols == frozenset({"BRK B", "AAPL"})
     with pytest.raises(ValueError):
-        validate(parsed("/buy 1 AAPL"), facts=make_facts(), contract=CONTRACTS["AAPL"], message_date=datetime(2026, 10, 13))
+        validate(parsed("/buy 1 AAPL stop 99"), facts=make_facts(), contract=CONTRACTS["AAPL"], message_date=datetime(2026, 10, 13))
 
 
 def _row(**overrides: Any) -> ManualOrderRow:
     values: dict[str, Any] = {
         "id": "a" * 32, "created_at": T0, "updated_at": T0, "chat_id": 7, "message_id": 1,
-        "update_id": 1, "source": "command", "raw_text": "/buy 10 AAPL", "action": "BUY",
+        "update_id": 1, "source": "command", "raw_text": "/buy 10 AAPL stop 99", "action": "BUY",
         "symbol": "AAPL", "con_id": 265598, "primary_exchange": "NASDAQ", "quantity": 10,
         "order_type": "MKT", "limit_price": None, "stop_price": None, "target_order_ref": None,
         "status": "sending", "reject_code": None, "error": None, "ibkr_order_id": None,
@@ -774,6 +799,8 @@ def _row(**overrides: Any) -> ManualOrderRow:
         "expires_at": T0 + timedelta(seconds=90), "cancel_requested": False, "audit": {},
     }
     values.update(overrides)
+    # D5: a buy row carries its stop (migration 17); no other row ever does.
+    values.setdefault("entry_stop_price", Decimal("99") if values["action"] == "BUY" else None)
     return ManualOrderRow(**values)
 
 
@@ -862,9 +889,9 @@ async def test_telegram_updates_are_recorded_once(tmp_path, monkeypatch) -> None
 @pytest.mark.anyio
 async def test_queue_order_is_idempotent_per_message(tmp_path, monkeypatch) -> None:
     path = await _ledger(tmp_path, monkeypatch)
-    first = await _queue("/buy 10 AAPL", message_id=1)
-    again = await _queue("/buy 10 AAPL", message_id=1)
-    other_chat = await _queue("/buy 10 AAPL", message_id=1, chat_id=8)
+    first = await _queue("/buy 10 AAPL stop 99", message_id=1)
+    again = await _queue("/buy 10 AAPL stop 99", message_id=1)
+    other_chat = await _queue("/buy 10 AAPL stop 99", message_id=1, chat_id=8)
     assert first == again != other_chat
     assert await _row_count(path) == 2
     row = await get_order(first)
@@ -883,24 +910,24 @@ async def test_queue_order_is_idempotent_per_message(tmp_path, monkeypatch) -> N
 async def test_queue_order_refuses_orders_not_derived_from_the_text(tmp_path, monkeypatch) -> None:
     path = await _ledger(tmp_path, monkeypatch)
     facts = make_facts()
-    validated = accepted(check("/buy 10 AAPL", facts))
+    validated = accepted(check("/buy 10 AAPL stop 99", facts))
     common = dict(chat_id=7, update_id=1, message_date=T0, audit={}, now=T0)
     with pytest.raises(ValueError, match="does not derive"):
-        await queue_order(validated, message_id=1, source="command", raw_text="/buy 100 AAPL", **common)
+        await queue_order(validated, message_id=1, source="command", raw_text="/buy 100 AAPL stop 99", **common)
     with pytest.raises(ValueError, match="does not derive"):  # e.g. a model's paraphrase of a question
         await queue_order(validated, message_id=2, source="command", raw_text="should I buy AAPL?", **common)
     with pytest.raises(ValueError, match="source"):
-        await queue_order(validated, message_id=3, source="text", raw_text="/buy 10 AAPL", **common)
+        await queue_order(validated, message_id=3, source="text", raw_text="/buy 10 AAPL stop 99", **common)
     with pytest.raises(TypeError):
-        await queue_order(parsed("/buy 10 AAPL"), message_id=4, source="command", raw_text="/buy 10 AAPL", **common)  # type: ignore[arg-type]
+        await queue_order(parsed("/buy 10 AAPL stop 99"), message_id=4, source="command", raw_text="/buy 10 AAPL stop 99", **common)  # type: ignore[arg-type]
     assert await _row_count(path) == 0
 
 
 @pytest.mark.anyio
 async def test_claim_takes_the_oldest_and_expires_overdue_rows(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    old = await _queue("/buy 1 AAPL", message_id=1, message_date=T0 - timedelta(seconds=30), now=T0)
-    newer = await _queue("/buy 2 AAPL", message_id=2, message_date=T0, now=T0 + timedelta(milliseconds=1))
+    old = await _queue("/buy 1 AAPL stop 99", message_id=1, message_date=T0 - timedelta(seconds=30), now=T0)
+    newer = await _queue("/buy 2 AAPL stop 99", message_id=2, message_date=T0, now=T0 + timedelta(milliseconds=1))
     # old expires at T0+60s, newer at T0+90s
     claimed = await claim_next_order(T0 + timedelta(seconds=59))
     assert claimed is not None and claimed.id == old and claimed.status == "sending"
@@ -913,11 +940,11 @@ async def test_claim_takes_the_oldest_and_expires_overdue_rows(tmp_path, monkeyp
 @pytest.mark.anyio
 async def test_claim_boundary_is_strictly_before_expiry(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    row_id = await _queue("/buy 1 AAPL", message_id=1, message_date=T0)
+    row_id = await _queue("/buy 1 AAPL stop 99", message_id=1, message_date=T0)
     assert await claim_next_order(T0 + timedelta(seconds=90)) is None
     row = await get_order(row_id)
     assert row is not None and row.status == "expired"
-    second = await _queue("/buy 1 AAPL", message_id=2, message_date=T0)
+    second = await _queue("/buy 1 AAPL stop 99", message_id=2, message_date=T0)
     claimed = await claim_next_order(T0 + timedelta(seconds=89, microseconds=999999))
     assert claimed is not None and claimed.id == second
 
@@ -925,11 +952,11 @@ async def test_claim_boundary_is_strictly_before_expiry(tmp_path, monkeypatch) -
 @pytest.mark.anyio
 async def test_two_concurrent_claimers_never_share_a_row(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    only = await _queue("/buy 1 AAPL", message_id=1)
+    only = await _queue("/buy 1 AAPL stop 99", message_id=1)
     results = await asyncio.gather(*(claim_next_order(T0) for _ in range(2)))
     winners = [row for row in results if row is not None]
     assert [row.id for row in winners] == [only]
-    ids = [await _queue(f"/buy {n} AAPL", message_id=10 + n) for n in range(1, 6)]
+    ids = [await _queue(f"/buy {n} AAPL stop 99", message_id=10 + n) for n in range(1, 6)]
     results = await asyncio.gather(*(claim_next_order(T0) for _ in range(8)))
     claimed = [row.id for row in results if row is not None]
     assert sorted(claimed) == sorted(ids) and len(set(claimed)) == 5
@@ -938,7 +965,7 @@ async def test_two_concurrent_claimers_never_share_a_row(tmp_path, monkeypatch) 
 @pytest.mark.anyio
 async def test_status_updates_are_monotonic(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    row_id = await _queue("/buy 100 AAPL 100", message_id=1)
+    row_id = await _queue("/buy 100 AAPL 100 stop 99", message_id=1)
     assert await update_order_status(row_id, "sending", now=T0) is False  # only claim may do this
     assert await update_order_status(row_id, "sent", now=T0) is False
     claimed = await claim_next_order(T0)
@@ -971,7 +998,7 @@ async def test_status_updates_are_monotonic(tmp_path, monkeypatch) -> None:
 @pytest.mark.anyio
 async def test_queued_rows_may_only_end_without_being_sent(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    row_id = await _queue("/buy 1 AAPL", message_id=1)
+    row_id = await _queue("/buy 1 AAPL stop 99", message_id=1)
     assert await update_order_status(row_id, "rejected", now=T0, reject_code="kill_switch") is True
     assert await claim_next_order(T0) is None
     row = await get_order(row_id)
@@ -981,7 +1008,7 @@ async def test_queued_rows_may_only_end_without_being_sent(tmp_path, monkeypatch
 @pytest.mark.anyio
 async def test_database_triggers_enforce_the_ledger_invariants(tmp_path, monkeypatch) -> None:
     path = await _ledger(tmp_path, monkeypatch)
-    row_id = await _queue("/buy 10 AAPL", message_id=1)
+    row_id = await _queue("/buy 10 AAPL stop 99", message_id=1)
     assert await claim_next_order(T0) is not None
     assert await update_order_status(row_id, "sent", now=T0, ibkr_order_id=5) is True
     async with aiosqlite.connect(path) as db:
@@ -1021,16 +1048,21 @@ async def test_schema_rejects_malformed_rows(tmp_path, monkeypatch) -> None:
     path = await _ledger(tmp_path, monkeypatch)
     base = {
         "id": "b" * 32, "created_at": "t", "updated_at": "t", "chat_id": 7, "message_id": 1,
-        "update_id": 1, "source": "command", "raw_text": "/buy 1 AAPL", "action": "BUY",
+        "update_id": 1, "source": "command", "raw_text": "/buy 1 AAPL stop 99", "action": "BUY",
         "symbol": "AAPL", "con_id": 1, "primary_exchange": "NASDAQ", "quantity": 1,
         "order_type": "MKT", "limit_price": None, "stop_price": None, "target_order_ref": None,
         "status": "queued", "expires_at": "t", "audit_json": "{}",
+        # D5 (migration 17): the database refuses a buy without its stop.
+        "entry_stop_price": "0.5",
     }
     bad_rows = [
         {"id": "B" * 32}, {"id": "b" * 31}, {"quantity": 0}, {"con_id": None}, {"order_type": "STP"},
         {"order_type": "LMT"}, {"limit_price": "10"}, {"action": "SELL_STOP"}, {"status": "done"},
         {"source": "model"}, {"audit_json": "not json"}, {"action": "CANCEL"},
         {"action": "CLOSE_ALL"}, {"message_id": 0}, {"raw_text": ""},
+        {"entry_stop_price": None}, {"entry_stop_price": "0"}, {"entry_stop_price": "-1"},
+        {"entry_stop_price": "x"}, {"order_type": "LMT", "limit_price": "0.5"},
+        {"action": "SELL", "raw_text": "/sell 1 AAPL"},
     ]
     async with aiosqlite.connect(path) as db:
         columns = ", ".join(base)
@@ -1047,9 +1079,9 @@ async def test_schema_rejects_malformed_rows(tmp_path, monkeypatch) -> None:
 @pytest.mark.anyio
 async def test_sending_rows_unknown_to_ibkr_become_unknown_and_are_never_resent(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    known = await _queue("/buy 1 AAPL", message_id=1)
-    lost = await _queue("/buy 2 AAPL", message_id=2)
-    queued = await _queue("/buy 3 AAPL", message_id=3)
+    known = await _queue("/buy 1 AAPL stop 99", message_id=1)
+    lost = await _queue("/buy 2 AAPL stop 99", message_id=2)
+    queued = await _queue("/buy 3 AAPL stop 99", message_id=3)
     assert (await claim_next_order(T0)).id == known  # type: ignore[union-attr]
     assert (await claim_next_order(T0)).id == lost  # type: ignore[union-attr]
     marked = await mark_unknown_sending_rows({order_ref(known), "bot:xyz", "manual:junk"}, now=T0)
@@ -1069,9 +1101,9 @@ async def test_sending_rows_unknown_to_ibkr_become_unknown_and_are_never_resent(
 @pytest.mark.anyio
 async def test_request_cancel_stops_queued_rows_and_flags_live_ones(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    live = await _queue("/buy 1 AAPL", message_id=1)
+    live = await _queue("/buy 1 AAPL stop 99", message_id=1)
     assert (await claim_next_order(T0)).id == live  # type: ignore[union-attr]
-    waiting = await _queue("/buy 2 AAPL", message_id=2)
+    waiting = await _queue("/buy 2 AAPL stop 99", message_id=2)
     outcome = await request_cancel(short_id(waiting), now=T0)
     assert (outcome.result, outcome.cancelled_unsent, outcome.flagged_live) == ("applied", (waiting,), ())
     assert await claim_next_order(T0) is None
@@ -1095,11 +1127,11 @@ async def test_request_cancel_stops_queued_rows_and_flags_live_ones(tmp_path, mo
 @pytest.mark.anyio
 async def test_cancel_all_covers_every_open_manual_order(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    sent = await _queue("/buy 1 AAPL", message_id=1)
+    sent = await _queue("/buy 1 AAPL stop 99", message_id=1)
     assert await claim_next_order(T0) is not None
     assert await update_order_status(sent, "sent", now=T0, ibkr_order_id=3) is True
     queued = await _queue("/sell 5 TSLA", message_id=2)
-    done = await _queue("/buy 3 AAPL", message_id=3)
+    done = await _queue("/buy 3 AAPL stop 99", message_id=3)
     assert await update_order_status(done, "rejected", now=T0) is True
     outcome = await request_cancel("all", now=T0)
     assert (outcome.cancelled_unsent, outcome.flagged_live) == ((queued,), (sent,))
@@ -1109,7 +1141,7 @@ async def test_cancel_all_covers_every_open_manual_order(tmp_path, monkeypatch) 
 @pytest.mark.anyio
 async def test_cancel_messages_are_ledger_rows_applied_atomically(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    target = await _queue("/buy 1 AAPL", message_id=1)
+    target = await _queue("/buy 1 AAPL stop 99", message_id=1)
     cancel_text = f"/cancel {short_id(target)}"
     cancel_id = await _queue(cancel_text, message_id=2)
     cancel_row = await get_order(cancel_id)
@@ -1134,27 +1166,27 @@ async def test_short_ids_stay_unique(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
     candidates = iter(["abcdef" + "0" * 26, "abcdef" + "1" * 26, "123456" + "0" * 26])
     monkeypatch.setattr(manual, "_new_order_id", lambda: next(candidates))
-    first = await _queue("/buy 1 AAPL", message_id=1)
-    second = await _queue("/buy 2 AAPL", message_id=2)
+    first = await _queue("/buy 1 AAPL stop 99", message_id=1)
+    second = await _queue("/buy 2 AAPL stop 99", message_id=2)
     assert (first, second) == ("abcdef" + "0" * 26, "123456" + "0" * 26)
     monkeypatch.setattr(manual, "_new_order_id", lambda: "abcdef" + "2" * 26)
     with pytest.raises(RuntimeError, match="unique"):
-        await _queue("/buy 3 AAPL", message_id=3)
+        await _queue("/buy 3 AAPL stop 99", message_id=3)
     monkeypatch.setattr(manual, "_new_order_id", lambda: "Z" * 32)
     with pytest.raises(RuntimeError, match="hex"):
-        await _queue("/buy 4 AAPL", message_id=4)
+        await _queue("/buy 4 AAPL stop 99", message_id=4)
 
 
 @pytest.mark.anyio
 async def test_ledger_facts_feed_share_reservations_and_buy_budgets(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
     yesterday = T0 - timedelta(days=1)
-    await _queue("/buy 5 AAPL", message_id=1, facts=make_facts(now=yesterday))
+    await _queue("/buy 5 AAPL stop 99", message_id=1, facts=make_facts(now=yesterday))
     sell = await _queue("/sell 30 TSLA", message_id=2)
     stop = await _queue("/stop 20 TSLA 95", message_id=3)
-    buy_live = await _queue("/buy 10 AAPL", message_id=4)  # estimate 10 x 100.01
-    buy_filled = await _queue("/buy 100 AAPL 100", message_id=5)
-    buy_dead = await _queue("/buy 7 AAPL", message_id=6)
+    buy_live = await _queue("/buy 10 AAPL stop 99", message_id=4)  # estimate 10 x 100.01
+    buy_filled = await _queue("/buy 100 AAPL 100 stop 99", message_id=5)
+    buy_dead = await _queue("/buy 7 AAPL stop 99", message_id=6)
     facts = await ledger_facts(symbol="TSLA", now=T0)
     assert facts.open_manual_sell_qty == 50
     assert facts.counted_order_refs == frozenset({order_ref(sell), order_ref(stop)})
@@ -1184,8 +1216,8 @@ async def test_ledger_facts_feed_share_reservations_and_buy_budgets(tmp_path, mo
 @pytest.mark.anyio
 async def test_status_watch_lists(tmp_path, monkeypatch) -> None:
     await _ledger(tmp_path, monkeypatch)
-    first = await _queue("/buy 1 AAPL", message_id=1)
-    second = await _queue("/buy 2 AAPL", message_id=2, now=T0 + timedelta(seconds=1))
+    first = await _queue("/buy 1 AAPL stop 99", message_id=1)
+    second = await _queue("/buy 2 AAPL stop 99", message_id=2, now=T0 + timedelta(seconds=1))
     assert [row.id for row in await list_orders_updated_since(T0 - timedelta(seconds=1))] == [first, second]
     assert await claim_next_order(T0 + timedelta(seconds=5)) is not None
     changed = await list_orders_updated_since(T0 + timedelta(seconds=2))
@@ -1247,3 +1279,166 @@ async def test_queued_close_rows_keep_their_kind(tmp_path, monkeypatch) -> None:
     replaced = replace(claimed, quantity=41)
     assert rejected(revalidate_claimed(replaced, facts=make_facts(owner_position_qty=Decimal(40)),
                                        contract=CONTRACTS["TSLA"])) == "insufficient_shares"
+
+
+# ---------------------------------------------------------------- D5 (v7c): a buy carries its stop
+
+
+@pytest.mark.anyio
+async def test_v7c_manual_buy_without_stop_refused_by_parser_and_db_trigger(tmp_path, monkeypatch) -> None:
+    # The parser: no stop, no order (the old "buy first, then /stop" advice is gone).
+    for text in ("/buy 100 AAPL", "/buy $5k NVDA", "buy 100 AAPL at 180", "/buy 100 AAPL 180"):
+        refusal = parse_order_text(text)
+        assert isinstance(refusal, ParseRefusal) and refusal.code == "missing_entry_stop", text
+        assert "stop" in refusal.reason and "then /stop" not in refusal.reason
+    # The model: a buy without its stop cannot even be represented.
+    with pytest.raises(ValueError, match="protective stop"):
+        ParsedOrder(action="BUY", source="command", symbol="AAPL", quantity=1, order_type="MKT")
+    with pytest.raises(ValueError, match="takes no entry stop"):
+        ParsedOrder(action="SELL", source="command", symbol="AAPL", quantity=1, order_type="MKT",
+                    entry_stop_price=Decimal("90"))
+    # The bridge's re-check: a buy row from before migration 17 is never sent.
+    later = T0 + timedelta(seconds=30)
+    assert rejected(revalidate_claimed(_row(entry_stop_price=None), facts=make_facts(now=later),
+                                       contract=CONTRACTS["AAPL"])) == "missing_entry_stop"
+    # The database: migration 17's trigger, whatever wrote the row.
+    path = await _ledger(tmp_path, monkeypatch)
+    columns = ("id, created_at, updated_at, chat_id, message_id, update_id, source, raw_text, action, symbol,"
+               " con_id, primary_exchange, quantity, order_type, status, expires_at, audit_json")
+    values = ("c" * 32, "t", "t", 7, 1, 1, "command", "/buy 1 AAPL", "BUY", "AAPL", 1, "NASDAQ", 1, "MKT",
+              "queued", "t", "{}")
+    async with aiosqlite.connect(path) as db:
+        with pytest.raises(aiosqlite.IntegrityError, match="manual_buy_needs_stop"):
+            await db.execute(f"INSERT INTO autotrader_manual_orders ({columns}) VALUES ({', '.join('?' * 17)})",
+                             values)
+    assert await _row_count(path) == 0
+
+
+def test_buy_stop_must_be_below_the_bid_for_market_and_below_the_limit() -> None:
+    # A market buy fills at the ask; a stop at or above the bid would fire at once.
+    assert rejected(check("/buy 1 AAPL stop 99.99")) == "stop_not_below_entry"  # bid 99.99
+    assert accepted(check("/buy 1 AAPL stop 99.98")).entry_stop_price == Decimal("99.98")
+    refusal = parse_order_text("/buy 1 AAPL 100 stop 100")
+    assert isinstance(refusal, ParseRefusal) and refusal.code == "stop_not_below_entry"
+    order = accepted(check("/buy 1 AAPL 100 stop 99.98"))  # below the limit and the bid 99.99
+    assert (order.limit_price, order.entry_stop_price, order.entry_risk) == (
+        Decimal("100"), Decimal("99.98"), Decimal("0.02")
+    )
+    assert rejected(check("/buy 1 AAPL stop 99.995")) == "invalid_tick"
+    assert accepted(check("/buy 100 AAPL 0.5123 stop 0.5001", make_facts(
+        quote=make_quote(bid="0.5122", ask="0.5124", last="0.5123")))).entry_stop_price == Decimal("0.5001")
+
+
+@pytest.mark.parametrize(
+    ("text", "ok"),
+    [
+        ("/buy 100 AAPL stop 90.01", True),  # 100 x (100.01 - 90.01) = 1,000.00 = 1% of 100k
+        ("/buy 100 AAPL stop 90", False),  # 1,001.00
+        ("/buy 100 AAPL 100 stop 90", True),  # 100 x 10 = 1,000 at the limit
+        ("/buy 101 AAPL 100 stop 90", False),  # 1,010
+        ("/buy $5k NVDA stop 80", True),  # 49 x 20.01 = 980.49
+        ("/buy $5k NVDA stop 79", False),  # 49 x 21.01 = 1,029.49
+    ],
+)
+def test_manual_entry_risk_is_at_most_1pct_of_net_liq(text: str, ok: bool) -> None:
+    assert manual.MAX_MANUAL_ENTRY_RISK_FRACTION_OF_NET_LIQ == Decimal("0.01")
+    result = check(text)
+    if ok:
+        order = accepted(result)
+        assert order.entry_risk is not None and order.entry_risk <= Decimal("1000")
+    else:
+        assert rejected(result) == "manual_entry_risk_over_1pct"
+        assert "over 1% of net liquidation" in result.message  # type: ignore[union-attr]
+
+
+def test_exits_never_see_the_entry_stop_rules() -> None:
+    # A net liquidation where a 1-share buy fits the notional caps but its risk is over 1%
+    # (10.01 > 5): exits still pass, and never carry a stop.
+    tiny = make_facts(net_liquidation=Decimal("500"), owner_position_qty=Decimal(100))
+    assert rejected(check("/buy 1 AAPL stop 90", tiny)) == "manual_entry_risk_over_1pct"
+    for text in ("/sell 10 AAPL", "/sell all AAPL", "/stop AAPL 95", "/close AAPL", "sell 10 AAPL at 100"):
+        order = accepted(check(text, tiny))
+        assert order.entry_stop_price is None and order.entry_risk is None, text
+    for text in ("/closeall", "/cancel a3f9c2", "/cancel all"):
+        assert accepted(check(text, tiny)).entry_stop_price is None
+
+
+def test_revalidation_reapplies_the_entry_stop_rules_to_live_facts() -> None:
+    later = T0 + timedelta(seconds=30)
+    row = _row(entry_stop_price=Decimal("99"))
+    good = accepted(revalidate_claimed(row, facts=make_facts(now=later), contract=CONTRACTS["AAPL"]))
+    assert (good.entry_stop_price, good.entry_risk) == (Decimal("99"), Decimal("10.10"))
+    fallen = make_facts(now=later, quote=make_quote(now=later, bid="98.99", ask="99.01", last="99.00"))
+    assert rejected(revalidate_claimed(row, facts=fallen, contract=CONTRACTS["AAPL"])) == "stop_not_below_entry"
+    # 10 x (100.01 - 90) = 100.10 fits 1% of 100k when queued, not of a 5k account at the send.
+    wide = _row(entry_stop_price=Decimal("90"))
+    assert accepted(revalidate_claimed(wide, facts=make_facts(now=later), contract=CONTRACTS["AAPL"]))
+    poorer = make_facts(now=later, net_liquidation=Decimal("5000"))
+    assert rejected(revalidate_claimed(wide, facts=poorer, contract=CONTRACTS["AAPL"])) == (
+        "manual_entry_risk_over_1pct"
+    )
+
+
+@pytest.mark.anyio
+async def test_queue_order_records_the_entry_stop_and_its_risk(tmp_path, monkeypatch) -> None:
+    path = await _ledger(tmp_path, monkeypatch)
+    row_id = await _queue("/buy 10 AAPL stop 99", message_id=1)
+    row = await get_order(row_id)
+    assert row is not None and row.entry_stop_price == Decimal("99") and row.stop_price is None
+    validation = row.audit["validation"]
+    assert validation["entry_stop_price"] == "99" and validation["entry_risk"] == "10.10"  # type: ignore[index]
+    async with aiosqlite.connect(path) as db:
+        with pytest.raises(aiosqlite.IntegrityError, match="immutable"):
+            await db.execute("UPDATE autotrader_manual_orders SET entry_stop_price='50' WHERE id=?", (row_id,))
+    sell = await get_order(await _queue("/sell 10 AAPL", message_id=2))
+    assert sell is not None and sell.entry_stop_price is None
+
+
+@pytest.mark.anyio
+async def test_manual_schema_pending_refuses_only_buys(tmp_path, monkeypatch) -> None:
+    from tests.schema_support import apply_up_to
+
+    path = tmp_path / "v16.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(path))
+    await apply_up_to(path, 16)
+    assert await manual.entry_stop_ready() is False
+    # Every exit and cancel is recorded and read back as before (the stop column reads NULL).
+    sell = await _queue("/sell 10 AAPL", message_id=1)
+    cancel = await _queue("/cancel a3f9c2", message_id=2)  # no such order: recorded, rejected
+    rows = {row.id: row for row in await list_orders_updated_since(T0 - timedelta(days=1))}
+    assert set(rows) == {sell, cancel} and rows[sell].entry_stop_price is None
+    assert (await claim_next_order(T0)).id == sell  # type: ignore[union-attr]
+    # A buy cannot be recorded without its stop column: nothing is written.
+    with pytest.raises(manual.ManualSchemaPending) as pending:
+        await _queue("/buy 10 AAPL stop 99", message_id=3)
+    assert pending.value.code == "manual_schema_pending" == manual.MANUAL_SCHEMA_PENDING
+    assert await _row_count(str(path)) == 2
+    # After `autotraderctl db migrate` (v17) the same buy is recorded with its stop.
+    await init_db()
+    assert await manual.entry_stop_ready() is True
+    row = await get_order(await _queue("/buy 10 AAPL stop 99", message_id=4))
+    assert row is not None and row.entry_stop_price == Decimal("99")
+
+
+def test_no_override_path() -> None:
+    # D5: no same-day override. Nothing in the owner-order path or the bridge offers a
+    # way around the entry-stop rules or the risk limits.
+    from pathlib import Path
+    import re
+
+    backend = Path(manual.__file__).resolve().parents[2]
+    words = re.compile(r"override|--force|i-know|i_know|bypass", re.IGNORECASE)
+    for relative in ("trading/execution/manual_orders.py", "trading/operations/telegram_bot.py",
+                     "scripts_local/paper_bridge.py"):
+        found = [line for line in (backend / relative).read_text().splitlines() if words.search(line)]
+        assert found == [], (relative, found)
+
+
+def test_a_marketable_limit_buy_needs_its_stop_below_the_bid() -> None:
+    # Limit 102 with the bid at 99.99 fills near the bid: a stop at 100 would fire at once.
+    refused = check("/buy 1 AAPL 102 stop 100")
+    assert rejected(refused) == "stop_not_below_entry" and "below the bid 99.99" in refused.message  # type: ignore[union-attr]
+    assert accepted(check("/buy 1 AAPL 102 stop 99.98")).entry_risk == Decimal("2.02")  # risk at the limit
+    # Below the market the limit itself is the floor (the parser already refuses a stop at it).
+    assert isinstance(parse_order_text("/buy 1 AAPL 98 stop 98"), ParseRefusal)
+    assert accepted(check("/buy 1 AAPL 98 stop 97.99")).entry_stop_price == Decimal("97.99")

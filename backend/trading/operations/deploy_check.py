@@ -35,7 +35,10 @@ Tokens, in the runbook's order:
 * ``clock``: the ``sntp`` offset is at most 2 s (``--skip-clock``: WARN).
 * ``window``: now is inside the deploy window 18:30 -> 07:20 ET (I-4).
 * ``pin`` (I-5): the candidate's bridge hashes to the candidate's own
-  ``REVIEWED_BRIDGE_SHA256``.
+  ``REVIEWED_BRIDGE_SHA256``, and every file of its
+  ``REVIEWED_BRIDGE_IMPORTS_SHA256`` (P3-B0, the backend files the bridge
+  imports lazily) hashes to its entry; the OK note gives the map's
+  ``imports_sha=`` for the verdict line.
 
 The readers ``match_verdict`` (the matched verdict lines), ``verdict_tokens``
 (their ``bridge_sha=``/``migration=``/``imports_sha=``) and ``reviewed_pins``
@@ -100,6 +103,10 @@ PIN_NAME = "REVIEWED_BRIDGE_SHA256"
 # Every reviewed pin constant in supervisor.py starts with this (P3-B0 adds
 # REVIEWED_BRIDGE_IMPORTS_SHA256); deploy apply reads them all generically.
 REVIEWED_PREFIX = "REVIEWED_"
+# P3-B0: {path under backend/: sha256} of the files the bridge imports lazily.
+IMPORTS_PIN_NAME = "REVIEWED_BRIDGE_IMPORTS_SHA256"
+# The verdict line's `imports_sha=` is this many hex of imports_digest(map).
+IMPORTS_SHA_LENGTH = 12
 # P2-3 refusal tokens, the first word of the refusing check's detail.
 MIGRATION_UNEXPECTED = "migration_unexpected"
 VERDICT_MIGRATION_MISSING = "verdict_migration_missing"
@@ -435,6 +442,29 @@ def reviewed_pins(source: str) -> dict[str, object]:
             except ValueError as exc:
                 raise ValueError(f"{target.id} is not a literal") from exc
     return pins
+
+
+def imports_pin_files(value: object) -> dict[str, str]:
+    """``REVIEWED_BRIDGE_IMPORTS_SHA256`` checked: a non-empty ``{path under backend/:
+    64-hex sha256}`` map with no absolute path and no ``..``; ValueError otherwise."""
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{IMPORTS_PIN_NAME} is not a non-empty {{path: sha256}} map")
+    files: dict[str, str] = {}
+    for path, digest in value.items():
+        if not isinstance(path, str) or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{IMPORTS_PIN_NAME} entry {path!r} is not a path with a 64-hex sha256")
+        parts = PurePosixPath(path).parts
+        if not parts or PurePosixPath(path).is_absolute() or ".." in parts:
+            raise ValueError(f"{IMPORTS_PIN_NAME} names a path outside backend/: {path!r}")
+        files[path] = digest
+    return files
+
+
+def imports_digest(files: dict[str, str]) -> str:
+    """sha256 of the sorted ``<path> <sha256>`` lines of an imports map, one per line; the
+    verdict line's ``imports_sha=`` is its first ``IMPORTS_SHA_LENGTH`` hex."""
+    text = "".join(f"{path} {digest}\n" for path, digest in sorted(files.items()))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def is_review_path(path: str) -> bool:
@@ -828,7 +858,28 @@ def check_pin(git: Git, *, candidate: str, head: str | None) -> CheckResult:
             REFUSE,
             f"{candidate}:{BRIDGE_PATH} sha256 {actual[:12]} is not its {PIN_NAME} {pinned[:12]} (I-5)",
         )
-    return CheckResult(PIN, OK, notes=(f"bridge sha256 {actual[:12]} == {PIN_NAME}",))
+    notes = [f"bridge sha256 {actual[:12]} == {PIN_NAME}"]
+    try:
+        imports = reviewed_pins(supervisor.decode("utf-8", "replace")).get(IMPORTS_PIN_NAME)
+        files = None if imports is None else imports_pin_files(imports)
+    except (SyntaxError, ValueError) as exc:
+        return CheckResult(PIN, REFUSE, f"{candidate}:{SUPERVISOR_PATH}: {exc}")
+    if files is not None:
+        for path, digest in sorted(files.items()):
+            blob = git.blob(head, f"backend/{path}")
+            found = None if blob is None else hashlib.sha256(blob).hexdigest()
+            if found != digest:
+                shown = "missing" if found is None else f"sha256 {found[:12]}"
+                return CheckResult(
+                    PIN,
+                    REFUSE,
+                    f"{candidate}:backend/{path} {shown} is not its {IMPORTS_PIN_NAME} entry {digest[:12]} (I-5)",
+                )
+        notes.append(
+            f"bridge imports {len(files)} files == {IMPORTS_PIN_NAME}"
+            f" (imports_sha={imports_digest(files)[:IMPORTS_SHA_LENGTH]})"
+        )
+    return CheckResult(PIN, OK, notes=tuple(notes))
 
 
 # --- the run ----------------------------------------------------------------------
@@ -941,6 +992,8 @@ __all__ = [
     "EXIT_REFUSED",
     "Git",
     "GitError",
+    "IMPORTS_PIN_NAME",
+    "IMPORTS_SHA_LENGTH",
     "MIGRATION_UNEXPECTED",
     "REVIEWED_PREFIX",
     "REVIEW_ONLY_PREFIX",
@@ -958,6 +1011,8 @@ __all__ = [
     "check_window",
     "git_environment",
     "glob_matches",
+    "imports_digest",
+    "imports_pin_files",
     "in_deploy_window",
     "is_deployable",
     "is_review_path",

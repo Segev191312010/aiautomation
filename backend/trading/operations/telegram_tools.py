@@ -578,12 +578,14 @@ class OrderView:
     error: str = ""
     cancel_requested: bool = False
     expires_at: datetime | None = None
+    entry_stop: str = ""  # a buy's protective stop (D5)
 
     @property
     def body(self) -> str:
-        """``BUY 100 AAPL LMT 180.50``: the order without its id."""
+        """``BUY 100 AAPL LMT 180.50 stop 175.00``: the order without its id."""
         parts = (self.side, self.qty, self.symbol, self.order_type, self.price)
-        return " ".join(part for part in parts if part) or "order"
+        text = " ".join(part for part in parts if part) or "order"
+        return f"{text} stop {self.entry_stop}" if self.entry_stop else text
 
     @property
     def label(self) -> str:
@@ -603,7 +605,7 @@ def _text(value: Any) -> str:
 
 
 def order_view(row: Any) -> OrderView:
-    """``BUY 100 AAPL LMT 180.50``, ``SELL 50 TSLA STP 240.00``, ``CLOSE BF B bot
+    """``BUY 100 AAPL LMT 180.50 stop 175.00``, ``SELL 50 TSLA STP 240.00``, ``CLOSE BF B bot
     bracket``, ``CLOSE ALL``: what the owner sent, as the ledger holds it."""
     order_id = str(_field(row, "id") or "")
     action = str(_field(row, "action") or "")
@@ -634,6 +636,7 @@ def order_view(row: Any) -> OrderView:
         error=str(_field(row, "error") or _field(row, "reject_code") or ""),
         cancel_requested=bool(_field(row, "cancel_requested")),
         expires_at=expires if isinstance(expires := _field(row, "expires_at"), datetime) else None,
+        entry_stop=_text(_field(row, "entry_stop_price")),
     )
 
 

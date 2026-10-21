@@ -996,6 +996,83 @@ def test_a_missing_or_ambiguous_pin_literal_refuses(scenario, supervisor):
     assert "REVIEWED_BRIDGE_SHA256 literal" in result.detail
 
 
+def _imports_supervisor(pin: str, imports: dict[str, str]) -> str:
+    entries = "".join(f'    "{path}": "{digest}",\n' for path, digest in imports.items())
+    return (
+        f'"""supervisor"""\nREVIEWED_BRIDGE_SHA256 = "{pin}"\n'
+        f"REVIEWED_BRIDGE_IMPORTS_SHA256: dict[str, str] = {{\n{entries}}}\n"
+    )
+
+
+def _with_imports(scenario: Scenario, *, edit_after: bool = False, imports=None) -> dict[str, str]:
+    """The candidate pins two backend files the bridge imports (P3-B0)."""
+    files = {"config.py": "CFG = 1\n", "trading/execution/manual_orders.py": "LEDGER = 1\n"}
+    pins = imports or {path: hashlib.sha256(text.encode()).hexdigest() for path, text in files.items()}
+
+    def edit(repo: Repo) -> None:
+        for path, text in files.items():
+            repo.write(f"backend/{path}", text)
+        bridge_pin = hashlib.sha256(b"print('bridge v1')\n").hexdigest()
+        repo.write(SUPERVISOR, _imports_supervisor(bridge_pin, pins))
+        if edit_after:
+            repo.write("backend/trading/execution/manual_orders.py", "LEDGER = 2  # not re-reviewed\n")
+
+    _on_candidate(scenario, edit)
+    return pins
+
+
+def test_the_pin_checks_the_bridge_imports_map(scenario):
+    pins = _with_imports(scenario)
+
+    result = _pin(scenario.repo)
+
+    assert result.status == OK, result.detail
+    digest = hashlib.sha256(b"print('bridge v1')\n").hexdigest()
+    expected = deploy_check.imports_digest(pins)
+    assert result.notes == (
+        f"bridge sha256 {digest[:12]} == REVIEWED_BRIDGE_SHA256",
+        f"bridge imports 2 files == REVIEWED_BRIDGE_IMPORTS_SHA256 (imports_sha={expected[:12]})",
+    )
+    # The digest is over the sorted `<path> <sha256>` lines: order-free, and any entry moves it.
+    assert expected == hashlib.sha256(
+        "".join(f"{path} {pins[path]}\n" for path in sorted(pins)).encode()
+    ).hexdigest()
+    assert deploy_check.imports_digest(dict(reversed(list(pins.items())))) == expected
+    assert deploy_check.imports_digest({**pins, "config.py": "0" * 64}) != expected
+
+
+def test_an_import_file_that_is_not_its_pin_refuses(scenario):
+    _with_imports(scenario, edit_after=True)
+
+    result = _pin(scenario.repo)
+
+    assert result.status == REFUSE
+    actual = hashlib.sha256(b"LEDGER = 2  # not re-reviewed\n").hexdigest()
+    assert result.detail.startswith(
+        f"cand:backend/trading/execution/manual_orders.py sha256 {actual[:12]} is not its"
+        " REVIEWED_BRIDGE_IMPORTS_SHA256 entry"
+    )
+
+
+@pytest.mark.parametrize(
+    "imports, detail",
+    [
+        ({"trading/missing.py": "c" * 64}, "cand:backend/trading/missing.py missing is not its"),
+        ({"../outside.py": "c" * 64}, "names a path outside backend/"),
+        ({"/abs.py": "c" * 64}, "names a path outside backend/"),
+        ({"config.py": "short"}, "is not a path with a 64-hex sha256"),
+    ],
+    ids=["missing-file", "dotdot", "absolute", "bad-digest"],
+)
+def test_a_bad_imports_map_refuses(scenario, imports, detail):
+    _with_imports(scenario, imports=imports)
+
+    result = _pin(scenario.repo)
+
+    assert result.status == REFUSE
+    assert detail in result.detail
+
+
 def test_a_missing_bridge_refuses(scenario):
     _on_candidate(scenario, lambda repo: (repo.path / BRIDGE).unlink())
 
@@ -1099,8 +1176,17 @@ def test_reviewed_pins_sees_the_real_supervisor_pin():
 
     source = Path(supervisor.__file__).read_text()
 
-    assert deploy_check.reviewed_pins(source) == {"REVIEWED_BRIDGE_SHA256": supervisor.REVIEWED_BRIDGE_SHA256}
+    # Rewritten explicitly for P3-B0 (not weakened): supervisor.py now pins the
+    # bridge's lazy imports as a second REVIEWED_* constant, so the reader must
+    # see exactly both, and the bridge pin literal is still found exactly once.
+    assert deploy_check.reviewed_pins(source) == {
+        "REVIEWED_BRIDGE_SHA256": supervisor.REVIEWED_BRIDGE_SHA256,
+        "REVIEWED_BRIDGE_IMPORTS_SHA256": supervisor.REVIEWED_BRIDGE_IMPORTS_SHA256,
+    }
     assert deploy_check.PIN_PATTERN.findall(source) == [supervisor.REVIEWED_BRIDGE_SHA256]
+    assert deploy_check.imports_pin_files(supervisor.REVIEWED_BRIDGE_IMPORTS_SHA256) == (
+        supervisor.REVIEWED_BRIDGE_IMPORTS_SHA256
+    )
 
 
 @pytest.mark.parametrize(

@@ -101,6 +101,29 @@ def test_the_bridge_lazily_imports_exactly_these_backend_modules():
     assert len(_ledger_attributes(_tree())) >= 10
 
 
+def _imported_file(statement: str) -> str:
+    """The backend file one lazy import statement loads, by path under backend/."""
+    node = ast.parse(statement).body[0]
+    assert isinstance(node, ast.ImportFrom) and node.module and len(node.names) == 1
+    module = node.module.replace(".", "/")
+    as_module = BACKEND / f"{module}.py"
+    if as_module.is_file():  # from trading.scheduler.sessions import market_session
+        return as_module.relative_to(BACKEND).as_posix()
+    submodule = BACKEND / module / f"{node.names[0].name}.py"  # from trading.execution import manual_orders
+    assert submodule.is_file(), statement
+    return submodule.relative_to(BACKEND).as_posix()
+
+
+def test_expected_lazy_imports_equal_pinned_import_keys():
+    # P3-B0 (C1): the supervisor's imports pin covers exactly the files the
+    # reviewed bridge imports lazily, read from the bridge's own source.
+    from trading.operations.supervisor import REVIEWED_BRIDGE_IMPORTS_SHA256
+
+    statements = _lazy_backend_imports(_tree())
+    assert tuple(statements) == EXPECTED_LAZY_IMPORTS
+    assert sorted(_imported_file(statement) for statement in statements) == sorted(REVIEWED_BRIDGE_IMPORTS_SHA256)
+
+
 def test_the_bridge_backend_imports_work_in_a_fresh_interpreter(tmp_path):
     tree = _tree()
     database = tmp_path / "never-created.db"

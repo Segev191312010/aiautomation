@@ -1950,7 +1950,7 @@ def test_d3_a_market_buy_is_claimed_sent_and_followed_to_filled(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     clock = Clock(MANUAL_T0 + timedelta(seconds=2))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
@@ -1980,7 +1980,7 @@ def test_d3_a_market_buy_is_claimed_sent_and_followed_to_filled(
 
 
 @pytest.mark.parametrize(("text", "expected"), [
-    ("/buy 10 AAPL 185", ("BUY", "LMT", 10, "lmtPrice", 185.0)),
+    ("/buy 10 AAPL 185 stop 180", ("BUY", "LMT", 10, "lmtPrice", 185.0)),
     ("/sell 30 AAPL", ("SELL", "MKT", 30, None, None)),
     ("/sell 30 AAPL 191", ("SELL", "LMT", 30, "lmtPrice", 191.0)),
     ("/stop 50 AAPL at 185", ("SELL", "STP", 50, "auxPrice", 185.0)),
@@ -2033,8 +2033,8 @@ def test_d3_a_row_claimed_before_a_crash_is_marked_unknown_and_never_resent(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    lost = queue_manual("/buy 10 AAPL", message_id=1)
-    known = queue_manual("/buy 5 TSLA", message_id=2)
+    lost = queue_manual("/buy 10 AAPL stop 185", message_id=1)
+    known = queue_manual("/buy 5 TSLA stop 185", message_id=2)
     for _ in (lost, known):  # both claimed by the previous bridge, which then died
         assert asyncio.run(mo.claim_next_order(MANUAL_T0 + timedelta(seconds=1))) is not None
     # Only the TSLA order reached IBKR before the crash: TWS still reports it.
@@ -2064,8 +2064,8 @@ def test_d3_cancel_requests_cancel_only_that_rows_order_and_settle_on_confirmati
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL 185", message_id=1)
-    other = queue_manual("/buy 3 TSLA 185", message_id=2)
+    row_id = queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
+    other = queue_manual("/buy 3 TSLA 185 stop 180", message_id=2)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     clock = Clock(MANUAL_T0 + timedelta(seconds=2))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
@@ -2093,7 +2093,7 @@ def test_d3_a_tws_rejection_marks_the_row_rejected_with_its_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     clock = Clock(MANUAL_T0 + timedelta(seconds=2))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
@@ -2192,7 +2192,7 @@ def test_d3_one_bad_row_never_blocks_the_flatten(
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
     held = bracket("held", "HELD", status="open", parent=30, filled=100)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1, now=ny(15, 44, 50))
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1, now=ny(15, 44, 50))
     broker = connected_broker(bid=Decimal("50.00"), ask=Decimal("50.02"), live_orders={31: "Submitted", 32: "PreSubmitted"},
                               positions={300: 100})
     broker.reqOpenOrders()
@@ -2218,8 +2218,8 @@ def test_d3_manual_orders_never_take_bot_slots_and_keep_bot_entries_off_their_sy
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    queue_manual("/buy 10 AAPL 185", message_id=1)
-    queue_manual("/buy 5 TSLA 185", message_id=2)
+    queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
+    queue_manual("/buy 5 TSLA 185 stop 180", message_id=2)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     clock = Clock(MANUAL_T0 + timedelta(seconds=2))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
@@ -2281,8 +2281,8 @@ def test_d3_cancel_all_cancels_every_working_owner_order_and_keeps_partial_fills
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    first = queue_manual("/buy 10 AAPL 185", message_id=1)
-    second = queue_manual("/buy 3 TSLA 185", message_id=2)
+    first = queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
+    second = queue_manual("/buy 3 TSLA 185 stop 180", message_id=2)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     clock = Clock(MANUAL_T0 + timedelta(seconds=2))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
@@ -2314,7 +2314,7 @@ def test_d3_an_order_that_filled_while_the_bridge_was_down_is_recorded_filled(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     assert asyncio.run(mo.claim_next_order(MANUAL_T0 + timedelta(seconds=1))) is not None
     # The previous bridge sent it as order 88 and died; it filled meanwhile and is no longer open.
     filled = execution("0000e0d5.000000e1.01.01", 88, 10, 190.0, acctNumber=ACCOUNT, orderRef=f"manual:{row_id}",
@@ -2399,7 +2399,7 @@ def manual_sells(broker: FakeBroker, row_id: str) -> list[Any]:
     return [sent for _, sent in broker.placed if sent.orderRef == f"manual:{row_id}"]
 
 
-@pytest.mark.parametrize("text", ["/close AAPL", "/sell 100 AAPL", "/sell all AAPL", "/buy 10 AAPL"])
+@pytest.mark.parametrize("text", ["/close AAPL", "/sell 100 AAPL", "/sell all AAPL", "/buy 10 AAPL stop 185"])
 def test_f1_a_past_sessions_live_bot_legs_keep_owner_sells_off_their_shares(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str
 ) -> None:
@@ -2622,7 +2622,7 @@ def test_l1_a_manual_buy_meets_the_kill_switch_at_send_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fence: str
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)  # queued while the fence was off
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)  # queued while the fence was off
     bridge = desk_bridge(tmp_path, connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01")), ledger,
                          clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
 
@@ -2638,7 +2638,7 @@ def test_l1_a_manual_buy_meets_the_kill_switch_at_send_time(
 
 def test_l1_a_delayed_quote_never_counts_as_real_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     broker = connected_broker()
 
     def delayed(request_id: int, contract: Any, *args: Any) -> None:
@@ -2670,7 +2670,7 @@ def test_l1_owner_orders_are_refused_when_tws_reports_a_non_paper_account(
 
 def test_l1_no_owner_order_is_sent_after_a_stop_request(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
     original = broker.reqMktData
@@ -2690,7 +2690,7 @@ def test_l1_a_failure_after_place_order_is_unknown_never_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     original = broker.placeOrder
 
@@ -2751,7 +2751,7 @@ def test_l1_a_queued_row_with_a_cancel_request_is_never_claimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     with closing(sqlite3.connect(ledger)) as connection:  # a cancel flag that raced the claim
         connection.execute("UPDATE autotrader_manual_orders SET cancel_requested=1 WHERE id=?", (row_id,))
         connection.commit()
@@ -2768,11 +2768,11 @@ def test_l1_unknown_manual_buys_still_count_toward_the_manual_exposure_cap(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    for message_id, text in ((1, "/buy 800 AAPL"), (2, "/buy 800 TSLA")):  # ~152,000 each
+    for message_id, text in ((1, "/buy 800 AAPL stop 185"), (2, "/buy 800 TSLA stop 185")):  # ~152,000 each
         queue_manual(text, message_id=message_id)
         assert asyncio.run(mo.claim_next_order(MANUAL_T0 + timedelta(seconds=1))) is not None
     asyncio.run(mo.mark_unknown_sending_rows(set(), now=MANUAL_T0 + timedelta(seconds=1)))  # both unknown
-    row_id = queue_manual("/buy 200 NVDA", message_id=3)  # +38,000: over 50% of 665,000 with the two above
+    row_id = queue_manual("/buy 200 NVDA stop 185", message_id=3)  # +38,000: over 50% of 665,000 with the two above
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
     bridge.tick()
@@ -2808,8 +2808,8 @@ def test_l2_earlier_session_rows_ibkr_no_longer_works_are_settled_at_startup(
     ledger = manual_ledger(tmp_path, monkeypatch)
     yesterday = ny(10, 0) - timedelta(days=1)
     partial = queue_manual("/sell 100 AAPL 191", message_id=1, now=yesterday, owner_shares=100)
-    lost = queue_manual("/buy 10 TSLA", message_id=2, now=yesterday)
-    today = queue_manual("/buy 5 NVDA 185", message_id=3)
+    lost = queue_manual("/buy 10 TSLA stop 185", message_id=2, now=yesterday)
+    today = queue_manual("/buy 5 NVDA 185 stop 180", message_id=3)
     for moment in (yesterday, yesterday, MANUAL_T0):
         assert asyncio.run(mo.claim_next_order(moment + timedelta(seconds=1))) is not None
     asyncio.run(mo.update_order_status(partial, "sent", now=yesterday, ibkr_order_id=55))
@@ -2838,7 +2838,7 @@ def test_l3_the_next_order_id_clears_every_id_in_the_state_and_the_ledger(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    old = queue_manual("/buy 1 TSLA", message_id=1)
+    old = queue_manual("/buy 1 TSLA stop 185", message_id=1)
     assert asyncio.run(mo.claim_next_order(MANUAL_T0 + timedelta(seconds=1))) is not None
     asyncio.run(mo.update_order_status(old, "sent", now=MANUAL_T0, ibkr_order_id=150))
     done = bracket("done", "DONE", status="closed", parent=120, filled=100, exit_filled=100)  # legs 120-122
@@ -2857,7 +2857,7 @@ def test_l3_a_stored_order_id_ibkr_reports_as_another_order_is_never_acted_on(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL 185", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
     assert asyncio.run(mo.claim_next_order(MANUAL_T0 + timedelta(seconds=1))) is not None
     asyncio.run(mo.update_order_status(row_id, "sent", now=MANUAL_T0, ibkr_order_id=31))
     # After a reset sequence, id 31 now names a bot leg at IBKR.
@@ -2908,7 +2908,7 @@ def test_l3_a_cancel_checks_the_order_ref_right_before_cancelling(
     from trading.execution import manual_orders as mo
 
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL 185", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
     clock = Clock(MANUAL_T0 + timedelta(seconds=2))
     bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
@@ -2951,7 +2951,7 @@ def test_l5_no_owner_row_is_claimed_in_the_last_seconds_before_the_flatten(
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
     held = bracket("held", "HELD", status="open", parent=30, filled=100)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1, now=ny(15, 44, 40))
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1, now=ny(15, 44, 40))
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), live_orders={31: "Submitted", 32: "PreSubmitted"},
                               positions={300: 100})
     broker.reqOpenOrders()
@@ -2969,7 +2969,7 @@ def test_f1_live_bot_legs_block_owner_orders_by_symbol_even_without_a_contract_i
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
-    row_id = queue_manual("/buy 10 AAPL", message_id=1)
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1)
     broker = _broker_with_live_bot_legs(41, 42, parent=40, ref="autotrader:yesterday0001")
     broker.open_order_contracts = {41: SimpleNamespace(symbol="AAPL"), 42: SimpleNamespace(symbol="AAPL")}
     bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
@@ -3257,7 +3257,7 @@ def test_lc_new_order_ids_skip_the_live_orders_of_an_earlier_session(
     stop = _bot_leg(101, "STP", parent=99, ref="autotrader:yesterday0001")
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), positions={AAPL_ID: 100},
                               live_orders={100: "Submitted", 101: "PreSubmitted"}, order_objects={100: target, 101: stop})
-    queue_manual("/buy 5 TSLA", message_id=1)
+    queue_manual("/buy 5 TSLA stop 185", message_id=1)
     bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
     bridge.startup()
     bridge.tick()

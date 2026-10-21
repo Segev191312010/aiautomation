@@ -181,3 +181,96 @@ async def test_every_migration_applies_cleanly_to_a_copy_of_the_live_database(tm
     await init_db()
     assert await _ledger(copy) == ledger
     assert await _integrity(copy) == ("ok", [])
+
+
+# --- migration 17 (v7c, owner decision D5): a buy carries its protective stop -----------------------
+
+V17_TRIGGERS = {
+    "autotrader_manual_orders_buy_needs_stop",
+    "autotrader_manual_orders_entry_stop_immutable",
+}
+
+
+def _migration_17() -> migrations.Migration:
+    return next(item for item in migrations.MIGRATIONS if item.version == 17)
+
+
+def test_migration_17_identity_and_payload() -> None:
+    from trading.storage.manual_orders_schema import (
+        MANUAL_BUY_NEEDS_STOP,
+        MANUAL_ENTRY_STOP_MIGRATION,
+        MANUAL_ENTRY_STOP_SCHEMA,
+    )
+
+    migration = _migration_17()
+    assert (migration.version, migration.name, migration.signature) == (
+        MANUAL_ENTRY_STOP_MIGRATION, "manual-entry-stop", "v1-manual-entry-stop-20261021"
+    )
+    assert migration.schema_payload == MANUAL_ENTRY_STOP_SCHEMA
+    assert MANUAL_BUY_NEEDS_STOP == "manual_buy_needs_stop"
+    # Migration 12's own schema is untouched: its reviewed intent trigger is never recreated.
+    assert _migration_12().checksum == MIGRATION_12_CHECKSUM
+    assert not any("DROP" in statement.upper() for statement in MANUAL_ENTRY_STOP_SCHEMA)
+
+
+@pytest.mark.anyio
+async def test_migration_17_applies_on_top_of_a_version_16_database_with_rows(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "v16.db"
+    full = migrations.MIGRATIONS
+    monkeypatch.setattr(migrations, "MIGRATIONS", full[:16])
+    columns = ("id, created_at, updated_at, chat_id, message_id, update_id, source, raw_text, action, symbol,"
+               " con_id, primary_exchange, quantity, order_type, limit_price, stop_price, status, expires_at,"
+               " audit_json")
+    marks = ", ".join("?" * 19)
+
+    def row(digit: str, action: str, order_type: str, limit: str | None, stop: str | None) -> tuple[object, ...]:
+        return (digit * 32, "t", "t", 7, int(digit, 16) + 1, 1, "command", "x", action, "AAPL", 1, "NASDAQ", 10,
+                order_type, limit, stop, "filled", "t", "{}")
+
+    async with aiosqlite.connect(path) as db:
+        await migrations.apply_migrations(db)
+        # The ledger as v16 holds it: buys without a stop, a /stop order.
+        await db.execute(f"INSERT INTO autotrader_manual_orders ({columns}) VALUES ({marks})",
+                         row("a", "BUY", "LMT", "180", None))
+        await db.execute(f"INSERT INTO autotrader_manual_orders ({columns}) VALUES ({marks})",
+                         row("b", "SELL_STOP", "STP", None, "170"))
+        await db.commit()
+    assert [version for version, _, _ in await _ledger(path)] == list(range(1, 17))
+    monkeypatch.setattr(migrations, "MIGRATIONS", full)
+    backup = tmp_path / "before-migration-17.db"
+    async with aiosqlite.connect(path) as db:
+        await migrations.apply_migrations(db, backup_path=backup)
+    ledger = await _ledger(path)
+    assert [version for version, _, _ in ledger] == [item.version for item in full]
+    assert ledger[16][1] == _migration_17().checksum
+    assert V17_TRIGGERS <= (await _schema(path))["trigger"]
+    _assert_migration_12_present(await _schema(path))
+    assert [version for version, _, _ in await _ledger(backup)] == list(range(1, 17))
+    async with aiosqlite.connect(path) as db:
+        async with db.execute("SELECT id, entry_stop_price FROM autotrader_manual_orders ORDER BY id") as cursor:
+            assert [tuple(item) for item in await cursor.fetchall()] == [("a" * 32, None), ("b" * 32, None)]
+        stop_columns = columns + ", entry_stop_price"
+        stop_marks = marks + ", ?"
+        # A buy without its stop, a stop on anything but a buy, a stop not below its limit: refused.
+        for values, match in (
+            (row("c", "BUY", "MKT", None, None) + (None,), "manual_buy_needs_stop"),
+            (row("d", "BUY", "MKT", None, None) + ("0",), "CHECK"),
+            (row("e", "SELL", "MKT", None, None) + ("170",), "CHECK"),
+            (row("f", "BUY", "LMT", "180", None) + ("180",), "CHECK"),
+        ):
+            with pytest.raises(aiosqlite.IntegrityError, match=match):
+                await db.execute(f"INSERT INTO autotrader_manual_orders ({stop_columns}) VALUES ({stop_marks})",
+                                 values)
+            await db.rollback()
+        await db.execute(f"INSERT INTO autotrader_manual_orders ({stop_columns}) VALUES ({stop_marks})",
+                         row("9", "BUY", "LMT", "180", None) + ("175",))
+        await db.commit()
+        # The stop is part of the immutable intent, also for the rows written before v17.
+        for target in ("9" * 32, "a" * 32):
+            with pytest.raises(aiosqlite.IntegrityError, match="immutable"):
+                await db.execute("UPDATE autotrader_manual_orders SET entry_stop_price='150' WHERE id=?", (target,))
+            await db.rollback()
+        with pytest.raises(aiosqlite.IntegrityError, match="immutable"):
+            await db.execute("UPDATE autotrader_manual_orders SET limit_price='181' WHERE id=?", ("9" * 32,))
+        await db.rollback()
+    assert await _integrity(path) == ("ok", [])

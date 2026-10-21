@@ -78,6 +78,8 @@ from trading.operations.deploy_check import (
     BRIDGE_PATH,
     DEFAULT_BENIGN_PATHS,
     DEFAULT_LEDGER_GLOB,
+    IMPORTS_PIN_NAME,
+    IMPORTS_SHA_LENGTH,
     MIGRATION_UNEXPECTED,
     PIN_NAME,
     REFUSE,
@@ -91,6 +93,8 @@ from trading.operations.deploy_check import (
     VerdictLine,
     check_tree_clean,
     git_environment,
+    imports_digest,
+    imports_pin_files,
     match_verdict,
     resolve_candidate,
     reviewed_pins,
@@ -203,6 +207,8 @@ DRY_RUN_SCHEMA = "dry_run_schema"
 DRY_RUN_SESSION = "dry_run_session"
 DRY_RUN_HEARTBEAT = "dry_run_heartbeat"
 DRY_RUN_BUDGET = "dry_run_budget"
+# P3-B0: the candidate pins the bridge's imports, so its dry run must say so once.
+DRY_RUN_IMPORTS = "dry_run_imports"
 POST_START_NO_START = "post_start_no_start"
 POST_START_SESSION_WAIT = "post_start_session_wait"
 POST_START_LAUNCH_REFUSED = "post_start_launch_refused"
@@ -272,6 +278,7 @@ TOKENS = (
     DRY_RUN_SESSION,
     DRY_RUN_HEARTBEAT,
     DRY_RUN_BUDGET,
+    DRY_RUN_IMPORTS,
     POST_START_NO_START,
     POST_START_SESSION_WAIT,
     POST_START_LAUNCH_REFUSED,
@@ -702,7 +709,11 @@ def pin_problems(
 ) -> tuple[list[tuple[str, str]], dict[str, str]]:
     """The three-way pin check: ``--expect-pin`` == every matched verdict's
     ``bridge_sha=`` == the candidate's ``REVIEWED_BRIDGE_SHA256`` == the
-    candidate's bridge blob; and every other ``REVIEWED_*`` pin == its blobs."""
+    candidate's bridge blob; and every other ``REVIEWED_*`` pin == its blobs.
+    When the candidate pins the bridge's imports (P3-B0), every matched verdict
+    carries ``imports_sha=`` == the first 12 hex of that map's digest, so the
+    review names the import files too; a verdict that names imports the
+    candidate does not pin is refused as well."""
     problems: list[tuple[str, str]] = []
     if not verdicts:
         problems.append((PIN_VERDICT_MISSING, "no matched verdict line to read bridge_sha= from"))
@@ -722,10 +733,34 @@ def pin_problems(
         problems.append((PIN_EXPECTED, f"{head[:12]} has no {SUPERVISOR_PATH}"))
         return problems, {}
     try:
-        files = pinned_files(reviewed_pins(supervisor.decode("utf-8", "replace")))
+        pins = reviewed_pins(supervisor.decode("utf-8", "replace"))
+        files = pinned_files(pins)
+        imports = imports_pin_files(pins[IMPORTS_PIN_NAME]) if IMPORTS_PIN_NAME in pins else None
     except (SyntaxError, ValueError) as exc:
         problems.append((PIN_EXPECTED, f"{head[:12]}:{SUPERVISOR_PATH}: {exc}"))
         return problems, {}
+    wanted = None if imports is None else imports_digest(imports)[:IMPORTS_SHA_LENGTH]
+    for line in verdicts:
+        named = verdict_tokens(line.text).get("imports_sha", ())
+        if wanted is None:
+            if named:
+                problems.append(
+                    (
+                        PIN_EXPECTED,
+                        f"verdict imports_sha={','.join(named)} but {head[:12]} pins no bridge imports:"
+                        f" {line.describe()}",
+                    )
+                )
+        elif not named:
+            problems.append((PIN_VERDICT_MISSING, f"the verdict line has no imports_sha=: {line.describe()}"))
+        elif named != (wanted,):
+            problems.append(
+                (
+                    PIN_EXPECTED,
+                    f"verdict imports_sha={','.join(named)} is not {head[:12]}'s {IMPORTS_PIN_NAME}"
+                    f" digest {wanted}: {line.describe()}",
+                )
+            )
     if files[BRIDGE_PATH] != expect_pin:
         problems.append(
             (PIN_EXPECTED, f"the candidate's {PIN_NAME} {files[BRIDGE_PATH]} is not --expect-pin {expect_pin}")
@@ -738,6 +773,19 @@ def pin_problems(
                 (PIN_EXPECTED, f"{head[:12]}:{path} sha256 {actual or 'missing'} is not its pin {digest}")
             )
     return problems, files
+
+
+def pinned_imports_count(git: Git, commit: str) -> int | None:
+    """How many files ``commit``'s REVIEWED_BRIDGE_IMPORTS_SHA256 pins, or None for code
+    from before P3-B0 (or a map pin_problems has already refused)."""
+    blob = git.blob(commit, SUPERVISOR_PATH)
+    if blob is None:
+        return None
+    try:
+        value = reviewed_pins(blob.decode("utf-8", "replace")).get(IMPORTS_PIN_NAME)
+        return None if value is None else len(imports_pin_files(value))
+    except (SyntaxError, ValueError):
+        return None
 
 
 def fenced_sendable(database: Path) -> tuple[str, ...]:
@@ -785,6 +833,11 @@ def reviewed_line(pin: str) -> str:
     return f"{BRIDGE_PREFIX}reviewed (sha256 {pin[:12]})"
 
 
+def imports_line(count: int) -> str:
+    """supervisor.bridge_imports_lines when every pinned import is the reviewed one."""
+    return f"{BRIDGE_PREFIX}imports reviewed ({count} files)"
+
+
 def pin_info_line(pin: str) -> str:
     return f"{BRIDGE_PREFIX}INFO bridge sha256={pin}"
 
@@ -825,6 +878,9 @@ class DryRunExpectation:
     registry: bool = True
     heartbeat: bool = True
     budget: bool = False
+    # P3-B0: the number of files the candidate's REVIEWED_BRIDGE_IMPORTS_SHA256
+    # pins (None: code from before P3-B0 prints no such line).
+    imports: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -868,6 +924,12 @@ class DryRunCheck:
                 DRY_RUN_PIN,
                 pin_info_line(expect.pin),
                 family=lambda line: line.startswith(f"{BRIDGE_PREFIX}INFO bridge sha256="),
+            )
+        if expect.imports is not None:
+            exactly_one(
+                DRY_RUN_IMPORTS,
+                imports_line(expect.imports),
+                family=lambda line: line.startswith(f"{BRIDGE_PREFIX}imports "),
             )
         if expect.fenced is not None:
             exactly_one(
@@ -1065,6 +1127,7 @@ class ApplyPlan:
     session_date: date
     budget: bool
     tool_sha: str
+    imports: int | None = None
 
 
 @dataclass(slots=True)
@@ -1256,6 +1319,7 @@ class DeployOperator:
         bridge_blob = self.git.blob(head, BRIDGE_PATH) or b""
         if refusals or prev is None:
             return None, refusals
+        imports = pinned_imports_count(self.git, head)
         return (
             ApplyPlan(
                 request=request,
@@ -1270,6 +1334,7 @@ class DeployOperator:
                 session_date=next_session_date(now),
                 budget=b"\nDAY_RISK_BUDGET_PCT" in bridge_blob,
                 tool_sha=(own_head or "?")[:SHORT_SHA_LENGTH],
+                imports=imports,
             ),
             [],
         )
@@ -1398,6 +1463,7 @@ class DeployOperator:
             fenced=tuple(sorted(plan.request.expect_fenced)),
             sendable=SENDABLE_IDENTITIES,
             budget=plan.budget,
+            imports=plan.imports,
         )
 
     # -- steps --
