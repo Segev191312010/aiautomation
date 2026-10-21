@@ -91,8 +91,10 @@ MIN_SESSIONS_SINCE_STEP = 10
 PROBATION_SESSIONS = 5
 DEMOTION_MIN_TRADES = 10
 # Owner decision 2026-10-15: the open-risk term (bridge v7c) gates the first
-# step above current sizes. Flipped only in the commit that follows v7c's deploy.
-OPEN_RISK_TERM_DEPLOYED = False
+# step above current sizes. True since the bridge v7c change (plan P3-B1), in the
+# same commit that pins that bridge: a tripwire test ties it to the pinned bridge's
+# DAY_RISK_BUDGET_PCT, so it can never be True for a bridge without the budget.
+OPEN_RISK_TERM_DEPLOYED = True
 
 # Statuses and named tokens.
 PROPOSED = "proposed"

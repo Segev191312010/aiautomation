@@ -75,7 +75,9 @@ def test_the_shipped_tables_are_the_owners_tables() -> None:
             positions, entries, offset
         ), name
     assert bridge.global_max_open() == 6
-    assert bridge.BRIDGE_VERSION == "v7b"
+    # Rewritten for v7c (explicit, not weakened): the same four identities and caps ship in bridge v7c,
+    # which adds only the account-level day risk budget (D1) and manual buys with their stop (D5).
+    assert bridge.BRIDGE_VERSION == "v7c"
 
 
 @pytest.mark.parametrize("identity", sorted(OWNER_TABLE))

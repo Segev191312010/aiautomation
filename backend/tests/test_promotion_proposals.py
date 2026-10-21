@@ -112,11 +112,15 @@ def test_the_rule_its_ladder_and_the_v7c_gate_are_pinned():
     assert (promoter.PROBATION_SESSIONS, promoter.DEMOTION_MIN_TRADES) == (5, 10)
     assert promoter.MODE == "propose" and promoter.RULE_VERSION == "promotion-proposals-v1"
     # Owner decision 2026-10-15: no step above current sizes before v7c is deployed.
-    assert OPEN_RISK_TERM_DEPLOYED is False
+    # Rewritten for v7c (explicit, not weakened): the gate ships True with the pinned v7c bridge, and
+    # test_the_open_risk_gate_follows_the_pinned_bridge ties it to that bridge's budget constant.
+    assert OPEN_RISK_TERM_DEPLOYED is True
 
 
 def test_eligible_evidence_is_held_while_the_open_risk_term_is_not_deployed():
-    report = evaluate_identity(_evidence(STRONG))  # the module's own gate
+    # Rewritten for v7c (explicit, not weakened): the module's own gate is True since v7c, so the held
+    # branch is reached by passing False, exactly what a pre-v7c module would have used.
+    report = evaluate_identity(_evidence(STRONG), open_risk_term_deployed=False)
     assert (report.status, report.proposed, report.reasons, report.token) == (
         HELD, Decimal("0.5"), (), HELD_OPEN_RISK_TERM,
     )
@@ -269,7 +273,10 @@ def test_the_window_runs_through_a_size_step_and_counts_incidents_and_probation(
     )
 
 
-def test_the_text_section_lists_proposals_first_then_every_identity():
+def test_the_text_section_lists_proposals_first_then_every_identity(monkeypatch):
+    # Rewritten for v7c (explicit, not weakened): the shipped gate is True since v7c; this test keeps
+    # checking the text section with the gate closed (the held line), as it was written.
+    monkeypatch.setattr(promoter, "OPEN_RISK_TERM_DEPLOYED", False)
     reports = (
         evaluate_identity(_evidence(STRONG, current="1", identity="MOMO_HOD_V2")),
         evaluate_identity(_evidence(STRONG)),
@@ -373,8 +380,9 @@ def test_the_nightly_job_writes_proposals_and_the_weekly_text_carries_them(night
     ]
     directory = night["root"] / "reports" / "2026-10-12"
     document = json.loads((directory / "proposals.json").read_text())
+    # Rewritten for v7c (explicit, not weakened): the document reports the shipped gate, True since v7c.
     assert (document["mode"], document["open_risk_term_deployed"], document["rule"]) == (
-        "propose", False, "promotion-proposals-v1",
+        "propose", True, "promotion-proposals-v1",
     )
     assert [item["status"] for item in document["identities"]] == [
         "at_ceiling", "not_eligible", "not_eligible", "not_eligible",
@@ -525,3 +533,25 @@ def test_an_unreadable_fence_table_proposes_nothing(tmp_path):
     empty = tmp_path / "empty.db"
     sqlite3.connect(empty).close()
     assert promoter.read_fences(empty) == {}
+
+
+def test_the_open_risk_gate_follows_the_pinned_bridge():
+    # Plan P3-B1: the promoter may propose a size-up only while the pinned bridge enforces the 3 %
+    # account-level day risk budget. Both halves are read from disk: the bridge file must be the
+    # supervisor's pinned one, and the gate must equal "that bridge has the 3 % budget".
+    import importlib.util
+    import sys
+
+    from trading.operations.supervisor import BACKEND_DIR, REVIEWED_BRIDGE_SHA256, file_sha256
+
+    path = BACKEND_DIR / "scripts_local" / "paper_bridge.py"
+    assert file_sha256(path) == REVIEWED_BRIDGE_SHA256
+    spec = importlib.util.spec_from_file_location("paper_bridge_promotion_gate", path)
+    assert spec is not None and spec.loader is not None
+    bridge = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = bridge
+    try:
+        spec.loader.exec_module(bridge)
+    finally:
+        sys.modules.pop(spec.name, None)
+    assert promoter.OPEN_RISK_TERM_DEPLOYED is (bridge.DAY_RISK_BUDGET_PCT == Decimal("3"))
