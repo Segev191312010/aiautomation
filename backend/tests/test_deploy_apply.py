@@ -24,11 +24,15 @@ import io
 import itertools
 import json
 import os
+import re
+import shlex
 from pathlib import Path
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
+import time as time_module
 
 import pytest
 
@@ -85,6 +89,16 @@ PLAN_TOKENS = (
     "verdict_migration_missing", "undo_reset_noop", "undo_prev_mismatch", "undo_needs_db_restore",
     "undo_not_flat",
 )
+# Added by the N17 fixes and the P2 rehearsal findings (P2.1), each kept verbatim.
+P21_TOKENS = (
+    "candidate_worktree_dirty",  # LOW-3
+    "paths_not_canonical",  # LOW-4
+    "changed_paths_unreadable",  # rehearsal F-2
+    "confirm_timeout",  # MEDIUM-1
+    "live_head_moved",  # MEDIUM-1
+    "session_date_changed",  # MEDIUM-1
+    "post_start_child_exited",  # rehearsal F-1
+)
 
 
 # --- guards: nothing real outside git ------------------------------------------------------
@@ -107,14 +121,25 @@ def _nothing_live(monkeypatch):
 # --- fakes ---------------------------------------------------------------------------------------
 
 
+class FakeWorldError(BaseException):
+    """The fake world refuses to go on (a runaway wait, a second supervisor while one
+    holds its lock): a BaseException, so no `except Exception` in the code under test
+    turns it into a halt, and the test fails instead of hanging (N17 I-14, M67)."""
+
+
 class FakeClock:
     """A wall clock that moves only when the code under test sleeps; events fire on the way."""
+
+    # The longest legitimate run sleeps a few hundred times (75 s stop + 60 s start,
+    # twice with an undo); a wait loop that never ends trips this instead of hanging.
+    MAX_SLEEPS = 5000
 
     def __init__(self, start: datetime) -> None:
         self.now = start
         self._events: list[tuple[datetime, int, Callable[[], None]]] = []
         self._order = itertools.count()
         self.slept = 0.0
+        self.sleeps = 0
 
     def __call__(self) -> datetime:
         return self.now
@@ -123,6 +148,9 @@ class FakeClock:
         heapq.heappush(self._events, (self.now + timedelta(seconds=seconds), next(self._order), action))
 
     def sleep(self, seconds: float) -> None:
+        self.sleeps += 1
+        if self.sleeps > self.MAX_SLEEPS:
+            raise FakeWorldError(f"the fake clock was slept {self.MAX_SLEEPS} times: a wait that never ends")
         target = self.now + timedelta(seconds=seconds)
         while self._events and self._events[0][0] <= target:
             at, _order, action = heapq.heappop(self._events)
@@ -133,12 +161,22 @@ class FakeClock:
 
 
 class FakeTTY(io.StringIO):
-    def __init__(self, typed: str = "", *, tty: bool = True) -> None:
+    """The owner's terminal; ``on_read`` runs while the prompt waits (time passes,
+    HEAD moves, Ctrl-C) before the typed line comes back."""
+
+    def __init__(self, typed: str = "", *, tty: bool = True, on_read: Callable[[], None] | None = None) -> None:
         super().__init__(typed)
         self._tty = tty
+        self._on_read = on_read
 
     def isatty(self) -> bool:
         return self._tty
+
+    def readline(self, *args) -> str:
+        action, self._on_read = self._on_read, None
+        if action is not None:
+            action()
+        return super().readline(*args)
 
 
 @dataclass
@@ -153,6 +191,9 @@ class StartShape:
     extra_rotated: int = 0
     plist_root: Path | None = None  # None: the live checkout
     mode: str = "daily"
+    # After 07:55 ET: SESSION_START and the session children at once, no SESSION_WAIT
+    # (the real 2026-10-13 09:46 ET restart, supervisor.log.2026-10-17:31-37).
+    mid_session: bool = False
 
 
 class FakeRobot:
@@ -194,9 +235,17 @@ class FakeRobot:
         return self.lock_fd is not None
 
     def hold_lock(self) -> None:
+        if self.lock_fd is not None:
+            # A blocking flock here deadlocked the suite (N17 I-14: M67 hung for 14 min).
+            raise FakeWorldError("a second supervisor started while one holds supervisor.lock")
         self.lock.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_fd = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
+        descriptor = os.open(self.lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            raise FakeWorldError("supervisor.lock is held elsewhere: a second supervisor would refuse") from None
+        self.lock_fd = descriptor
 
     def release_lock(self) -> None:
         if self.lock_fd is not None:
@@ -221,12 +270,21 @@ class FakeRobot:
             self.write(f"SUPERVISOR_START pid={pid} mode={shape.mode}", moment),
             self.write(f"CHILD_START telegram pid={telegram}", moment),
             self.write(f"CHILD_START heartbeat pid={heartbeat}", moment),
-            self.write(
-                f"SESSION_WAIT date={shape.session_date.isoformat()}"
-                f" until={shape.session_date.isoformat()}T11:55:00+00:00",
-                moment,
-            ),
         ]
+        if shape.mid_session:
+            state.append(self.write(f"SESSION_START date={shape.session_date.isoformat()}", moment))
+            for name in ("screener", "notifier", "bridge", "orb", "gap"):
+                child = next(self.pids)
+                self.children.append((child, pid, f"{self.python} {self.control} {name} run"))
+                state.append(self.write(f"CHILD_START {name} pid={child}", moment))
+        else:
+            state.append(
+                self.write(
+                    f"SESSION_WAIT date={shape.session_date.isoformat()}"
+                    f" until={shape.session_date.isoformat()}T11:55:00+00:00",
+                    moment,
+                )
+            )
         if shape.rotate:
             # LogRotation: rename, then the carried state lines and the marker in one write.
             day = latest_rotation_boundary(moment).date()
@@ -268,6 +326,8 @@ class FakeLive:
         self.dry_run_edit: Callable[[str], str] | None = None
         self.dry_run_code = 0
         self.on_call: dict[str, Callable[[], None]] = {}
+        # What `shadow agent enable` writes instead of this code's own plist (None: its own).
+        self.plist_bytes: Callable[[], bytes | None] = lambda: None
 
     def __call__(self, argv, *, cwd, timeout) -> deploy_apply.LiveResult:
         argv = tuple(argv)
@@ -290,7 +350,7 @@ class FakeLive:
             root = shape.plist_root if shape is not None and shape.plist_root else world.repo
             manager = LaunchdManager(user_paths=world.paths, repository_root=root)
             world.paths.launch_agents_directory.mkdir(parents=True, exist_ok=True)
-            world.paths.launch_agent_file.write_bytes(manager.serialized_payload())
+            world.paths.launch_agent_file.write_bytes(self.plist_bytes() or manager.serialized_payload())
             world.launchctl.loaded = True
             if shape is not None:
                 world.clock.after(self.start_after, lambda: world.robot.start(shape))
@@ -401,6 +461,22 @@ def dry_run_text(world: "World", day: date) -> str:
     head = _DRY_RUN_HEAD.format(
         day=day.isoformat(), dow=f"{day:%a}", python=world.robot.python, logs=world.paths.log_directory
     )
+    local = world.clock().astimezone(MARKET_TIMEZONE)
+    if local.date() == day and local.time() >= time(7, 55):
+        # supervisor.dry_run_report simulates from now on the session day: the session
+        # starts at once, with no SESSION_WAIT (the shape of the real report at 08:05 ET,
+        # test_dry_run_mid_session_form_is_the_real_reports).
+        clock = f"{local:%H:%M:%S}"
+        head = head.replace(f"clock start  {day} 00:00 ET", f"clock start  {day} {local:%H:%M} ET").replace(
+            f"00:00:00  SUPERVISOR_START pid=62397 mode=once date={day}\n"
+            f"00:00:00  SESSION_WAIT date={day} until={day}T11:55:00+00:00\n"
+            f"07:55:00  SESSION_START date={day}\n"
+            "07:55:00  CHILD_START screener pid=1\n",
+            f"{clock}  SUPERVISOR_START pid=62397 mode=once date={day}\n"
+            f"{clock}  SESSION_START date={day}\n"
+            f"{clock}  CHILD_START screener pid=1\n",
+        )
+        assert "SESSION_WAIT" not in head, "the mid-session fixture must replace the waiting timeline"
     return "\n".join([head, bridge_lines, _DRY_RUN_TAIL.format(schema=schema)]) + "\n"
 
 
@@ -432,6 +508,7 @@ def _scenario(
     label: str = "P2",
     candidate_pin: str = PIN_V2,
     base_pinned: bool = True,
+    tool_file: str = TOOL_FILE,
 ) -> Scenario:
     repo = Repo(root / "live")
     repo.path.mkdir(parents=True)
@@ -451,7 +528,7 @@ def _scenario(
     repo.write(SUPERVISOR, f'"""supervisor"""\nREVIEWED_BRIDGE_SHA256 = "{candidate_pin}"\n')
     repo.write("backend/trading/feature.py", "FEATURE = 2\n")
     if tool_change:
-        repo.write(TOOL_FILE, "# the deploy tool changes\n")
+        repo.write(tool_file, "# the deploy tool changes\n")
     reviewed = repo.commit("feature")
     repo.append(
         LEDGER, _verdict_line(reviewed[:7], scope=scope, bridge_sha=bridge_sha, migration=migration, label=label)
@@ -479,6 +556,8 @@ class World:
     own_root: Path | None = None
     writer_factory: Callable[[Path], GitWriter] = GitWriter
     sntp: Callable[[], str] = lambda: GOOD_SNTP
+    # The account's real home as the tool reads it (None: the fake HOME is canonical).
+    account_home: Path | None = None
 
     def __post_init__(self) -> None:
         self.robot = FakeRobot(self.paths, self.repo, self.clock)
@@ -498,11 +577,13 @@ class World:
             _git(tree, "checkout", "-q", "--detach", head)
         return tree
 
-    def env(self, typed: str | None = None, *, tty: bool = True) -> DeployEnvironment:
+    def env(
+        self, typed: str | None = None, *, tty: bool = True, on_read: Callable[[], None] | None = None
+    ) -> DeployEnvironment:
         return DeployEnvironment(
             user_paths=self.paths,
             db_path=self.db,
-            stdin=FakeTTY(self.short_head + "\n" if typed is None else typed, tty=tty),
+            stdin=FakeTTY(self.short_head + "\n" if typed is None else typed, tty=tty, on_read=on_read),
             out=self.out,
             clock=self.clock,
             sleep=self.clock.sleep,
@@ -512,6 +593,7 @@ class World:
             sntp=self.sntp,
             own_root=self.own_root or self.worktree(),
             writer_factory=self.writer_factory,
+            account_home=lambda: self.account_home or self.paths.home,
         )
 
     @property
@@ -535,11 +617,20 @@ class World:
         )
         return replace(request, **changes)
 
-    def apply(self, typed: str | None = None, *, tty: bool = True, **changes) -> int:
-        return deploy_apply.run_deploy_apply(self.request(**changes), self.env(typed, tty=tty))
+    def apply(
+        self, typed: str | None = None, *, tty: bool = True, on_read: Callable[[], None] | None = None, **changes
+    ) -> int:
+        return deploy_apply.run_deploy_apply(self.request(**changes), self.env(typed, tty=tty, on_read=on_read))
 
-    def undo(self, to: str, reason: str = "dry_run_bang", typed: str | None = None) -> int:
-        environment = self.env(to[:7] + "\n" if typed is None else typed)
+    def undo(
+        self,
+        to: str,
+        reason: str = "dry_run_bang",
+        typed: str | None = None,
+        *,
+        on_read: Callable[[], None] | None = None,
+    ) -> int:
+        environment = self.env(to[:7] + "\n" if typed is None else typed, on_read=on_read)
         return deploy_apply.run_deploy_undo(DeployUndoRequest(repo=self.repo, to=to, reason=reason), environment)
 
     @property
@@ -611,6 +702,22 @@ def test_deploy_apply_constants_are_pinned():
     assert deploy_apply.STOP_WAIT_TIMEOUT_S == 75
     assert deploy_apply.POST_START_TIMEOUT_S == 60
     assert deploy_apply.POLL_S == 1.0
+    # P2.1: the manual L3-9 look came 20 s after the enable (rehearsal F-1); a typed
+    # sha older than 5 minutes is stale (N17 MEDIUM-1); SIGHUP/SIGTERM halt (LOW-2).
+    assert deploy_apply.POST_START_SETTLE_S == 20
+    assert deploy_apply.POST_START_SETTLE_S < deploy_apply.POST_START_TIMEOUT_S
+    assert deploy_apply.CONFIRM_TIMEOUT_S == 300
+    assert deploy_apply.HALT_SIGNALS == (signal.SIGHUP, signal.SIGTERM)
+    assert (
+        deploy_apply.CANDIDATE_WORKTREE_DIRTY,
+        deploy_apply.PATHS_NOT_CANONICAL,
+        deploy_apply.CHANGED_PATHS_UNREADABLE,
+        deploy_apply.CONFIRM_TIMEOUT,
+        deploy_apply.LIVE_HEAD_MOVED,
+        deploy_apply.SESSION_DATE_CHANGED,
+        deploy_apply.POST_START_CHILD_EXITED,
+    ) == P21_TOKENS
+    assert set(P21_TOKENS) <= set(deploy_apply.TOKENS)
     assert deploy_apply.DEPLOYS_LOG_NAME == "deploys.log"
     assert deploy_apply.DEPLOY_LOCK_NAME == "deploy.lock"
     assert (
@@ -637,6 +744,7 @@ def test_every_failure_token_is_one_literal_listed_once():
     assert len(tokens) == len(set(tokens))
     assert all(token == token.lower() and token.replace("_", "").isalnum() for token in tokens)
     assert set(PLAN_TOKENS) <= set(tokens)
+    assert set(P21_TOKENS) <= set(tokens)
     module_tokens = {
         value
         for name, value in vars(deploy_apply).items()
@@ -936,6 +1044,26 @@ def _break_live_pin(world, held):
     return _rebuild(world, base_pinned=False), {}, "prev_sha_invalid"
 
 
+def _break_own_checkout(world, held):
+    # N17 LOW-3: an uncommitted edit in the tool's own checkout runs unreviewed code.
+    (world.worktree() / "backend" / "trading" / "feature.py").write_text("FEATURE = 'edited in the worktree'\n")
+    return world, {}, "candidate_worktree_dirty"
+
+
+def _break_home(world, held):
+    # N17 LOW-4: HOME points elsewhere than the account's own home.
+    world.account_home = world.root / "account-home"
+    return world, {}, "paths_not_canonical"
+
+
+def _break_db_path(world, held):
+    # N17 LOW-4: DB_PATH points at a copy, not the robot's database.
+    copy = world.root / "copy.db"
+    copy.write_bytes(world.db.read_bytes())
+    world.db = copy
+    return world, {}, "paths_not_canonical"
+
+
 PRECHECK_BREAKERS = {
     "start_cutoff": _break_start_cutoff,
     "deploy_check_verdict": _break_verdict,
@@ -961,6 +1089,9 @@ PRECHECK_BREAKERS = {
     "label_missing": _break_label,
     "fenced_unreadable": _break_fences_unreadable,
     "live_pin_unreadable": _break_live_pin,
+    "candidate_worktree_dirty": _break_own_checkout,
+    "paths_not_canonical_home": _break_home,
+    "paths_not_canonical_db": _break_db_path,
 }
 
 
@@ -1002,7 +1133,15 @@ def test_not_a_tty_refuses(world):
 
 @pytest.mark.parametrize("typed", ["deadbee\n", "", "\n", "{full}\n", "{upper}\n"])
 def test_wrong_typed_sha_refuses(world, typed):
+    # N17 LOW-7: about 3.7 % of candidate shas have 7 digit-only characters, whose
+    # .upper() is the right sha. Add docs-only commits (the verdict still matches)
+    # until the short sha holds a letter, so the case variant always differs.
+    for _attempt in range(40):
+        if typed != "{upper}\n" or world.short_head.upper() != world.short_head:
+            break
+        _on_candidate(world, lambda repo: repo.append(LEDGER, "# a docs-only line"))
     typed = typed.format(full=world.head, upper=world.short_head.upper())
+    assert typed != world.short_head + "\n"
 
     code = world.apply(typed=typed)
 
@@ -1160,7 +1299,17 @@ def test_start_cutoff_rechecked_before_the_fast_forward(world):
     assert world.live_head() == world.scenario.base
     assert f"STEP git -C {world.repo} merge" not in world.output
     _token_lines(world, "start_cutoff")
-    assert world.deploys()[-1].endswith(f"DEPLOY rollback to {world.scenario.base} result=ROLLBACK reason=start_cutoff")
+    # Rewritten for the rehearsal's observation (R5a): git never moved, so nothing is
+    # reset and the line says ABORTED, not "rollback to" (was: result=ROLLBACK).
+    assert world.deploys()[-1].split(" ", 1)[1] == (
+        f"DEPLOY P2 {world.short_head} PREV_SHA={world.scenario.base} pin={PIN_V2[:12]}"
+        " result=ABORTED reason=start_cutoff"
+    )
+    assert f"OK HEAD is still {world.scenario.base}: git never moved, nothing to reset" in world.output
+    assert f"STEP git -C {world.repo} reset --keep" not in world.output
+    assert world.summary() == (
+        f"deploy apply: ABORTED reason=start_cutoff (exit 3; git never moved; {world.scenario.base[:7]} runs again)"
+    )
     assert world.robot.running and world.launchctl.loaded
 
 
@@ -1719,7 +1868,9 @@ def test_migrated_failure_halts_disabled_prints_restore_never_resets(tmp_path, m
     )
     for expected in (
         "RESTORE (never run by this command); one line at a time, each only after the one before passed:",
-        "  1. pgrep -fl autotraderctl.py || echo none",
+        # Rewritten for rehearsal O-e: `pgrep -fl autotraderctl.py` also listed other
+        # checkouts' processes; the pattern is now the live checkout's backend/ only.
+        f"  1. pgrep -fl {shlex.quote(deploy_apply._ere_literal(f'{world.repo}/backend/'))} || echo none",
         f"  2. [ -e {world.db} ] && mv {world.db} {world.db}.v{LATEST}-failed-",
         f"  3. cp {backup} {world.db}",
         f"  4. git -C {world.repo} reset --keep {world.scenario.base}",
@@ -2067,12 +2218,20 @@ def _bridge_mismatch(world: World) -> None:
     bridge = world.repo / BRIDGE
 
     class EditedBridge(GitWriter):
+        # N17 LOW-7: git's index caches each file's stat in whole seconds. The old
+        # restore (a plain write) looked clean to `reset --keep` only when it fell in
+        # the same second as the fast-forward (racy git); across a second boundary the
+        # reset refused and the test failed. Pin the boundary (the index records an
+        # hour-old stat) and restore through git, so the outcome never depends on timing.
         def merge_ff_only(self, sha):
             super().merge_ff_only(sha)
+            hour_ago = time_module.time() - 3600
+            os.utime(bridge, (hour_ago, hour_ago))
+            _git(world.repo, "update-index", "-q", "--refresh")
             bridge.write_text("print('edited after the fast-forward')\n")
 
         def reset_keep(self, sha):
-            bridge.write_text(BRIDGE_V2)
+            _git(world.repo, "checkout", "-q", "--", BRIDGE)
             super().reset_keep(sha)
 
     world.writer_factory = EditedBridge
@@ -2132,7 +2291,21 @@ def test_each_migrate_failure_halts_and_never_resets(tmp_path, token, setup):
     assert "RESTORE (never run by this command)" in world.output
     if token != "migrate_status_not_current":
         assert world.deploys()[-1].endswith(f"reason={token} backup=none")
-        assert any("no backup line was read" in line for line in world.output.splitlines())
+        # Rewritten for N17 MEDIUM-2: the old text sent the owner to "the newest"
+        # same-pair backup (an older attempt's file can be the newest). Without a
+        # backup line `db migrate` changed nothing; here the database is still at
+        # v<N-1>, so the restore says so and copies, moves and names no file.
+        lines = world.output.splitlines()
+        assert "  No `backup    <path>` line was read from `db migrate`: no backup made by this run is known." in lines
+        live = deploy_apply.LiveCheckout(world.repo, world.live)
+        assert f"  {live.command_line('db', 'status', '--db-path', str(world.db))}" in lines
+        assert (
+            f"  state now (read-only, as db status prints it): schema v{PREVIOUS}, this code needs v{LATEST}"
+            f" (pending: {LATEST})"
+        ) in lines
+        assert f"  The database is unchanged at v{PREVIOUS}: no database restore is needed. Run only:" in lines
+        assert not any(" mv " in line or " cp " in line or "newest" in line for line in lines)
+        assert f"  2. git -C {shlex.quote(str(world.repo))} reset --keep {world.scenario.base}" in lines
 
 
 @pytest.mark.parametrize("error, token", [(KeyboardInterrupt, "interrupted"), (RuntimeError, "internal_error")])
@@ -2309,7 +2482,13 @@ def _undo_break_state(world, held):
     return "undo_not_flat", world.scenario.base
 
 
+def _undo_break_home(world, held):
+    world.account_home = world.root / "account-home"
+    return "paths_not_canonical", world.scenario.base
+
+
 UNDO_BREAKERS = {
+    "paths_not_canonical": _undo_break_home,
     "deploy_lock_busy": _undo_break_lock,
     "runs_from_live_checkout": _undo_break_live,
     "prev_sha_invalid": _undo_break_prev,
@@ -2378,4 +2557,871 @@ def test_an_unexpected_error_after_the_migration_prints_the_restore(tmp_path):
     assert code == deploy_apply.EXIT_HALTED, world.output
     _token_lines(world, "internal_error")
     assert "RESTORE (never run by this command)" in world.output
-    assert world.deploys()[-1].split(" backup=", 1)[1].endswith(f".v{PREVIOUS}-to-v{LATEST}.db")
+    # Rewritten for N17 LOW-2: the HALTED line now ends with the next action, so the
+    # backup is read as its own field instead of as the line's tail.
+    backup = re.search(r" backup=(\S+) next: ", world.deploys()[-1]).group(1)
+    assert backup.endswith(f".v{PREVIOUS}-to-v{LATEST}.db")
+    assert world.deploys()[-1].endswith(
+        f" next: restore the database and the code to PREV_SHA={world.scenario.base} (backup={backup});"
+        " never enable the old code on the migrated database"
+    )
+
+
+# --- P2.1: N17 MEDIUM-1, a stale confirmation ----------------------------------------------------
+
+
+def _commit_on_live(world: World) -> None:
+    """Someone moves the live checkout's HEAD while the prompt waits."""
+    world.scenario.repo.write("README.md", "moved while the prompt waited\n")
+    world.scenario.repo.commit("moved")
+
+
+STALE_CONFIRMATIONS = {
+    # case: (clock before the plan, what happens while the prompt waits, refused tokens)
+    "past_0650_et": (
+        datetime(2026, 10, 25, 6, 49, tzinfo=MARKET_TIMEZONE),
+        lambda w: setattr(w.clock, "now", w.clock.now + timedelta(seconds=90)),
+        {"start_cutoff"},
+    ),
+    "past_5_minutes": (
+        None, lambda w: setattr(w.clock, "now", w.clock.now + timedelta(seconds=301)), {"confirm_timeout"},
+    ),
+    "head_moved": (None, _commit_on_live, {"live_head_moved"}),
+    # N17's repro: the plan printed Sat 19:00 ET, the sha typed Sun 07:00 ET.
+    "n17_repro_12_hours": (
+        None, lambda w: setattr(w.clock, "now", w.clock.now + timedelta(hours=12)), {"confirm_timeout", "start_cutoff"},
+    ),
+    # Mon 19:00 ET -> Tue 19:00 ET: in the window again, but a day later.
+    "a_day_later": (
+        datetime(2026, 10, 26, 19, 0, tzinfo=MARKET_TIMEZONE),
+        lambda w: setattr(w.clock, "now", w.clock.now + timedelta(hours=24)),
+        {"confirm_timeout", "session_date_changed"},
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(STALE_CONFIRMATIONS))
+def test_a_stale_confirmation_refuses_and_changes_nothing(world, case):
+    start, waiting, tokens = STALE_CONFIRMATIONS[case]
+    if start is not None:
+        world.clock.now = start
+    before = world.live_head()
+
+    code = world.apply(on_read=lambda: waiting(world))
+
+    assert code == deploy_apply.EXIT_REFUSED, world.output
+    assert _refused(world) == tokens, world.output
+    assert "PLAN (nothing has changed yet):" in world.output
+    assert world.summary().endswith("(exit 78; nothing changed)")
+    assert not world.deploys_log.exists()
+    assert world.live.calls == [] and world.launchctl.calls == [] and world.robot.table_reads == 0
+    assert world.robot.running and world.launchctl.loaded
+    if case != "head_moved":
+        assert world.live_head() == before
+    else:
+        assert world.live_head() not in (before, world.head)  # moved, and never fast-forwarded
+        moved = f"REFUSE live_head_moved: live HEAD is {world.live_head()}, not {before} as the plan showed"
+        assert moved in world.output
+
+
+def test_a_rolled_session_date_alone_refuses(world, monkeypatch):
+    rolled = {"after_prompt": False}
+    real = deploy_apply.next_session_date
+
+    def session(now):
+        found = real(now)
+        return found + timedelta(days=1) if rolled["after_prompt"] else found
+
+    monkeypatch.setattr(deploy_apply, "next_session_date", session)
+
+    code = world.apply(on_read=lambda: rolled.update(after_prompt=True))
+
+    assert code == deploy_apply.EXIT_REFUSED, world.output
+    assert _refused(world) == {"session_date_changed"}
+    assert (
+        f"REFUSE session_date_changed: the upcoming session is {NEXT_SESSION + timedelta(days=1)}, not {NEXT_SESSION}"
+        " as the plan showed"
+    ) in world.output
+    assert not world.deploys_log.exists() and world.live.calls == []
+
+
+def test_a_confirmation_within_the_limit_still_deploys(world):
+    code = world.apply(on_read=lambda: setattr(world.clock, "now", world.clock.now + timedelta(seconds=299)))
+
+    assert code == deploy_apply.EXIT_OK, world.output
+    assert "Type the sha within 300 s: the window, live HEAD and the session are read again" in world.output
+
+
+@pytest.mark.parametrize("case", sorted(STALE_CONFIRMATIONS))
+def test_a_stale_undo_confirmation_refuses_and_changes_nothing(world, case):
+    _deployed(world)
+    start, waiting, tokens = STALE_CONFIRMATIONS[case]
+    if start is not None:
+        world.clock.now = start
+    log_before = world.deploys()
+    head = world.live_head()
+
+    code = world.undo(world.scenario.base, on_read=lambda: waiting(world))
+
+    assert code == deploy_apply.EXIT_REFUSED, world.output
+    assert _refused(world) == tokens, world.output
+    assert world.deploys() == log_before
+    assert world.live.calls == [] and world.launchctl.calls == [] and world.robot.table_reads == 0
+    assert (world.live_head() == head) is (case != "head_moved")
+
+
+# --- P2.1: N17 LOW-1, the six surviving mutations and the M67 hang -------------------------------------
+
+
+def test_the_prev_line_is_written_before_the_stop(world):
+    """M34: the PREV line is the rollback target if the run dies during the stop."""
+    seen: list[str] = []
+    world.live.on_call["shadow agent disable"] = lambda: seen.append(world.deploys()[-1] if world.deploys() else "")
+
+    assert world.apply() == deploy_apply.EXIT_OK, world.output
+    assert seen[0] == f"2026-10-25T02:00:00+03:00 P2 PREV_SHA={world.scenario.base} schema=v{LATEST}"
+
+
+def test_git_writer_runs_with_the_scrubbed_environment(world, monkeypatch, tmp_path):
+    """M35: GitWriter uses deploy_check's git_environment, never the caller's."""
+    seen: list[dict[str, str]] = []
+    real_run = subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        if list(argv)[:1] == ["git"] and "core.fsmonitor=false" in argv and "merge" in argv:
+            seen.append(kwargs.get("env"))
+        return real_run(argv, *args, **kwargs)
+
+    head = world.head
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "not-a-repository"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+    expected = deploy_check.git_environment(world.repo)
+    monkeypatch.setattr(subprocess, "run", spy)
+    GitWriter(world.repo).merge_ff_only(head)  # with GIT_DIR honoured this would fail
+    monkeypatch.setattr(subprocess, "run", real_run)
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_WORK_TREE")
+
+    assert seen == [expected]
+    assert "GIT_DIR" not in seen[0] and "GIT_WORK_TREE" not in seen[0]
+    assert seen[0]["GIT_CEILING_DIRECTORIES"] == str(world.repo.resolve().parent)
+    assert world.live_head() == world.head
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, EOFError, OSError])
+def test_ctrl_c_or_a_closed_stdin_at_the_prompt_refuses_and_changes_nothing(world, error):
+    """M57: an aborted prompt never confirms."""
+
+    def abort():
+        raise error()
+
+    assert world.apply(on_read=abort) == deploy_apply.EXIT_REFUSED, world.output
+    assert _refused(world) == {"confirm_mismatch"}
+    assert not world.deploys_log.exists() and world.live.verbs == []
+    _deployed(world)
+    world.out.truncate(0)
+    world.out.seek(0)
+    log_before = world.deploys()
+    assert world.undo(world.scenario.base, on_read=abort) == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"confirm_mismatch"}
+    assert world.deploys() == log_before and world.live.verbs == []
+
+
+def _different_plist_at_prev(world: World) -> None:
+    """The restored PREV writes another launchd.py payload than the running tool's."""
+    world.live.plist_bytes = lambda: (
+        _plist_payload(world, ThrottleInterval=99) if world.live_head() == world.scenario.base else None
+    )
+
+
+def test_an_undo_across_a_launchd_payload_change_skips_the_plist_bytes(tmp_path):
+    """M63: across a launchd.py change the old payload is the right one; only the
+    paths and the load are checked. Without that change the bytes must match."""
+    changed = _make_world(tmp_path / "changed", tool_change=True, tool_file=deploy_apply.LAUNCHD_PATH)
+    unchanged = _make_world(tmp_path / "unchanged")
+    try:
+        for world in (changed, unchanged):
+            _deployed(world)
+            _different_plist_at_prev(world)
+        assert changed.undo(changed.scenario.base) == deploy_apply.EXIT_ROLLED_BACK, changed.output
+        assert changed.robot.running and changed.live_head() == changed.scenario.base
+        assert unchanged.undo(unchanged.scenario.base) == deploy_apply.EXIT_UNDO_FAILED, unchanged.output
+        assert "FAIL undo_post_start: post_start_plist: " in unchanged.output
+        assert "is not the plist the live checkout writes" in unchanged.output
+    finally:
+        changed.robot.release_lock()
+        unchanged.robot.release_lock()
+
+
+def _fence(world: World, identity: str) -> None:
+    with sqlite3.connect(world.db) as db:
+        db.execute(
+            "INSERT INTO autotrader_execution_fences (name, stopped, reason, updated_at)"
+            " VALUES (?, 1, 'owner halt', '2026-10-24T00:00:00+00:00')",
+            (f"paper:{identity}",),
+        )
+
+
+def test_a_persisting_expected_fence_passes(world):
+    """M71: a fence that stays (--expect-fenced) is the bridge's CRITICAL line."""
+    _fence(world, "ORB_V2")
+
+    assert world.apply(expect_fenced=("ORB_V2",)) == deploy_apply.EXIT_OK, world.output
+    assert "  | bridge       CRITICAL fenced identities = ORB_V2" in world.output.splitlines()
+    assert world.output.count("fenced ORB_V2") == 1  # the plan's session line
+
+
+def test_a_migrate_output_with_the_wrong_version_pair_is_migrate_unparsed(tmp_path):
+    """M28: a backup line alone is not enough; the pair must be v<N-1> -> v<N>."""
+    world = _migration_world(tmp_path)
+    backup = world.root / "backup.db"
+    world.live.migrate_result = (0, f"database  {world.db}\nbackup    {backup}\nmigrated  v14 -> v15\n")
+    try:
+        code = world.apply(expect_migration=LATEST)
+    finally:
+        world.robot.release_lock()
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    _token_lines(world, "migrate_unparsed")
+    assert f"read backup={backup} migrated=(14, 15)" in world.output
+    assert world.live.verbs[:2] == ["shadow agent disable", "db migrate --db-path"]
+    assert "db status --db-path" not in world.live.verbs
+
+
+def test_the_fake_world_fails_instead_of_hanging(world):
+    """M67 hung the suite: a second supervisor's blocking flock. Now the fake world
+    raises a BaseException (never turned into a halt), and a runaway wait trips the clock."""
+    assert world.robot.running
+    with pytest.raises(FakeWorldError, match="second supervisor"):
+        world.robot.start()
+    clock = FakeClock(START)
+    with pytest.raises(FakeWorldError, match="a wait that never ends"):
+        for _ in range(FakeClock.MAX_SLEEPS + 1):
+            clock.sleep(1.0)
+    assert not issubclass(FakeWorldError, Exception)
+
+
+def test_an_undo_that_skips_its_stop_fails_the_fake_world(world, monkeypatch):
+    """M67 itself, as a test: only the undo's own stop is skipped (the deploy's stop
+    and the failed undo's disable still run). The undo's pending start then fires
+    while the deploy's supervisor holds the lock: a FakeWorldError, not a hang."""
+    world.live.starts = [StartShape(preflight=("PREFLIGHT_WARNING heartbeat not configured",)), StartShape()]
+    calls = itertools.count()
+    real_stop = DeployOperator.stop
+
+    def skip_the_undos_stop(self):
+        if next(calls) != 1:
+            real_stop(self)
+
+    monkeypatch.setattr(DeployOperator, "stop", skip_the_undos_stop)
+    with pytest.raises(FakeWorldError, match="second supervisor"):
+        world.apply()
+
+
+# --- P2.1: N17 MEDIUM-1 / LOW-5, the undo meets the previous code mid-session ---------------------------
+
+# The real 2026-10-13 09:46 ET restart (supervisor.log.2026-10-17:31-37), plus the
+# heartbeat child's CHILD_START in the real 2026-10-18 shape (the 10-13 log predates it).
+_REAL_MID_SESSION_START = """2026-10-13T13:42:29+00:00 SUPERVISOR_STOP reason=SIGTERM
+2026-10-13T13:46:59+00:00 SUPERVISOR_START pid=86351 mode=daily
+2026-10-13T13:46:59+00:00 CHILD_START telegram pid=86363
+2026-10-13T13:46:59+00:00 CHILD_START heartbeat pid=86369
+2026-10-13T13:46:59+00:00 SESSION_START date=2026-10-13
+2026-10-13T13:46:59+00:00 CHILD_START screener pid=86364
+2026-10-13T13:46:59+00:00 CHILD_START notifier pid=86365
+2026-10-13T13:46:59+00:00 CHILD_START bridge pid=86366
+2026-10-13T13:46:59+00:00 CHILD_START orb pid=86367
+2026-10-13T13:46:59+00:00 CHILD_START gap pid=86368
+2026-10-13T13:47:01+00:00 CHILD_EXIT gap code=1 restart_in=95
+"""
+
+
+def _real_log_world(world: World, text: str, pids: dict[int, int]) -> datetime:
+    """The real lines as the live supervisor.log, the pids as ps rows; returns the
+    enable's `since`: the second of the text's first line."""
+    for path in world.paths.log_directory.glob("supervisor.log*"):
+        path.unlink()
+    (world.paths.log_directory / "supervisor.log").write_text(text)
+    world.robot.release_lock()
+    python, control = world.robot.python, world.robot.control
+    world.robot.children = [
+        (pid, parent, f"{python} {control} run" if parent == 1 else f"{python} {control} child")
+        for pid, parent in pids.items()
+    ]
+    return datetime.fromisoformat(text.split(" ", 1)[0])
+
+
+def test_the_real_mid_session_start_passes_only_the_undo_start_check(world):
+    since = _real_log_world(world, _REAL_MID_SESSION_START, {86351: 1, 86363: 86351, 86369: 86351})
+    world.clock.now = datetime(2026, 10, 13, 13, 47, 30, tzinfo=timezone.utc)
+    operator = world.operator()
+
+    failures, missing, evidence, settle_from = operator._start_state(
+        since, date(2026, 10, 13), rotation_due=False, mid_session_ok=True
+    )
+    assert failures == [] and missing == []
+    assert "2026-10-13T13:46:59+00:00 SESSION_START date=2026-10-13" in evidence
+    assert settle_from == datetime(2026, 10, 13, 13, 46, 59, tzinfo=timezone.utc)
+    # The deploy's own start check still requires SESSION_WAIT: a deploy never starts mid-session.
+    failures, missing, _evidence, _settle = operator._start_state(since, date(2026, 10, 13), rotation_due=False)
+    assert failures == [] and missing == ["SESSION_WAIT date=2026-10-13"]
+    # The undo still needs the right day, the children and the one supervisor.
+    failures, _missing, _evidence, _settle = operator._start_state(
+        since, date(2026, 10, 14), rotation_due=False, mid_session_ok=True
+    )
+    assert [token for token, _ in failures] == ["post_start_session_wait"]
+    world.robot.children = [entry for entry in world.robot.children if entry[0] != 86369]
+    _failures, missing, _evidence, _settle = operator._start_state(
+        since, date(2026, 10, 13), rotation_due=False, mid_session_ok=True
+    )
+    assert missing == ["heartbeat pid 86369 in the process table"]
+
+
+def test_the_fake_mid_session_start_has_the_real_shape(world):
+    """LEARNED 2026-10-17: the fixture's line kinds and order are the real log's."""
+    world.robot.stop()
+    world.robot.start(StartShape(mid_session=True, session_date=date(2026, 10, 13)))
+    fake = [line.split()[1:3] for line in world.robot.log.read_text().splitlines()[-9:]]
+    real = [line.split()[1:3] for line in _REAL_MID_SESSION_START.splitlines()[1:-1]]
+    assert [kind for kind, *_ in fake] == [kind for kind, *_ in real]
+    assert [line[1].split("=")[0] for line in fake] == [line[1].split("=")[0] for line in real]
+
+
+def _real_report(world: World, tmp_path: Path, now: datetime, day: date) -> str:
+    real_lines = _BRIDGE_LINES.format(
+        pin12=supervisor.REVIEWED_BRIDGE_SHA256[:12],
+        pin=supervisor.REVIEWED_BRIDGE_SHA256,
+        fenced="INFO fenced identities = none",
+    ).splitlines()
+
+    def preflight(_session_date, **_kwargs):
+        lines = [line.removeprefix("bridge       ") for line in real_lines[1:]]
+        return 0, "".join(f"22:10:01 ET  {line}\n" for line in lines)
+
+    return supervisor.dry_run_report(
+        session_date=day,
+        now=now,
+        user_paths=UserPaths(home=tmp_path / "dry-home"),
+        unsupervised=list,
+        database=world.db,
+        registry=list,
+        preflight=preflight,
+        heartbeat_present=lambda: True,
+    )
+
+
+def test_dry_run_mid_session_form_is_the_real_reports(world, tmp_path):
+    """The real dry_run_report at Mon 08:05 ET for that Monday: SESSION_START at once,
+    no SESSION_WAIT. Only the undo accepts it; after the session (SESSION_OVER) nobody does."""
+    day = date(2026, 10, 26)
+    report = _real_report(world, tmp_path, datetime(2026, 10, 26, 8, 5, tzinfo=MARKET_TIMEZONE), day)
+    assert "SESSION_WAIT" not in report and "08:05:00  SESSION_START date=2026-10-26" in report.splitlines()
+    pin = supervisor.REVIEWED_BRIDGE_SHA256
+    undo = DryRunExpectation(
+        session_date=day, pin=pin, schema_version=LATEST, database=str(world.db), mid_session_ok=True
+    )
+    real = DryRunCheck.parse(report, 0, undo)
+    assert real.ok, real.failures
+    assert "SESSION_START date=2026-10-26 (mid-session: no SESSION_WAIT)" in real.evidence
+    deploy = DryRunCheck.parse(report, 0, replace(undo, mid_session_ok=False))
+    assert [token for token, _ in deploy.failures] == ["dry_run_session"]
+    # The fixture's mid-session text gives the same evidence as the real report.
+    world.clock.now = datetime(2026, 10, 26, 8, 5, tzinfo=MARKET_TIMEZONE)
+    fixture = dry_run_text(world, day).replace(PIN_V1, pin).replace(PIN_V1[:12], pin[:12])
+    assert DryRunCheck.parse(fixture, 0, undo).evidence == real.evidence
+    over = _real_report(world, tmp_path, datetime(2026, 10, 26, 19, 0, tzinfo=MARKET_TIMEZONE), day)
+    assert "SESSION_OVER date=2026-10-26" in over
+    assert [token for token, _ in DryRunCheck.parse(over, 0, undo).failures] == ["dry_run_session"]
+
+
+def test_a_late_automatic_undo_restarts_the_old_code_mid_session(world):
+    """N17 MEDIUM-1's tail: a deploy whose dry run ran past 07:55 ET on a session day
+    fails, and its undo meets the previous code's mid-session start. Before P2.1
+    that undo failed its own dry run (no SESSION_WAIT) and left the robot disabled."""
+    world.clock.now = datetime(2026, 10, 26, 6, 49, tzinfo=MARKET_TIMEZONE)
+    # Sunday's 18:35 ET rotation already ran: no rotation is due at a Monday start.
+    world.robot.write("LOG_ROTATED date=x", world.clock(), path=world.robot.log.with_name("supervisor.log.2026-10-25"))
+    slow = iter([True])
+    world.live.on_call["run --dry-run"] = lambda: next(slow, False) and world.clock.sleep(76 * 60)
+    world.live.starts = [StartShape(mid_session=True, session_date=date(2026, 10, 26))]
+
+    code = world.apply()
+
+    assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
+    _token_lines(world, "dry_run_session")
+    assert world.live_head() == world.scenario.base
+    assert world.robot.running and world.launchctl.loaded
+    assert "  | SESSION_START date=2026-10-26 (mid-session: no SESSION_WAIT)" in world.output.splitlines()
+    assert (
+        "OK started: one supervisor, telegram and heartbeat under it, SESSION_START date=2026-10-26 (mid-session),"
+    ) in world.output
+    assert world.deploys()[-1].endswith(
+        f"DEPLOY rollback to {world.scenario.base} result=ROLLBACK reason=dry_run_session"
+    )
+
+
+def test_an_undo_failure_names_the_previous_codes_own_condition(world):
+    """N17 LOW-5: the owner learns that the condition is the previous code's own."""
+    world.live.starts = [
+        StartShape(preflight=("PREFLIGHT_WARNING heartbeat not configured",)),
+        StartShape(preflight=("PREFLIGHT_WARNING heartbeat not configured",)),
+    ]
+
+    assert world.apply() == deploy_apply.EXIT_UNDO_FAILED, world.output
+    assert (
+        f"The condition above is {world.scenario.base[:7]}'s own start (post_start_preflight_warning). If the robot"
+        " ran with it before this deploy (for example the same PREFLIGHT_WARNING heartbeat line), the block's last"
+        " enable restores that state."
+    ) in world.output
+    assert "After the enable:" in world.output
+
+
+# --- P2.1: rehearsal observation 5, the undo's dry run reads the fences and the heartbeat --------------
+
+
+def test_the_undo_dry_run_requires_the_fences_and_the_heartbeat(world):
+    calls = itertools.count(1)
+    edits = {
+        2: lambda text: text.replace(
+            "heartbeat    Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url present (the child"
+            " validates the URL)",
+            "heartbeat    not configured (no Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url)",
+        ),
+    }
+
+    def edit_the_undos_dry_run():
+        number = next(calls)
+        if number == 1:
+            world.live.dry_run_edit = lambda text: text + "!!! x\n"
+        elif number in edits:
+            world.live.dry_run_edit = edits[number]
+
+    world.live.on_call["run --dry-run"] = edit_the_undos_dry_run
+
+    assert world.apply() == deploy_apply.EXIT_UNDO_FAILED, world.output
+    assert "FAIL undo_dry_run: dry_run_heartbeat: " in world.output
+
+
+def test_the_undo_dry_run_requires_the_fenced_line_seen_before(world):
+    calls = itertools.count(1)
+
+    def fence_appears_in_the_undos_dry_run():
+        if next(calls) == 1:
+            world.live.dry_run_edit = lambda text: text + "!!! x\n"
+        else:
+            world.live.dry_run_edit = lambda text: text.replace(
+                "INFO fenced identities = none", "CRITICAL fenced identities = ORB_V2"
+            )
+
+    world.live.on_call["run --dry-run"] = fence_appears_in_the_undos_dry_run
+
+    assert world.apply() == deploy_apply.EXIT_UNDO_FAILED, world.output
+    assert "FAIL undo_dry_run: dry_run_fenced: expected exactly `bridge       INFO fenced identities = none`" in (
+        world.output
+    )
+
+
+def test_the_undo_reads_the_fences_through_the_old_bridges_sendable_set(world):
+    """A manual undo reads the fences now; a fence on a name the restored bridge does
+    not send (here an unknown NEW_V9) is not in its fenced line, as the bridge does."""
+    _deployed(world)
+    _fence(world, "ORB_V2")
+    _fence(world, "NEW_V9")
+
+    assert world.undo(world.scenario.base) == deploy_apply.EXIT_ROLLED_BACK, world.output
+    assert "  | bridge       CRITICAL fenced identities = ORB_V2" in world.output.splitlines()
+    # Without its sendable line the old bridge's fences cannot be read.
+    check = DryRunCheck.parse(
+        _template(world).replace(deploy_apply.sendable_line(SENDABLE_IDENTITIES) + "\n", ""),
+        0,
+        _expect(world, fenced=("NEW_V9",), fenced_by_printed_sendable=True, sendable=None),
+    )
+    assert [token for token, _ in check.failures] == ["dry_run_sendable"]
+
+
+# --- P2.1: rehearsal observation 4, nothing to reset when git never moved ---------------------------------
+
+
+def test_an_abort_before_the_fast_forward_never_resets(world, monkeypatch):
+    resets: list[str] = []
+    real_reset = GitWriter.reset_keep
+    monkeypatch.setattr(GitWriter, "reset_keep", lambda self, sha: resets.append(sha) or real_reset(self, sha))
+    world.writer_factory = _MergeFails
+
+    code = world.apply()
+
+    assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
+    assert resets == [] and world.live_head() == world.scenario.base
+    assert world.deploys()[-1].endswith("result=ABORTED reason=merge_failed")
+    assert world.live.verbs == [
+        "shadow agent disable", "shadow agent disable", "run --dry-run --date", "shadow agent enable",
+    ]
+    assert world.robot.running and world.robot.starts == 2
+    assert world.summary().startswith("deploy apply: ABORTED reason=merge_failed (exit 3; git never moved;")
+    # An ABORTED line is never read as a deploy that `deploy undo` could undo.
+    assert deploy_apply._DEPLOY_PASS.search(world.deploys()[-1]) is None
+
+
+# --- P2.1: rehearsal F-1, the children are watched after their start ---------------------------------------
+
+
+def _telegram_dies(world: World, after: float, code: int = 78) -> None:
+    def die():
+        world.robot.children = [entry for entry in world.robot.children if "telegram" not in entry[2]]
+        world.robot.write(f"CHILD_EXIT telegram code={code} restart_in=15")
+
+    world.clock.after(after, die)
+
+
+def test_the_start_waiter_watches_the_children_for_the_settle_window(world):
+    since = _start_after(world)  # the children start 2 s after `since`
+
+    _wait_started(world, since)
+
+    assert world.clock() >= since + timedelta(seconds=2 + deploy_apply.POST_START_SETTLE_S)
+    assert "OK settled: telegram and heartbeat ran 20 s after their CHILD_START, no exit" in world.output
+
+
+@pytest.mark.parametrize("after", [3.0, 2.0 + deploy_apply.POST_START_SETTLE_S - 1])
+def test_a_required_child_exit_inside_the_settle_window_fails(world, after):
+    since = _start_after(world)
+    _telegram_dies(world, after)
+
+    with pytest.raises(DeployFailure) as failure:
+        _wait_started(world, since)
+
+    assert failure.value.token == "post_start_child_exited"
+    assert "CHILD_EXIT telegram code=78 restart_in=15 after the start" in failure.value.detail
+
+
+def test_the_real_telegram_exit_and_restart_fail_the_start(world):
+    """The real 2026-10-13 06:50 ET start: telegram exited 78 in its first second and
+    was restarted 15 s later; the restart running is not a clean start."""
+    text = """2026-10-13T06:50:58+00:00 SUPERVISOR_START pid=18068 mode=daily
+2026-10-13T06:50:58+00:00 CHILD_START telegram pid=18084
+2026-10-13T06:50:58+00:00 CHILD_START heartbeat pid=18085
+2026-10-13T06:50:58+00:00 SESSION_WAIT date=2026-10-13 until=2026-10-13T11:55:00+00:00
+2026-10-13T06:50:58+00:00 CHILD_EXIT telegram code=78 restart_in=15
+2026-10-13T06:51:13+00:00 CHILD_START telegram pid=18138
+"""
+    since = _real_log_world(world, text, {18068: 1, 18138: 18068, 18085: 18068})
+    failures, _missing, _evidence, _settle = world.operator()._start_state(
+        since, date(2026, 10, 13), rotation_due=False
+    )
+    assert [token for token, _ in failures] == ["post_start_child_exited"]
+    assert "CHILD_EXIT telegram code=78 restart_in=15" in failures[0][1]
+
+
+def test_a_telegram_exit_after_the_start_is_not_a_pass(world):
+    """Rehearsal R7: telegram exits 78 three seconds after its start; the deploy is
+    undone instead of writing PASS."""
+    first = iter([True])
+    world.live.on_call["shadow agent enable"] = lambda: next(first, False) and _telegram_dies(world, 2.0 + 3.0)
+
+    code = world.apply()
+
+    assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
+    _token_lines(world, "post_start_child_exited")
+    assert not any("result=PASS" in line for line in world.deploys())
+    assert world.robot.running and world.live_head() == world.scenario.base
+
+
+# --- P2.1: N17 LOW-2, SIGHUP and SIGTERM halt like Ctrl-C ------------------------------------------------
+
+
+@pytest.fixture
+def safe_signals():
+    """A handler that swallows the signal, so a regression cannot kill pytest; the
+    code under test must replace it while it runs and restore it afterwards."""
+    swallowed: list[int] = []
+    previous = {
+        number: signal.signal(number, lambda n, _f: swallowed.append(n)) for number in deploy_apply.HALT_SIGNALS
+    }
+    yield swallowed, {number: signal.getsignal(number) for number in deploy_apply.HALT_SIGNALS}
+    for number, handler in previous.items():
+        signal.signal(number, handler)
+
+
+@pytest.mark.parametrize("number", [signal.SIGHUP, signal.SIGTERM], ids=["SIGHUP", "SIGTERM"])
+def test_a_hangup_or_term_after_the_confirmation_halts_where_it_stood(world, safe_signals, number):
+    swallowed, installed = safe_signals
+    at_prompt: list[object] = []
+    world.live.on_call["run --dry-run"] = lambda: os.kill(os.getpid(), number)
+
+    code = world.apply(on_read=lambda: at_prompt.append(signal.getsignal(number)))
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    name = signal.Signals(number).name
+    assert f"FAIL interrupted: interrupted ({name}: the terminal closed or the process was told to stop)" in (
+        world.output
+    )
+    _token_lines(world, "interrupted")
+    assert world.deploys()[-1].endswith(
+        f" result=HALTED reason=interrupted next: runbook 6.3 back to PREV_SHA={world.scenario.base}"
+        f" (HEAD {world.head}): only when flat"
+    )
+    assert "MANUAL ROLLBACK (runbook 6.3)" in world.output
+    assert world.live.verbs == ["shadow agent disable", "run --dry-run --date"]  # nothing more was run
+    assert swallowed == []  # the run's own handler took it
+    assert at_prompt == [installed[number]]  # before the confirmation nothing was installed
+    assert signal.getsignal(number) is installed[number]  # restored
+
+
+def test_a_hangup_during_the_undo_halts_with_the_next_action(world, safe_signals):
+    swallowed, installed = safe_signals
+    _deployed(world)
+    world.live.on_call["run --dry-run"] = lambda: os.kill(os.getpid(), signal.SIGHUP)
+
+    code = world.undo(world.scenario.base)
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    assert world.deploys()[-1].endswith(
+        f"DEPLOY rollback to {world.scenario.base} result=UNDO_FAILED reason=interrupted"
+        f" next: runbook 6.3 back to {world.scenario.base} (HEAD {world.scenario.base})"
+    )
+    assert world.summary() == "deploy undo: HALTED reason=interrupted (exit 4)"
+    assert swallowed == [] and signal.getsignal(signal.SIGHUP) is installed[signal.SIGHUP]
+
+
+def test_an_interrupt_before_the_fast_forward_says_git_never_moved(world, safe_signals):
+    world.live.on_call["shadow agent disable"] = lambda: os.kill(os.getpid(), signal.SIGTERM)
+
+    assert world.apply() == deploy_apply.EXIT_HALTED, world.output
+    assert world.deploys()[-1].endswith(
+        f" next: git never moved (HEAD {world.scenario.base}): ( cd {world.repo}/backend &&"
+        f" {world.repo}/backend/.venv/bin/python {world.repo}/backend/autotraderctl.py shadow agent enable ),"
+        " then the start lines"
+    )
+
+
+# --- P2.1: N17 LOW-3 and LOW-4, the tool's own checkout and paths ------------------------------------------
+
+
+def test_untracked_files_refuse_only_under_backend(world):
+    tree = world.worktree()
+    (tree / "docs").mkdir(exist_ok=True)
+    (tree / "docs" / "notes.md").write_text("an untracked note\n")
+    assert world.apply() == deploy_apply.EXIT_OK, world.output
+
+    world2 = _rebuild(world)
+    try:
+        (world2.worktree() / "backend" / "json.py").write_text("raise SystemExit('planted')\n")
+        assert world2.apply() == deploy_apply.EXIT_REFUSED
+        assert _refused(world2) == {"candidate_worktree_dirty"}
+        assert "?? backend/json.py" in world2.output
+    finally:
+        world2.robot.release_lock()
+
+
+def test_the_plan_prints_the_paths_and_the_account_home_is_the_password_databases(world):
+    import pwd
+
+    assert world.apply() == deploy_apply.EXIT_OK, world.output
+    lines = world.output.splitlines()
+    assert f"  database       {world.db}  schema v{LATEST} (unchanged)" in lines
+    assert f"  logs           {world.paths.log_directory} (supervisor.log, deploys.log)" in lines
+    assert f"  data           {world.paths.data_directory}" in lines
+    assert deploy_apply.account_home() == Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert deploy_apply.default_environment(Path("/x.db")).account_home is deploy_apply.account_home
+
+
+@pytest.mark.parametrize("action", [["apply", "--candidate", "c", "--expect-parent", "a" * 40,
+                                      "--expect-pin", "b" * 64, "--scope", "P2"],
+                                     ["undo", "--to", "a" * 40, "--reason", "x_y"]])
+def test_the_cli_refuses_db_path_for_apply_and_undo(capsys, tmp_path, action):
+    with pytest.raises(SystemExit) as error:
+        main(["deploy", *action, "--repo", str(tmp_path), "--db-path", str(tmp_path / "copy.db")])
+
+    assert error.value.code == 2
+    assert f"--db-path does not apply to deploy {action[0]}" in capsys.readouterr().err
+
+
+def test_a_git_failure_listing_changed_paths_is_its_own_token(world, monkeypatch):
+    """Rehearsal F-2: not deploy_tool_scope_missing, which names another cause."""
+    real = deploy_check.Git.changed_paths
+
+    def broken(self, base, head):
+        if base == "HEAD":
+            raise deploy_check.GitError("git diff failed: injected")
+        return real(self, base, head)
+
+    monkeypatch.setattr(deploy_check.Git, "changed_paths", broken)
+
+    assert world.apply() == deploy_apply.EXIT_REFUSED
+    assert "changed_paths_unreadable" in _refused(world) and "deploy_tool_scope_missing" not in _refused(world)
+    assert "REFUSE changed_paths_unreadable: cannot list the paths HEAD..candidate changes: git diff failed" in (
+        world.output
+    )
+
+
+# --- P2.1: N17 LOW-6, every failure inside the undo --------------------------------------------------------
+
+
+def test_an_unexpected_error_inside_the_undo_leaves_it_disabled(world):
+    _deployed(world)
+
+    def boom():
+        raise RuntimeError("injected")
+
+    world.live.on_call["run --dry-run"] = boom
+
+    code = world.undo(world.scenario.base)
+
+    assert code == deploy_apply.EXIT_UNDO_FAILED, world.output
+    assert "FAIL internal_error: RuntimeError: injected" in world.output
+    assert world.deploys()[-1].endswith(
+        f"DEPLOY rollback to {world.scenario.base} result=UNDO_FAILED reason=internal_error"
+    )
+    assert not world.robot.running and not world.launchctl.loaded
+    assert "MANUAL ROLLBACK (runbook 6.3), only when flat; run one line at a time:" in world.output
+    assert world.summary() == (
+        "deploy undo: UNDO FAILED reason=internal_error after dry_run_bang (exit 5; the robot is disabled)"
+    )
+
+
+def test_an_unexpected_error_inside_the_automatic_undo_is_exit_5(world):
+    calls = itertools.count(1)
+
+    def bang_then_boom():
+        if next(calls) == 1:
+            world.live.dry_run_edit = lambda text: text + "!!! x\n"
+        else:
+            raise ValueError("injected in the undo")
+
+    world.live.on_call["run --dry-run"] = bang_then_boom
+
+    assert world.apply() == deploy_apply.EXIT_UNDO_FAILED, world.output
+    assert "FAIL internal_error: ValueError: injected in the undo" in world.output
+    assert not world.robot.running and not world.launchctl.loaded
+
+
+# --- P2.1: N17 MEDIUM-2, a restore without a backup line ------------------------------------------------
+
+
+def test_a_migrate_without_a_backup_line_on_a_changed_database_copies_nothing(tmp_path):
+    """The database changed although no backup line was read: stop and ask, with the
+    exact pattern and this run's start time; never "the newest" file, never a cp."""
+    world = _migration_world(tmp_path)
+    world.live.on_call["db migrate"] = lambda: migrate_database(world.db)  # changed behind the tool
+    world.live.migrate_result = (1, f"database  {world.db}\nschema    v{PREVIOUS} (this code knows v{LATEST})\n")
+    backups = world.db.parent / "backups"
+    backups.mkdir()
+    (backups / f"autotrader.20261001T000000.000000Z.v{PREVIOUS}-to-v{LATEST}.db").write_text("an older attempt")
+    try:
+        code = world.apply(expect_migration=LATEST)
+    finally:
+        world.robot.release_lock()
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    lines = world.output.splitlines()
+    assert f"  state now (read-only, as db status prints it): schema v{LATEST} is current" in lines
+    assert (
+        f"  The database is not at v{PREVIOUS}, or its state is unknown: STOP and ask before copying anything."
+        " Copy no file you did not see this run make."
+    ) in lines
+    assert (
+        f"  This run's backup, if one exists: {backups}/autotrader.<YYYYMMDDTHHMMSS.ffffff>Z"
+        f".v{PREVIOUS}-to-v{LATEST}.db"
+        " stamped at or after 20261024T230003Z (this run's `db migrate` started 2026-10-25T02:00:03+03:00);"
+        " never an older one."
+    ) in lines
+    restore = world.output.split("RESTORE (never run by this command)", 1)[1]
+    assert " cp " not in restore and " mv " not in restore and "20261001T000000" not in restore
+    assert "newest" not in restore and "reset --keep" not in restore
+
+
+def test_the_halt_after_a_migration_offers_the_new_code_first_when_only_the_start_was_late(tmp_path):
+    """Rehearsal R5c: migrated and dry-run-checked, only the start met 06:50 ET."""
+    world = _migration_world(tmp_path)
+    world.clock.now = datetime(2026, 10, 25, 6, 49, tzinfo=MARKET_TIMEZONE)
+    world.live.on_call["run --dry-run"] = lambda: world.clock.sleep(61)
+    try:
+        code = world.apply(expect_migration=LATEST)
+    finally:
+        world.robot.release_lock()
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    _token_lines(world, "start_cutoff")
+    assert not world.robot.running and not world.launchctl.loaded
+    output = world.output
+    assert output.index("OPTION 1: start the new code.") < output.index("OPTION 2: go back to PREV") < output.index(
+        "RESTORE (never run by this command)"
+    )
+    assert (
+        f"  echo \"$(date -Iseconds) DEPLOY P2 {world.short_head} PREV_SHA={world.scenario.base} pin={PIN_V2[:12]}"
+        f" result=PASS schema=v{LATEST}\" >> {world.deploys_log}"
+    ) in output.splitlines()
+    assert "enable" not in " ".join(world.live.verbs)  # D4: the command itself never starts it
+    # Any other failure after the migration prints only the restore.
+    other = _migration_world(tmp_path / "other")
+    other.live.dry_run_edit = lambda text: text + "!!! x\n"
+    try:
+        assert other.apply(expect_migration=LATEST) == deploy_apply.EXIT_HALTED
+    finally:
+        other.robot.release_lock()
+    assert "OPTION 1" not in other.output
+
+
+# --- P2.1: rehearsal F-3 and O-e, the printed plan and the restore's pgrep -----------------------------------
+
+
+@pytest.mark.parametrize("migration", [False, True])
+def test_the_plan_numbers_its_steps_consecutively(tmp_path, migration):
+    world = _migration_world(tmp_path) if migration else _make_world(tmp_path)
+    try:
+        world.apply(typed="\n", **({"expect_migration": LATEST} if migration else {}))
+    finally:
+        world.robot.release_lock()
+
+    plan = world.output.split("PLAN (nothing has changed yet):", 1)[1]
+    numbers = [int(found) for found in re.findall(r"^  (\d+)\. ", plan, re.M)]
+    assert numbers == list(range(1, 8 if migration else 7))
+
+
+def test_the_pgrep_pattern_matches_only_the_live_checkouts_paths():
+    path = "/Users/x/a.b+c/backend/"
+    pattern = deploy_apply._ere_literal(path)
+    assert re.fullmatch(pattern, path)
+    assert not re.search(pattern, "/Users/x/aXb+c/backend/") and not re.search(pattern, "/Users/x/a.bbc/backend/")
+    assert not re.search(pattern, "/Users/x/a.b+c/.claude/worktrees/p/backend/autotraderctl.py")
+
+
+def test_the_case_of_the_typed_sha_matters():
+    """N17 LOW-7: the case test without depending on the candidate's sha."""
+    sha = "abc1234" + "0" * 33
+    for typed, confirmed in (("abc1234\n", True), (" abc1234 \n", True), ("ABC1234\n", False), ("abc123\n", False)):
+        operator = DeployOperator.__new__(DeployOperator)
+        operator.env = DeployEnvironment(
+            user_paths=UserPaths(home=Path("/nowhere")), db_path=Path("/x"), stdin=FakeTTY(typed), out=io.StringIO()
+        )
+        assert operator._confirmed(sha, "the candidate's") is confirmed, typed
+
+
+def test_a_required_child_started_twice_is_a_restart(world):
+    """Two CHILD_START lines of an always-on child after the start are a restart,
+    even when the exit line between them is missing."""
+    text = """2026-10-18T07:48:57+00:00 SUPERVISOR_START pid=83718 mode=daily
+2026-10-18T07:48:57+00:00 CHILD_START telegram pid=83725
+2026-10-18T07:48:57+00:00 CHILD_START heartbeat pid=83726
+2026-10-18T07:48:57+00:00 SESSION_WAIT date=2026-10-19 until=2026-10-19T11:55:00+00:00
+2026-10-18T07:49:12+00:00 CHILD_START heartbeat pid=83790
+"""
+    since = _real_log_world(world, text, {83718: 1, 83725: 83718, 83790: 83718})
+    failures, _missing, _evidence, _settle = world.operator()._start_state(
+        since, date(2026, 10, 19), rotation_due=False
+    )
+    assert failures == [("post_start_child_exited", "2 CHILD_START heartbeat lines: restarted")]
+
+
+def test_the_undo_checks_the_session_it_meets_not_the_one_it_was_given(world):
+    """N17 MEDIUM-1: undo_to reads the upcoming session itself; a stale date from the
+    caller would make the old code's own start fail its SESSION_WAIT check."""
+    _deployed(world)
+
+    code = world.operator().undo_to(world.scenario.base, "x_y", PIN_V1, session_date=date(2026, 10, 23))
+
+    assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
+    assert f"note: the upcoming session is now {NEXT_SESSION}, not 2026-10-23: the undo checks {NEXT_SESSION}" in (
+        world.output
+    )
+    assert f"run --dry-run --date {NEXT_SESSION}" in " ".join(" ".join(argv) for argv, _c, _t in world.live.calls)

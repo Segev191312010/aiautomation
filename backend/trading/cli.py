@@ -399,7 +399,8 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "owner-run install of a reviewed candidate (runbook 6.2 STEP 0-5): pre-checks, stop,"
             " fast-forward, [migrate,] dry run, start, post-checks; a failure undoes it by itself"
-            " (exit 0 pass, 78 refused, 3 rolled back, 4 halted, 5 undo failed)"
+            " (exit 0 pass, 78 refused, 3 rolled back or aborted (git never moved): the previous code"
+            " runs again, 4 halted, 5 undo failed)"
         ),
     )
     deploy_apply.add_argument("--candidate", required=True, metavar="REF", help="branch or sha to deploy")
@@ -1079,7 +1080,13 @@ def _deploy_write_command(arguments: argparse.Namespace, parser: argparse.Argume
         return sha
 
     requested_db_path = getattr(arguments, "db_path", None)
-    database = (requested_db_path or Path(cfg.DB_PATH)).expanduser()
+    if requested_db_path is not None:
+        # N17 LOW-4: launchctl acts on the real robot, whose database is the canonical one.
+        parser.error(
+            f"--db-path does not apply to deploy {arguments.action}: it acts on the robot's own database"
+            " (<data>/autotrader.db); unset DB_PATH too"
+        )
+    database = Path(cfg.DB_PATH).expanduser()
     try:
         if arguments.action == "undo":
             reason = arguments.reason.strip()
