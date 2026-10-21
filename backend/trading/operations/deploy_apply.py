@@ -24,7 +24,10 @@ derives paths from its own file runs as a subprocess of the live checkout:
 What it does, in order (exit codes below):
 
 1. pre-checks (any refusal: exit 78, nothing written, no live call);
-2. the plan and the typed confirmation;
+2. the plan and the typed confirmation. The confirmation goes stale: when the
+   sha is typed, the window, live HEAD == PREV_SHA and the upcoming session
+   are read again, and an answer older than ``CONFIRM_TIMEOUT_S`` is refused
+   (exit 78, nothing written; N17 MEDIUM-1);
 3. ``<iso> <label> PREV_SHA=<40hex> schema=v<n>`` into ``deploys.log``;
 4. stop: ``shadow agent disable``, then wait on observed facts (C11: a
    disable that errors is logged and the wait goes on) for no supervisor, no
@@ -34,19 +37,41 @@ What it does, in order (exit codes below):
    branch name), HEAD, the bridge (and every pinned file) on disk, the tree;
 6. only with ``--expect-migration N``: ``db migrate`` and ``db status``;
 7. the live dry run, every required line checked (``DryRunCheck``);
-8. the window again, then ``shadow agent enable`` and the start checks;
+8. the window again, then ``shadow agent enable`` and the start checks, which
+   end only after telegram and heartbeat ran ``POST_START_SETTLE_S`` with no
+   exit (rehearsal F-1);
 9. ``<iso> DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12> result=PASS
    schema=v<n>`` and the ledger-ready line.
 
 A failure in steps 5-8 of a code-only deploy undoes it by itself
 (``undo_to``: stop, ``git reset --keep PREV``, HEAD re-read, the dry run shows
-the old pin, start, ``DEPLOY rollback to <sha> result=ROLLBACK reason=<token>``,
-exit 3). After step 6 ran, a failure halts instead: the robot is left
-disabled, ``result=HALTED reason=<token> backup=<path>`` is written and the
-database restore is printed, never executed (exit 4). A failure inside the
-undo leaves the robot disabled and prints runbook 6.3 with literal values
-(exit 5). Every failure path has one literal token, used identically in
-stdout, the ``deploys.log`` ``reason=`` and the final summary (``TOKENS``).
+the old pin, the fences and the heartbeat, start, ``DEPLOY rollback to <sha>
+result=ROLLBACK reason=<token>``, exit 3). When git never moved (live HEAD is
+still PREV, e.g. the window closed before the fast-forward), nothing is reset:
+the unchanged code is checked and started again and ``DEPLOY <label> <short>
+... result=ABORTED reason=<token>`` is written (exit 3 too: either way the
+previous code runs again). The undo also accepts the previous code's
+mid-session start form (no ``SESSION_WAIT``; ``SESSION_START`` at once). After
+step 6 ran, a failure halts instead: the robot is left disabled,
+``result=HALTED reason=<token> backup=<path>`` is written and the database
+restore is printed, never executed (exit 4). A failure inside the undo,
+expected or not, leaves the robot disabled and prints runbook 6.3 with literal
+values (exit 5). The undo restarts the previous code only on a tree with no
+``index.lock`` and nothing outside the benign list (``undo_tree_dirty``;
+``deploy undo`` refuses it before anything stops). After the confirmation,
+SIGHUP (the terminal closed) and SIGTERM halt the run where it stands like
+Ctrl-C (exit 4), and the HALTED line in ``deploys.log`` carries the next
+action: "git never moved" only before the first git write and on a clean
+tree, else runbook 6.3. A signal that lands during a git write waits for the
+write to end, and git runs in its own session, so it is never killed
+mid-checkout (N17b-L1). Every failure path has one literal
+token, used identically in stdout, the ``deploys.log`` ``reason=`` and the
+final summary (``TOKENS``).
+
+Paths. The robot under launchd uses the account's own home: ``deploy apply``
+and ``deploy undo`` refuse (``paths_not_canonical``) when ``HOME`` is not the
+account's home directory or the database is not ``<data>/autotrader.db``
+(``DB_PATH`` set elsewhere; ``--db-path`` is refused by the command line).
 
 Git writes go through ``GitWriter`` only: ``merge --ff-only`` and
 ``reset --keep``, with ``deploy_check``'s scrubbed git environment; this module
@@ -55,7 +80,7 @@ holds no other git write (an AST test pins it).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import closing, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import fcntl
@@ -64,8 +89,10 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import re
 import shlex
+import signal
 import sqlite3
 import stat
 import subprocess
@@ -85,6 +112,7 @@ from trading.operations.deploy_check import (
     REFUSE,
     SUPERVISOR_PATH,
     VERDICT_MIGRATION_MISSING,
+    WINDOW_CLOSES,
     CheckResult,
     DeployCheckRequest,
     Git,
@@ -137,7 +165,15 @@ LAST_START = time(6, 50)
 # launchd gives the supervisor 45 s (ExitTimeOut) to stop its children (20 s).
 STOP_WAIT_TIMEOUT_S = 75
 POST_START_TIMEOUT_S = 60
+# Rehearsal F-1: the manual L3-9 look came 20 s after the enable; a telegram
+# child without its token exits 78 one or two seconds after its CHILD_START.
+POST_START_SETTLE_S = 20
 POLL_S = 1.0
+# N17c-L2: a concurrent `git status` holds .git/index.lock for milliseconds; a
+# lock still there after this long is a git write cut short (N17c-L1).
+INDEX_LOCK_WAIT_S = 5
+# N17 MEDIUM-1: a typed sha older than this is a stale confirmation.
+CONFIRM_TIMEOUT_S = 300
 DEPLOYS_LOG_NAME = "deploys.log"
 DEPLOY_LOCK_NAME = "deploy.lock"
 
@@ -173,6 +209,8 @@ OWN_ROOT = Path(__file__).resolve().parents[3]
 NOT_INTERACTIVE = "not_interactive"
 RUNS_FROM_LIVE_CHECKOUT = "runs_from_live_checkout"
 NOT_CANDIDATE_WORKTREE = "not_candidate_worktree"
+CANDIDATE_WORKTREE_DIRTY = "candidate_worktree_dirty"
+PATHS_NOT_CANONICAL = "paths_not_canonical"
 LIVE_PYTHON_MISSING = "live_python_missing"
 DEPLOY_LOCK_BUSY = "deploy_lock_busy"
 START_CUTOFF = "start_cutoff"
@@ -180,12 +218,18 @@ DEPLOY_CHECK_PREFIX = "deploy_check_"
 PIN_VERDICT_MISSING = "pin_verdict_missing"
 PIN_EXPECTED = "pin_expected"
 PREV_SHA_INVALID = "prev_sha_invalid"
+CHANGED_PATHS_UNREADABLE = "changed_paths_unreadable"
 DEPLOY_TOOL_SCOPE_MISSING = "deploy_tool_scope_missing"
 FENCED_UNEXPECTED = "fenced_unexpected"
 MIGRATE_LOCK_BUSY = "migrate_lock_busy"
 DEPLOYS_LOG_UNUSABLE = "deploys_log_unusable"
+LIVE_INDEX_LOCK = "live_index_lock"
 LABEL_MISSING = "label_missing"
 CONFIRM_MISMATCH = "confirm_mismatch"
+# The plan went stale while the prompt waited (N17 MEDIUM-1; with START_CUTOFF).
+CONFIRM_TIMEOUT = "confirm_timeout"
+LIVE_HEAD_MOVED = "live_head_moved"
+SESSION_DATE_CHANGED = "session_date_changed"
 # The stop (exit 4 before the fast-forward, git untouched).
 STOP_WAIT_TIMEOUT = "stop_wait_timeout"
 # Steps 5-8 (code-only: undone, exit 3; after a migration: halted, exit 4).
@@ -216,6 +260,7 @@ POST_START_ROTATION_FAILED = "post_start_rotation_failed"
 POST_START_PREFLIGHT_WARNING = "post_start_preflight_warning"
 POST_START_TELEGRAM_MISSING = "post_start_telegram_missing"
 POST_START_HEARTBEAT_MISSING = "post_start_heartbeat_missing"
+POST_START_CHILD_EXITED = "post_start_child_exited"
 POST_START_PLIST = "post_start_plist"
 POST_START_HEAD = "post_start_head"
 POST_START_TIMEOUT = "post_start_timeout"
@@ -229,6 +274,8 @@ UNDO_RESET_FAILED = "undo_reset_failed"
 UNDO_RESET_NOOP = "undo_reset_noop"
 UNDO_DRY_RUN = "undo_dry_run"
 UNDO_POST_START = "undo_post_start"
+# N17b-L1/I-5: index.lock or changes outside the benign list after a git write.
+UNDO_TREE_DIRTY = "undo_tree_dirty"
 # `deploy undo` refusals (exit 78).
 UNDO_PREV_MISMATCH = "undo_prev_mismatch"
 UNDO_NEEDS_DB_RESTORE = "undo_needs_db_restore"
@@ -244,6 +291,8 @@ TOKENS = (
     NOT_INTERACTIVE,
     RUNS_FROM_LIVE_CHECKOUT,
     NOT_CANDIDATE_WORKTREE,
+    CANDIDATE_WORKTREE_DIRTY,
+    PATHS_NOT_CANONICAL,
     LIVE_PYTHON_MISSING,
     DEPLOY_LOCK_BUSY,
     START_CUTOFF,
@@ -253,12 +302,17 @@ TOKENS = (
     PIN_VERDICT_MISSING,
     PIN_EXPECTED,
     PREV_SHA_INVALID,
+    CHANGED_PATHS_UNREADABLE,
     DEPLOY_TOOL_SCOPE_MISSING,
     FENCED_UNEXPECTED,
     MIGRATE_LOCK_BUSY,
     DEPLOYS_LOG_UNUSABLE,
+    LIVE_INDEX_LOCK,
     LABEL_MISSING,
     CONFIRM_MISMATCH,
+    CONFIRM_TIMEOUT,
+    LIVE_HEAD_MOVED,
+    SESSION_DATE_CHANGED,
     STOP_WAIT_TIMEOUT,
     MERGE_FAILED,
     HEAD_MISMATCH,
@@ -286,6 +340,7 @@ TOKENS = (
     POST_START_PREFLIGHT_WARNING,
     POST_START_TELEGRAM_MISSING,
     POST_START_HEARTBEAT_MISSING,
+    POST_START_CHILD_EXITED,
     POST_START_PLIST,
     POST_START_HEAD,
     POST_START_TIMEOUT,
@@ -297,6 +352,7 @@ TOKENS = (
     UNDO_RESET_NOOP,
     UNDO_DRY_RUN,
     UNDO_POST_START,
+    UNDO_TREE_DIRTY,
     UNDO_PREV_MISMATCH,
     UNDO_NEEDS_DB_RESTORE,
     UNDO_SCHEMA_UNKNOWN,
@@ -312,10 +368,14 @@ MIGRATE_BACKUP_LINE = re.compile(r"^backup    (?P<path>/\S.*)$")
 MIGRATE_DONE_LINE = re.compile(r"^migrated  v(?P<before>\d+) -> v(?P<after>\d+)$")
 # The dry run's own line prefixes (supervisor.dry_run_report).
 BRIDGE_PREFIX = "bridge       "
+SENDABLE_LINE_PREFIX = f"{BRIDGE_PREFIX}INFO sendable identities = "
 SESSION_PREFIX = "session      "
 DATABASE_PREFIX = "database     schema "
 BUDGET_TEXT = "day risk budget 3% of net liquidation"
 _SESSION_WAIT_EVENT = re.compile(r"^\d{2}:\d{2}:\d{2}  SESSION_WAIT date=(?P<day>\S+) ")
+# A dry run from after 07:55 ET on the session day simulates from now: the
+# session starts at once, with no SESSION_WAIT (supervisor.run).
+_SESSION_START_EVENT = re.compile(r"^\d{2}:\d{2}:\d{2}  SESSION_START date=(?P<day>\S+)(?:\s|$)")
 _PID = re.compile(r"\bpid=(?P<pid>\d+)")
 _ARCHIVE_NAME = re.compile(rf"^{re.escape(SUPERVISOR_LOG_NAME)}\.(?P<day>\d{{4}}-\d{{2}}-\d{{2}})$")
 # A DEPLOY line written by this tool or by hand on 2026-10-16/18: `DEPLOY <label>
@@ -357,6 +417,15 @@ class DeployFailure(Exception):
 
 class DeploysLogError(RuntimeError):
     """``deploys.log`` is a symlink, not a regular file, or cannot be written."""
+
+
+class DeploySignal(KeyboardInterrupt):
+    """SIGHUP (the terminal closed) or SIGTERM after the confirmation: handled like
+    Ctrl-C, so the run halts where it stands with its line and manual block (N17 LOW-2)."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.name = name
 
 
 # --- deploys.log -------------------------------------------------------------------------
@@ -441,6 +510,14 @@ def halted_line(
     )
 
 
+def aborted_line(moment: datetime, label: str, head: str, prev: str, pin: str, token: str) -> str:
+    """Git never moved: the deploy stopped before its fast-forward took, and PREV runs again."""
+    return (
+        f"{iso_seconds(moment)} DEPLOY {label} {head[:SHORT_SHA_LENGTH]} PREV_SHA={prev}"
+        f" pin={pin[:12]} result=ABORTED reason={token}"
+    )
+
+
 def rollback_line(moment: datetime, prev: str, token: str) -> str:
     return f"{iso_seconds(moment)} DEPLOY rollback to {prev} result=ROLLBACK reason={token}"
 
@@ -498,6 +575,63 @@ def hold_lock(path: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
+# --- signals ----------------------------------------------------------------------------
+
+# Without a handler either signal kills the run wherever it stands, between the
+# stop and the start too, and leaves no instructions (N17 LOW-2).
+HALT_SIGNALS = (signal.SIGHUP, signal.SIGTERM)
+_DEFERRED_SIGNALS = (signal.SIGINT, *HALT_SIGNALS)
+
+
+def _raise_deploy_signal(signum: int, _frame: object) -> None:
+    raise DeploySignal(signal.Signals(signum).name)
+
+
+@contextmanager
+def _signal_handlers(handler: object, numbers: Sequence[int]) -> Iterator[None]:
+    previous: dict[int, object] = {}
+    try:
+        for number in numbers:
+            previous[number] = signal.signal(number, handler)  # type: ignore[arg-type]
+    except ValueError:
+        pass  # not the main thread: the default handling stays
+    try:
+        yield
+    finally:
+        for number, old in previous.items():
+            signal.signal(number, old)  # type: ignore[arg-type]
+
+
+def signals_interrupt() -> AbstractContextManager[None]:
+    """SIGHUP and SIGTERM raise ``DeploySignal`` (a ``KeyboardInterrupt``) while this holds."""
+    return _signal_handlers(_raise_deploy_signal, HALT_SIGNALS)
+
+
+def signals_deferred() -> AbstractContextManager[None]:
+    """While a halt writes its line and prints its block, a second signal is ignored."""
+    return _signal_handlers(signal.SIG_IGN, _DEFERRED_SIGNALS)
+
+
+@contextmanager
+def signals_held() -> Iterator[None]:
+    """N17b-L1: a signal that lands during a git write waits for the write to end,
+    then goes to the handler that was in place. Raised inside ``subprocess.run``,
+    a KeyboardInterrupt SIGKILLs git 0.25 s later, which can leave index.lock and
+    a half-written tree under an unchanged HEAD."""
+    held: list[int] = []
+
+    def hold(number: int, _frame: object) -> None:
+        if number not in held:
+            held.append(number)
+
+    try:
+        with _signal_handlers(hold, _DEFERRED_SIGNALS):
+            yield
+    finally:
+        for number in held:
+            signal.raise_signal(number)
+
+
 # --- git writes -------------------------------------------------------------------------
 
 
@@ -514,14 +648,17 @@ class GitWriter:
     def _run(self, *args: str) -> None:
         argv = ["git", "-C", str(self._repo), "-c", "core.fsmonitor=false", *args]
         try:
-            completed = subprocess.run(
-                argv,
-                capture_output=True,
-                env=git_environment(self._repo),
-                stdin=subprocess.DEVNULL,
-                timeout=120,
-                check=False,
-            )
+            # N17b-L1: a new session keeps the terminal's SIGHUP and SIGINT away from git.
+            with signals_held():
+                completed = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    env=git_environment(self._repo),
+                    stdin=subprocess.DEVNULL,
+                    timeout=120,
+                    check=False,
+                    start_new_session=True,
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitError(f"git {args[0]} failed: {type(exc).__name__}: {exc}") from exc
         if completed.returncode != 0:
@@ -788,16 +925,25 @@ def pinned_imports_count(git: Git, commit: str) -> int | None:
         return None
 
 
-def fenced_sendable(database: Path) -> tuple[str, ...]:
-    """The sendable identities whose own fence is stopped (read-only, as the bridge reads them)."""
+def stopped_identity_fences(database: Path) -> tuple[str, ...]:
+    """Every identity whose own fence is stopped, sendable or not (read-only)."""
     uri = f"file:{quote(str(database.expanduser().resolve()))}?mode=ro"
     with closing(sqlite3.connect(uri, uri=True, timeout=5)) as db:
         rows = db.execute(
             "SELECT name FROM autotrader_execution_fences WHERE name LIKE ? AND stopped=1",
             (f"{IDENTITY_FENCE_PREFIX}%",),
         ).fetchall()
-    names = {str(name)[len(IDENTITY_FENCE_PREFIX):] for (name,) in rows}
-    return tuple(sorted(names & set(SENDABLE_IDENTITIES)))
+    return tuple(sorted({str(name)[len(IDENTITY_FENCE_PREFIX):] for (name,) in rows}))
+
+
+def account_home() -> Path:
+    """The account's own home directory (the password database), whatever HOME says."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+def _ere_literal(text: str) -> str:
+    """``text`` as a POSIX extended regular expression that matches only itself (pgrep)."""
+    return re.sub(r"([\\.^$*+?()\[\]{}|])", r"\\\1", text)
 
 
 def next_session_date(now: datetime) -> date:
@@ -827,6 +973,11 @@ def parse_migrate_output(output: str) -> tuple[str | None, tuple[int, int] | Non
 
 
 # --- the dry run ------------------------------------------------------------------------------
+
+# N17b-L3: an undo checks the PREVIOUS code's dry run with the lines built here
+# (reviewed, schema, fenced, sendable prefix, heartbeat, session). They are a
+# contract across versions: changing one breaks the rollback to every earlier
+# head (test_the_undo_line_texts_are_a_cross_version_contract).
 
 
 def reviewed_line(pin: str) -> str:
@@ -874,6 +1025,10 @@ class DryRunExpectation:
     # only asked for its reviewed pin).
     pin_info: bool = True
     fenced: tuple[str, ...] | None = ()
+    # The undo's older bridge prints the fences of its own sendable set: with this,
+    # ``fenced`` holds every stopped identity fence and the expected line keeps
+    # those the dry run's one sendable line names, as that bridge does.
+    fenced_by_printed_sendable: bool = False
     sendable: tuple[str, ...] | None = SENDABLE_IDENTITIES
     registry: bool = True
     heartbeat: bool = True
@@ -881,6 +1036,9 @@ class DryRunExpectation:
     # P3-B0: the number of files the candidate's REVIEWED_BRIDGE_IMPORTS_SHA256
     # pins (None: code from before P3-B0 prints no such line).
     imports: int | None = None
+    # The undo only (N17 MEDIUM-1): after 07:55 ET on the session day the dry run
+    # simulates from now, and the session starts at once with no SESSION_WAIT.
+    mid_session_ok: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -931,17 +1089,32 @@ class DryRunCheck:
                 imports_line(expect.imports),
                 family=lambda line: line.startswith(f"{BRIDGE_PREFIX}imports "),
             )
-        if expect.fenced is not None:
+        fenced = expect.fenced
+        if fenced is not None and expect.fenced_by_printed_sendable:
+            printed = [line for line in lines if line.startswith(SENDABLE_LINE_PREFIX)]
+            if len(printed) == 1:
+                names = set(printed[0][len(SENDABLE_LINE_PREFIX):].split(", "))
+                fenced = tuple(sorted(set(fenced) & names))
+            else:
+                fenced = None
+                failures.append(
+                    (
+                        DRY_RUN_SENDABLE,
+                        f"expected one `{SENDABLE_LINE_PREFIX}...` line to read the bridge's own sendable set,"
+                        f" found {len(printed)}",
+                    )
+                )
+        if fenced is not None:
             exactly_one(
                 DRY_RUN_FENCED,
-                fenced_line(expect.fenced),
+                fenced_line(fenced),
                 family=lambda line: line.startswith(BRIDGE_PREFIX) and " fenced identities = " in line,
             )
         if expect.sendable is not None:
             exactly_one(
                 DRY_RUN_SENDABLE,
                 sendable_line(expect.sendable),
-                family=lambda line: line.startswith(f"{BRIDGE_PREFIX}INFO sendable identities = "),
+                family=lambda line: line.startswith(SENDABLE_LINE_PREFIX),
             )
         if expect.registry:
             exactly_one(
@@ -955,14 +1128,20 @@ class DryRunCheck:
         day = expect.session_date.isoformat()
         sessions = [line for line in lines if line.startswith(SESSION_PREFIX)]
         waits = [found.group("day") for found in map(_SESSION_WAIT_EVENT.match, lines) if found]
-        if len(sessions) == 1 and sessions[0].startswith(f"{SESSION_PREFIX}{day} (") and waits == [day]:
+        started = [found.group("day") for found in map(_SESSION_START_EVENT.match, lines) if found]
+        session_ok = len(sessions) == 1 and sessions[0].startswith(f"{SESSION_PREFIX}{day} (")
+        if session_ok and waits == [day]:
             evidence.append(sessions[0])
             evidence.append(f"SESSION_WAIT date={day}")
+        elif session_ok and expect.mid_session_ok and not waits and started == [day]:
+            evidence.append(sessions[0])
+            evidence.append(f"SESSION_START date={day} (mid-session: no SESSION_WAIT)")
         else:
+            also = f" (or, mid-session, one SESSION_START date={day})" if expect.mid_session_ok else ""
             failures.append(
                 (
                     DRY_RUN_SESSION,
-                    f"expected `{SESSION_PREFIX}{day} (...` and one SESSION_WAIT date={day};"
+                    f"expected `{SESSION_PREFIX}{day} (...` and one SESSION_WAIT date={day}{also};"
                     f" found {'; '.join(sessions) or 'no session line'}, SESSION_WAIT {waits or 'none'}",
                 )
             )
@@ -1111,6 +1290,7 @@ class DeployEnvironment:
     sntp: SntpProbe | None = None
     own_root: Path = OWN_ROOT
     writer_factory: Callable[[Path], GitWriter] = GitWriter
+    account_home: Callable[[], Path] = account_home
 
 
 @dataclass(frozen=True, slots=True)
@@ -1128,6 +1308,9 @@ class ApplyPlan:
     budget: bool
     tool_sha: str
     imports: int | None = None
+    # N17b-L2: every stopped identity fence, sendable or not, read at the precheck;
+    # the automatic undo keeps the names the restored bridge itself prints.
+    stopped_fences: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1137,6 +1320,10 @@ class _State:
     enabled: bool = False
     migrated: bool = False
     backup: str | None = None
+    migrate_started: datetime | None = None
+    dry_run_passed: bool = False
+    # N17b-L1/I-1: set before the first git write; "git never moved" only while False.
+    git_written: bool = False
 
 
 # --- the operator -------------------------------------------------------------------------------
@@ -1154,6 +1341,8 @@ class DeployOperator:
         self.deploys_log = DeploysLog(env.user_paths.log_directory / DEPLOYS_LOG_NAME)
         self.command = "deploy apply"
         self._last_dry_run: DryRunCheck | None = None
+        # Set by undo_to: git never moved, so nothing was reset (result=ABORTED).
+        self.undo_aborted = False
 
     # -- output --
 
@@ -1199,11 +1388,77 @@ class DeployOperator:
                 if refusals or plan is None:
                     return self._refuse(refusals)
                 self._print_plan(plan)
+                shown_at = self.now()
                 if not self._confirmed(plan.head, "the candidate's"):
                     return self._refuse([(CONFIRM_MISMATCH, "the typed sha is not the candidate's short sha")])
+                stale = self._confirmation_problems(
+                    shown_at=shown_at, head=plan.prev, session_date=plan.session_date
+                )
+                if stale:
+                    return self._refuse(stale)
                 return self._run(plan)
         except LockBusy as exc:
             return self._refuse([(DEPLOY_LOCK_BUSY, str(exc))])
+
+    def _confirmation_problems(
+        self, *, shown_at: datetime, head: str, session_date: date
+    ) -> list[tuple[str, str]]:
+        """N17 MEDIUM-1: the plan the owner confirmed must still hold when the sha
+        is typed (the prompt waits for ever); else nothing is written and nothing runs."""
+        now = self.now()
+        problems: list[tuple[str, str]] = []
+        waited = (now - shown_at).total_seconds()
+        if waited > CONFIRM_TIMEOUT_S:
+            problems.append(
+                (
+                    CONFIRM_TIMEOUT,
+                    f"the sha was typed {waited:.0f} s after the plan was printed (at most {CONFIRM_TIMEOUT_S} s):"
+                    " run the command again for a fresh plan",
+                )
+            )
+        window = start_window_problem(now)
+        if window:
+            problems.append((START_CUTOFF, f"when the sha was typed: {window}"))
+        live = self._live_head()
+        if live != head:
+            problems.append(
+                (LIVE_HEAD_MOVED, f"live HEAD is {live}, not {head} as the plan showed: run the command again")
+            )
+        upcoming = next_session_date(now)
+        if upcoming != session_date:
+            problems.append(
+                (
+                    SESSION_DATE_CHANGED,
+                    f"the upcoming session is {upcoming.isoformat()}, not {session_date.isoformat()} as the plan"
+                    " showed: run the command again",
+                )
+            )
+        return problems
+
+    def _path_problems(self) -> list[tuple[str, str]]:
+        """N17 LOW-4: the robot under launchd uses the account's canonical paths (the
+        plist sets neither HOME nor DB_PATH); a shell pointed at a rehearsal copy
+        would check one database and log directory while launchctl acts on the real robot."""
+        account = self.env.account_home()
+        canonical = UserPaths(home=account)
+        problems: list[tuple[str, str]] = []
+        if not _same_path(self.env.user_paths.home, account):
+            problems.append(
+                (
+                    PATHS_NOT_CANONICAL,
+                    f"HOME is {self.env.user_paths.home}, not this account's home {account}: run from a shell"
+                    " whose HOME is the account's own (`echo $HOME`)",
+                )
+            )
+        if not _same_path(self.env.db_path, canonical.database_file):
+            problems.append(
+                (
+                    PATHS_NOT_CANONICAL,
+                    f"the database is {self.env.db_path}, not the robot's {canonical.database_file}:"
+                    " unset DB_PATH (`unset DB_PATH`)",
+                )
+            )
+        return problems
 
     def _prechecks(self, request: DeployApplyRequest) -> tuple[ApplyPlan | None, list[tuple[str, str]]]:
         refusals: list[tuple[str, str]] = []
@@ -1218,6 +1473,7 @@ class DeployOperator:
         window = start_window_problem(now)
         if window:
             refusals.append((START_CUTOFF, window))
+        refusals.extend(self._path_problems())
         head = resolve_candidate(self.git, request.candidate)
         check_request = DeployCheckRequest(
             candidate=request.candidate,
@@ -1248,6 +1504,15 @@ class DeployOperator:
                     f" {request.candidate} {(head or '?')[:12]}: run it from the candidate's worktree",
                 )
             )
+        dirty = self._own_checkout_changes()
+        if dirty:
+            refusals.append(
+                (
+                    CANDIDATE_WORKTREE_DIRTY,
+                    f"{self.env.own_root} has {len(dirty)} change(s) the review did not see"
+                    f" ({'; '.join(dirty[:5])}): `git -C {self.env.own_root} status --short` must print nothing",
+                )
+            )
         if not os.access(self.live.python, os.X_OK) or not self.live.entrypoint.is_file():
             refusals.append(
                 (LIVE_PYTHON_MISSING, f"{self.live.python} or {self.live.entrypoint} is missing or not executable")
@@ -1262,7 +1527,7 @@ class DeployOperator:
             changed = self.git.changed_paths("HEAD", head)
         except GitError as exc:
             changed = []
-            refusals.append((DEPLOY_TOOL_SCOPE_MISSING, f"cannot list the changed paths: {exc}"))
+            refusals.append((CHANGED_PATHS_UNREADABLE, f"cannot list the paths HEAD..candidate changes: {exc}"))
         tool_changes = sorted(set(changed) & set(DEPLOY_TOOL_PATHS))
         if tool_changes and DEPLOY_TOOL_SCOPE not in request.scope:
             refusals.append(
@@ -1290,12 +1555,13 @@ class DeployOperator:
                 old_pin = bridge_pin_at(self.git, prev)
             except (GitError, SyntaxError, ValueError) as exc:
                 refusals.append((PREV_SHA_INVALID, f"the live code's pin cannot be read: {exc}"))
+        stopped: tuple[str, ...] = ()
         try:
-            fenced = fenced_sendable(self.env.db_path)
+            stopped = stopped_identity_fences(self.env.db_path)
         except (OSError, sqlite3.Error) as exc:
-            fenced = ()
             refusals.append((FENCED_UNEXPECTED, f"identity fences unreadable: {type(exc).__name__}: {exc}"))
         else:
+            fenced = tuple(sorted(set(stopped) & set(SENDABLE_IDENTITIES)))
             if fenced != tuple(sorted(request.expect_fenced)):
                 refusals.append(
                     (
@@ -1310,6 +1576,11 @@ class DeployOperator:
         log_problem = self.deploys_log.problem()
         if log_problem:
             refusals.append((DEPLOYS_LOG_UNUSABLE, log_problem))
+        # N17c-L1: with a stale index.lock the fast-forward fails after the stop,
+        # and the undo will not restart PREV on that tree: refuse before anything stops.
+        lock_problem = self._index_lock_problem()
+        if lock_problem:
+            refusals.append((LIVE_INDEX_LOCK, lock_problem))
         label = request.label or (verdict_label(matched[0].text) if matched else "")
         if matched and not _valid_label(label):
             refusals.append(
@@ -1335,6 +1606,7 @@ class DeployOperator:
                 budget=b"\nDAY_RISK_BUDGET_PCT" in bridge_blob,
                 tool_sha=(own_head or "?")[:SHORT_SHA_LENGTH],
                 imports=imports,
+                stopped_fences=stopped,
             ),
             [],
         )
@@ -1344,6 +1616,58 @@ class DeployOperator:
             return self.git.resolve("HEAD")
         except GitError:
             return None
+
+    def _index_lock(self) -> Path | None:
+        try:
+            found = Path(self.git.text("rev-parse", "--git-path", "index.lock").strip())
+        except GitError:
+            return None
+        return found if found.is_absolute() else self.repo / found
+
+    def _index_lock_problem(self) -> str | None:
+        """N17c-L1/L2: the live checkout's index.lock, after up to INDEX_LOCK_WAIT_S
+        for a concurrent reader's to go; the problem names its remedy."""
+        lock = self._index_lock()
+        if lock is None:
+            return f"git rev-parse --git-path index.lock failed in {self.repo}"
+        deadline = self.now() + timedelta(seconds=INDEX_LOCK_WAIT_S)
+        while lock.exists():
+            if self.now() >= deadline:
+                return (
+                    f"{lock} exists after {INDEX_LOCK_WAIT_S} s: a git write was cut short or is still running;"
+                    f" only when `pgrep -x git || echo none` prints none: rm {shlex.quote(str(lock))}"
+                )
+            self.env.sleep(POLL_S)
+        return None
+
+    def _tree_problem(self) -> str | None:
+        """N17b-L1/I-5: what a git write cut short leaves behind (index.lock, files
+        outside the benign list); None when the live tree is only benign."""
+        lock_problem = self._index_lock_problem()
+        if lock_problem:
+            return lock_problem
+        try:
+            tree = check_tree_clean(self.git, benign_paths=DEFAULT_BENIGN_PATHS)
+        except GitError as exc:
+            return f"git status failed: {exc}"
+        if tree.status == REFUSE:
+            return "; ".join((tree.detail, *tree.notes))
+        return None
+
+    def _own_checkout_changes(self) -> list[str]:
+        """N17 LOW-3: what the tool's own checkout holds beyond its HEAD: tracked
+        changes anywhere, and untracked files under backend/ (first on sys.path,
+        so importable). The review saw HEAD only."""
+        try:
+            entries = Git(self.env.own_root).status_entries()
+        except GitError as exc:
+            return [f"git status failed: {exc}"]
+        return [entry for entry in entries if not entry.startswith("??") or entry[3:].startswith("backend/")]
+
+    def _print_paths(self) -> None:
+        self.say(f"  home           {self.env.user_paths.home} (the account's: {self.env.account_home()})")
+        self.say(f"  logs           {self.env.user_paths.log_directory} (supervisor.log, {DEPLOYS_LOG_NAME})")
+        self.say(f"  data           {self.env.user_paths.data_directory}")
 
     def _print_plan(self, plan: ApplyPlan) -> None:
         request = plan.request
@@ -1357,32 +1681,33 @@ class DeployOperator:
             f"  database       {self.env.db_path}  schema v{plan.schema_before}"
             + (f" -> v{plan.schema_after} (db migrate)" if migration else " (unchanged)")
         )
+        self._print_paths()
         fenced = ", ".join(request.expect_fenced) or "none"
         self.say(f"  session        {plan.session_date.isoformat()}  fenced {fenced}")
         first = prev_line(self.now(), plan.label, plan.prev, plan.schema_before)
-        self.say(f"  1. append to {self.deploys_log.path}: {first}")
-        self.say(
-            f"  2. stop: {self.live.command_line('shadow', 'agent', 'disable')}; wait up to {STOP_WAIT_TIMEOUT_S} s"
-            " for no supervisor, no trading process, a free supervisor.lock and SUPERVISOR_STOP reason=SIGTERM"
-        )
-        self.say(
-            f"  3. window again, then git -C {self.repo} merge --ff-only {plan.head};"
-            " then HEAD, the pinned files' sha256 and the tree"
-        )
+        steps = [
+            f"append to {self.deploys_log.path}: {first}",
+            f"stop: {self.live.command_line('shadow', 'agent', 'disable')}; wait up to {STOP_WAIT_TIMEOUT_S} s"
+            " for no supervisor, no trading process, a free supervisor.lock and SUPERVISOR_STOP reason=SIGTERM",
+            f"window again, then git -C {self.repo} merge --ff-only {plan.head};"
+            " then HEAD, the pinned files' sha256 and the tree",
+        ]
         if migration:
-            self.say(
-                f"  4. {self.live.command_line('db', 'migrate', '--db-path', str(self.env.db_path))}"
+            steps.append(
+                f"{self.live.command_line('db', 'migrate', '--db-path', str(self.env.db_path))}"
                 f" (expect migrated  v{plan.schema_before} -> v{plan.schema_after}), then db status"
             )
-        self.say(
-            f"  5. {self.live.command_line('run', '--dry-run', '--date', plan.session_date.isoformat())}:"
-            " every required line, no !!!, no WARNING:"
-        )
-        self.say(
-            f"  6. window again, then {self.live.command_line('shadow', 'agent', 'enable')}; wait up to"
-            f" {POST_START_TIMEOUT_S} s for the start lines, the children, the plist and HEAD"
-        )
-        self.say(f"  7. append the DEPLOY {plan.label} {plan.head[:SHORT_SHA_LENGTH]} ... result=PASS line")
+        steps += [
+            f"{self.live.command_line('run', '--dry-run', '--date', plan.session_date.isoformat())}:"
+            " every required line, no !!!, no WARNING:",
+            f"window again, then {self.live.command_line('shadow', 'agent', 'enable')}; wait up to"
+            f" {POST_START_TIMEOUT_S} s for the start lines, the children, the plist and HEAD, and"
+            f" {POST_START_SETTLE_S} s with no telegram or heartbeat exit",
+            f"append the DEPLOY {plan.label} {plan.head[:SHORT_SHA_LENGTH]} ... result=PASS line",
+        ]
+        # Rehearsal F-3: numbered consecutively, with or without the migration.
+        for number, step in enumerate(steps, start=1):
+            self.say(f"  {number}. {step}")
         if migration:
             self.say(
                 "  A failure after the migration HALTS: the robot stays disabled and the restore is printed"
@@ -1390,6 +1715,13 @@ class DeployOperator:
             )
         else:
             self.say(f"  A failure after the stop undoes the deploy by itself: back to {plan.prev}.")
+        self._print_confirmation_rule()
+
+    def _print_confirmation_rule(self) -> None:
+        self.say(
+            f"  Type the sha within {CONFIRM_TIMEOUT_S} s: the window, live HEAD and the session are read again"
+            " when you type, and a changed fact refuses (nothing changed). Do not close this window while it runs."
+        )
 
     def _confirmed(self, sha: str, whose: str) -> bool:
         short = sha[:SHORT_SHA_LENGTH]
@@ -1414,38 +1746,44 @@ class DeployOperator:
             return self._refuse([(DEPLOYS_LOG_UNUSABLE, f"the PREV line could not be written: {exc}")])
         self.say(f"OK deploys.log: {first}")
         state = _State()
-        try:
+        with signals_interrupt():
             try:
-                self.stop()
-            except DeployFailure as failure:
-                return self._halt_before_ff(plan, failure)
-            try:
-                self._require_window("fast-forward")
-                self.fast_forward(plan)
-                if plan.request.expect_migration is not None:
-                    state.migrated = True
-                    state.backup = self.migrate(plan)
-                self.dry_run(self._expectation(plan))
-                self._require_window("start")
-                since = self.enable(state)
-                self.wait_started(since, expected_head=plan.head, session_date=plan.session_date)
-            except DeployFailure as failure:
-                if state.migrated:
-                    return self._halt_after_migration(plan, failure, state)
-                return self._auto_undo(plan, failure, state)
-        except KeyboardInterrupt:
-            return self._halt_unexpected(plan, INTERRUPTED, "interrupted (Ctrl-C)", state)
-        except Exception as exc:  # noqa: BLE001 - every unexpected error halts with the manual blocks
-            return self._halt_unexpected(plan, INTERNAL_ERROR, f"{type(exc).__name__}: {exc}", state)
-        line = pass_line(self.now(), plan.label, plan.head, plan.prev, plan.pin, plan.schema_after)
-        self._append(line)
-        checked = len(self._last_dry_run.evidence) if self._last_dry_run else 0
-        self.say(
-            f"{iso_seconds(self.now())} | DEPLOY {plan.label} {plan.head[:SHORT_SHA_LENGTH]} PREV_SHA={plan.prev}"
-            f" pin={plan.pin[:12]} result=PASS | owner-run via autotraderctl deploy apply ({plan.tool_sha});"
-            f" {checked} dry-run lines ok; post-checks ok | {_display(self.deploys_log.path)}"
-        )
-        self.say(f"deploy apply: PASS {plan.label} {plan.head[:SHORT_SHA_LENGTH]} (exit {EXIT_OK})")
+                try:
+                    self.stop()
+                except DeployFailure as failure:
+                    return self._halt_before_ff(plan, failure)
+                try:
+                    self._require_window("fast-forward")
+                    state.git_written = True
+                    self.fast_forward(plan)
+                    if plan.request.expect_migration is not None:
+                        state.migrated = True
+                        state.migrate_started = self.now()
+                        state.backup = self.migrate(plan)
+                    self.dry_run(self._expectation(plan))
+                    state.dry_run_passed = True
+                    self._require_window("start")
+                    since = self.enable(state)
+                    self.wait_started(since, expected_head=plan.head, session_date=plan.session_date)
+                except DeployFailure as failure:
+                    if state.migrated:
+                        return self._halt_after_migration(plan, failure, state)
+                    return self._auto_undo(plan, failure, state)
+            except KeyboardInterrupt as interrupt:
+                return self._halt_unexpected(plan, INTERRUPTED, _interrupted(interrupt), state)
+            except Exception as exc:  # noqa: BLE001 - every unexpected error halts with the manual blocks
+                return self._halt_unexpected(plan, INTERNAL_ERROR, f"{type(exc).__name__}: {exc}", state)
+            with signals_deferred():
+                line = pass_line(self.now(), plan.label, plan.head, plan.prev, plan.pin, plan.schema_after)
+                self._append(line)
+                checked = len(self._last_dry_run.evidence) if self._last_dry_run else 0
+                self.say(
+                    f"{iso_seconds(self.now())} | DEPLOY {plan.label} {plan.head[:SHORT_SHA_LENGTH]}"
+                    f" PREV_SHA={plan.prev} pin={plan.pin[:12]} result=PASS | owner-run via autotraderctl deploy"
+                    f" apply ({plan.tool_sha}); {checked} dry-run lines ok; post-checks ok"
+                    f" | {_display(self.deploys_log.path)}"
+                )
+                self.say(f"deploy apply: PASS {plan.label} {plan.head[:SHORT_SHA_LENGTH]} (exit {EXIT_OK})")
         return EXIT_OK
 
     def _require_window(self, step: str) -> None:
@@ -1616,8 +1954,10 @@ class DeployOperator:
         session_date: date,
         *,
         rotation_due: bool,
-    ) -> tuple[list[tuple[str, str]], list[str], list[str]]:
-        """``(failures, still missing, evidence)`` of the start, from the logs and ps."""
+        mid_session_ok: bool = False,
+    ) -> tuple[list[tuple[str, str]], list[str], list[str], datetime | None]:
+        """``(failures, still missing, evidence, settle from)`` of the start, from the
+        logs and ps; ``settle from`` is the last required CHILD_START's time."""
         lines = supervisor_lines(self.env.user_paths.log_directory, since)
         table = list(self.env.process_table())
         failures: list[tuple[str, str]] = []
@@ -1652,6 +1992,7 @@ class DeployOperator:
         ]
         if stops:
             failures.append((POST_START_NO_START, f"the supervisor stopped: {stops[-1].text}"))
+        after_start = [] if first_start is None else lines[first_start + 1:]
         if pid is not None:
             running = supervisors(table)
             others = [entry for entry in running if entry[0] != pid]
@@ -1670,14 +2011,32 @@ class DeployOperator:
         waits = [line for line in lines if line.kind == "SESSION_WAIT"]
         wanted = f"date={session_date.isoformat()}"
         wrong = [line for line in waits if wanted not in line.fields]
+        # The undo's previous code may start mid-session (N17 MEDIUM-1, the real
+        # 2026-10-13 09:46 ET restart): SESSION_START at once, no SESSION_WAIT.
+        sessions = [line for line in after_start if line.kind == "SESSION_START"] if mid_session_ok else []
         if wrong:
             failures.append((POST_START_SESSION_WAIT, f"{wrong[0].text} is not {wanted}"))
-        elif not waits:
-            missing.append(f"SESSION_WAIT {wanted}")
-        else:
+        elif waits:
             evidence.append(waits[0].text)
+        elif sessions and wanted not in sessions[0].fields:
+            failures.append((POST_START_SESSION_WAIT, f"{sessions[0].text} is not {wanted}"))
+        elif sessions:
+            evidence.append(sessions[0].text)
+        else:
+            missing.append(f"SESSION_WAIT {wanted}" + (f" (or SESSION_START {wanted})" if mid_session_ok else ""))
         always_on = ((TELEGRAM_CHILD, POST_START_TELEGRAM_MISSING), (HEARTBEAT_CHILD, POST_START_HEARTBEAT_MISSING))
+        settle_from: datetime | None = None
         for child, token in always_on:
+            # Rehearsal F-1: a required child that exited (or restarted) after the
+            # new start is a failure, even when its restart is running again.
+            exits = [line for line in after_start if line.kind == "CHILD_EXIT" and line.fields[2:3] == [child]]
+            restarts = [line for line in after_start if line.kind == "CHILD_START" and line.fields[2:3] == [child]]
+            if exits:
+                failures.append((POST_START_CHILD_EXITED, f"{mask_accounts(exits[0].text)} after the start"))
+                continue
+            if len(restarts) > 1:
+                failures.append((POST_START_CHILD_EXITED, f"{len(restarts)} CHILD_START {child} lines: restarted"))
+                continue
             events = [
                 line
                 for line in lines
@@ -1696,6 +2055,7 @@ class DeployOperator:
                 )
             else:
                 evidence.append(events[-1].text)
+                settle_from = events[-1].at if settle_from is None else max(settle_from, events[-1].at)
         rotated = [line for line in lines if line.kind == "LOG_ROTATED"]
         allowed = rotations_allowed(since)
         if len(rotated) > allowed:
@@ -1705,7 +2065,7 @@ class DeployOperator:
         elif rotation_due and not rotated:
             missing.append("the LOG_ROTATED line of the rotation due at this start")
         evidence.extend(line.text for line in rotated)
-        return failures, missing, evidence
+        return failures, missing, evidence, settle_from
 
     def _plist_problem(self, *, check_current: bool) -> str | None:
         path = self.env.user_paths.launch_agent_file
@@ -1734,39 +2094,56 @@ class DeployOperator:
         return None
 
     def wait_started(
-        self, since: datetime, *, expected_head: str, session_date: date, check_current: bool = True
+        self,
+        since: datetime,
+        *,
+        expected_head: str,
+        session_date: date,
+        check_current: bool = True,
+        mid_session_ok: bool = False,
     ) -> None:
         since = floor_second(since)
         rotation_due = rotation_due_at(self.env.user_paths.log_directory, since)
         deadline = self.now() + timedelta(seconds=POST_START_TIMEOUT_S)
         settled = False
         while True:
-            failures, missing, evidence = self._start_state(since, session_date, rotation_due=rotation_due)
+            failures, missing, evidence, settle_from = self._start_state(
+                since, session_date, rotation_due=rotation_due, mid_session_ok=mid_session_ok
+            )
             if failures:
                 token, detail = failures[0]
                 raise DeployFailure(token, detail, notes=[f"{t}: {d}" for t, d in failures[1:]])
-            if not missing:
-                if settled:
-                    break
-                # One more look: a LOG_ROTATION_FAILED follows its marker.
-                settled = True
-            else:
+            if missing:
                 settled = False
                 if self.now() >= deadline:
                     raise DeployFailure(
                         POST_START_TIMEOUT, f"still missing after {POST_START_TIMEOUT_S} s: " + "; ".join(missing)
                     )
+            elif settle_from is not None and self.now() < settle_from + timedelta(seconds=POST_START_SETTLE_S):
+                # Rehearsal F-1: every start line is there; watch the children for
+                # POST_START_SETTLE_S after their CHILD_START before trusting them.
+                settled = False
+            elif settled:
+                break
+            else:
+                # One more look: a LOG_ROTATION_FAILED follows its marker.
+                settled = True
             self.env.sleep(POLL_S)
         for line in evidence:
             self.say(f"  | {line}")
+        self.say(f"OK settled: telegram and heartbeat ran {POST_START_SETTLE_S} s after their CHILD_START, no exit")
         problem = self._plist_problem(check_current=check_current)
         if problem:
             raise DeployFailure(POST_START_PLIST, problem)
         head = self._live_head()
         if head != expected_head:
             raise DeployFailure(POST_START_HEAD, f"HEAD is {head}, expected {expected_head}")
+        mid_session = not any(" SESSION_WAIT " in line for line in evidence)
+        session = (
+            f"SESSION_START date={session_date} (mid-session)" if mid_session else f"SESSION_WAIT date={session_date}"
+        )
         self.say(
-            f"OK started: one supervisor, telegram and heartbeat under it, SESSION_WAIT date={session_date},"
+            f"OK started: one supervisor, telegram and heartbeat under it, {session},"
             f" plist WorkingDirectory {self.live.backend}, loaded, HEAD {expected_head[:12]}"
         )
 
@@ -1792,23 +2169,96 @@ class DeployOperator:
         self._append(
             halted_line(self.now(), plan.label, plan.head, plan.prev, plan.pin, failure.token, state.backup or "none")
         )
+        if failure.token == START_CUTOFF and state.dry_run_passed and not state.enabled:
+            # Rehearsal R5c: only the start came too late; the migrated candidate
+            # passed its dry run. D4 holds: this command never starts it itself.
+            self._print_start_migrated(plan)
+            self.say("OPTION 2: go back to PREV with the database restore below.")
         self._print_restore(
-            plan.prev, plan.old_pin, plan.schema_before, plan.schema_after, state.backup, plan.session_date
+            plan.prev,
+            plan.old_pin,
+            plan.schema_before,
+            plan.schema_after,
+            state.backup,
+            plan.session_date,
+            made_after=state.migrate_started,
         )
         self.say(f"{self.command}: HALTED reason={failure.token} (exit {EXIT_HALTED}; the robot is disabled)")
         return EXIT_HALTED
 
+    def _print_start_migrated(self, plan: ApplyPlan) -> None:
+        self.say(
+            f"OPTION 1: start the new code. The database is at v{plan.schema_after} and"
+            f" {plan.head[:SHORT_SHA_LENGTH]}'s dry run passed; only the start came after"
+            f" {LAST_START:%H:%M} ET. One line at a time:"
+        )
+        # N17b-L4: the manual window ends at 07:20 ET, 35 minutes before the first child.
+        self.say(
+            f"  Only before {WINDOW_CLOSES:%H:%M} ET. Later, leave the robot disabled until after the"
+            f" close (from {FIRST_START:%H:%M} ET), or take OPTION 2."
+        )
+        self.say(f"  cd {shlex.quote(str(self.live.backend))}")
+        self.say(f"  {self.live.command_line('shadow', 'agent', 'enable')}")
+        self._print_start_expectation(plan.session_date)
+        line = (
+            f"DEPLOY {plan.label} {plan.head[:SHORT_SHA_LENGTH]} PREV_SHA={plan.prev} pin={plan.pin[:12]}"
+            f" result=PASS schema=v{plan.schema_after}"
+        )
+        self.say(f"  echo \"$(date -Iseconds) {line}\" >> {shlex.quote(str(self.deploys_log.path))}")
+        self.say("  (the echo only after both looks showed the expected lines)")
+
+    def _print_start_expectation(self, session_date: date) -> None:
+        log = shlex.quote(str(self.env.user_paths.log_directory / SUPERVISOR_LOG_NAME))
+        self.say(f"  tail -n 8 {log}")
+        self.say(
+            f"  Expect: SUPERVISOR_START pid=<n> mode=daily, CHILD_START {TELEGRAM_CHILD}, CHILD_START"
+            f" {HEARTBEAT_CHILD}, then SESSION_WAIT date={session_date} (SESSION_START date={session_date} after"
+            " 07:55 ET); no PREFLIGHT_WARNING, LAUNCH_REFUSED or CHILD_EXIT"
+        )
+        self.say(f"  after {POST_START_SETTLE_S} s, tail -n 8 {log} again: still no CHILD_EXIT {TELEGRAM_CHILD} or"
+                 f" {HEARTBEAT_CHILD}")
+
     def _halt_unexpected(self, plan: ApplyPlan, token: str, detail: str, state: _State) -> int:
-        self.say(f"FAIL {token}: {detail}")
-        self._append(halted_line(self.now(), plan.label, plan.head, plan.prev, plan.pin, token, state.backup))
-        self.say("Nothing more was run. HEAD may be the candidate or PREV; the robot may be stopped or running.")
-        if state.migrated:
-            self._print_restore(
-                plan.prev, plan.old_pin, plan.schema_before, plan.schema_after, state.backup, plan.session_date
+        with signals_deferred():
+            self.say(f"FAIL {token}: {detail}")
+            head = self._live_head()
+            tree = self._tree_problem()
+            if tree:
+                self.say(f"note: the live tree is not clean: {tree}")
+            # The terminal may be gone (SIGHUP): deploys.log carries the next action too.
+            if state.migrated:
+                after = (
+                    f"restore the database and the code to PREV_SHA={plan.prev} (backup={state.backup or 'none'});"
+                    " never enable the old code on the migrated database"
+                )
+            elif head == plan.prev and not state.git_written and tree is None:
+                after = (
+                    f"git never moved (HEAD {plan.prev}): ( cd {self.live.backend} &&"
+                    f" {self.live.command_line('shadow', 'agent', 'enable')} ), then the start lines"
+                )
+            else:
+                # N17b I-1: HEAD may be PREV again after the undo's reset; the dry run still comes first.
+                after = f"runbook 6.3 back to PREV_SHA={plan.prev} (HEAD {head or 'unknown'}): only when flat"
+                if tree:
+                    after += f"; first the tree: {tree}"
+            self._append(
+                halted_line(self.now(), plan.label, plan.head, plan.prev, plan.pin, token, state.backup)
+                + f" next: {after}"
             )
-        else:
-            self._print_manual_rollback(plan.prev, plan.old_pin, plan.session_date, token)
-        self.say(f"{self.command}: HALTED reason={token} (exit {EXIT_HALTED})")
+            self.say(f"Nothing more was run. Live HEAD is {head or 'unknown'}; the robot may be stopped or running.")
+            if state.migrated:
+                self._print_restore(
+                    plan.prev,
+                    plan.old_pin,
+                    plan.schema_before,
+                    plan.schema_after,
+                    state.backup,
+                    plan.session_date,
+                    made_after=state.migrate_started,
+                )
+            else:
+                self._print_manual_rollback(plan.prev, plan.old_pin, plan.session_date, token)
+            self.say(f"{self.command}: HALTED reason={token} (exit {EXIT_HALTED})")
         return EXIT_HALTED
 
     def _leave_disabled(self) -> None:
@@ -1819,6 +2269,8 @@ class DeployOperator:
             self.say(f"WARNING {failure.token}: {failure.detail}")
             for note in failure.notes:
                 self.say(f"  {note}")
+        except Exception as exc:  # noqa: BLE001 - a failure path must reach its manual block
+            self.say(f"WARNING the disable could not be confirmed: {type(exc).__name__}: {exc}")
 
     def _auto_undo(self, plan: ApplyPlan, failure: DeployFailure, state: _State) -> int:
         self.say(f"FAIL {failure.token}: {failure.detail}")
@@ -1831,8 +2283,15 @@ class DeployOperator:
             plan.old_pin,
             session_date=plan.session_date,
             launchd_changed=LAUNCHD_PATH in _changed(self.git, plan.prev, plan.head),
+            fenced=plan.stopped_fences,
+            aborted=lambda moment, token: aborted_line(moment, plan.label, plan.head, plan.prev, plan.pin, token),
         )
-        if code == EXIT_ROLLED_BACK:
+        if code == EXIT_ROLLED_BACK and self.undo_aborted:
+            self.say(
+                f"{self.command}: ABORTED reason={failure.token} (exit {EXIT_ROLLED_BACK}; git never moved;"
+                f" {plan.prev[:SHORT_SHA_LENGTH]} runs again)"
+            )
+        elif code == EXIT_ROLLED_BACK:
             self.say(
                 f"{self.command}: ROLLED BACK reason={failure.token} (exit {EXIT_ROLLED_BACK};"
                 f" {plan.prev[:SHORT_SHA_LENGTH]} runs again)"
@@ -1847,11 +2306,24 @@ class DeployOperator:
         *,
         session_date: date,
         launchd_changed: bool = False,
+        fenced: Sequence[str] | None = None,
+        aborted: Callable[[datetime, str], str] | None = None,
     ) -> int:
         """P2-4: stop, ``reset --keep`` to PREV, re-read HEAD, dry run with the old
-        pin, start; ``result=ROLLBACK`` and exit 3, or exit 5 with the robot disabled."""
+        pin, start; ``result=ROLLBACK`` and exit 3, or exit 5 with the robot disabled.
+
+        With ``aborted`` (the automatic undo) and live HEAD still PREV, git never
+        moved: nothing is reset, and ``aborted(now, reason)`` is the line written.
+        ``fenced`` is the identity fence set seen before the deploy (default: read now).
+        """
         state = _State()
+        self.undo_aborted = False
         try:
+            current = next_session_date(self.now())
+            if current != session_date:
+                # N17 MEDIUM-1: the session the previous code will meet is the one now.
+                self.say(f"note: the upcoming session is now {current}, not {session_date}: the undo checks {current}")
+                session_date = current
             try:
                 self.stop()
             except DeployFailure as failure:
@@ -1859,26 +2331,46 @@ class DeployOperator:
             problem = prev_sha_problem(self.git, prev)
             if problem:
                 raise DeployFailure(UNDO_PREV_INVALID, problem)
-            self.say(f"STEP git -C {self.repo} reset --keep {prev}")
-            try:
-                self.writer.reset_keep(prev)
-            except (GitError, ValueError) as exc:
-                raise DeployFailure(UNDO_RESET_FAILED, str(exc)) from exc
-            head = self._live_head()
-            if head != prev:
-                raise DeployFailure(UNDO_RESET_NOOP, f"HEAD is {head} after reset --keep {prev}")
-            self.say(f"OK HEAD {prev}")
+            if aborted is not None and self._live_head() == prev:
+                self.undo_aborted = True
+                self.say(f"OK HEAD is still {prev}: git never moved, nothing to reset")
+            else:
+                self.say(f"STEP git -C {self.repo} reset --keep {prev}")
+                try:
+                    self.writer.reset_keep(prev)
+                except (GitError, ValueError) as exc:
+                    raise DeployFailure(UNDO_RESET_FAILED, str(exc)) from exc
+                head = self._live_head()
+                if head != prev:
+                    raise DeployFailure(UNDO_RESET_NOOP, f"HEAD is {head} after reset --keep {prev}")
+                self.say(f"OK HEAD {prev}")
+            # N17b I-5: PREV restarts only on its own tree (a failed merge can leave files behind).
+            tree = self._tree_problem()
+            if tree:
+                raise DeployFailure(UNDO_TREE_DIRTY, tree)
+            self.say("OK tree only benign, no index.lock")
             status = inspect_schema(self.env.db_path)
+            fences: tuple[str, ...] | None
+            if fenced is not None:
+                fences = tuple(sorted(fenced))
+            else:
+                try:
+                    fences = stopped_identity_fences(self.env.db_path)
+                except (OSError, sqlite3.Error) as exc:
+                    fences = None
+                    self.say(f"note: identity fences unreadable ({type(exc).__name__}): the fenced line is not checked")
             expect = DryRunExpectation(
                 session_date=session_date,
                 pin=expected_old_pin,
                 schema_version=status.applied_version,
                 database=str(self.env.db_path.expanduser()),
                 pin_info=False,
-                fenced=None,
+                fenced=fences,
+                fenced_by_printed_sendable=True,
                 sendable=None,
                 registry=False,
-                heartbeat=False,
+                heartbeat=True,
+                mid_session_ok=True,
             )
             try:
                 self.dry_run(expect)
@@ -1888,42 +2380,87 @@ class DeployOperator:
             since = self.enable(state)
             try:
                 self.wait_started(
-                    since, expected_head=prev, session_date=session_date, check_current=not launchd_changed
+                    since,
+                    expected_head=prev,
+                    session_date=session_date,
+                    check_current=not launchd_changed,
+                    mid_session_ok=True,
                 )
             except DeployFailure as failure:
                 detail = f"{failure.token}: {failure.detail}"
                 raise DeployFailure(UNDO_POST_START, detail, notes=failure.notes) from failure
-        except DeployFailure as failure:
+        except Exception as exc:  # noqa: BLE001 - N17 LOW-6: every failure inside the undo
+            failure = exc if isinstance(exc, DeployFailure) else DeployFailure(
+                INTERNAL_ERROR, f"{type(exc).__name__}: {exc}"
+            )
+            return self._undo_failed(prev, expected_old_pin, session_date, reason, failure, state)
+        if self.undo_aborted and aborted is not None:
+            self._append(aborted(self.now(), reason))
+            self.say(f"OK aborted: {prev} runs again; reason={reason}")
+        else:
+            self._append(rollback_line(self.now(), prev, reason))
+            self.say(f"OK rollback to {prev}: reason={reason}")
+        return EXIT_ROLLED_BACK
+
+    def _undo_failed(
+        self, prev: str, old_pin: str, session_date: date, reason: str, failure: DeployFailure, state: _State
+    ) -> int:
+        """Any failure inside the undo: disabled, UNDO_FAILED, runbook 6.3, exit 5."""
+        with signals_deferred():
             self.say(f"FAIL {failure.token}: {failure.detail}")
             for note in failure.notes:
                 self.say(f"  {note}")
-            if state.enabled:
+            if state.enabled or failure.token == INTERNAL_ERROR:
                 self._leave_disabled()
             self._append(undo_failed_line(self.now(), prev, failure.token))
-            self._print_manual_rollback(prev, expected_old_pin, session_date, reason)
+            if failure.token in (UNDO_DRY_RUN, UNDO_POST_START):
+                # N17 LOW-5: the previous code itself showed this; it may have run so before.
+                step = "dry run" if failure.token == UNDO_DRY_RUN else "start"
+                condition = failure.detail.split(":", 1)[0]
+                self.say(
+                    f"The condition above is {prev[:SHORT_SHA_LENGTH]}'s own {step} ({condition})."
+                    " If the robot ran with it before this deploy (for example the same PREFLIGHT_WARNING heartbeat"
+                    " line), the block's last enable restores that state."
+                )
+            self._print_manual_rollback(prev, old_pin, session_date, reason)
             self.say(
                 f"{self.command}: UNDO FAILED reason={failure.token} after {reason}"
                 f" (exit {EXIT_UNDO_FAILED}; the robot is disabled)"
             )
-            return EXIT_UNDO_FAILED
-        self._append(rollback_line(self.now(), prev, reason))
-        self.say(f"OK rollback to {prev}: reason={reason}")
-        return EXIT_ROLLED_BACK
+        return EXIT_UNDO_FAILED
 
     def _print_manual_rollback(self, prev: str, old_pin: str, session_date: date, reason: str) -> None:
         """Runbook 6.3 with literal values, for the owner's zsh: one line at a time."""
         self.say("MANUAL ROLLBACK (runbook 6.3), only when flat; run one line at a time:")
         self.say(f"  cd {shlex.quote(str(self.live.backend))}")
         self.say(f"  {self.live.command_line('shadow', 'agent', 'disable')}")
+        lock = self._index_lock()
+        if lock is not None and lock.exists():
+            # N17b-L1: a git killed mid-write leaves its lock; reset --keep refuses while it is there.
+            self.say(f"{lock} is left from a git write cut short: the rm only when pgrep printed none")
+            self.say("  pgrep -x git || echo none")
+            self.say(f"  rm {shlex.quote(str(lock))}")
         self.say(f"  git -C {shlex.quote(str(self.repo))} reset --keep {prev}")
         self.say(f"  git -C {shlex.quote(str(self.repo))} rev-parse HEAD")
+        self.say(f"  git -C {shlex.quote(str(self.repo))} status --short")
         self.say(f"  {self.live.command_line('run', '--dry-run', '--date', session_date.isoformat())}")
         self.say(f"  {self.live.command_line('shadow', 'agent', 'enable')}")
         self.say(
             f"  echo \"$(date -Iseconds) DEPLOY rollback to {prev} result=ROLLBACK reason={reason}\""
             f" >> {shlex.quote(str(self.deploys_log.path))}"
         )
-        self.say(f"Expect: rev-parse prints {prev}; the dry run shows `{reviewed_line(old_pin)}` and no !!!.")
+        self.say(
+            f"Expect: rev-parse prints {prev}; status shows nothing outside {', '.join(DEFAULT_BENIGN_PATHS)}"
+            " (anything more: stop there, do not enable, ask);"
+            f" the dry run shows `{reviewed_line(old_pin)}` and no !!!."
+        )
+        self.say("After the enable:")
+        self._print_start_expectation(session_date)
+
+    def _pgrep_line(self) -> str:
+        """Rehearsal O-e: only the live checkout's processes (its venv python and
+        scripts), never another checkout's or worktree's."""
+        return f"pgrep -fl {shlex.quote(_ere_literal(f'{self.live.backend}/'))} || echo none"
 
     def _print_restore(
         self,
@@ -1933,32 +2470,71 @@ class DeployOperator:
         after: int,
         backup: str | None,
         session_date: date,
+        *,
+        made_after: datetime | None = None,
     ) -> None:
         """P2-3: the database restore, printed with literal values and never executed."""
         database = self.env.db_path.expanduser()
         stamp = self.now().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
         quoted = shlex.quote(str(database))
         self.say("RESTORE (never run by this command); one line at a time, each only after the one before passed:")
-        self.say("  1. pgrep -fl autotraderctl.py || echo none")
-        self.say("     Expect: none")
-        for suffix in ("", "-wal", "-shm"):
-            source = shlex.quote(f"{database}{suffix}")
-            target = shlex.quote(f"{database}{suffix}.v{after}-failed-{stamp}")
-            self.say(f"  2. [ -e {source} ] && mv {source} {target}")
+        if not backup:
+            # N17 MEDIUM-2: no `backup` line means `db migrate` refused before it
+            # changed anything. "The newest" same-pair backup can be an older
+            # attempt's file: copied over the live data it loses every row since.
+            self.say("  No `backup    <path>` line was read from `db migrate`: no backup made by this run is known.")
+            self.say(f"  {self.live.command_line('db', 'status', '--db-path', str(database))}")
+            try:
+                status = inspect_schema(database)
+                state = status.describe()
+                unchanged = not status.problems and status.applied_version == before
+            except Exception as exc:  # noqa: BLE001 - unknown is never "unchanged"
+                state, unchanged = f"unreadable: {type(exc).__name__}: {exc}", False
+            self.say(f"  state now (read-only, as db status prints it): {state}")
+            if not unchanged:
+                self.say(
+                    f"  The database is not at v{before}, or its state is unknown: STOP and ask before copying"
+                    " anything. Copy no file you did not see this run make."
+                )
+                when = (
+                    f"stamped at or after {made_after.astimezone(UTC):%Y%m%dT%H%M%S}Z (this run's `db migrate`"
+                    f" started {iso_seconds(made_after)})"
+                    if made_after is not None
+                    else "made by that deploy (between its PREV line and its DEPLOY line in deploys.log)"
+                )
+                self.say(
+                    f"  This run's backup, if one exists: {shlex.quote(str(database.parent / 'backups'))}/"
+                    f"{database.stem}.<YYYYMMDDTHHMMSS.ffffff>Z.v{before}-to-v{after}.db {when}; never an older one."
+                )
+                return
+            self.say(f"  The database is unchanged at v{before}: no database restore is needed. Run only:")
+        numbers = iter(range(1, 10))
+
+        def step(*lines: str, each: bool = False) -> None:
+            number = next(numbers)
+            for index, line in enumerate(lines):
+                self.say(f"  {number}. {line}" if index == 0 or each else f"     {line}")
+
+        step(self._pgrep_line(), "Expect: none")
         if backup:
-            self.say(f"  3. cp {shlex.quote(backup)} {quoted}")
-        else:
-            self.say(
-                f"  3. no backup line was read: find the newest {database.stem}.*.v{before}-to-v{after}.db in"
-                f" {shlex.quote(str(database.parent / 'backups'))} and cp it to {quoted}"
-            )
-        self.say(f"  4. git -C {shlex.quote(str(self.repo))} reset --keep {prev}")
-        self.say(f"     git -C {shlex.quote(str(self.repo))} rev-parse HEAD")
-        self.say(f"     Expect: {prev}")
-        self.say(f"  5. cd {shlex.quote(str(self.live.backend))}")
-        self.say(f"     {self.live.command_line('run', '--dry-run', '--date', session_date.isoformat())}")
-        self.say(f"     Expect: `{reviewed_line(old_pin)}` and `{DATABASE_PREFIX}v{before} current`, no !!!")
-        self.say(f"  6. {self.live.command_line('shadow', 'agent', 'enable')}")
+            moves = []
+            for suffix in ("", "-wal", "-shm"):
+                source = shlex.quote(f"{database}{suffix}")
+                target = shlex.quote(f"{database}{suffix}.v{after}-failed-{stamp}")
+                moves.append(f"[ -e {source} ] && mv {source} {target}")
+            step(*moves, each=True)
+            step(f"cp {shlex.quote(backup)} {quoted}")
+        step(
+            f"git -C {shlex.quote(str(self.repo))} reset --keep {prev}",
+            f"git -C {shlex.quote(str(self.repo))} rev-parse HEAD",
+            f"Expect: {prev}",
+        )
+        step(
+            f"cd {shlex.quote(str(self.live.backend))}",
+            self.live.command_line("run", "--dry-run", "--date", session_date.isoformat()),
+            f"Expect: `{reviewed_line(old_pin)}` and `{DATABASE_PREFIX}v{before} current`, no !!!",
+        )
+        step(self.live.command_line("shadow", "agent", "enable"))
 
     # -- undo --
 
@@ -1982,23 +2558,35 @@ class DeployOperator:
                 self.say("PLAN (nothing has changed yet):")
                 self.say(f"  live checkout  {self.repo}  HEAD {head}")
                 self.say(f"  back to        {request.to} (bridge pin {old_pin[:12]})  reason={request.reason}")
+                self.say(f"  database       {self.env.db_path}")
+                self._print_paths()
                 self.say(f"  then the dry run for {session_date.isoformat()} and the start checks")
+                self._print_confirmation_rule()
+                shown_at = self.now()
                 if not self._confirmed(request.to, "the --to"):
                     return self._refuse([(CONFIRM_MISMATCH, "the typed sha is not the --to short sha")])
-                try:
-                    code = self.undo_to(
-                        request.to,
-                        request.reason,
-                        old_pin,
-                        session_date=session_date,
-                        launchd_changed=LAUNCHD_PATH in _changed(self.git, request.to, head),
-                    )
-                except KeyboardInterrupt:
-                    self.say(f"FAIL {INTERRUPTED}: interrupted (Ctrl-C); nothing more was run")
-                    self._append(undo_failed_line(self.now(), request.to, INTERRUPTED))
-                    self._print_manual_rollback(request.to, old_pin, session_date, request.reason)
-                    self.say(f"{self.command}: HALTED reason={INTERRUPTED} (exit {EXIT_HALTED})")
-                    return EXIT_HALTED
+                stale = self._confirmation_problems(shown_at=shown_at, head=head, session_date=session_date)
+                if stale:
+                    return self._refuse(stale)
+                with signals_interrupt():
+                    try:
+                        code = self.undo_to(
+                            request.to,
+                            request.reason,
+                            old_pin,
+                            session_date=session_date,
+                            launchd_changed=LAUNCHD_PATH in _changed(self.git, request.to, head),
+                        )
+                    except KeyboardInterrupt as interrupt:
+                        with signals_deferred():
+                            self.say(f"FAIL {INTERRUPTED}: {_interrupted(interrupt)}; nothing more was run")
+                            self._append(
+                                undo_failed_line(self.now(), request.to, INTERRUPTED)
+                                + f" next: runbook 6.3 back to {request.to} (HEAD {self._live_head() or 'unknown'})"
+                            )
+                            self._print_manual_rollback(request.to, old_pin, session_date, request.reason)
+                            self.say(f"{self.command}: HALTED reason={INTERRUPTED} (exit {EXIT_HALTED})")
+                        return EXIT_HALTED
                 if code == EXIT_ROLLED_BACK:
                     self.say(f"{self.command}: ROLLED BACK reason={request.reason} (exit {EXIT_ROLLED_BACK})")
                 return code
@@ -2012,6 +2600,7 @@ class DeployOperator:
         window = start_window_problem(self.now())
         if window:
             refusals.append((START_CUTOFF, window))
+        refusals.extend(self._path_problems())
         head = self._live_head()
         problem = prev_sha_problem(self.git, request.to)
         if problem:
@@ -2064,6 +2653,8 @@ class DeployOperator:
                         f"the deploy migrated v{before} -> v{after}: the database must be restored first",
                     )
                 )
+                # The deploy migrated and passed, so its backup is the newest of the
+                # pair; without one, _print_restore copies nothing (N17 MEDIUM-2).
                 self._print_restore(
                     request.to, old_pin or "?" * 12, before, int(after),
                     _newest_backup(self.env.db_path, before, int(after)), next_session_date(self.now()),
@@ -2071,10 +2662,19 @@ class DeployOperator:
         flat = _not_flat(self.env.user_paths.data_directory / BRIDGE_STATE_DIRECTORY)
         if flat:
             refusals.append((UNDO_NOT_FLAT, flat))
+        tree = self._tree_problem()
+        if tree:
+            refusals.append((UNDO_TREE_DIRTY, tree))
         return refusals, old_pin, head
 
 
 # --- helpers ------------------------------------------------------------------------------------
+
+
+def _interrupted(interrupt: KeyboardInterrupt) -> str:
+    if isinstance(interrupt, DeploySignal):
+        return f"interrupted ({interrupt.name}: the terminal closed or the process was told to stop)"
+    return "interrupted (Ctrl-C)"
 
 
 def _valid_label(label: str) -> bool:
@@ -2199,6 +2799,7 @@ def default_environment(db_path: Path) -> DeployEnvironment:
 
 
 __all__ = [
+    "CONFIRM_TIMEOUT_S",
     "DEPLOYS_LOG_NAME",
     "DEPLOY_LOCK_NAME",
     "DEPLOY_TOOL_PATHS",
@@ -2206,6 +2807,7 @@ __all__ = [
     "DeployEnvironment",
     "DeployFailure",
     "DeployOperator",
+    "DeploySignal",
     "DeployUndoRequest",
     "DeploysLog",
     "DeploysLogError",
@@ -2218,13 +2820,16 @@ __all__ = [
     "EXIT_UNDO_FAILED",
     "FIRST_START",
     "GitWriter",
+    "HALT_SIGNALS",
     "LAST_START",
     "LiveCheckout",
     "LiveResult",
     "POLL_S",
+    "POST_START_SETTLE_S",
     "POST_START_TIMEOUT_S",
     "STOP_WAIT_TIMEOUT_S",
     "TOKENS",
+    "account_home",
     "default_environment",
     "in_start_window",
     "lock_is_free",
