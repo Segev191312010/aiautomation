@@ -56,9 +56,15 @@ step 6 ran, a failure halts instead: the robot is left disabled,
 ``result=HALTED reason=<token> backup=<path>`` is written and the database
 restore is printed, never executed (exit 4). A failure inside the undo,
 expected or not, leaves the robot disabled and prints runbook 6.3 with literal
-values (exit 5). After the confirmation, SIGHUP (the terminal closed) and
-SIGTERM halt the run where it stands like Ctrl-C (exit 4), and the HALTED line
-in ``deploys.log`` carries the next action. Every failure path has one literal
+values (exit 5). The undo restarts the previous code only on a tree with no
+``index.lock`` and nothing outside the benign list (``undo_tree_dirty``;
+``deploy undo`` refuses it before anything stops). After the confirmation,
+SIGHUP (the terminal closed) and SIGTERM halt the run where it stands like
+Ctrl-C (exit 4), and the HALTED line in ``deploys.log`` carries the next
+action: "git never moved" only before the first git write and on a clean
+tree, else runbook 6.3. A signal that lands during a git write waits for the
+write to end, and git runs in its own session, so it is never killed
+mid-checkout (N17b-L1). Every failure path has one literal
 token, used identically in stdout, the ``deploys.log`` ``reason=`` and the
 final summary (``TOKENS``).
 
@@ -104,6 +110,7 @@ from trading.operations.deploy_check import (
     REFUSE,
     SUPERVISOR_PATH,
     VERDICT_MIGRATION_MISSING,
+    WINDOW_CLOSES,
     CheckResult,
     DeployCheckRequest,
     Git,
@@ -257,6 +264,8 @@ UNDO_RESET_FAILED = "undo_reset_failed"
 UNDO_RESET_NOOP = "undo_reset_noop"
 UNDO_DRY_RUN = "undo_dry_run"
 UNDO_POST_START = "undo_post_start"
+# N17b-L1/I-5: index.lock or changes outside the benign list after a git write.
+UNDO_TREE_DIRTY = "undo_tree_dirty"
 # `deploy undo` refusals (exit 78).
 UNDO_PREV_MISMATCH = "undo_prev_mismatch"
 UNDO_NEEDS_DB_RESTORE = "undo_needs_db_restore"
@@ -331,6 +340,7 @@ TOKENS = (
     UNDO_RESET_NOOP,
     UNDO_DRY_RUN,
     UNDO_POST_START,
+    UNDO_TREE_DIRTY,
     UNDO_PREV_MISMATCH,
     UNDO_NEEDS_DB_RESTORE,
     UNDO_SCHEMA_UNKNOWN,
@@ -590,6 +600,26 @@ def signals_deferred() -> AbstractContextManager[None]:
     return _signal_handlers(signal.SIG_IGN, _DEFERRED_SIGNALS)
 
 
+@contextmanager
+def signals_held() -> Iterator[None]:
+    """N17b-L1: a signal that lands during a git write waits for the write to end,
+    then goes to the handler that was in place. Raised inside ``subprocess.run``,
+    a KeyboardInterrupt SIGKILLs git 0.25 s later, which can leave index.lock and
+    a half-written tree under an unchanged HEAD."""
+    held: list[int] = []
+
+    def hold(number: int, _frame: object) -> None:
+        if number not in held:
+            held.append(number)
+
+    try:
+        with _signal_handlers(hold, _DEFERRED_SIGNALS):
+            yield
+    finally:
+        for number in held:
+            signal.raise_signal(number)
+
+
 # --- git writes -------------------------------------------------------------------------
 
 
@@ -606,14 +636,17 @@ class GitWriter:
     def _run(self, *args: str) -> None:
         argv = ["git", "-C", str(self._repo), "-c", "core.fsmonitor=false", *args]
         try:
-            completed = subprocess.run(
-                argv,
-                capture_output=True,
-                env=git_environment(self._repo),
-                stdin=subprocess.DEVNULL,
-                timeout=120,
-                check=False,
-            )
+            # N17b-L1: a new session keeps the terminal's SIGHUP and SIGINT away from git.
+            with signals_held():
+                completed = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    env=git_environment(self._repo),
+                    stdin=subprocess.DEVNULL,
+                    timeout=120,
+                    check=False,
+                    start_new_session=True,
+                )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitError(f"git {args[0]} failed: {type(exc).__name__}: {exc}") from exc
         if completed.returncode != 0:
@@ -850,11 +883,6 @@ def stopped_identity_fences(database: Path) -> tuple[str, ...]:
     return tuple(sorted({str(name)[len(IDENTITY_FENCE_PREFIX):] for (name,) in rows}))
 
 
-def fenced_sendable(database: Path) -> tuple[str, ...]:
-    """The sendable identities whose own fence is stopped (read-only, as the bridge reads them)."""
-    return tuple(sorted(set(stopped_identity_fences(database)) & set(SENDABLE_IDENTITIES)))
-
-
 def account_home() -> Path:
     """The account's own home directory (the password database), whatever HOME says."""
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -892,6 +920,11 @@ def parse_migrate_output(output: str) -> tuple[str | None, tuple[int, int] | Non
 
 
 # --- the dry run ------------------------------------------------------------------------------
+
+# N17b-L3: an undo checks the PREVIOUS code's dry run with the lines built here
+# (reviewed, schema, fenced, sendable prefix, heartbeat, session). They are a
+# contract across versions: changing one breaks the rollback to every earlier
+# head (test_the_undo_line_texts_are_a_cross_version_contract).
 
 
 def reviewed_line(pin: str) -> str:
@@ -1207,6 +1240,9 @@ class ApplyPlan:
     session_date: date
     budget: bool
     tool_sha: str
+    # N17b-L2: every stopped identity fence, sendable or not, read at the precheck;
+    # the automatic undo keeps the names the restored bridge itself prints.
+    stopped_fences: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1218,6 +1254,8 @@ class _State:
     backup: str | None = None
     migrate_started: datetime | None = None
     dry_run_passed: bool = False
+    # N17b-L1/I-1: set before the first git write; "git never moved" only while False.
+    git_written: bool = False
 
 
 # --- the operator -------------------------------------------------------------------------------
@@ -1449,12 +1487,13 @@ class DeployOperator:
                 old_pin = bridge_pin_at(self.git, prev)
             except (GitError, SyntaxError, ValueError) as exc:
                 refusals.append((PREV_SHA_INVALID, f"the live code's pin cannot be read: {exc}"))
+        stopped: tuple[str, ...] = ()
         try:
-            fenced = fenced_sendable(self.env.db_path)
+            stopped = stopped_identity_fences(self.env.db_path)
         except (OSError, sqlite3.Error) as exc:
-            fenced = ()
             refusals.append((FENCED_UNEXPECTED, f"identity fences unreadable: {type(exc).__name__}: {exc}"))
         else:
+            fenced = tuple(sorted(set(stopped) & set(SENDABLE_IDENTITIES)))
             if fenced != tuple(sorted(request.expect_fenced)):
                 refusals.append(
                     (
@@ -1492,6 +1531,7 @@ class DeployOperator:
                 session_date=next_session_date(now),
                 budget=b"\nDAY_RISK_BUDGET_PCT" in bridge_blob,
                 tool_sha=(own_head or "?")[:SHORT_SHA_LENGTH],
+                stopped_fences=stopped,
             ),
             [],
         )
@@ -1501,6 +1541,29 @@ class DeployOperator:
             return self.git.resolve("HEAD")
         except GitError:
             return None
+
+    def _index_lock(self) -> Path | None:
+        try:
+            found = Path(self.git.text("rev-parse", "--git-path", "index.lock").strip())
+        except GitError:
+            return None
+        return found if found.is_absolute() else self.repo / found
+
+    def _tree_problem(self) -> str | None:
+        """N17b-L1/I-5: what a git write cut short leaves behind (index.lock, files
+        outside the benign list); None when the live tree is only benign."""
+        lock = self._index_lock()
+        if lock is None:
+            return f"git rev-parse --git-path index.lock failed in {self.repo}"
+        if lock.exists():
+            return f"{lock} exists: a git write was cut short or is still running"
+        try:
+            tree = check_tree_clean(self.git, benign_paths=DEFAULT_BENIGN_PATHS)
+        except GitError as exc:
+            return f"git status failed: {exc}"
+        if tree.status == REFUSE:
+            return "; ".join((tree.detail, *tree.notes))
+        return None
 
     def _own_checkout_changes(self) -> list[str]:
         """N17 LOW-3: what the tool's own checkout holds beyond its HEAD: tracked
@@ -1602,6 +1665,7 @@ class DeployOperator:
                     return self._halt_before_ff(plan, failure)
                 try:
                     self._require_window("fast-forward")
+                    state.git_written = True
                     self.fast_forward(plan)
                     if plan.request.expect_migration is not None:
                         state.migrated = True
@@ -2038,6 +2102,11 @@ class DeployOperator:
             f" {plan.head[:SHORT_SHA_LENGTH]}'s dry run passed; only the start came after"
             f" {LAST_START:%H:%M} ET. One line at a time:"
         )
+        # N17b-L4: the manual window ends at 07:20 ET, 35 minutes before the first child.
+        self.say(
+            f"  Only before {WINDOW_CLOSES:%H:%M} ET. Later, leave the robot disabled until after the"
+            f" close (from {FIRST_START:%H:%M} ET), or take OPTION 2."
+        )
         self.say(f"  cd {shlex.quote(str(self.live.backend))}")
         self.say(f"  {self.live.command_line('shadow', 'agent', 'enable')}")
         self._print_start_expectation(plan.session_date)
@@ -2063,19 +2132,25 @@ class DeployOperator:
         with signals_deferred():
             self.say(f"FAIL {token}: {detail}")
             head = self._live_head()
+            tree = self._tree_problem()
+            if tree:
+                self.say(f"note: the live tree is not clean: {tree}")
             # The terminal may be gone (SIGHUP): deploys.log carries the next action too.
             if state.migrated:
                 after = (
                     f"restore the database and the code to PREV_SHA={plan.prev} (backup={state.backup or 'none'});"
                     " never enable the old code on the migrated database"
                 )
-            elif head == plan.prev:
+            elif head == plan.prev and not state.git_written and tree is None:
                 after = (
                     f"git never moved (HEAD {plan.prev}): ( cd {self.live.backend} &&"
                     f" {self.live.command_line('shadow', 'agent', 'enable')} ), then the start lines"
                 )
             else:
+                # N17b I-1: HEAD may be PREV again after the undo's reset; the dry run still comes first.
                 after = f"runbook 6.3 back to PREV_SHA={plan.prev} (HEAD {head or 'unknown'}): only when flat"
+                if tree:
+                    after += f"; first the tree: {tree}"
             self._append(
                 halted_line(self.now(), plan.label, plan.head, plan.prev, plan.pin, token, state.backup)
                 + f" next: {after}"
@@ -2118,7 +2193,7 @@ class DeployOperator:
             plan.old_pin,
             session_date=plan.session_date,
             launchd_changed=LAUNCHD_PATH in _changed(self.git, plan.prev, plan.head),
-            fenced=plan.request.expect_fenced,
+            fenced=plan.stopped_fences,
             aborted=lambda moment, token: aborted_line(moment, plan.label, plan.head, plan.prev, plan.pin, token),
         )
         if code == EXIT_ROLLED_BACK and self.undo_aborted:
@@ -2179,6 +2254,11 @@ class DeployOperator:
                 if head != prev:
                     raise DeployFailure(UNDO_RESET_NOOP, f"HEAD is {head} after reset --keep {prev}")
                 self.say(f"OK HEAD {prev}")
+            # N17b I-5: PREV restarts only on its own tree (a failed merge can leave files behind).
+            tree = self._tree_problem()
+            if tree:
+                raise DeployFailure(UNDO_TREE_DIRTY, tree)
+            self.say("OK tree only benign, no index.lock")
             status = inspect_schema(self.env.db_path)
             fences: tuple[str, ...] | None
             if fenced is not None:
@@ -2264,15 +2344,25 @@ class DeployOperator:
         self.say("MANUAL ROLLBACK (runbook 6.3), only when flat; run one line at a time:")
         self.say(f"  cd {shlex.quote(str(self.live.backend))}")
         self.say(f"  {self.live.command_line('shadow', 'agent', 'disable')}")
+        lock = self._index_lock()
+        if lock is not None and lock.exists():
+            # N17b-L1: a git killed mid-write leaves its lock; reset --keep refuses while it is there.
+            self.say(f"{lock} is left from a git write cut short: the rm only when pgrep printed none")
+            self.say("  pgrep -x git || echo none")
+            self.say(f"  rm {shlex.quote(str(lock))}")
         self.say(f"  git -C {shlex.quote(str(self.repo))} reset --keep {prev}")
         self.say(f"  git -C {shlex.quote(str(self.repo))} rev-parse HEAD")
+        self.say(f"  git -C {shlex.quote(str(self.repo))} status --short")
         self.say(f"  {self.live.command_line('run', '--dry-run', '--date', session_date.isoformat())}")
         self.say(f"  {self.live.command_line('shadow', 'agent', 'enable')}")
         self.say(
             f"  echo \"$(date -Iseconds) DEPLOY rollback to {prev} result=ROLLBACK reason={reason}\""
             f" >> {shlex.quote(str(self.deploys_log.path))}"
         )
-        self.say(f"Expect: rev-parse prints {prev}; the dry run shows `{reviewed_line(old_pin)}` and no !!!.")
+        self.say(
+            f"Expect: rev-parse prints {prev}; status shows nothing outside {', '.join(DEFAULT_BENIGN_PATHS)};"
+            f" the dry run shows `{reviewed_line(old_pin)}` and no !!!."
+        )
         self.say("After the enable:")
         self._print_start_expectation(session_date)
 
@@ -2481,6 +2571,9 @@ class DeployOperator:
         flat = _not_flat(self.env.user_paths.data_directory / BRIDGE_STATE_DIRECTORY)
         if flat:
             refusals.append((UNDO_NOT_FLAT, flat))
+        tree = self._tree_problem()
+        if tree:
+            refusals.append((UNDO_TREE_DIRTY, tree))
         return refusals, old_pin, head
 
 

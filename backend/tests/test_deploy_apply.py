@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 import fcntl
@@ -3425,3 +3426,314 @@ def test_the_undo_checks_the_session_it_meets_not_the_one_it_was_given(world):
         world.output
     )
     assert f"run --dry-run --date {NEXT_SESSION}" in " ".join(" ".join(argv) for argv, _c, _t in world.live.calls)
+
+
+# --- P2.2: N17b-L1..L4, the mutation survivors of the P2.1 sweep -------------------------------------------
+
+
+class _SignalOnWrite(io.StringIO):
+    """The owner's terminal; sends ``number`` to this process once, when a written
+    line contains ``marker`` (a second signal while a block is printed)."""
+
+    def __init__(self, marker: str, number: int) -> None:
+        super().__init__()
+        self.marker = marker
+        self.number = number
+        self.sent = 0
+
+    def write(self, text: str) -> int:
+        written = super().write(text)
+        if self.marker in text and not self.sent:
+            self.sent += 1
+            os.kill(os.getpid(), self.number)
+        return written
+
+
+def test_a_signal_during_the_fast_forward_waits_for_git(world, safe_signals, monkeypatch):
+    """N17b-L1: a SIGTERM while git writes is held until git is done (raised inside
+    subprocess.run it SIGKILLs git 0.25 s later); git runs in its own session, so
+    the terminal's SIGHUP and SIGINT never reach it."""
+    swallowed, _installed = safe_signals
+    seen: list[dict] = []
+    real_run = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if "merge" in list(argv):
+            seen.append(kwargs)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    code = world.apply()
+    monkeypatch.setattr(subprocess, "run", real_run)
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    assert world.live_head() == world.head  # the fast-forward finished
+    assert [kwargs.get("start_new_session") for kwargs in seen] == [True]
+    _token_lines(world, "interrupted")
+    assert world.deploys()[-1].endswith(
+        f" next: runbook 6.3 back to PREV_SHA={world.scenario.base} (HEAD {world.head}): only when flat"
+    )
+    assert swallowed == []
+
+
+def test_an_interrupt_after_the_undos_reset_never_says_git_never_moved(world, safe_signals):
+    """N17b I-1: HEAD is PREV again after the automatic undo's reset; the next action
+    still goes through runbook 6.3 (the dry run first), never a bare enable."""
+    world.live.dry_run_edit = lambda text: text + "!!! x\n"
+    dry_runs: list[int] = []
+
+    def second_dry_run() -> None:
+        dry_runs.append(1)
+        if len(dry_runs) == 2:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    world.live.on_call["run --dry-run"] = second_dry_run
+
+    assert world.apply() == deploy_apply.EXIT_HALTED, world.output
+    assert world.live_head() == world.scenario.base
+    assert "git never moved" not in world.deploys()[-1]
+    assert world.deploys()[-1].endswith(
+        f" next: runbook 6.3 back to PREV_SHA={world.scenario.base} (HEAD {world.scenario.base}): only when flat"
+    )
+
+
+def test_an_index_lock_is_never_git_never_moved(world, safe_signals):
+    """N17b-L1: a git write cut short leaves index.lock under an unchanged HEAD; the
+    halt sends the owner through runbook 6.3, with the lock's own two lines first."""
+    lock = world.repo / ".git" / "index.lock"
+
+    def interrupted() -> None:
+        lock.write_text("")
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    world.live.on_call["shadow agent disable"] = interrupted
+    try:
+        code = world.apply()
+    finally:
+        lock.unlink(missing_ok=True)
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    last = world.deploys()[-1]
+    assert "git never moved" not in last
+    assert f" next: runbook 6.3 back to PREV_SHA={world.scenario.base} (HEAD {world.scenario.base}): only when" in last
+    assert f"first the tree: {lock} exists" in last
+    lines = world.output.splitlines()
+    assert lines.index("  pgrep -x git || echo none") < lines.index(f"  rm {lock}") < lines.index(
+        f"  git -C {world.repo} reset --keep {world.scenario.base}"
+    )
+    assert f"  git -C {world.repo} status --short" in lines
+
+
+def test_the_undo_never_restarts_the_previous_code_on_a_dirty_tree(world):
+    """N17b I-5: a file left behind after the reset (a failed merge's leftovers) stops
+    the undo before the dry run: exit 5, the robot disabled."""
+
+    class StrayAfterReset(GitWriter):
+        def reset_keep(self, sha):
+            super().reset_keep(sha)
+            (world.repo / "backend" / "stray.py").write_text("left behind\n")
+
+    world.writer_factory = StrayAfterReset
+    world.live.dry_run_edit = lambda text: text + "!!! x\n"
+
+    code = world.apply()
+
+    assert code == deploy_apply.EXIT_UNDO_FAILED, world.output
+    assert f"FAIL undo_tree_dirty: 1 status entry in {world.repo} outside the benign list" in world.output
+    assert world.deploys()[-1].endswith(f"DEPLOY rollback to {world.scenario.base} result=UNDO_FAILED reason=undo_tree_dirty")
+    assert "shadow agent enable" not in world.live.verbs
+    assert world.live.verbs.count("run --dry-run --date") == 1  # the deploy's own; the undo stopped before its
+    assert not world.launchctl.loaded and not world.robot.running
+
+
+def test_deploy_undo_refuses_a_dirty_tree_before_anything_stops(world):
+    _deployed(world)
+    (world.repo / "backend" / "stray.py").write_text("left behind\n")
+
+    assert world.undo(world.scenario.base) == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"undo_tree_dirty"}
+    assert world.live.calls == []
+
+
+def test_the_automatic_undo_expects_every_stopped_fence_the_old_bridge_prints(world, monkeypatch):
+    """N17b-L2: a fence on a name the candidate no longer sends (GAP_GO_V2 here) is
+    outside --expect-fenced, yet the restored bridge still sends and prints it."""
+    monkeypatch.setattr(
+        deploy_apply, "SENDABLE_IDENTITIES", tuple(name for name in SENDABLE_IDENTITIES if name != "GAP_GO_V2")
+    )
+    _fence(world, "GAP_GO_V2")
+
+    code = world.apply()
+
+    assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
+    assert world.live_head() == world.scenario.base
+    assert world.output.splitlines().count("  | bridge       CRITICAL fenced identities = GAP_GO_V2") == 1
+
+
+def test_the_undo_line_texts_are_a_cross_version_contract():
+    """N17b-L3: an undo checks the PREVIOUS head's dry run with texts built by the new
+    code. These are the texts of every head deployed since P1-B 9558442 (supervisor.py
+    :1910, :1924, :2059; paper_bridge.py :346, :883; heartbeat.py :208 there): changing
+    one breaks the rollback to every earlier head."""
+    pin = "7d313fd075d29e1e62c11eab52fd7832a0aaab21fd0b616c0ce2ee3f47962af4"
+    assert deploy_apply.reviewed_line(pin) == "bridge       reviewed (sha256 7d313fd075d2)"
+    assert deploy_apply.fenced_line(()) == "bridge       INFO fenced identities = none"
+    assert deploy_apply.fenced_line(("ORB_V2", "GAP_GO_V2")) == (
+        "bridge       CRITICAL fenced identities = GAP_GO_V2, ORB_V2"
+    )
+    assert deploy_apply.SENDABLE_LINE_PREFIX == "bridge       INFO sendable identities = "
+    assert deploy_apply.schema_ok_line(16, "/x/autotrader.db") == "database     schema v16 current (/x/autotrader.db)"
+    assert deploy_apply.SESSION_PREFIX == "session      "
+    assert deploy_apply.heartbeat_ok_line() == (
+        "heartbeat    Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url present"
+        " (the child validates the URL)"
+    )
+
+
+def test_the_late_start_option_names_its_time_bound(tmp_path):
+    """N17b-L4: OPTION 1 (start the migrated candidate) only before 07:20 ET."""
+    world = _migration_world(tmp_path)
+    world.clock.now = datetime(2026, 10, 25, 6, 49, tzinfo=MARKET_TIMEZONE)
+    world.live.on_call["run --dry-run"] = lambda: world.clock.sleep(61)
+    try:
+        code = world.apply(expect_migration=LATEST)
+    finally:
+        world.robot.release_lock()
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    lines = world.output.splitlines()
+    option = lines.index(next(line for line in lines if line.startswith("OPTION 1: start the new code.")))
+    assert lines[option + 1] == (
+        "  Only before 07:20 ET. Later, leave the robot disabled until after the close (from 18:40 ET),"
+        " or take OPTION 2."
+    )
+
+
+def test_undo_refuses_outside_the_window_before_the_plan(world):
+    """P2.1 survivor M47: the window is a precheck of `deploy undo` itself, not only
+    a re-check of the typed answer; no plan is printed and nothing is read."""
+    _deployed(world)
+    world.clock.now = datetime(2026, 10, 26, 7, 0, tzinfo=MARKET_TIMEZONE)
+    read: list[bool] = []
+
+    assert world.undo(world.scenario.base, on_read=lambda: read.append(True)) == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"start_cutoff"}
+    assert "PLAN (nothing has changed yet):" not in world.output
+    assert read == []
+
+
+def test_the_start_waiter_takes_one_more_look_after_the_settle(world):
+    """P2.1 survivor M60: a LOG_ROTATION_FAILED follows its marker; the waiter looks
+    once more after the settle window before it trusts the start."""
+    since = _start_after(world)  # the supervisor starts 2 s after `since`
+    world.clock.after(
+        2 + deploy_apply.POST_START_SETTLE_S + 0.5,
+        lambda: world.robot.write("LOG_ROTATION_FAILED file=telegram.log error=PermissionError"),
+    )
+
+    with pytest.raises(DeployFailure) as failure:
+        _wait_started(world, since)
+
+    assert failure.value.token == "post_start_rotation_failed"
+
+
+def test_home_alone_is_compared_with_the_accounts_home(world):
+    """P2.1 survivor M95: HOME elsewhere with the database at the account's own path
+    still refuses (the database check alone would not)."""
+    account = world.root / "account-home"
+    canonical = UserPaths(home=account).database_file
+    canonical.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(world.db)) as source, closing(sqlite3.connect(canonical)) as target:
+        source.backup(target)
+    world.account_home = account
+    world.db = canonical
+
+    assert world.apply() == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"paths_not_canonical"}
+    refusals = [line for line in world.output.splitlines() if line.startswith("REFUSE paths_not_canonical")]
+    assert len(refusals) == 1 and refusals[0].startswith(f"REFUSE paths_not_canonical: HOME is {world.paths.home},")
+
+
+def test_a_signal_while_the_pass_line_is_written_is_ignored(world, safe_signals):
+    """P2.1 survivor M105: the PASS line and the ledger-ready line are written with
+    the signals ignored; a SIGTERM there neither escapes nor halts a finished deploy."""
+    swallowed, _installed = safe_signals
+    world.out = _SignalOnWrite("result=PASS | owner-run", signal.SIGTERM)
+
+    try:
+        code = world.apply()
+    except KeyboardInterrupt:
+        pytest.fail("the signal escaped the PASS block")
+
+    assert code == deploy_apply.EXIT_OK, world.output
+    assert world.out.sent == 1 and swallowed == []
+    assert world.deploys()[-1].split(" ", 1)[1].startswith(f"DEPLOY P2 {world.short_head} ")
+    assert world.summary() == f"deploy apply: PASS P2 {world.short_head} (exit 0)"
+
+
+def test_a_second_signal_during_a_halt_is_ignored(world, safe_signals):
+    """N17b B1/B11: the halt writes its line and prints its block with the signals
+    ignored; a second SIGTERM in the middle of the block changes nothing."""
+    swallowed, _installed = safe_signals
+    world.out = _SignalOnWrite("MANUAL ROLLBACK (runbook 6.3)", signal.SIGTERM)
+    world.live.on_call["run --dry-run"] = lambda: os.kill(os.getpid(), signal.SIGTERM)
+
+    try:
+        code = world.apply()
+    except KeyboardInterrupt:
+        pytest.fail("the second signal escaped the halt")
+
+    assert code == deploy_apply.EXIT_HALTED, world.output
+    assert world.out.sent == 1 and swallowed == []
+    assert world.summary() == "deploy apply: HALTED reason=interrupted (exit 4)"
+    assert f"  git -C {world.repo} reset --keep {world.scenario.base}" in world.output.splitlines()
+
+
+def test_an_unreadable_own_checkout_refuses(world, monkeypatch):
+    """N17b B8: a git error reading the tool's own checkout refuses; it never reads as clean."""
+    own = world.worktree().resolve()
+    real = deploy_check.Git.status_entries
+
+    def status_entries(self):
+        if Path(self.repo).resolve() == own:
+            raise deploy_check.GitError("git status failed: fatal: injected")
+        return real(self)
+
+    monkeypatch.setattr(deploy_check.Git, "status_entries", status_entries)
+
+    assert world.apply() == deploy_apply.EXIT_REFUSED
+    assert "candidate_worktree_dirty" in _refused(world)
+    assert "git status failed: git status failed: fatal: injected" in world.output
+
+
+def test_the_previous_supervisors_child_exits_in_the_enable_second_are_not_the_new_ones(world):
+    """N17b B07: a supervisor's stop writes `CHILD_EXIT telegram code=0 restart_in=none`
+    (and heartbeat's) before its SUPERVISOR_STOP (supervisor.log 2026-10-18 07:46:01).
+    In the enable's second they share the stamp of `since`: only exits after the
+    new start are the new children's."""
+    for child in ("telegram", "heartbeat"):
+        world.robot.write(f"CHILD_EXIT {child} code=0 restart_in=none")
+    world.robot.stop()
+    since = world.clock()
+    world.clock.after(2, lambda: world.robot.start())
+    world.paths.launch_agent_file.write_bytes(
+        LaunchdManager(user_paths=world.paths, repository_root=world.repo).serialized_payload()
+    )
+
+    _wait_started(world, since)
+
+    assert "OK started" in world.output
+
+
+def test_the_deploys_own_start_never_accepts_the_mid_session_form(world):
+    """N17b B05: only the undo accepts the previous code's mid-session start; the
+    deploy's own start (before 06:50 ET) must show SESSION_WAIT, else it times out
+    and the undo runs."""
+    world.live.starts = [StartShape(mid_session=True), StartShape()]
+
+    code = world.apply()
+
+    assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
+    _token_lines(world, "post_start_timeout")
+    assert "SESSION_WAIT date=2026-10-26" in world.output
