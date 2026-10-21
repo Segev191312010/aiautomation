@@ -1065,7 +1065,14 @@ def _break_db_path(world, held):
     return world, {}, "paths_not_canonical"
 
 
+def _break_index_lock(world, held):
+    # N17c-L1: a git write cut short left .git/index.lock in the live checkout.
+    (world.repo / ".git" / "index.lock").write_text("")
+    return world, {}, "live_index_lock"
+
+
 PRECHECK_BREAKERS = {
+    "live_index_lock": _break_index_lock,
     "start_cutoff": _break_start_cutoff,
     "deploy_check_verdict": _break_verdict,
     "deploy_check_tree_clean": _break_tree,
@@ -3449,10 +3456,11 @@ class _SignalOnWrite(io.StringIO):
         return written
 
 
-def test_a_signal_during_the_fast_forward_waits_for_git(world, safe_signals, monkeypatch):
-    """N17b-L1: a SIGTERM while git writes is held until git is done (raised inside
-    subprocess.run it SIGKILLs git 0.25 s later); git runs in its own session, so
-    the terminal's SIGHUP and SIGINT never reach it."""
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
+def test_a_signal_during_the_fast_forward_waits_for_git(world, safe_signals, monkeypatch, number):
+    """N17b-L1: a SIGTERM or a Ctrl-C while git writes is held until git is done
+    (raised inside subprocess.run it SIGKILLs git 0.25 s later); git runs in its own
+    session, so the terminal's SIGHUP and SIGINT never reach it (N17c-L3: SIGINT too)."""
     swallowed, _installed = safe_signals
     seen: list[dict] = []
     real_run = subprocess.run
@@ -3460,12 +3468,19 @@ def test_a_signal_during_the_fast_forward_waits_for_git(world, safe_signals, mon
     def run(argv, *args, **kwargs):
         if "merge" in list(argv):
             seen.append(kwargs)
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), number)
         return real_run(argv, *args, **kwargs)
 
+    # Python's own Ctrl-C handler, also where a background shell left SIGINT ignored.
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
     monkeypatch.setattr(subprocess, "run", run)
-    code = world.apply()
-    monkeypatch.setattr(subprocess, "run", real_run)
+    try:
+        code = world.apply()
+    except KeyboardInterrupt:
+        pytest.fail("the signal escaped the run")
+    finally:
+        monkeypatch.setattr(subprocess, "run", real_run)
+        signal.signal(signal.SIGINT, previous)
 
     assert code == deploy_apply.EXIT_HALTED, world.output
     assert world.live_head() == world.head  # the fast-forward finished
@@ -3523,6 +3538,12 @@ def test_an_index_lock_is_never_git_never_moved(world, safe_signals):
         f"  git -C {world.repo} reset --keep {world.scenario.base}"
     )
     assert f"  git -C {world.repo} status --short" in lines
+    # N17c I-3: a status beyond the benign file has its next step.
+    assert any(
+        line.startswith(f"Expect: rev-parse prints {world.scenario.base}; status shows nothing outside"
+                        " .claude/settings.local.json (anything more: stop there, do not enable, ask);")
+        for line in lines
+    )
 
 
 def test_the_undo_never_restarts_the_previous_code_on_a_dirty_tree(world):
@@ -3737,3 +3758,59 @@ def test_the_deploys_own_start_never_accepts_the_mid_session_form(world):
     assert code == deploy_apply.EXIT_ROLLED_BACK, world.output
     _token_lines(world, "post_start_timeout")
     assert "SESSION_WAIT date=2026-10-26" in world.output
+
+
+# --- P2.3: N17c-L1..L3 ------------------------------------------------------------------------------------
+
+
+def test_a_transient_index_lock_is_waited_for(world):
+    """N17c-L2: a concurrent `git status` holds index.lock for milliseconds; the
+    check waits up to INDEX_LOCK_WAIT_S for it to go before it refuses."""
+    lock = world.repo / ".git" / "index.lock"
+    lock.write_text("")
+    world.clock.after(2, lambda: lock.unlink())
+
+    assert world.apply() == deploy_apply.EXIT_OK, world.output
+    assert deploy_apply.INDEX_LOCK_WAIT_S == 5
+
+
+def test_a_stale_index_lock_names_its_remedy_in_both_refusals(world):
+    """N17c-L1 and I-1: the refusal, before anything stops, carries the two lines."""
+    lock = world.repo / ".git" / "index.lock"
+    lock.write_text("")
+
+    assert world.apply() == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"live_index_lock"}
+    remedy = f"only when `pgrep -x git || echo none` prints none: rm {lock}"
+    assert f"REFUSE live_index_lock: {lock} exists after 5 s: a git write was cut short" in world.output
+    assert remedy in world.output
+    assert world.live.calls == []
+
+    world.out.truncate(0)
+    world.out.seek(0)
+    lock.unlink()
+    _deployed(world)
+    lock.write_text("")
+    assert world.undo(world.scenario.base) == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"undo_tree_dirty"}
+    assert remedy in world.output
+    assert world.live.calls == []
+
+
+def test_an_unreadable_index_lock_path_is_a_problem_not_clean(world, monkeypatch):
+    """N17c-L3 (C02): when `git rev-parse --git-path index.lock` fails, the tree
+    check reports it; it never reads as clean."""
+    real_text = deploy_check.Git.text
+
+    def text(self, *args):
+        if "--git-path" in args:
+            raise deploy_check.GitError("git rev-parse failed: fatal: injected")
+        return real_text(self, *args)
+
+    monkeypatch.setattr(deploy_check.Git, "text", text)
+    _deployed(world)
+
+    assert world.undo(world.scenario.base) == deploy_apply.EXIT_REFUSED
+    assert _refused(world) == {"undo_tree_dirty"}
+    assert f"REFUSE undo_tree_dirty: git rev-parse --git-path index.lock failed in {world.repo}" in world.output
+    assert world.live.calls == []

@@ -165,6 +165,9 @@ POST_START_TIMEOUT_S = 60
 # child without its token exits 78 one or two seconds after its CHILD_START.
 POST_START_SETTLE_S = 20
 POLL_S = 1.0
+# N17c-L2: a concurrent `git status` holds .git/index.lock for milliseconds; a
+# lock still there after this long is a git write cut short (N17c-L1).
+INDEX_LOCK_WAIT_S = 5
 # N17 MEDIUM-1: a typed sha older than this is a stale confirmation.
 CONFIRM_TIMEOUT_S = 300
 DEPLOYS_LOG_NAME = "deploys.log"
@@ -216,6 +219,7 @@ DEPLOY_TOOL_SCOPE_MISSING = "deploy_tool_scope_missing"
 FENCED_UNEXPECTED = "fenced_unexpected"
 MIGRATE_LOCK_BUSY = "migrate_lock_busy"
 DEPLOYS_LOG_UNUSABLE = "deploys_log_unusable"
+LIVE_INDEX_LOCK = "live_index_lock"
 LABEL_MISSING = "label_missing"
 CONFIRM_MISMATCH = "confirm_mismatch"
 # The plan went stale while the prompt waited (N17 MEDIUM-1; with START_CUTOFF).
@@ -297,6 +301,7 @@ TOKENS = (
     FENCED_UNEXPECTED,
     MIGRATE_LOCK_BUSY,
     DEPLOYS_LOG_UNUSABLE,
+    LIVE_INDEX_LOCK,
     LABEL_MISSING,
     CONFIRM_MISMATCH,
     CONFIRM_TIMEOUT,
@@ -1508,6 +1513,11 @@ class DeployOperator:
         log_problem = self.deploys_log.problem()
         if log_problem:
             refusals.append((DEPLOYS_LOG_UNUSABLE, log_problem))
+        # N17c-L1: with a stale index.lock the fast-forward fails after the stop,
+        # and the undo will not restart PREV on that tree: refuse before anything stops.
+        lock_problem = self._index_lock_problem()
+        if lock_problem:
+            refusals.append((LIVE_INDEX_LOCK, lock_problem))
         label = request.label or (verdict_label(matched[0].text) if matched else "")
         if matched and not _valid_label(label):
             refusals.append(
@@ -1549,14 +1559,28 @@ class DeployOperator:
             return None
         return found if found.is_absolute() else self.repo / found
 
-    def _tree_problem(self) -> str | None:
-        """N17b-L1/I-5: what a git write cut short leaves behind (index.lock, files
-        outside the benign list); None when the live tree is only benign."""
+    def _index_lock_problem(self) -> str | None:
+        """N17c-L1/L2: the live checkout's index.lock, after up to INDEX_LOCK_WAIT_S
+        for a concurrent reader's to go; the problem names its remedy."""
         lock = self._index_lock()
         if lock is None:
             return f"git rev-parse --git-path index.lock failed in {self.repo}"
-        if lock.exists():
-            return f"{lock} exists: a git write was cut short or is still running"
+        deadline = self.now() + timedelta(seconds=INDEX_LOCK_WAIT_S)
+        while lock.exists():
+            if self.now() >= deadline:
+                return (
+                    f"{lock} exists after {INDEX_LOCK_WAIT_S} s: a git write was cut short or is still running;"
+                    f" only when `pgrep -x git || echo none` prints none: rm {shlex.quote(str(lock))}"
+                )
+            self.env.sleep(POLL_S)
+        return None
+
+    def _tree_problem(self) -> str | None:
+        """N17b-L1/I-5: what a git write cut short leaves behind (index.lock, files
+        outside the benign list); None when the live tree is only benign."""
+        lock_problem = self._index_lock_problem()
+        if lock_problem:
+            return lock_problem
         try:
             tree = check_tree_clean(self.git, benign_paths=DEFAULT_BENIGN_PATHS)
         except GitError as exc:
@@ -2360,7 +2384,8 @@ class DeployOperator:
             f" >> {shlex.quote(str(self.deploys_log.path))}"
         )
         self.say(
-            f"Expect: rev-parse prints {prev}; status shows nothing outside {', '.join(DEFAULT_BENIGN_PATHS)};"
+            f"Expect: rev-parse prints {prev}; status shows nothing outside {', '.join(DEFAULT_BENIGN_PATHS)}"
+            " (anything more: stop there, do not enable, ask);"
             f" the dry run shows `{reviewed_line(old_pin)}` and no !!!."
         )
         self.say("After the enable:")
