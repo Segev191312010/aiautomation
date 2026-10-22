@@ -49,7 +49,7 @@ import sqlite3
 from types import MappingProxyType
 from urllib.parse import quote
 
-from trading.risk.engine import NO_SCALING, require_size_multiplier
+from trading.risk.engine import IDENTITY_SIZING_MISSING, NO_SCALING, require_size_multiplier
 from trading.scheduler.sessions import MarketSession, market_session
 from trading.storage import migrations as schema_migrations
 from trading.storage.migrations import (
@@ -401,6 +401,75 @@ def session_identity_multiplier(
     return require_size_multiplier(size)
 
 
+class SizeNotInForce(RuntimeError):
+    """``size_in_force`` found no size for the identity and session: ``token`` says why.
+
+    The tokens are this module's own (``identity_size_store_unreadable``,
+    ``size_event_chain_broken``, ...) plus ``identity_sizing_missing`` for a
+    name without a reviewed baseline row. Nothing ever substitutes a size.
+    """
+
+    def __init__(self, token: str, identity: str, session_date: date, detail: str) -> None:
+        super().__init__(f"{token}: {identity} has no size for the {session_date.isoformat()} session ({detail})")
+        self.token = token
+        self.identity = identity
+        self.session_date = session_date
+        self.detail = detail
+
+
+def size_in_force(database: str | Path, identity: str, session_date: date) -> Decimal:
+    """The size ``identity`` trades with in the session ``session_date``, as
+    that session's start reads (or read) it; for the readers that are not the
+    session start itself (plan P3-E/P3-F: the nightly writer's "current" for
+    the next session, ``session_check`` for a past one).
+
+    The same rules as ``session_identity_multiplier``, read-only (one
+    ``mode=ro`` open through ``read_size_events``) and without its clock
+    guard: the latest event effective on or before ``session_date`` and
+    written before that session's start is in force, else the reviewed
+    baseline; an event written at or after the start is not part of that
+    session's size (that read ignored it). Fail-closed: every case in which
+    the session start would have no size raises ``SizeNotInForce`` with the
+    same named token (a name without a ceiling or a baseline row, an
+    unreadable store or one with migration 18 pending, a chain that does not
+    start at the baseline, a size above the ceiling, a date that is not a
+    session). It logs nothing: the caller names the refusal where it matters.
+    """
+    name = identity.strip()
+    mode = CURRENT_ACCOUNT_MODE
+    ceilings = IDENTITY_SIZE_CEILING.get(mode)
+    if ceilings is None:
+        detail = f"account mode {mode!r} has no ceiling row"
+        raise SizeNotInForce(ACCOUNT_MODE_WITHOUT_CEILING, name, session_date, detail)
+    ceiling = ceilings.get(name)
+    if ceiling is None:
+        detail = f"the {mode} ceiling row does not name it"
+        raise SizeNotInForce(SENDABLE_WITHOUT_CEILING, name, session_date, detail)
+    baseline = identity_multiplier(name, sendable=True)
+    if baseline is None:
+        raise SizeNotInForce(IDENTITY_SIZING_MISSING, name, session_date, "no reviewed baseline row")
+    session = market_session(session_date)
+    if session is None:
+        raise SizeNotInForce(IDENTITY_SIZE_STORE_UNREADABLE, name, session_date, "not an XNYS session")
+    starts_at = _trading_day_start(session)
+    try:
+        events = read_size_events(database, identity=name, account_mode=mode)
+    except SizeStoreUnreadable as exc:
+        raise SizeNotInForce(IDENTITY_SIZE_STORE_UNREADABLE, name, session_date, str(exc)) from exc
+    problem = _chain_problem(events, baseline)
+    if problem is not None:
+        raise SizeNotInForce(SIZE_EVENT_CHAIN_BROKEN, name, session_date, problem)
+    size = baseline
+    for event in events:
+        # In force: effective on or before the session, and written before its start.
+        if event.effective_session <= session_date and event.created_at < starts_at:
+            size = event.to_mult
+    if size > ceiling:
+        detail = f"x{size} is above the {mode} ceiling x{ceiling}"
+        raise SizeNotInForce(IDENTITY_SIZE_ABOVE_CEILING, name, session_date, detail)
+    return require_size_multiplier(size)
+
+
 __all__ = [
     "ACCOUNT_MODE_WITHOUT_CEILING",
     "CURRENT_ACCOUNT_MODE",
@@ -414,8 +483,10 @@ __all__ = [
     "SIZE_LADDER",
     "SIZE_READ_BEFORE_SESSION_START",
     "SizeEvent",
+    "SizeNotInForce",
     "SizeStoreUnreadable",
     "identity_multiplier",
     "read_size_events",
     "session_identity_multiplier",
+    "size_in_force",
 ]

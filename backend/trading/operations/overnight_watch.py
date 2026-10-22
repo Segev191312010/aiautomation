@@ -31,7 +31,13 @@ schedule); this module probes, reads the logs and sends:
   * ``recorder.log`` from the notifier's end to the recorder's (16:15-17:30
     ET on session days): its competing-login lines into
     ``CompetingLoginWatch`` (a page at once, a re-page every 10 minutes while
-    they keep coming, over after a 10-minute silence).
+    they keep coming, over after a 10-minute silence);
+  * the night's size proposals (plan P3-E, ``size_notify.ProposalWatch``) for
+    the session about to start, at any hour and whatever the port: at the
+    first pre-session lead (05:55 ET) a normal-sound reminder while a step up
+    still waits for the owner (only once phone approval exists), and at the
+    07:55 ET deadline one silent "expired, sizes unchanged" note. Its sends go
+    through the assistant's one Telegram sender, the silent flag included.
 
 A stop is never lost. ``TelegramAssistant.stop`` cancels this task and waits
 for it; Python 3.11's ``asyncio.wait_for`` runs its awaitable in a task of its
@@ -87,6 +93,7 @@ from trading.operations.notify_service import (
     restart_cap_event,
 )
 from trading.operations.paths import UserPaths
+from trading.operations.size_notify import ProposalWatch
 from trading.operations.supervisor import NOTIFIER_CHILD, PORT_PROBE_TIMEOUT_S, SUPERVISOR_LOG_NAME
 
 logger = logging.getLogger("autotrader.shadow.telegram")
@@ -207,6 +214,7 @@ class OvernightWatch:
         tick_seconds: float = WATCH_TICK_SECONDS,
         memory: MutableMapping[str, str] | None = None,
         notifier_outage: NotifierOutage | None = None,
+        proposals: ProposalWatch | None = None,
     ) -> None:
         self._tailers = {
             SUPERVISOR_LOG: LogTailer(log_directory / SUPERVISOR_LOG_NAME),
@@ -220,6 +228,7 @@ class OvernightWatch:
         self._tick = tick_seconds
         self._memory: MutableMapping[str, str] = {} if memory is None else memory
         self._notifier_outage = notifier_outage
+        self._proposals = proposals
         self._rotation = RotationCarried()
         self.port = PortWatch()
         self.competing = CompetingLoginWatch()
@@ -276,6 +285,7 @@ class OvernightWatch:
         self._follow_logs(now, send, save)
         self._follow_competing(now, send)
         try:
+            self._follow_proposals(now)
             await self._follow_port(now, send)
         finally:
             self._remember()
@@ -364,6 +374,17 @@ class OvernightWatch:
             text = competing_login_repage_text(decision.since, decision.source)
         logger.warning("overnight watch: competing login (%s), paged", decision.kind.value)
         send(text)
+
+    # -- size proposals ----------------------------------------------------------
+
+    def _follow_proposals(self, now: datetime) -> None:
+        """The reminder and the expiry note; a failure never holds up the port watch."""
+        if self._proposals is None:
+            return
+        try:
+            self._proposals.step(now, self._memory)
+        except Exception as exc:  # noqa: BLE001 - retried at the next step
+            logger.warning("overnight watch: size proposals unreadable (%s); retried", type(exc).__name__)
 
     # -- the port --------------------------------------------------------------
 
@@ -464,6 +485,8 @@ class OvernightWatch:
     def _wait_seconds(self, now: datetime) -> float:
         wait = self._tick
         moments = [lead for lead in pre_session_leads(et_day(now)) if lead > now]
+        if self._proposals is not None:
+            moments += [moment for moment in self._proposals.moments(now) if moment > now]
         if self._next_check is not None and self._next_check > now:
             moments.append(self._next_check)
         for moment in moments:

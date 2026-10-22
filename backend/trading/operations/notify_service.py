@@ -68,7 +68,14 @@
      An announced outage counts once, as an outage, whatever opened it (a
      failed connect, an IBKR-side loss, a data-refused run) and also when the
      pair budget held it back until the sustain limit or the window announced
-     it; a flap is a flip the phone never heard as an outage.
+     it; a flap is a flip the phone never heard as an outage;
+  m. a sendable identity without a size (plan P3-E, from P3-C's open
+     question 1): a strategy child's CRITICAL size line (``SIZE_TRIPWIRES``:
+     the session-start size read's refusals, an event written mid-session,
+     the pipeline's ``identity_sizing_missing`` block), with normal sound,
+     each token once per session date (``size_tripwire:<token>`` in the
+     per-date state), so the owner hears on the day that an identity trades
+     no setups, never only in a log.
 
 It reads the database, the logs and the bridge state files, and writes one
 kind of row: the Sentinel's ``paper:<IDENTITY>`` fence, stop-only. Nothing
@@ -173,6 +180,16 @@ from trading.operations.sentinel import (
 )
 from trading.operations.supervisor import NOTIFIER_CHILD, bridge_window
 from trading.operations.telegram_tools import child_starts_on, read_log_tail, restarts_text
+from trading.risk.engine import IDENTITY_SIZING_MISSING
+from trading.risk.identity_sizing import (
+    ACCOUNT_MODE_WITHOUT_CEILING,
+    IDENTITY_SIZE_ABOVE_CEILING,
+    IDENTITY_SIZE_STORE_UNREADABLE,
+    SENDABLE_WITHOUT_CEILING,
+    SIZE_EVENT_CHAIN_BROKEN,
+    SIZE_EVENT_WRITTEN_MID_SESSION,
+    SIZE_READ_BEFORE_SESSION_START,
+)
 from trading.research.live_ledger import bridge_state_directory
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
@@ -312,6 +329,28 @@ MANAGER_TRIPWIRES = (
     "ai_request_not_sent",
 )
 TRIPWIRE_ALERT_INTERVAL = timedelta(minutes=30)
+# A sendable identity without a size for the session (plan P3-C/P3-E): the
+# session-start read's CRITICAL tokens (trading.risk.identity_sizing), the
+# event it ignored as written mid-session, and the pipeline's block of every
+# setup of a run without a size. Forwarded from the strategy children's logs
+# with normal sound, each token once per session date.
+SIZE_TRIPWIRES = (
+    IDENTITY_SIZE_STORE_UNREADABLE,
+    IDENTITY_SIZE_ABOVE_CEILING,
+    ACCOUNT_MODE_WITHOUT_CEILING,
+    SIZE_EVENT_CHAIN_BROKEN,
+    SIZE_EVENT_WRITTEN_MID_SESSION,
+    SIZE_READ_BEFORE_SESSION_START,
+    SENDABLE_WITHOUT_CEILING,
+    IDENTITY_SIZING_MISSING,
+)
+# Only the CRITICAL line itself (``<time> CRITICAL <logger> <token>: ...``),
+# never a decision line that merely names the block as its risk code, and
+# never a line of the stack the CRITICAL carries.
+_SIZE_TRIPWIRE = re.compile(
+    r"\bCRITICAL\b.*?\b(?P<token>" + "|".join(re.escape(token) for token in SIZE_TRIPWIRES) + r"):"
+)
+SIZE_TRIPWIRE_KEY = "size_tripwire:{token}"
 # A plan lookup that fails in the managed child never shows in the plans table
 # (the notifier's own outage alert reads that), so it is forwarded from the log.
 _FALLBACK_PLAN_ERROR = re.compile(r"manager_fallback_neutral: plan_error\b")
@@ -863,6 +902,15 @@ def manager_tripwire(line: str) -> tuple[str, str] | None:
     if token is None:
         return None
     return token, f"🚨 AI day manager tripwire: {token}\n{_clip(line.strip(), 300)}"
+
+
+def size_tripwire(line: str) -> tuple[str, str] | None:
+    """``(token, phone text)`` for a strategy child's CRITICAL size line, else None."""
+    match = _SIZE_TRIPWIRE.search(line)
+    if match is None:
+        return None
+    token = match.group("token")
+    return token, f"🚨 Size tripwire: {token}\n{_clip(line.strip(), 300)}"
 
 
 def child_exit_code(line: str) -> int | None:
@@ -2772,6 +2820,9 @@ class _NotifierSession:
             token, text = tripwire
             if self._alert_allowed(f"tripwire:{token}", TRIPWIRE_ALERT_INTERVAL):
                 self._send_alert(f"tripwire:{token}", text)
+        sized = size_tripwire(line)
+        if sized is not None:
+            self._size_tripwire(*sized)
         if source == "bridge":
             if _PREFLIGHT_REFUSED.search(line):
                 self._state.count(PREFLIGHT_REFUSED)
@@ -2785,6 +2836,14 @@ class _NotifierSession:
             self._competing_login(self._competing.seen(self._environment.clock(), source))
         elif problem and self._alert_allowed("ibkr_session"):
             self._send_alert(f"ibkr_session:{problem}", ibkr_alert_text(problem, source))
+
+    def _size_tripwire(self, token: str, text: str) -> None:
+        """Once per token and session date, normal sound; a lost delivery is retried."""
+        key = SIZE_TRIPWIRE_KEY.format(token=token)
+        if key in self._state.delivered or key in self._in_flight:
+            return
+        logger.warning("size tripwire %s: forwarded to the phone", token)
+        self._send_alert(key, text, key=key)
 
     def _follow_competing(self) -> None:
         self._competing_login(self._competing.tick(self._environment.clock()))
@@ -3334,6 +3393,7 @@ __all__ = [
     "notifier_gateway_outage",
     "child_exit_code",
     "manager_tripwire",
+    "size_tripwire",
     "supervisor_child_name",
     "collect_daily_report",
     "close_line",
