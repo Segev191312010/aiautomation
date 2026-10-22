@@ -3932,7 +3932,7 @@ async def test_the_sentinel_fences_from_the_notifier_once_and_a_restart_keeps_it
 
     from trading.operations import notify_service, sentinel
 
-    # The live auto-fence (P1-B.4's switch; the Sentinel ships log-only), unchanged.
+    # The live auto-fence (P1-B.4's switch, shipped True since P1-B.4), pinned on explicitly.
     monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
     paths = await _notify_day(tmp_path, monkeypatch)
     _write_bridge_state(paths, {
@@ -3966,15 +3966,16 @@ async def test_the_sentinel_fences_from_the_notifier_once_and_a_restart_keeps_it
 
 @pytest.mark.anyio
 async def test_log_only_the_notifier_sends_one_would_fence_line_and_writes_no_fence(tmp_path, monkeypatch, caplog):
-    """The shipped switch through the production path: 20 Sentinel checks (every
-    30 s, 10:00-10:10) over ORB_V2's limit send one 🔎 line, write no fence row,
-    and a restart the same day sends nothing more."""
+    """The switch off (log-only) through the production path: 20 Sentinel checks
+    (every 30 s, 10:00-10:10) over ORB_V2's limit send one 🔎 line, write no
+    fence row, and a restart the same day sends nothing more."""
     from datetime import time
 
     from config import cfg
     from trading.operations import notify_service, sentinel
 
-    assert sentinel.SENTINEL_FENCES_LIVE is False
+    # P1-B.4 (owner): the Sentinel ships live, so log-only is set explicitly here.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", False)
     caplog.set_level(logging.INFO, logger="autotrader.shadow")
     paths = await _notify_day(tmp_path, monkeypatch)
     _write_bridge_state(paths, {
