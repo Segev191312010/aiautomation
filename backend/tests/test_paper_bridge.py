@@ -24,6 +24,7 @@ import sqlite3
 import stat
 import sys
 import threading
+import time
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -143,6 +144,10 @@ class FakeBroker(pb.BrokerState):
         # v7c: TWS also reports this client's own working orders to reqAllOpenOrders; the older
         # tests predate that and keep the book to other clients' orders only.
         self.own_in_all_open_orders = False
+        # v7c fix 1 (N18 N21): TWS reports a new order (openOrder, orderStatus) a moment after
+        # placeOrder; with delay_echoes the reports wait for deliver_echoes().
+        self.delay_echoes = False
+        self.delayed_echoes: list[Callable[[], None]] = []
 
     def connect(self, host: str, port: int, client_id: int) -> None:
         assert (host, port, client_id) == ("127.0.0.1", 7497, CLIENT_ID)
@@ -241,12 +246,24 @@ class FakeBroker(pb.BrokerState):
         self.placed.append((order_id, order))
         self.own_orders[order_id] = order
         status = self.order_status.get(order_id, "PreSubmitted" if order.orderType == "STP" else "Submitted")
-        if self.echo_orders:
-            echo = copy.copy(order)
-            echo.clientId = CLIENT_ID
-            self.openOrder(order_id, SimpleNamespace(symbol="", conId=contract.conId), echo,
-                           SimpleNamespace(status=status))
-        self.orderStatus(order_id, status, 0, order.totalQuantity, 0)
+
+        def report() -> None:
+            if self.echo_orders:
+                echo = copy.copy(order)
+                echo.clientId = CLIENT_ID
+                self.openOrder(order_id, SimpleNamespace(symbol="", conId=contract.conId), echo,
+                               SimpleNamespace(status=status))
+            self.orderStatus(order_id, status, 0, order.totalQuantity, 0)
+
+        if self.delay_echoes:
+            self.delayed_echoes.append(report)
+        else:
+            report()
+
+    def deliver_echoes(self) -> None:
+        reports, self.delayed_echoes = self.delayed_echoes, []
+        for report in reports:
+            report()
 
     def cancelOrder(self, order_id: int) -> None:
         self.cancelled.append(order_id)
@@ -3716,7 +3733,8 @@ def test_v7a1_the_shared_read_only_opener_retries_a_transient_open_and_fails_clo
 # The fake broker's net liquidation is 665,000.00: the budget is 19,950.00 (3 %) and the daily loss
 # limit 13,300.00 (2 %). A default decision buys 100 @ 50.00 with its stop at 49.50: new risk 50.00.
 
-V7C_ADVICE_FOR_AAPL = "close it with /close AAPL, or protect it with a stop that stays working (GTC)"
+# Changed by v7c fix 1 (N18 LOW-5): "or in TWS", since /close is refused on a past session's bot leg.
+V7C_ADVICE_FOR_AAPL = "close it with /close AAPL or in TWS, or protect it with a stop that stays working (GTC)"
 
 
 def stop_leg(order_id: int, quantity: int, price: float, *, parent: int, ref: str = "autotrader:MOMO_HOD_V2:open",
@@ -3941,8 +3959,8 @@ def test_v7c_dead_stop_blocks_entries(tmp_path: Path, monkeypatch: pytest.Monkey
     bridge.tick()
 
     why = ("v7c_unprotected_position: OPEN 100 sh of the MOMO_HOD_V2 bracket, whose stop order 32 is not live —"
-           " every risk-increasing order is refused; close it with /close OPEN, or protect it with a stop that stays"
-           " working (GTC)")
+           " every risk-increasing order is refused; close it with /close OPEN or in TWS, or protect it with a stop"
+           " that stays working (GTC)")  # "or in TWS" added by v7c fix 1 (N18 LOW-5)
     assert v7c_skip(bridge, "d1") == f"{why} (source=bot){WOULD_HAVE}"  # O3
     row = manual_row(row_id)
     assert (row.status, row.reject_code, row.error) == (
@@ -3991,8 +4009,8 @@ def test_v7c_unprotected_page_text_never_promises_a_day_stop_unblocks(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Telegram /stop orders are DAY orders: a page saying "/stop SYM PRICE unblocks" would unblock until the close.
-    assert pb.UNPROTECTED_ADVICE.format(symbol="SYM") == (
-        "close it with /close SYM, or protect it with a stop that stays working (GTC)")
+    assert pb.UNPROTECTED_ADVICE.format(symbol="SYM") == (  # "or in TWS" added by v7c fix 1 (N18 LOW-5)
+        "close it with /close SYM or in TWS, or protect it with a stop that stays working (GTC)")
     clock = Clock(DECIDED)
     broker = connected_broker(positions={AAPL_ID: 100}, contracts=STOCK)
     bridge = make_bridge(tmp_path, broker, clock=clock)
@@ -4545,13 +4563,15 @@ def test_v7c_pnl_source_reqpnl_then_computed_fallback(
     broker.pnl(pb.PNL_REQUEST_ID, -1500.0, 0.0, -1500.0)  # IBKR also counts commissions and TWS-direct trades
     assert bridge.account_realized_loss() == Decimal("1500")
     assert bridge.account_realized_loss() == Decimal("1500")
+    # Changed by v7c fix 1 (N18 LOW-2, owner Q5 "the floor now"): an unset report or a stale value
+    # switches the source to computed, but IBKR's last value stays a lower bound for the loss (was 1000).
     for unset in (None, float("nan"), float("inf"), system.float_info.max):
         broker.pnl(pb.PNL_REQUEST_ID, 0.0, 0.0, unset)
-        assert bridge.account_realized_loss() == Decimal("1000"), unset
+        assert bridge.account_realized_loss() == Decimal("1500"), unset
     broker.pnl(pb.PNL_REQUEST_ID, 0.0, 0.0, -1010.0)
     assert bridge.account_realized_loss() == Decimal("1010")  # within $25 of the computed: no WARN
     monkeypatch.setattr(pb, "PNL_FRESH", timedelta(seconds=-1))  # older than 120 s: stale
-    assert bridge.account_realized_loss() == Decimal("1000")
+    assert bridge.account_realized_loss() == Decimal("1010")  # the floor (was 1000: v7c fix 1, LOW-2)
     monkeypatch.undo()
     broker.pnl(pb.PNL_REQUEST_ID, 0.0, 0.0, 2500.0)  # IBKR says +2,500: its value never hides the computed loss
     assert bridge.account_realized_loss() == Decimal("1000")
@@ -4563,6 +4583,11 @@ def test_v7c_pnl_source_reqpnl_then_computed_fallback(
         "v7c_pnl_source=computed", "v7c_pnl_source=reqpnl", "v7c_pnl_source=computed", "v7c_pnl_source=reqpnl",
         "v7c_pnl_source=computed", "v7c_pnl_source=reqpnl",
     ]  # once per change
+    stale = [line for line in out if line.startswith("v7c_pnl_stale")]  # once per stale episode (LOW-2)
+    assert stale[0] == "v7c_pnl_stale: IBKR's last realized -1500.00 is no longer reported — it stays a lower bound" \
+        " for today's loss"
+    assert len(stale) == 2 and re.fullmatch(r"v7c_pnl_stale: IBKR's last realized -1010\.00 is \d+s old — it stays a"
+                                            r" lower bound for today's loss", stale[1])
     assert [line for line in out if "v7c_pnl_mismatch" in line] == [
         "WARN v7c_pnl_mismatch: IBKR realized -1500.00 vs computed -1000.00 (gap 500.00 > 332.50); the budget"
         " counts the larger loss",
@@ -4733,3 +4758,812 @@ def test_v7c_a_failing_stop_fit_never_blocks_owner_exits(
     assert critical(events(capsys)) == [
         "manual-order stop fitting failed (ValueError: corrupt fit) — check the owner's attached stops in TWS"
     ]  # once
+
+
+# ---- v7c fix 1: review N18 (MEDIUM-1..3, LOW-1..5, 7, 8, 9) ------------------------------------------------------
+
+
+def _filled_manual_buy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exec_id: str
+                       ) -> tuple[Any, FakeBroker, Clock, str, int, int]:
+    """A filled /buy 10 AAPL stop 185 whose position update has arrived: 10 AAPL under the attached stop."""
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch, "/buy 10 AAPL stop 185")
+    fill(broker, parent_id, 10, 190.01, f"manual:{buy_id}", exec_id)
+    push_position(broker, AAPL_ID, 10)
+    clock.advance(2)
+    bridge.tick()
+    assert manual_row(buy_id).status == "filled"
+    return bridge, broker, clock, buy_id, parent_id, stop_id
+
+
+def unsold_page(row_id: str, summary: str, stop_id: int, what: str, why: str) -> str:
+    return (f"manual order #{row_id[:6]} ({summary}): your stop on AAPL (order(s) [{stop_id}]) {what} and AAPL was not"
+            f" sold ({why}) — it has no stop; act in TWS")
+
+
+# MEDIUM-1 (a): an exit decides first and pages by name whenever a released holding is not sold.
+
+def test_fix1_closeall_keeps_the_stop_of_a_holding_it_cannot_sell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18 probe P1: e63a599 cancelled the stop first and then refused the 1.06 % book: no stop, nothing sold.
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001a1.01.01")
+    close_id = queue_manual("/closeall", message_id=2, now=clock.value)
+    broker.placed.clear()
+    broker.quote = Decimal("188.00")  # the book is now 1.06 % wide (a thin name, or a fast market)
+    capsys.readouterr()
+    clock.advance(1)
+    bridge.tick()
+    clock.advance(2)
+    bridge.tick()
+
+    assert broker.cancelled == [] and broker.placed == []  # the stop still protects the 10 shares
+    row = manual_row(close_id)
+    assert (row.status, row.reject_code, row.error) == (
+        "rejected", "nothing_closed", "AAPL: spread 1.06% over 1% — not sold; its stop is kept")
+    assert bridge.account_open_risk().unprotected == ()
+    assert not critical(events(capsys))
+
+
+def test_fix1_closeall_releases_and_sells_only_the_holding_it_can_sell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    aapl = queue_manual("/buy 10 AAPL stop 185", message_id=1)
+    tsla = queue_manual("/buy 10 TSLA stop 185", message_id=2)
+    broker = per_contract_broker(contracts=STOCK, books={AAPL_ID: (189.99, 190.01), TSLA_ID: (249.99, 250.01)})
+    broker.own_in_all_open_orders = True
+    clock = Clock(MANUAL_T0 + timedelta(seconds=2))
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
+    bridge.tick()
+    clock.advance(1)
+    bridge.tick()  # one owner row per tick
+    [(aapl_buy, _), (aapl_stop, _), (tsla_buy, _), (tsla_stop, _)] = broker.placed
+    fill(broker, aapl_buy, 10, 190.01, f"manual:{aapl}", "0000e0d5.000001a2.01.01")
+    fill(broker, tsla_buy, 10, 250.01, f"manual:{tsla}", "0000e0d5.000001a3.01.01")
+    push_position(broker, AAPL_ID, 10)
+    push_position(broker, TSLA_ID, 10)
+    clock.advance(2)
+    bridge.tick()
+    assert (manual_row(aapl).status, manual_row(tsla).status) == ("filled", "filled")
+
+    broker.books[AAPL_ID] = (186.00, 190.00)  # AAPL 2.13 % wide; TSLA tight
+    close_id = queue_manual("/closeall", message_id=3, now=clock.value)
+    broker.placed.clear()
+    capsys.readouterr()
+    clock.advance(1)
+    bridge.tick()
+    assert broker.cancelled == [tsla_stop] and broker.placed == []  # only the holding it will sell is released
+
+    broker.orderStatus(tsla_stop, "Cancelled", 0, 10, 0)
+    clock.advance(2)
+    bridge.tick()
+    [(child, sell)] = broker.placed  # the sell leaves only after IBKR confirms its stop's cancel
+    assert (sell.action, sell.orderType, sell.totalQuantity) == ("SELL", "MKT", 10)
+    assert bridge.manual.tracked[close_id].con_ids == {child: TSLA_ID}
+    assert aapl_stop not in broker.cancelled  # the refused holding keeps its stop
+    row = manual_row(close_id)
+    assert (row.status, row.error) == ("sent", "AAPL: spread 2.13% over 1% — not sold; its stop is kept")
+    assert not [text for text in critical(events(capsys)) if "was not sold" in text]
+
+
+def test_fix1_a_close_whose_quote_turns_during_the_release_pages_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18 probe P1b: the stop is cancelled, then the quote widens before the sell can leave.
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001a4.01.01")
+    close_id = queue_manual("/close AAPL", message_id=2, now=clock.value, owner_shares=10)
+    broker.placed.clear()
+    clock.advance(1)
+    bridge.tick()
+    assert broker.cancelled == [stop_id]
+    broker.orderStatus(stop_id, "Cancelled", 0, 10, 0)
+    broker.quote = Decimal("188.00")  # the quote widens in the second it takes IBKR to confirm
+    capsys.readouterr()
+    clock.advance(1)
+    bridge.tick()
+
+    row = manual_row(close_id)
+    assert broker.placed == [] and row.status == "rejected"
+    pages = critical(events(capsys))
+    assert pages == [unsold_page(close_id, "CLOSE 10 AAPL MKT", stop_id, "was cancelled", row.error)]
+    assert row.error.startswith("Spread is 1.06% (max 1%)")
+
+
+@pytest.mark.parametrize("problem", ["wide", "stopping"])
+def test_fix1_a_close_checks_its_quote_and_can_send_right_before_it_cancels_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str
+) -> None:
+    bridge, broker, clock, _, _, _ = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001aa.01.01")
+    close_id = queue_manual("/close AAPL", message_id=2, now=clock.value, owner_shares=10)
+    broker.placed.clear()
+    if problem == "wide":
+        broker.quote = Decimal("188.00")  # 1.06 % wide when the /close is claimed
+    else:
+        original = broker.reqMktData
+
+        def quote_then_sigterm(request_id: int, contract: Any, *args: Any) -> None:
+            original(request_id, contract, *args)
+            bridge.stop_event.set()  # SIGTERM lands during the /close's own quote wait
+
+        broker.reqMktData = quote_then_sigterm  # type: ignore[method-assign]
+    clock.advance(1)
+    bridge.tick()
+
+    assert broker.cancelled == [] and broker.placed == []  # refused before its stop was touched
+    assert manual_row(close_id).status == ("rejected" if problem == "wide" else "error")
+    assert bridge.manual.releases == {}
+
+
+@pytest.mark.parametrize(("how", "code", "why"), [
+    ("stop", pb.EXIT_OK, "the bridge stopped"), ("disconnect", pb.EXIT_RESTART, "TWS disconnected")])
+def test_fix1_a_release_interrupted_by_a_stop_request_or_a_disconnect_pages_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], how: str, code: int, why: str
+) -> None:
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001a5.01.01")
+    close_id = queue_manual("/close AAPL", message_id=2, now=clock.value, owner_shares=10)
+    clock.advance(1)
+    bridge.tick()
+    assert broker.cancelled == [stop_id] and close_id in bridge.manual.releases
+    if how == "stop":
+        bridge.stop_event.set()
+    else:
+        broker.connected = False
+    capsys.readouterr()
+
+    assert bridge.interrupted() == code
+    assert unsold_page(close_id, "CLOSE 10 AAPL MKT", stop_id, "is being cancelled (IBKR has not confirmed yet)",
+                       f"{why} before IBKR confirmed the cancel") in critical(events(capsys))
+    row = manual_row(close_id)
+    assert row.status == "error" and row.error == (
+        f"{why} while your attached stop(s) [{stop_id}] were being cancelled for it; nothing sold — act in TWS")
+    assert bridge.manual.releases == {}
+
+
+def test_fix1_a_released_sell_stopped_before_it_leaves_pages_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001a6.01.01")
+    close_id = queue_manual("/sell all AAPL", message_id=2, now=clock.value, owner_shares=10)
+    broker.placed.clear()
+    clock.advance(1)
+    bridge.tick()
+    broker.orderStatus(stop_id, "Cancelled", 0, 10, 0)
+    bridge.stop_event.set()  # SIGTERM lands while IBKR confirms the cancel
+    capsys.readouterr()
+    clock.advance(1)
+    bridge.tick()
+
+    assert broker.placed == []
+    row = manual_row(close_id)
+    assert row.status == "error"
+    assert critical(events(capsys)) == [unsold_page(close_id, row.summary(), stop_id, "was cancelled", row.error)]
+
+
+def test_fix1_a_cancel_of_a_releasing_sell_pages_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001a7.01.01")
+    close_id = queue_manual("/close AAPL", message_id=2, now=clock.value, owner_shares=10)
+    clock.advance(1)
+    bridge.tick()
+    queue_manual(f"/cancel {close_id[:6]}", message_id=3, now=clock.value)
+    capsys.readouterr()
+    clock.advance(1)
+    bridge.tick()
+
+    assert manual_row(close_id).status == "cancelled"
+    assert critical(events(capsys)) == [unsold_page(
+        close_id, "CLOSE 10 AAPL MKT", stop_id, "is being cancelled (IBKR has not confirmed yet)",
+        "you cancelled the sell while its stops were being released")]
+
+
+@pytest.mark.parametrize(("at_ibkr", "state"), [
+    ("Cancelled", "stop(s) [{stop}] no longer work at IBKR: AAPL may have no stop"),
+    ("PreSubmitted", "IBKR still shows stop(s) [{stop}] working"),
+])
+def test_fix1_a_restart_reports_a_row_that_was_releasing_stops_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], at_ibkr: str, state: str
+) -> None:
+    bridge, broker, clock, buy_id, parent_id, stop_id = _filled_manual_buy(tmp_path, monkeypatch,
+                                                                           "0000e0d5.000001a8.01.01")
+    close_id = queue_manual("/close AAPL", message_id=2, now=clock.value, owner_shares=10)
+    clock.advance(1)
+    bridge.tick()
+    assert manual_row(close_id).status == "sending"  # its audit names the stop being released
+    # The bridge dies here (SIGKILL, a crash): the release lived in its memory only. A new bridge starts.
+    attached = stop_leg(stop_id, 10, 185.0, parent=parent_id, ref=f"manual:{buy_id}")
+    restarted = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), positions={AAPL_ID: 10},
+                                 contracts=STOCK, live_orders={stop_id: at_ibkr}, order_objects={stop_id: attached})
+    second = desk_bridge(tmp_path, restarted, tmp_path / "ledger.db", clock=clock)  # manual_ledger's database
+    capsys.readouterr()
+    second.startup()
+
+    message = (f"the bridge stopped while cancelling your attached stop(s) [{stop_id}] on AAPL for it; nothing was"
+               f" sold — {state.format(stop=stop_id)}")
+    pages = critical(events(capsys))
+    assert pages == [f"manual order #{close_id[:6]} (CLOSE 10 AAPL MKT): {message}; marked error, never resent;"
+                     " act in TWS"]  # never the plain "marked unknown" line
+    row = manual_row(close_id)
+    assert (row.status, row.error) == ("error", f"{message}. Never resent; act in TWS.")
+    assert restarted.placed == [] and restarted.cancelled == []
+
+
+def test_fix1_the_1555_finish_reports_an_open_release_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001a9.01.01")
+    close_id = queue_manual("/close AAPL", message_id=2, now=clock.value, owner_shares=10)
+    clock.advance(1)
+    bridge.tick()
+    assert close_id in bridge.manual.releases
+    clock.value = ny(15, 55)
+    capsys.readouterr()
+
+    assert bridge.finish() == pb.EXIT_OK  # finish follows owner rows, never their releases
+    assert unsold_page(close_id, "CLOSE 10 AAPL MKT", stop_id, "is being cancelled (IBKR has not confirmed yet)",
+                       "the session ended at 15:55 ET before IBKR confirmed the cancel") in critical(events(capsys))
+    assert manual_row(close_id).status == "error" and bridge.manual.releases == {}
+
+
+# MEDIUM-1 (b): the stop fit never cancels on a position update that has not arrived.
+
+def test_fix1_the_stop_fit_never_cancels_a_stop_on_an_unconfirmed_zero_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18 probe P8: e63a599 cancelled the stop 15 s after the fill because the position still read 0.
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch, "/buy 10 AAPL stop 185")
+    fill(broker, parent_id, 10, 190.01, f"manual:{buy_id}", "0000e0d5.000001b1.01.01")
+    clock.advance(2)
+    bridge.tick()
+    assert manual_row(buy_id).status == "filled"
+    capsys.readouterr()
+    for _ in range(16):  # 32 s: the position update for the fill has not arrived
+        clock.advance(2)
+        bridge.tick()
+
+    assert broker.cancelled == [] and [order_id for order_id, _ in broker.placed if order_id == stop_id] == [stop_id]
+    lags = [text for text in critical(events(capsys)) if "no position update" in text]
+    assert len(lags) == 1 and re.fullmatch(
+        rf"AAPL: no position update 1\ds after your buy's fill \(order {parent_id}\) — its attached stop {stop_id} is"
+        r" kept as it is until the position shows the shares; check TWS", lags[0])
+
+    push_position(broker, AAPL_ID, 10)  # the position catches up: the stop fits the 10 shares already
+    for _ in range(3):
+        clock.advance(2)
+        bridge.tick()
+    assert broker.cancelled == [] and stop_id not in bridge.manual.stop_fits
+    assert bridge.account_open_risk().unprotected == ()
+
+
+def test_fix1_the_stop_fit_reduces_only_once_the_position_shows_the_fills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch)  # 10 @ 185 stop 180
+    broker.execDetails(-1, None, execution("0000e0d5.000001b2.01.01", parent_id, 4, 185.0, acctNumber=ACCOUNT,
+                                           orderRef=f"manual:{buy_id}", side="BOT", time="20261013  10:00:30"))
+    broker.orderStatus(parent_id, "Cancelled", 4, 6, 185.0)  # 4 bought, the rest cancelled; no position update yet
+    broker.placed.clear()
+    for _ in range(10):  # 20 s, past the 15 s grace
+        clock.advance(2)
+        bridge.tick()
+    assert broker.placed == [] and broker.cancelled == []  # the position reads 0: never fitted to it
+
+    push_position(broker, AAPL_ID, 4)
+    clock.advance(2)
+    bridge.tick()
+    [(order_id, fitted)] = broker.placed
+    assert (order_id, fitted.totalQuantity) == (stop_id, 4)
+
+
+# MEDIUM-2: a book refresh is complete only once every open-orders request up to it is answered.
+
+class LaggingBook(FakeBroker):
+    """N18 probe P3: TWS answers reqAllOpenOrders from its own thread: A after 0.3 s, then B and openOrderEnd."""
+
+    def reqAllOpenOrders(self) -> None:
+        book = list(self.book)
+
+        def answer() -> None:
+            time.sleep(0.3)
+            order_id, contract, item, status, _ = book[0]
+            self.openOrder(order_id, contract, item, SimpleNamespace(status=status))
+            time.sleep(0.4)
+            order_id, contract, item, status, _ = book[1]
+            self.openOrder(order_id, contract, item, SimpleNamespace(status=status))
+            self.openOrderEnd()
+
+        threading.Thread(target=answer, daemon=True).start()
+
+
+def _book_with_owner_stop(broker: FakeBroker) -> None:
+    owner_stop = stop_leg(500, 100, 180.0, parent=0, ref="", client=0)  # the owner's TWS stop on all 100 shares
+    other = pb.order("BUY", "LMT", 1, ACCOUNT, "", lmtPrice=10.0)
+    other.clientId, other.permId = 0, 770501
+    broker.book = [(500, SimpleNamespace(conId=AAPL_ID, symbol="AAPL"), owner_stop, "PreSubmitted", 100.0),
+                   (501, SimpleNamespace(conId=TSLA_ID, symbol="TSLA"), other, "Submitted", 1.0)]
+
+
+def test_fix1_a_timed_out_refresh_never_lets_the_next_sell_see_a_partial_book(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    sell_id = queue_manual("/sell 50 AAPL", message_id=1, owner_shares=100)
+    broker = LaggingBook(bid=Decimal("189.99"), ask=Decimal("190.01"), positions={AAPL_ID: 100}, contracts=STOCK)
+    broker.connect("127.0.0.1", 7497, CLIENT_ID)
+    broker.reqAccountSummary(1, "All", "NetLiquidation")
+    broker.reqPositions()
+    _book_with_owner_stop(broker)
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
+    bridge.sync_timeout = 2.0
+    assert bridge.refresh_order_book(timeout=0.5) is None  # the watch's refresh times out (3 s in production)
+    bridge.manual.tick()  # the owner's sell: its snapshot straddles the late answer
+
+    # e63a599 took the late answer's end for its own and saw only TSLA: SELL 50 on 100 held under a 100-sh stop.
+    assert [item for _, item in broker.placed if item.action == "SELL"] == []
+    assert sorted(item.order_id for item in bridge.order_book) == [500, 501]
+    assert (manual_row(sell_id).status, manual_row(sell_id).reject_code) == ("rejected", "insufficient_shares")
+
+
+class HeldAnswers(FakeBroker):
+    """TWS answers reqAllOpenOrders in request order, when the test says so (``hold``); each answer is the
+    book at request time. ``on_request`` runs right after a request, while the bridge waits for it."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.hold = False
+        self.owed: list[list[tuple[int, Any, Any, str, float]]] = []
+        self.requests = 0
+        self.on_request: Callable[[int], None] | None = None
+
+    def reqAllOpenOrders(self) -> None:
+        self.requests += 1
+        if not self.hold:
+            super().reqAllOpenOrders()
+        else:
+            self.owed.append(list(self.book))
+        if self.on_request is not None:
+            self.on_request(self.requests)
+
+    def deliver(self, orders: int | None = None) -> None:
+        """The oldest answer still owed: its next ``orders`` orders, or the rest of it and its openOrderEnd."""
+        answer = self.owed[0]
+        sent = answer if orders is None else answer[:orders]
+        for order_id, contract, item, status, remaining in sent:
+            self.openOrder(order_id, contract, item, SimpleNamespace(status=status))
+            self.orderStatus(order_id, status, 0, remaining, 0, item.permId, 0, 0, item.clientId, "", 0)
+        del answer[:len(sent)]
+        if orders is None:
+            self.owed.pop(0)
+            self.openOrderEnd()
+
+
+def held_answers(**kwargs: Any) -> HeldAnswers:
+    broker = HeldAnswers(**kwargs)
+    broker.connect("127.0.0.1", 7497, CLIENT_ID)
+    broker.reqAccountSummary(1, "All", "NetLiquidation")
+    broker.reqPositions()
+    return broker
+
+
+def test_fix1_a_late_answer_straddling_the_clear_refuses_the_sell_when_its_own_answer_is_late_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    sell_id = queue_manual("/sell 50 AAPL", message_id=1, owner_shares=100)
+    broker = held_answers(bid=Decimal("189.99"), ask=Decimal("190.01"), positions={AAPL_ID: 100}, contracts=STOCK)
+    _book_with_owner_stop(broker)
+    broker.hold = True
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
+    assert bridge.refresh_order_book(timeout=0.01) is None  # request 1: no answer in time
+    broker.deliver(1)  # the AAPL stop of answer 1 arrives late, before the next request
+    broker.on_request = lambda number: broker.deliver() if number == 2 else None  # the rest of answer 1 + its end
+    bridge.manual.tick()  # request 2 is never answered in time
+
+    assert [item for _, item in broker.placed if item.action == "SELL"] == []
+    assert (manual_row(sell_id).status, manual_row(sell_id).reject_code) == ("rejected", "open_orders_unavailable")
+
+
+def test_fix1_an_open_orders_end_nobody_asked_for_never_completes_a_later_request(tmp_path: Path) -> None:
+    broker = held_answers(positions={AAPL_ID: 100}, contracts=STOCK)
+    _book_with_owner_stop(broker)
+    bridge = make_bridge(tmp_path, broker)
+    broker.hold = True
+    broker.openOrderEnd()  # TWS's own end, e.g. after the open orders it reports at connect
+    broker.openOrderEnd()
+    assert bridge.refresh_order_book(timeout=0.01) is None  # never completed by an end nobody asked for
+    broker.deliver()
+    assert bridge.refresh_order_book(timeout=0.01) is None  # request 2's answer is owed, not banked
+    broker.deliver()
+    broker.openOrderEnd()  # a stray end after every request is answered: dropped as well
+    assert bridge.refresh_order_book(timeout=0.01) is None
+    assert (broker.open_orders_requested, broker.open_orders_answered) == (3, 2)
+    broker.deliver()
+    broker.hold = False
+    assert sorted(item.order_id for item in bridge.refresh_order_book(timeout=0.01) or ()) == [500, 501]
+
+
+def test_fix1_the_book_recovers_once_the_slow_answers_arrive_and_keeps_only_the_newest(tmp_path: Path) -> None:
+    broker = held_answers(positions={AAPL_ID: 100}, contracts=STOCK)
+    _book_with_owner_stop(broker)
+    bridge = make_bridge(tmp_path, broker)
+    broker.hold = True
+    assert bridge.refresh_order_book(timeout=0.01) is None  # answer 1 (AAPL stop and TSLA) is owed
+    del broker.book[0]  # the owner cancels the AAPL stop in TWS; TSLA's order stays
+
+    def both_answers(number: int) -> None:
+        if number == 2:
+            broker.deliver()  # answer 1, still with the AAPL stop: an older answer, dropped at its end
+            broker.deliver()  # answer 2: TSLA only
+
+    broker.on_request = both_answers
+    book = bridge.refresh_order_book(timeout=0.01)
+    assert book is not None and [item.order_id for item in book] == [501]  # never the cancelled stop of answer 1
+    broker.hold, broker.on_request = False, None
+    fresh = bridge.refresh_order_book(timeout=0.01)  # a fresh request completes
+    assert [item.order_id for item in fresh or ()] == [501]
+
+
+# MEDIUM-3: one behaviour test per fail-closed branch of the coverage rule and of the reservation.
+
+def _covered_world(tmp_path: Path, *, held: int = 100, own: dict[int, tuple[Any, str]] | None = None,
+                   book: tuple[tuple[int, Any, str, float], ...] = (),
+                   own_in_book: bool = False) -> tuple[Any, FakeBroker]:
+    """``held`` AAPL at avgCost 50 (TWS-bought); ``own``: this client's (client 18) non-leg orders by id with
+    their status, reported to reqOpenOrders; ``book``: every other client's orders. The book is fresh."""
+    own = own or {}
+    broker = connected_broker(positions={AAPL_ID: held}, contracts=STOCK,
+                              live_orders={order_id: status for order_id, (_, status) in own.items()},
+                              order_objects={order_id: item for order_id, (item, _) in own.items()})
+    for order_id in own:
+        broker.open_order_contracts[order_id] = SimpleNamespace(conId=AAPL_ID, symbol="AAPL")
+    broker.own_in_all_open_orders = own_in_book
+    broker.reqOpenOrders()
+    for order_id, item, status, remaining in book:
+        broker.book.append((order_id, SimpleNamespace(conId=AAPL_ID, symbol="AAPL"), item, status, remaining))
+    bridge = make_bridge(tmp_path, broker)
+    assert bridge.refresh_order_book() is not None
+    return bridge, broker
+
+
+def tws_stop(order_id: int, quantity: int, price: float = 45.0, **fields: Any) -> Any:
+    item = stop_leg(order_id, quantity, price, parent=0, ref="", client=0)  # placed by hand in TWS (client 0)
+    for name, value in fields.items():
+        setattr(item, name, value)
+    return item
+
+
+@pytest.mark.parametrize(("status", "unprotected"), [
+    ("PreSubmitted", ()), ("Cancelled", (("AAPL", "100 sh held, working stops cover 0"),))])
+def test_fix1_n01_an_own_stop_covers_only_while_it_is_live(tmp_path: Path, status: str, unprotected: Any) -> None:
+    own = stop_leg(50, 100, 45.0, parent=0, ref="manual:ownstop1")  # an owner /stop the bridge sent
+    bridge, _ = _covered_world(tmp_path, own={50: (own, status)})
+    risk = bridge.account_open_risk()
+    assert risk.unprotected == unprotected
+    assert risk.total == (Decimal("500") if not unprotected else 0)  # 100 x (50 - 45)
+
+
+@pytest.mark.parametrize(("order_type", "covers"), [("STP", True), ("STP LMT", False), ("TRAIL", False)])
+def test_fix1_n02_only_a_plain_stop_in_the_book_covers(tmp_path: Path, order_type: str, covers: bool) -> None:
+    bridge, _ = _covered_world(tmp_path, book=((5, tws_stop(5, 100, orderType=order_type), "PreSubmitted", 100.0),))
+    expected = () if covers else (("AAPL", "100 sh held, working stops cover 0"),)
+    assert bridge.account_open_risk().unprotected == expected  # a stop limit or a trail may never fill
+
+
+@pytest.mark.parametrize(("account", "covers"), [(ACCOUNT, True), ("", True), ("OTHER-ACCOUNT", False)])
+def test_fix1_n03_another_accounts_stop_covers_nothing(tmp_path: Path, account: str, covers: bool) -> None:
+    bridge, _ = _covered_world(tmp_path, book=((5, tws_stop(5, 100, account=account), "PreSubmitted", 100.0),))
+    expected = () if covers else (("AAPL", "100 sh held, working stops cover 0"),)
+    assert bridge.account_open_risk().unprotected == expected
+
+
+def test_fix1_n04_an_own_stop_also_in_the_all_clients_book_covers_once(tmp_path: Path) -> None:
+    own = stop_leg(50, 100, 45.0, parent=0, ref="manual:ownstop2")
+    bridge, _ = _covered_world(tmp_path, held=200, own={50: (own, "PreSubmitted")}, own_in_book=True)
+    assert [(item.client_id, item.order_id) for item in bridge.order_book] == [(CLIENT_ID, 50)]  # in the book too
+    assert bridge.account_open_risk().unprotected == (("AAPL", "200 sh held, working stops cover 100"),)
+
+
+def test_fix1_n05_a_short_position_is_unprotected(tmp_path: Path) -> None:
+    bridge, _ = _covered_world(tmp_path, held=-50)
+    assert bridge.account_open_risk().unprotected == (("AAPL", "short 50 sh"),)
+    assert bridge.budget_problem(Decimal("50")).startswith("v7c_unprotected_position: AAPL short 50 sh")
+
+
+@pytest.mark.parametrize("avg_cost", [0.0, sys.float_info.max])  # 9.81 sends UNSET as 1.8e308
+def test_fix1_n06_shares_at_an_unknown_average_cost_are_unprotected(tmp_path: Path, avg_cost: float) -> None:
+    bridge, broker = _covered_world(tmp_path, book=((5, tws_stop(5, 100), "PreSubmitted", 100.0),))
+    assert bridge.account_open_risk().unprotected == ()
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 100.0, avg_cost)
+    assert bridge.account_open_risk().unprotected == (("AAPL", "100 sh held at an unknown average cost"),)
+
+
+def test_fix1_n08_stops_one_share_short_leave_the_position_unprotected(tmp_path: Path) -> None:
+    bridge, _ = _covered_world(tmp_path, book=((5, tws_stop(5, 60), "PreSubmitted", 60.0),
+                                               (6, tws_stop(6, 39, 44.0), "PreSubmitted", 39.0)))
+    assert bridge.account_open_risk().unprotected == (("AAPL", "100 sh held, working stops cover 99"),)
+
+
+def test_fix1_n09_a_partly_filled_stop_covers_only_what_it_has_left(tmp_path: Path) -> None:
+    own = stop_leg(50, 150, 45.0, parent=0, ref="manual:ownstop3")  # 150 sh, of which 60 already sold
+    bridge, broker = _covered_world(tmp_path, own={50: (own, "Submitted")})
+    broker.orderStatus(50, "Submitted", 60, 90, 44.9)
+    assert bridge.account_open_risk().unprotected == (("AAPL", "100 sh held, working stops cover 90"),)
+
+
+def test_fix1_n13_an_owner_buy_execution_is_never_a_realized_gain(tmp_path: Path) -> None:
+    broker = connected_broker()
+    bridge = make_bridge(tmp_path, broker)
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 100.0, 200.0)  # cost basis 200
+    broker.execDetails(-1, STOCK[AAPL_ID], execution("0000e0d5.000001c1.01.01", 9, 100, 190.0, acctNumber=ACCOUNT,
+                                                       orderRef="manual:sold", side="SLD", time="20261013  10:00:30"))
+    broker.execDetails(-1, STOCK[AAPL_ID], execution("0000e0d5.000001c2.01.01", 10, 100, 210.0, acctNumber=ACCOUNT,
+                                                       orderRef="manual:added", side="BOT", time="20261013  10:01:00"))
+    assert bridge.computed_realized() == (Decimal("-1000"), 0)  # the buy above the basis realizes nothing
+    assert bridge.account_realized_loss() == Decimal("1000")
+
+
+def test_fix1_n21_an_owner_buy_ibkr_has_not_reported_yet_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
+    broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
+    broker.delay_echoes = True  # TWS's openOrder and orderStatus for the new orders come later
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
+    bridge.tick()
+    [(parent_id, _), _] = broker.placed
+
+    assert broker.order_status.get(parent_id) is None  # placed, not reported by IBKR yet
+    assert bridge.account_open_risk().total == Decimal("50.00")  # reserved all the same: 10 x (185 - 180)
+    broker.deliver_echoes()
+    assert bridge.account_open_risk().total == Decimal("50.00")
+
+
+# LOW-1 .. LOW-5, LOW-8
+
+def test_fix1_low1_a_filled_owner_buy_stays_in_the_budget_until_its_position_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # N18 probe P2: e63a599 read 50.10 (working) -> 0 (filled, position not shown yet) -> 50.10 (shown).
+    bridge, broker, clock, buy_id, parent_id, _ = manual_buy_world(tmp_path, monkeypatch, "/buy 10 AAPL stop 185")
+    totals = [bridge.account_open_risk().total]
+    fill(broker, parent_id, 10, 190.01, f"manual:{buy_id}", "0000e0d5.000001d1.01.01")
+    for _ in range(3):
+        clock.advance(2)
+        bridge.tick()
+        totals.append(bridge.account_open_risk().total)
+    assert manual_row(buy_id).status == "filled" and buy_id in bridge.manual.settling
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 10.0, 190.01)
+    totals.append(bridge.account_open_risk().total)  # shown: section 3 counts it, the reservation ends
+    clock.advance(2)
+    bridge.tick()
+    totals.append(bridge.account_open_risk().total)
+
+    assert totals == [Decimal("50.10")] * 6  # never 0: 10 x (190.01 - 185)
+    assert bridge.manual.settling == {}
+
+
+def test_fix1_low2_a_quiet_reqpnl_loss_still_blocks_after_120s(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18 probe P4: e63a599 dropped IBKR's -14,000 (2.1 %) once it was 121 s old and sent a MOMO entry.
+    clock = Clock(DECIDED + timedelta(seconds=5))
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, clock=clock)
+    broker.pnl(pb.PNL_REQUEST_ID, -14000.0, 0.0, -14000.0)  # e.g. carried shares stopped out: 2.1 % of NLV
+    assert bridge.budget_problem(Decimal("50")).startswith(pb.DAILY_LOSS_LIMIT)
+    with broker.lock:
+        broker.pnl_at = time.monotonic() - 121  # a flat account: no P&L change, no further pnl() callback
+    capsys.readouterr()
+    assert bridge.budget_problem(Decimal("50")).startswith(pb.DAILY_LOSS_LIMIT)
+    bridge.decisions = lambda: [decision_row("d1", "MSFT", created=clock.value)]
+    bridge.tick()
+
+    assert v7c_skip(bridge, "d1").startswith("daily_loss_limit: daily loss limit reached (account realized loss"
+                                             " 14000.00")
+    assert broker.placed == []
+    out = [text for _, text in events(capsys)]
+    assert "v7c_pnl_source=computed" in out  # the source line stays: IBKR's value is no longer fresh
+    assert [line for line in out if line.startswith("v7c_pnl_stale")] == [
+        "v7c_pnl_stale: IBKR's last realized -14000.00 is 121s old — it stays a lower bound for today's loss"]
+
+
+def test_fix1_low3_unfilled_bot_shares_never_hide_owner_shares(tmp_path: Path) -> None:
+    # N18 probe P5: 40 of 100 bot shares bought, the owner buys 100 more in TWS under his own stop at 40.
+    item = bracket("b", "BOT", status="open", parent=40, filled=40, qty=100)
+    broker = connected_broker(executions=(execution("p", 40, 40, 50.0, acctNumber=ACCOUNT,
+                                                    orderRef="autotrader:MOMO_HOD_V2:b", time="20261013  10:00:01"),),
+                              live_orders={40: "Submitted", 41: "Submitted", 42: "PreSubmitted"},
+                              order_objects={42: stop_leg(42, 100, 49.5, parent=40, ref="autotrader:MOMO_HOD_V2:b")},
+                              positions={400: 140})
+    broker.reqOpenOrders()
+    broker.reqExecutions(1, SimpleNamespace(clientId=CLIENT_ID))
+    broker.position(ACCOUNT, SimpleNamespace(conId=400, symbol="BOT", secType="STK", currency="USD"), 140.0, 50.0)
+    broker.book.append((600, SimpleNamespace(conId=400, symbol="BOT"), tws_stop(600, 100, 40.0), "PreSubmitted", 100.0))
+    bridge = make_bridge(tmp_path, broker, brackets={"b": item})
+    bridge.refresh_order_book()
+
+    risk = bridge.account_open_risk()
+    assert "BOT account 100 held @ 50.0, stop 40.0: 1000.00" in risk.lines  # e63a599: 40 held, 400.00
+    assert risk.total == Decimal("1050.00")  # + the bracket: 40 held and 60 unfilled x (50.00 - 49.50)
+
+
+def test_fix1_low4_a_second_unprotected_episode_pages_again(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # N18 probe P6: e63a599 paged the first episode only.
+    clock = Clock(DECIDED)
+    broker = connected_broker(positions={AAPL_ID: 100}, contracts=STOCK)
+    bridge = make_bridge(tmp_path, broker, clock=clock)
+    capsys.readouterr()
+    for _ in range(10):
+        bridge.tick()
+        clock.advance(2)
+    page = ("v7c_unprotected_position AAPL: 100 sh held, working stops cover 0 — every risk-increasing order (bot and"
+            f" manual) is refused; {V7C_ADVICE_FOR_AAPL}")
+    assert critical(events(capsys)) == [page]
+    broker.book.append((0, SimpleNamespace(conId=AAPL_ID, symbol="AAPL"), tws_stop(0, 100), "PreSubmitted", 100.0))
+    clock.advance(31)
+    bridge.tick()
+    assert not bridge.account_open_risk().unprotected  # protected: the episode is over
+    broker.book.clear()  # the owner cancels the stop later in the day
+    for _ in range(25):
+        clock.advance(2)
+        bridge.tick()
+
+    assert critical(events(capsys)) == [page]  # the second episode pages again, once
+
+
+def test_fix1_low5_a_needs_attention_bracket_follows_the_account_once_the_grace_ends(tmp_path: Path) -> None:
+    item = bracket("att", "ATT", status="needs_attention", parent=30, filled=100,
+                   attention_reason="not found at IBKR at startup")  # its stop leg is gone: O3 blocks every entry
+    clock = Clock(DECIDED + timedelta(seconds=5))
+    broker = connected_broker(positions={300: 100})
+    bridge = make_bridge(tmp_path, broker, brackets={"att": item}, clock=clock)
+    why = (("ATT", "100 sh of the MOMO_HOD_V2 bracket, whose stop order 32 is not live"),)
+    assert bridge.account_open_risk().unprotected == why
+    broker.position(ACCOUNT, SimpleNamespace(conId=300, symbol="ATT"), 0.0, 0.0)  # the owner closed it in TWS
+    assert bridge.account_open_risk().unprotected == why  # a position update may trail a fill: the grace first
+    clock.advance(10)
+    assert bridge.account_open_risk().unprotected == why
+    clock.advance(6)
+    risk = bridge.account_open_risk()
+    assert risk.unprotected == () and risk.total == 0  # O3's block lifts
+    assert bridge.budget_problem(Decimal("50")) is None
+
+
+def test_fix1_low8_an_oversized_stop_warns_and_pages_but_never_blocks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18 probe P7b: the 10-15 GTC legs: IP 2,941 sh, VEEV 320 sh on 100 VEEV held.
+    ip, veev = 9001, 9002
+    carried = {ip: SimpleNamespace(conId=ip, symbol="IP", secType="STK", currency="USD", primaryExchange="NYSE"),
+               veev: SimpleNamespace(conId=veev, symbol="VEEV", secType="STK", currency="USD", primaryExchange="NYSE")}
+    legs = {22: stop_leg(22, 2941, 33.53, parent=20, ref="autotrader:MOMO_HOD_V2:ip1015"),
+            28: stop_leg(28, 320, 308.49, parent=26, ref="autotrader:MOMO_HOD_V2:veev1015")}
+    clock = Clock(DECIDED + timedelta(seconds=5))
+    broker = connected_broker(bid=Decimal("50.10"), positions={ip: 2941, veev: 100}, contracts=carried,
+                              live_orders={22: "PreSubmitted", 28: "PreSubmitted"}, order_objects=legs)
+    broker.open_order_contracts.update({22: carried[ip], 28: carried[veev]})
+    bridge = make_bridge(tmp_path, broker, clock=clock)
+    bridge.reconcile()
+    broker.position(ACCOUNT, carried[ip], 2941.0, 33.94)
+    broker.position(ACCOUNT, carried[veev], 100.0, 311.14)
+    bridge.decisions = lambda: [decision_row("d1", "MSFT", created=clock.value)]
+    capsys.readouterr()
+    bridge.tick()
+    bridge.tick()
+
+    assert bridge.brackets["d1"].status == "sent"  # owner Q6: never a block
+    assert bridge.account_open_risk().oversized == (("VEEV", Decimal("320"), Decimal("100"), Decimal("100")),)
+    out = events(capsys)
+    assert [text for kind, text in out if kind == "INFO" and "v7c_stop_oversized" in text] == [
+        "WARN v7c_stop_oversized VEEV: working stops sell 320 sh but cover 100 held — counted as covering; entries"
+        " are not blocked"]  # once per contract and quantity
+    assert [text for text in critical(out) if "v7c_stop_oversized" in text] == [
+        "v7c_stop_oversized VEEV: working stops sell 320 sh but cover 100 held: if they all fire the account is short"
+        " 220 sh — resize or cancel the extra stop in TWS"]
+
+
+# LOW-9: further test gaps (N14, N15, N17, N19, N22; N39 is in test_deploy_apply.py).
+
+def test_fix1_n14_an_owner_buy_reads_the_book_afresh_before_its_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), contracts=STOCK)
+    clock = Clock(MANUAL_T0 + timedelta(seconds=2))
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
+    bridge.tick()  # the watch reads the book: nothing held, no stop
+    # Since then the owner bought 100 TSLA in TWS under a GTC stop placed there too.
+    push_position(broker, TSLA_ID, 100)
+    broker.book.append((7, SimpleNamespace(conId=TSLA_ID, symbol="TSLA"), tws_stop(7, 100, 40.0), "PreSubmitted",
+                        100.0))
+    row_id = queue_manual("/buy 10 AAPL stop 185", message_id=1, now=clock.value)
+    clock.advance(4)  # the watch's book is 4 s old: neither its cadence nor its unprotected re-read is due
+    bridge.tick()
+
+    assert manual_row(row_id).status == "sent"  # the buy's own book read saw the TWS stop
+
+
+def test_fix1_n15_a_plain_stop_is_never_an_attached_stop_to_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge, broker, clock, _, parent_id, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001e1.01.01")
+    stop_row = queue_manual("/stop 10 AAPL at 180", message_id=2, now=clock.value, owner_shares=10)
+    push_position(broker, AAPL_ID, 20)  # 10 more bought in TWS: the /stop may cover them
+    clock.advance(1)
+    bridge.tick()
+    [(plain_id, plain)] = [(order_id, item) for order_id, item in broker.placed
+                           if item.orderRef == f"manual:{stop_row}"]
+    assert (plain.orderType, plain.parentId) == ("STP", 0)
+
+    # Only a stop with a parent is a buy's attached stop: /close, /sell all and /closeall never cancel a /stop.
+    assert bridge.manual.own_entry_stops(AAPL_ID) == [(stop_id, parent_id)]
+    assert bridge.manual.own_entry_stops(None) == [(stop_id, parent_id)]
+    with broker.lock:
+        assert not bridge.manual.is_entry_stop(broker.order_objects[plain_id])
+
+
+def test_fix1_n17_a_closeall_whose_stop_cancel_is_unconfirmed_still_closes_everything_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge, broker, clock, _, _, stop_id = _filled_manual_buy(tmp_path, monkeypatch, "0000e0d5.000001e2.01.01")
+    push_position(broker, TSLA_ID, 50)  # also 50 TSLA, held without any stop
+    close_id = queue_manual("/closeall", message_id=2, now=clock.value)
+    broker.placed.clear()
+    clock.advance(1)
+    bridge.tick()
+    assert broker.cancelled == [stop_id] and broker.placed == []
+    capsys.readouterr()
+    clock.advance(11)  # IBKR never reports the AAPL stop cancelled
+    bridge.tick()
+
+    [(child, sell)] = broker.placed
+    assert (sell.action, sell.totalQuantity) == ("SELL", 50) and bridge.manual.tracked[close_id].con_ids == {
+        child: TSLA_ID}
+    pages = critical(events(capsys))
+    assert pages[0] == (f"manual order #{close_id[:6]}: IBKR did not confirm the cancel of your attached stop(s)"
+                        f" [{stop_id}] in 10s — closing everything else; check TWS")
+    assert pages[1] == unsold_page(close_id, "CLOSE_ALL", stop_id, "is being cancelled (IBKR has not confirmed yet)",
+                                   "AAPL: 10 of 10 reserved by working sells/stops — cancel them first — not sold")
+    assert len(pages) == 2
+
+
+def test_fix1_n19_a_stop_placed_since_the_last_book_never_pages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock(DECIDED + timedelta(seconds=5))
+    broker = connected_broker(contracts=STOCK)
+    bridge = make_bridge(tmp_path, broker, clock=clock)
+    bridge.tick()  # the book is read: nothing held
+    clock.advance(1)
+    push_position(broker, AAPL_ID, 100)  # bought in TWS, with its stop, a second later
+    broker.book.append((5, SimpleNamespace(conId=AAPL_ID, symbol="AAPL"), tws_stop(5, 100), "PreSubmitted", 100.0))
+    capsys.readouterr()
+    for _ in range(12):  # 24 s, all inside the 30 s cadence
+        clock.advance(2)
+        bridge.tick()
+
+    assert not critical(events(capsys))  # re-read before paging: the stop covers it
+    assert bridge.account_open_risk().unprotected == ()
+
+
+def test_fix1_n22_the_post_submit_invariant_reads_the_stored_order(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    broker = connected_broker(bid=Decimal("50.10"))
+    bridge = make_bridge(tmp_path, broker, decisions=(decision_row("d1", "AAPL"),))
+    original = broker.placeOrder
+
+    def place(order_id: int, contract: Any, sent: Any) -> None:
+        if sent.orderType == "STP":  # IBKR shows the stop a dollar lower than the intent the budget checked
+            sent = copy.copy(sent)
+            sent.auxPrice -= 1.0
+        original(order_id, contract, sent)
+
+    broker.placeOrder = place
+    capsys.readouterr()
+    bridge.tick()
+
+    assert bridge.brackets["d1"].status == "sent"
+    assert ("CRITICAL", "v7c_budget_invariant_broken: open risk grew by 150.00 with AAPL (MOMO_HOD_V2), more than"
+            " its own 50.00 (0.00 -> 150.00) — check TWS") in events(capsys)

@@ -1489,6 +1489,9 @@ DRY_RUN_VARIANTS = {
             "heartbeat    not configured (no Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url)",
         ), {}, 0),
     "dry_run_budget": (None, {"budget": True}, 0),
+    # v7c fix 1 (N18 N39): exactly one budget line; two (a bridge that prints it twice) refuse.
+    "dry_run_budget_twice": (
+        lambda t: t + f"bridge       INFO {deploy_apply.BUDGET_TEXT}, account level\n" * 2, {"budget": True}, 0),
     # P3-B0: a candidate that pins the bridge's imports must print the line once.
     "dry_run_imports": (None, {"imports": 3}, 0),
     "dry_run_imports_count": (lambda t: t + "bridge       imports reviewed (2 files)\n", {"imports": 3}, 0),

@@ -265,6 +265,7 @@ Every buy ends with its stop: below the entry, at most 1% of the account at risk
 /sell 50 TSLA · /sell half TSLA · /sell all TSLA
 /stop TSLA 240 — protective stop on your shares (DAY)
 /close AAPL · /closeall · /cancel a3f9c2 · /cancel all
+A /buy position: sell part of it or raise its stop in TWS; /close, /sell all and /closeall release its stop.
 Sentences work too: "buy 100 shares of AAPL at 180".
 Word-like tickers need a $: $ALL, $IT, $ON.
 

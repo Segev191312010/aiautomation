@@ -2119,6 +2119,14 @@ async def test_fences_is_a_read_command(harness):
     assert harness.tools.calls == ["fences"] and harness.replies.texts == ["fences text"]
 
 
+def test_help_says_a_buy_position_is_sold_in_part_and_its_stop_raised_in_tws():
+    # v7c fix 1 (N18 LOW-7, owner Q3 "accept"): a /buy's attached stop reserves its shares, so a partial
+    # /sell and a /stop on that position are refused; only the whole-holding exits release the stop.
+    line = ("A /buy position: sell part of it or raise its stop in TWS; /close, /sell all and /closeall release"
+            " its stop.")
+    assert line in bot.HELP_TEXT.splitlines()
+
+
 def test_help_lists_halt_and_fences_and_says_resume_is_at_the_mac():
     for words in ("/fences", "/halt ORB_V2", "/confirm", "stop only", "autotraderctl"):
         assert words in bot.HELP_TEXT

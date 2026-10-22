@@ -134,9 +134,11 @@ goes out as a DAY parent plus its attached SELL STP child (parentId, GTC, the
 same orderRef): the child's fills never count as the buy's, a /cancel of the
 buy never cancels it, and once the buy is dead it is fitted down to the
 shares still held. A /close, /sell all or /closeall first cancels the owner's
-own attached stops on what it sells and sends the sell only after IBKR
-reports them cancelled, so two sells never work on the same shares. A
-symbol with a live bot order the bridge does
+own attached stops on what it sells (a /closeall decides every holding before
+it cancels anything, and keeps the stop of each holding it cannot sell) and
+sends the sell only after IBKR reports them cancelled, so two sells never work
+on the same shares; a holding whose stop was cancelled and that is then not
+sold is paged by name. A symbol with a live bot order the bridge does
 not manage today counts as a bot symbol: owner sells are refused there. A
 /close of a bot symbol reprices that bracket's target instead; /closeall does
 that for every bracket and sells each unreserved US-stock long at market. A
@@ -240,10 +242,14 @@ V7C_BUDGET_INVARIANT_BROKEN = "v7c_budget_invariant_broken"
 V7C_WRONG_THREAD = "v7c_wrong_thread"
 V7C_PNL_SOURCE = "v7c_pnl_source"
 V7C_PNL_MISMATCH = "v7c_pnl_mismatch"
+V7C_PNL_STALE = "v7c_pnl_stale"
+V7C_STOP_OVERSIZED = "v7c_stop_oversized"
 DAILY_LOSS_LIMIT = "daily_loss_limit"
 # What an unprotected position's page tells the owner. Never "/stop SYM PRICE":
-# a Telegram stop is a DAY order, so it would unblock only until the close.
-UNPROTECTED_ADVICE = "close it with /close {symbol}, or protect it with a stop that stays working (GTC)"
+# a Telegram stop is a DAY order, so it would unblock only until the close. "or in
+# TWS": /close is refused while a past session's bot leg or a needs_attention
+# bracket works on the symbol (N18 LOW-5).
+UNPROTECTED_ADVICE = "close it with /close {symbol} or in TWS, or protect it with a stop that stays working (GTC)"
 ENTRY_TTL = timedelta(minutes=10)
 # Session checkpoints relative to the XNYS close (16:00, or 13:00 on a half day).
 REGULAR_CLOSE = clock_time(16, 0)
@@ -653,6 +659,9 @@ class OpenRisk:
     total: Decimal
     lines: tuple[str, ...] = ()  # one per contributor, for the log
     unprotected: tuple[tuple[str, str], ...] = ()  # (symbol, why): shares no working stop covers
+    # (symbol, shares the stops sell, shares they cover, the account's position): working stops
+    # that would sell more than the shares they cover (LOW-8: a WARN, never a block)
+    oversized: tuple[tuple[str, Decimal, Decimal, Decimal], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1077,7 +1086,11 @@ class BrokerState:
         self.order_filled: dict[int, int] = {}  # orderStatus cumulative filled, never decreasing
         self.open_orders: dict[int, OpenOrderRow] = {}
         self.order_objects: dict[int, Any] = {}  # the Order TWS last reported per order id
-        self.open_orders_done = threading.Event()
+        # openOrderEnd carries no request id: open-orders requests (reqOpenOrders, reqAllOpenOrders)
+        # and their ends are counted, and a request is answered once every request up to it is.
+        self.open_orders_requested = 0
+        self.open_orders_answered = 0  # never above open_orders_requested: an end never banks
+        self.open_orders_answer = threading.Condition(self.lock)
         self.execs: dict[str, ExecutionRow] = {}  # execId without its correction suffix -> newest
         self.exec_done = threading.Event()
         self.bids: dict[int, Decimal] = {}
@@ -1103,8 +1116,10 @@ class BrokerState:
         self.completed_done = threading.Event()
         self.position_avg_cost: dict[tuple[str, int], Decimal] = {}  # (account, conId) -> IBKR avgCost per share
         self.position_basis: dict[tuple[str, int], Decimal] = {}  # the last avgCost of a non-zero position
-        self.pnl_realized: Decimal | None = None  # reqPnL account realizedPnL; None = unset or never sent
-        self.pnl_at: float | None = None  # time.monotonic() of that value
+        # reqPnL account realizedPnL: the last value IBKR reported on this connection (an unset
+        # report never erases it, LOW-2), and time.monotonic() of that report; None while unset.
+        self.pnl_realized: Decimal | None = None
+        self.pnl_at: float | None = None
 
     def nextValidId(self, order_id: int) -> None:
         with self.lock:
@@ -1184,7 +1199,17 @@ class BrokerState:
             self.data_types[int(request_id)] = _whole(market_data_type)
 
     def openOrderEnd(self) -> None:
-        self.open_orders_done.set()
+        # N18 MEDIUM-2. ibapi 9.81 decodes message 53 (OPEN_ORDER_END) with no field at all, and TWS
+        # may send one unasked (with the open orders it reports at connect), so an end is counted
+        # only against a request still unanswered: it never completes a later request early. TWS
+        # answers requests in order, so an end that leaves a newer request unanswered closes an
+        # older answer, which may have straddled the newer request's clear: its orders are dropped.
+        with self.open_orders_answer:
+            if self.open_orders_answered < self.open_orders_requested:
+                self.open_orders_answered += 1
+                if self.open_orders_answered < self.open_orders_requested:
+                    self.account_orders.clear()
+            self.open_orders_answer.notify_all()
 
     def execDetails(self, request_id: int, contract: Any, execution: Any) -> None:
         # Only this client's orders: never the owner's manual TWS trades.
@@ -1281,7 +1306,8 @@ class BrokerState:
             return
         value = _decimal_or_none(realized_pnl) if realized_pnl is not None else None
         with self.lock:
-            self.pnl_realized = value
+            if value is not None:
+                self.pnl_realized = value
             self.pnl_at = time.monotonic() if value is not None else None
 
     def error(self, request_id: int, code: Any, message: Any, *args: Any) -> None:
@@ -1410,8 +1436,10 @@ class Bridge:
         self.order_book_failures = 0
         self.pnl_source = ""  # reqpnl | computed: logged once per change
         self.pnl_mismatch = False
+        self.pnl_stale = False  # IBKR's last value is not fresh: logged once per episode
         self.stops_seen: dict[tuple[int, int], Decimal] = {}  # (client, order id) -> stop price last seen
         self.unprotected_since: dict[tuple[str, ...], datetime] = {}
+        self.attention_gaps: dict[str, datetime] = {}  # needs_attention bracket -> first read the account held less
         self.watch_failures = 0
         with self.app.lock:  # rejections of restored legs must be CRITICAL too
             for bracket in brackets.values():
@@ -2276,18 +2304,22 @@ class Bridge:
         total = Decimal("0")
         lines: list[str] = []
         unprotected: list[tuple[str, str]] = []
-        claimed: dict[int, int] = {}  # conId -> shares the bot's brackets hold or may still buy
+        oversized: list[tuple[str, Decimal, Decimal, Decimal]] = []
+        claimed: dict[int, int] = {}  # conId -> shares the bot's brackets hold (the position shows only these)
         for bracket in self.brackets.values():
             if bracket.skipped or bracket.parent is None or not self.holds_or_may_hold(bracket):
                 continue
             snapshot = self.fill_snapshot(bracket)
             held = max(0, snapshot.parent - max(snapshot.recorded_exits, snapshot.target + snapshot.stop))
+            if bracket.status == "needs_attention":
+                held = self.attention_held(bracket, held, snapshot.position)
             pending = max(0, bracket.qty - snapshot.parent) if self.entry_may_fill(bracket) else 0
             stop, limit, average = self.current_stop(bracket), Decimal(bracket.entry), Decimal(bracket.avg_entry)
             basis = average if bracket.filled > 0 and average > 0 else limit
             risk = position_risk(held, basis, pending, limit, stop, factor)
             total += risk
-            claimed[bracket.con_id] = claimed.get(bracket.con_id, 0) + held + pending
+            # LOW-3: unfilled bot shares are not in the account position, so they never hide the owner's.
+            claimed[bracket.con_id] = claimed.get(bracket.con_id, 0) + held
             lines.append(f"{bracket.symbol} bot {held} held @ {basis} + {pending} unfilled @ {limit}, stop {stop}:"
                          f" {money(risk)}")
             if held > 0 and self.stop_dead(bracket):
@@ -2302,7 +2334,7 @@ class Bridge:
                 continue
             risk = position_risk(0, price, pending, price, stop, factor)
             total += risk
-            lines.append(f"{symbol} owner buy {pending} unfilled @ {price}, stop {stop}: {money(risk)}")
+            lines.append(f"{symbol} owner buy {pending} not in the position yet @ {price}, stop {stop}: {money(risk)}")
         with self.app.lock:
             positions = sorted((con_id, shares) for (account, con_id), shares in self.app.positions.items()
                                if account == self.account and shares != 0)
@@ -2318,6 +2350,8 @@ class Bridge:
                 continue
             stops, fresh = self.covering_stops(con_id, entry)
             covered = sum((quantity for quantity, _ in stops), Decimal("0"))
+            if covered > other and entry is None:
+                oversized.append((symbol, covered, other, shares))
             if covered < other:
                 unknown = "" if fresh else " (no fresh open-orders book: stops placed in TWS are unknown)"
                 unprotected.append((symbol, f"{share_text(other)} sh held, working stops cover"
@@ -2331,7 +2365,19 @@ class Bridge:
             risk = position_risk(other, cost, 0, low, low, factor)
             total += risk
             lines.append(f"{symbol} account {share_text(other)} held @ {cost}, stop {low}: {money(risk)}")
-        return OpenRisk(total=total, lines=tuple(lines), unprotected=tuple(unprotected))
+        return OpenRisk(total=total, lines=tuple(lines), unprotected=tuple(unprotected), oversized=tuple(oversized))
+
+    def attention_held(self, bracket: Bracket, held: int, position: Decimal | None) -> int:
+        """LOW-5: a needs_attention bracket's shares come from its own legs' fills, which no longer
+        follow the account. Once the account has held fewer for longer than the position grace (the
+        owner closed them in TWS, say), only what the account still holds counts."""
+        if position is None or position >= held:
+            self.attention_gaps.pop(bracket.decision_id, None)
+            return held
+        now = self.now()
+        if now - self.attention_gaps.setdefault(bracket.decision_id, now) < POSITION_GAP_GRACE:
+            return held  # a position update may trail a fill: the bracket's own count until the grace ends
+        return max(0, int(position))
 
     def computed_realized(self) -> tuple[Decimal, int]:
         """The bot brackets' realized P&L plus each owner-order sell execution of this session at the
@@ -2352,11 +2398,15 @@ class Bridge:
     def account_realized_loss(self) -> Decimal:
         """Today's realized loss of the whole account, floored at zero: gains never fund risk (D1).
 
-        IBKR's reqPnL realizedPnL (commissions included) while it is at most PNL_FRESH old; else
-        the computed source (v7c_pnl_source=computed, logged once per change). While both exist,
-        the larger loss counts (fail closed: an IBKR value that is stale, reset or zero mid-session
-        never hides a loss the executions show), and a gap above the larger of $25 and 0.05 % of
-        net liquidation is a WARN line (O15).
+        IBKR's reqPnL realizedPnL (commissions included) is the source while it is at most
+        PNL_FRESH old; else the computed one (v7c_pnl_source=computed, logged once per change).
+        The larger loss of the two counts (fail closed: an IBKR value that is reset or zero
+        mid-session never hides a loss the executions show), and while IBKR's is fresh a gap above
+        the larger of $25 and 0.05 % of net liquidation is a WARN line (O15). IBKR's last value of
+        this connection stays a lower bound for the loss however old it is (owner Q5, N18 LOW-2):
+        TWS may stop sending a value that no longer changes, and a loss outside the computed
+        source (a TWS-direct or carried position) must not vanish with it; its staleness is
+        logged on its own line (v7c_pnl_stale).
         """
         computed, missing = self.computed_realized()
         with self.app.lock:
@@ -2367,8 +2417,16 @@ class Bridge:
             self.pnl_source = source
             note = f" ({missing} owner sell(s) without a cost basis count 0)" if missing and not fresh else ""
             log("INFO", f"{V7C_PNL_SOURCE}={source}{note}")
-        if not fresh or reported is None:
+        stale = reported is not None and not fresh
+        if stale and not self.pnl_stale:
+            age = "no longer reported" if stamp is None else f"{time.monotonic() - stamp:.0f}s old"
+            log("INFO", f"{V7C_PNL_STALE}: IBKR's last realized {money(reported)} is {age} — it stays a lower bound"
+                " for today's loss")
+        self.pnl_stale = stale
+        if reported is None:
             return max(Decimal("0"), -computed)
+        if not fresh:
+            return max(Decimal("0"), -min(reported, computed))
         net_liq = self.net_liq
         threshold = max(PNL_MISMATCH_MIN_USD, (net_liq or Decimal("0")) * PNL_MISMATCH_NLV_PCT / 100)
         gap = abs(reported - computed)
@@ -2451,14 +2509,37 @@ class Bridge:
                 f" its own {money(budget.new_risk)} ({money(budget.open_risk)} -> {money(after)}) — check TWS")
             traceback.print_stack(file=sys.stderr)
 
+    def request_open_orders(self, *, all_clients: bool) -> int:
+        """Send one open-orders request; the answer count that completes it (see openOrderEnd)."""
+        with self.app.lock:
+            if all_clients:
+                self.app.account_orders.clear()
+            self.app.open_orders_requested += 1
+            wanted = self.app.open_orders_requested
+        if all_clients:
+            self.app.reqAllOpenOrders()
+        else:
+            self.app.reqOpenOrders()
+        return wanted
+
+    def open_orders_complete(self, wanted: int, timeout: float) -> bool:
+        """True once TWS has answered every open-orders request up to the one ``wanted`` completes."""
+        with self.app.open_orders_answer:
+            return self.app.open_orders_answer.wait_for(lambda: self.app.open_orders_answered >= wanted, timeout)
+
     def refresh_order_book(self, *, timeout: float | None = None) -> list[AccountOrder] | None:
         """Every client's working orders (reqAllOpenOrders), TWS's own stops included; None when TWS
-        does not finish in time (the previous book then ages out after ORDER_BOOK_MAX_AGE)."""
-        with self.app.lock:
-            self.app.account_orders.clear()
-        self.app.open_orders_done.clear()
-        self.app.reqAllOpenOrders()
-        if not self.app.open_orders_done.wait(self.sync_timeout if timeout is None else timeout):
+        does not finish in time (the previous book then ages out after ORDER_BOOK_MAX_AGE).
+
+        The book is complete only once every request up to this one is answered: an earlier
+        request that timed out is still owed an answer, and its openOrderEnd (which carries no
+        request id) must not pass for this one's (N18 MEDIUM-2). While one is owed this returns
+        None, and every caller fails closed: an owner sell is refused open_orders_unavailable, a
+        /closeall sells nothing it cannot check, and the budget keeps the last full book until it
+        ages out. Once TWS answers the backlog, the next request completes again.
+        """
+        wanted = self.request_open_orders(all_clients=True)
+        if not self.open_orders_complete(wanted, self.sync_timeout if timeout is None else timeout):
             return None
         with self.app.lock:
             book = list(self.app.account_orders.values())
@@ -2507,6 +2588,20 @@ class Bridge:
                                 f" and manual) is refused; {UNPROTECTED_ADVICE.format(symbol=symbol)}")
         for key in [key for key in self.unprotected_since if key not in current]:
             del self.unprotected_since[key]
+            self.alerted.discard(key)  # LOW-4: the episode is over; the next one pages again
+
+    def warn_oversized(self, risk: OpenRisk) -> None:
+        """LOW-8 (owner Q6: WARN only, never a block): working stops that would sell more shares than
+        they cover, once per contract and quantity; CRITICAL when they would sell more than the whole
+        account position (the account would be short if they all fired)."""
+        for symbol, stops, covered, position in risk.oversized:
+            key = (V7C_STOP_OVERSIZED, symbol, str(stops), str(covered))
+            text = (f"{V7C_STOP_OVERSIZED} {symbol}: working stops sell {share_text(stops)} sh but cover"
+                    f" {share_text(covered)} held")
+            self.alert_once(key, f"WARN {text} — counted as covering; entries are not blocked", kind="INFO")
+            if stops > position:
+                self.alert_once((*key, "short"), f"{text}: if they all fire the account is short"
+                                f" {share_text(stops - position)} sh — resize or cancel the extra stop in TWS")
 
     def watch_budget(self) -> None:
         """Every tick: re-read the book on its cadence, note stop prices, page once per widened stop,
@@ -2528,6 +2623,7 @@ class Bridge:
             if self.refresh_order_book(timeout=timeout) is not None:  # a stop placed since the last book must not page
                 risk = self.account_open_risk()
         self.page_unprotected(risk)
+        self.warn_oversized(risk)
         for bracket in self.brackets.values():
             if bracket.skipped or bracket.parent is None or not self.holds_or_may_hold(bracket):
                 continue
@@ -2614,16 +2710,16 @@ class Bridge:
 
     def reconcile(self) -> None:
         """Startup: every sent/open bracket of this date must still be visible at IBKR."""
-        self.app.open_orders_done.clear()
         self.app.exec_done.clear()
         self.app.positions_done.clear()
-        self.app.reqOpenOrders()
+        wanted = self.request_open_orders(all_clients=False)
         execution_filter = ExecutionFilter()
         execution_filter.clientId = self.app.client_id
         self.app.reqExecutions(EXEC_REQUEST_ID, execution_filter)
         self.app.reqPositions()  # stays subscribed: every exit modification is capped by it
-        events = (self.app.open_orders_done, self.app.exec_done, self.app.positions_done)
-        if not all(event.wait(self.sync_timeout) for event in events):
+        answered = self.open_orders_complete(wanted, self.sync_timeout)
+        if not (answered and all(event.wait(self.sync_timeout) for event in (self.app.exec_done,
+                                                                              self.app.positions_done))):
             raise ReconciliationError("TWS did not finish reporting open orders, executions and positions")
         with self.app.lock:
             self.app.reconciled_arrival = self.app.exec_arrivals  # the startup positions already show these
@@ -2730,13 +2826,27 @@ class Bridge:
             code = EXIT_RESTART
         else:
             return None
+        self.abandon_releases("the bridge stopped" if code == EXIT_OK else "TWS disconnected")
         if self.past(self.times.flatten):
             self.alert_not_flat()  # after the flatten nothing else will watch these positions
         self.save()
         return code
 
+    def abandon_releases(self, why: str) -> None:
+        """MEDIUM-1: an owner sell still waiting for its attached stops' cancel when the loop stops
+        never leaves; each holding is paged by name (the next start never resends it)."""
+        if self.manual is None:
+            return
+        try:
+            self.manual.abandon_releases(why)
+        except Exception as exc:  # the way out must never fail: the owner is told in general terms
+            log("CRITICAL", f"owner stop releases not settled ({type(exc).__name__}: {exc}) — check your attached"
+                " stops in TWS")
+            traceback.print_exc(file=sys.stderr)
+
     def finish(self) -> int:
         """15:55 ET: no more management; stay for the 15:58 alert only while not flat."""
+        self.abandon_releases(f"the session ended at {self.times.stop:%H:%M} ET")  # no sell after the stop time
         for bracket in list(self.brackets.values()):
             self.refresh(bracket)
         if not self.flattened:  # started too late for the 15:45 pass: the first and only reprice
@@ -2837,6 +2947,8 @@ class Release:
     row: Any
     stop_ids: frozenset[int]
     since: datetime
+    holdings: Mapping[int, tuple[str, frozenset[int]]] = field(default_factory=dict)  # conId -> symbol, its stops
+    kept: Mapping[int, str] = field(default_factory=dict)  # /closeall: conId -> why its stop was kept
 
 
 @dataclass
@@ -2853,6 +2965,7 @@ class StopFit:
     total: int | None = None  # the totalQuantity sent (0 = cancelled); None until sent
     price: Decimal | None = None
     checks: int = 0
+    waiting_since: datetime | None = None  # first check that found the buy's fills not yet in the position
 
 
 def market_quote_problem(ledger: ModuleType, quote: Any, now: datetime) -> str | None:
@@ -2902,6 +3015,9 @@ class ManualDesk:
         self.attached: dict[str, set[int]] = {}  # a buy's orderRef -> the stop ids this run attached to it
         self.releases: dict[str, Release] = {}  # row id -> a sell waiting for its own stops' cancel
         self.stop_fits: dict[int, StopFit] = {}  # stop id -> a dead buy's stop being fitted
+        # LOW-1: finished buys whose fills the account position does not show yet; they stay in the
+        # day risk budget's reservation until a position update stamped after the fills arrives.
+        self.settling: dict[str, ManualTrack] = {}
 
     # ---- plumbing -------------------------------------------------------
     @staticmethod
@@ -2968,24 +3084,63 @@ class ManualDesk:
             return max(executed, self.app.order_filled.get(parent_id, 0))
 
     def pending_entries(self) -> list[tuple[str, int, Decimal | None, Decimal | None]]:
-        """Owner buys that may still fill: (symbol, unfilled shares, limit or ask, attached stop).
+        """Owner buys whose shares the account position does not show yet: (symbol, shares, limit or
+        ask, attached stop).
 
-        A buy counts from the moment it is tracked, before placeOrder, until IBKR reports its
-        order dead or filled: that is its reservation in the day risk budget.
+        A buy counts from the moment it is tracked, before placeOrder: its unfilled shares until
+        IBKR reports its order dead or filled, and its filled shares until a position update
+        stamped after their executions shows them (LOW-1, the rule unsettled_fills applies to
+        sells); section 3 of account_open_risk counts them from then on. That is its reservation
+        in the day risk budget. Filled shares count at their average price when it is above the
+        limit or ask the buy was sized at (a market buy can fill above the ask).
         """
         entries: list[tuple[str, int, Decimal | None, Decimal | None]] = []
-        for track in list(self.tracked.values()):
+        for track in [*self.tracked.values(), *self.settling.values()]:
             if track.kind != "order" or track.side != "BUY" or track.quantity is None:
                 continue
             with self.app.lock:
                 statuses = [self.app.order_status.get(order_id) for order_id in track.order_ids]
-            if statuses and not any(status is None or status in WORKING_ORDER_STATUSES for status in statuses):
+            may_fill = track.row_id in self.tracked and (
+                not statuses or any(status is None or status in WORKING_ORDER_STATUSES for status in statuses))
+            per_order, average_price = self.fills(track)
+            filled = min(track.quantity, sum(per_order.values()))
+            unfilled = track.quantity - filled if may_fill else 0
+            shares = unfilled + min(filled, self.unshown_fills(track.order_ids, track.con_id, track.order_ref))
+            if shares <= 0:
                 continue
-            per_order, _ = self.fills(track)
-            unfilled = track.quantity - min(track.quantity, sum(per_order.values()))
-            if unfilled > 0:
-                entries.append((next(iter(sorted(track.symbols)), "?"), unfilled, track.entry_price, track.entry_stop))
+            price = track.entry_price
+            if price is not None and average_price is not None:
+                price = max(price, average_price)
+            entries.append((next(iter(sorted(track.symbols)), "?"), shares, price, track.entry_stop))
         return entries
+
+    def unshown_fills(self, order_ids: set[int], con_id: int, order_ref: str) -> int:
+        """Shares a buy's own order(s) filled that no position update has shown yet.
+
+        An execution counts until a position update for its contract arrives after it (both are
+        stamped in the reader thread); one replayed at startup is in the startup positions
+        already. Shares IBKR's order status reports filled before their executions arrive are not
+        shown either. Never the attached stop's fills (it shares the orderRef).
+        """
+        stops = self.entry_stop_ids(order_ref)
+        own = {order_id for order_id in order_ids if order_id not in stops}
+        with self.app.lock:
+            shown = self.app.position_seq.get((self.bridge.account, con_id), 0)
+            rows = [row for row in self.app.execs.values()
+                    if row.order_id in own and row.side != "SLD" and row.shares > 0
+                    and row.account in {"", self.bridge.account}]
+            unshown = sum(row.shares for row in rows
+                          if row.arrival > self.app.reconciled_arrival and row.positions_seen >= shown)
+            for order_id in own:
+                executed = sum(row.shares for row in rows if row.order_id == order_id)
+                unshown += max(0, self.app.order_filled.get(order_id, 0) - executed)
+        return unshown
+
+    def settle_buys(self) -> None:
+        """LOW-1: a finished buy leaves the reservation once the position shows all of its fills."""
+        for row_id, track in list(self.settling.items()):
+            if self.unshown_fills(track.order_ids, track.con_id, track.order_ref) <= 0:
+                del self.settling[row_id]
 
     def fit_later(self, order_ref: str, symbol: str, con_id: int | None, exchange: str) -> None:
         """Once a buy is dead, fit its working attached stop to the shares it may still sell (after a grace)."""
@@ -3004,7 +3159,13 @@ class ManualDesk:
 
     def tend_stop_fits(self) -> None:
         """A dead buy's stop may sell at most min(its open shares, the buy's fills, the owner's shares):
-        cancelled at 0, else reduced, and confirmed through openOrder. Never raised, never re-sent."""
+        cancelled at 0, else reduced, and confirmed through openOrder. Never raised, never re-sent.
+
+        The owner's shares are read only once a position update stamped after the buy's last fill
+        has arrived (N18 MEDIUM-1b): a lagging position reads as fewer shares, even 0, and the
+        stop of shares just bought would be cancelled. Until then the stop is left as it is and
+        checked again next tick; a lag past POSITION_LAG_ALERT is CRITICAL once, never a cancel.
+        """
         now = self.bridge.now()
         for stop_id, fit in list(self.stop_fits.items()):
             with self.app.lock:
@@ -3027,6 +3188,14 @@ class ManualDesk:
                     del self.stop_fits[stop_id]
                 continue
             if now < fit.due:
+                continue
+            if self.unshown_fills({fit.parent_id}, fit.con_id, fit.order_ref) > 0:
+                fit.waiting_since = fit.waiting_since or now
+                if now - fit.waiting_since >= POSITION_LAG_ALERT:
+                    self.note_once(("fit-position-lag", str(stop_id)), "CRITICAL",
+                                   f"{fit.symbol}: no position update {int((now - fit.waiting_since).total_seconds())}s"
+                                   f" after your buy's fill (order {fit.parent_id}) — its attached stop {stop_id} is"
+                                   " kept as it is until the position shows the shares; check TWS")
                 continue
             remaining = _whole(getattr(cached, "totalQuantity", 0)) - stop_filled
             bought = self.entry_fills(fit.parent_id)
@@ -3063,6 +3232,11 @@ class ManualDesk:
             known = set(self.app.order_refs.values()) | set(self.app.completed_refs)
             known |= {row.order_ref for row in self.app.execs.values() if row.order_ref}
         for row_id in self.run(self.mo.mark_unknown_sending_rows(known, now=self.bridge.now())):
+            row = self.run(self.mo.get_order(row_id))
+            detail = self.release_detail(row) if row is not None else None
+            if detail is not None:
+                self.report_interrupted_release(row, detail)
+                continue
             log("CRITICAL", f"manual order #{row_id[:6]} was being sent when the bridge stopped and IBKR has no"
                 " order for it — marked unknown and never resent; check TWS")
         for row in self.run(self.mo.list_active_orders()):
@@ -3072,6 +3246,35 @@ class ManualDesk:
                 self.settle_earlier(row)
             else:
                 self.resume(row)
+
+    @staticmethod
+    def release_detail(row: Any) -> dict[str, Any] | None:
+        """The audit of a row that was cancelling the owner's attached stops (release()), else None."""
+        events = row.audit.get("events") if isinstance(row.audit, dict) else None
+        for event in reversed(events if isinstance(events, list) else []):
+            detail = event.get("detail") if isinstance(event, dict) else None
+            if isinstance(detail, dict) and isinstance(detail.get("releasing_stops"), list):
+                return detail
+        return None
+
+    def report_interrupted_release(self, row: Any, detail: dict[str, Any]) -> None:
+        """MEDIUM-1: the bridge stopped while this row's sell waited for the owner's attached stops'
+        cancel, so nothing was sold. Named CRITICAL (symbols, stop ids, what IBKR shows now), never a
+        plain unknown; the row is an error (its sell certainly never left: IBKR knows no order of it)."""
+        stop_ids = sorted(_whole(item) for item in detail["releasing_stops"])
+        named = detail.get("releasing") if isinstance(detail.get("releasing"), list) else []
+        symbols = sorted({str(item.get("symbol") or "?") for item in named if isinstance(item, dict)}
+                         or {row.symbol or "?"})
+        with self.app.lock:
+            live = sorted(stop_id for stop_id in stop_ids if self.app.order_status.get(stop_id) in LIVE_ORDER_STATUSES)
+        gone = [stop_id for stop_id in stop_ids if stop_id not in live]
+        state = (f"stop(s) {gone} no longer work at IBKR: {', '.join(symbols)} may have no stop" if gone else
+                 f"IBKR still shows stop(s) {live} working")
+        message = (f"the bridge stopped while cancelling your attached stop(s) {stop_ids} on {', '.join(symbols)} for"
+                   f" it; nothing was sold — {state}")
+        log("CRITICAL", f"manual order #{row.short_id} ({row.summary()}): {message}; marked error, never resent;"
+            " act in TWS")
+        self.write(row.id, "error", error=f"{message}. Never resent; act in TWS.")
 
     def earlier_session(self, row: Any) -> bool:
         return row.created_at.astimezone(NY).date() < self.bridge.session_date
@@ -3171,6 +3374,7 @@ class ManualDesk:
         self.run(self.mo.write_bridge_heartbeat("running", now=now))  # orders are refused once it is 20 s old
         self.heartbeat_at = now
         self.follow_all()
+        self.settle_buys()
         self.check_unsettled()
         for row in self.run(self.mo.list_cancel_requests()):
             try:
@@ -3204,12 +3408,12 @@ class ManualDesk:
         row = self.run(self.mo.claim_next_order(self.bridge.now()))
         if row is None:
             return
-        self.process_safely(row, released=False)
+        self.process_safely(row, released=None)
 
-    def process_safely(self, row: Any, *, released: bool) -> None:
+    def process_safely(self, row: Any, *, released: Release | None) -> None:
         try:
-            if released:
-                self.process(row, released=True)
+            if released is not None:
+                self.process(row, released=released)
             else:
                 self.process(row)
         except Exception as exc:
@@ -3219,6 +3423,43 @@ class ManualDesk:
                 f" ({type(exc).__name__}: {exc}) — marked {status}, never resent; check TWS")
             traceback.print_exc(file=sys.stderr)
             self.write(row.id, status, error=f"bridge error {type(exc).__name__}: {exc}")
+        if released is not None:
+            self.report_unsold(row, released)
+
+    def report_unsold(self, row: Any, release: Release, why: str = "") -> None:
+        """MEDIUM-1: a holding whose attached stop this row cancelled and that it did not sell has no
+        stop. CRITICAL by name, whatever stopped the sell (a refusal, a stop request, a lost
+        connection, an error, the owner's /cancel): the generic 15 s unprotected page is not enough."""
+        track = self.tracked.get(row.id)
+        sold = set(track.con_ids.values()) if track is not None else set()
+        unsold = [(con_id, symbol, stop_ids) for con_id, (symbol, stop_ids) in sorted(release.holdings.items())
+                  if con_id not in sold]
+        reasons = ""
+        if unsold and not why:
+            stored = self.run(self.mo.get_order(row.id))
+            reasons = str(stored.error or "") if stored is not None else ""
+        for con_id, symbol, stop_ids in unsold:
+            if why:
+                because = why
+            elif row.kind == "close_all":  # its notes name each holding: "SYM: why — not sold"
+                because = "; ".join(part for part in reasons.split("; ") if part.startswith(f"{symbol}:"))
+            else:
+                because = reasons
+            with self.app.lock:
+                gone = all(self.app.order_status.get(stop_id) in DEAD_ORDER_STATUSES for stop_id in stop_ids)
+            what = "was cancelled" if gone else "is being cancelled (IBKR has not confirmed yet)"
+            detail = f" ({because})" if because else ""
+            log("CRITICAL", f"manual order #{row.short_id} ({row.summary()}): your stop on {symbol} (order(s)"
+                f" {sorted(stop_ids)}) {what} and {symbol} was not sold{detail} — it has no stop; act in TWS")
+
+    def abandon_releases(self, why: str) -> None:
+        """Every sell still waiting for its stops' cancel when the loop stops (a stop request, a lost
+        connection, 15:55): it never leaves. Paged by name first, then the row is an error."""
+        for row_id, release in list(self.releases.items()):
+            del self.releases[row_id]
+            self.report_unsold(release.row, release, why=f"{why} before IBKR confirmed the cancel")
+            self.write(row_id, "error", error=f"{why} while your attached stop(s) {sorted(release.stop_ids)} were being"
+                       " cancelled for it; nothing sold — act in TWS")
 
     def follow_releases(self) -> None:
         """A sell waiting for its own stops' cancel goes out once IBKR reports them all dead; after
@@ -3228,7 +3469,7 @@ class ManualDesk:
                 statuses = [self.app.order_status.get(order_id) for order_id in release.stop_ids]
             if all(status in DEAD_ORDER_STATUSES for status in statuses):
                 del self.releases[row_id]
-                self.process_safely(release.row, released=True)
+                self.process_safely(release.row, released=release)
                 continue
             if self.bridge.now() - release.since < RELEASE_TIMEOUT:
                 continue
@@ -3238,7 +3479,7 @@ class ManualDesk:
             if row.kind == "close_all":
                 log("CRITICAL", f"manual order #{row.short_id}: IBKR did not confirm the cancel of your attached"
                     f" stop(s) {ids} in {seconds}s — closing everything else; check TWS")
-                self.process_safely(row, released=True)
+                self.process_safely(row, released=release)
                 continue
             message = (f"IBKR did not confirm the cancel of your attached stop(s) {ids} in {seconds}s, so nothing was"
                        " sold; check TWS: the stop may be gone. Nothing sent.")
@@ -3410,7 +3651,7 @@ class ManualDesk:
         parsed = self.mo.parse_order_text(row.raw_text)  # the row stores the resolved count, not "all"
         return isinstance(parsed, self.mo.ParsedOrder) and parsed.fraction == "all"
 
-    def process(self, row: Any, *, released: bool = False) -> None:
+    def process(self, row: Any, *, released: Release | None = None) -> None:
         now = self.bridge.now()
         contract = None
         if row.symbol and row.con_id and row.primary_exchange:
@@ -3419,15 +3660,13 @@ class ManualDesk:
         resting = freed_resting = Decimal("0")
         snapshot: list[AccountOrder] | None = None
         freeing: list[tuple[int, int]] = []  # (stop id, parent id): the owner's own attached stops it cancels first
-        if row.kind == "close_all" and not released:
-            freeing = self.own_entry_stops(None)
         if (row.side == "SELL" or row.action == "BUY") and row.con_id:
             snapshot = self.open_orders_snapshot()  # a buy's budget also reads it: stops placed in TWS
             if snapshot is None and row.side == "SELL":
                 self.reject(row, "open_orders_unavailable",
                             "TWS did not report its open orders, so the shares a sell may use are unknown. Nothing sent.")
                 return
-            if row.side == "SELL" and not released and self.sells_whole_holding(row):
+            if row.side == "SELL" and released is None and self.sells_whole_holding(row):
                 freeing = self.own_entry_stops(row.con_id)
             freed = {stop_id for stop_id, _ in freeing}
             for item in snapshot or ():
@@ -3435,6 +3674,8 @@ class ManualDesk:
                     resting += item.open_quantity
                     if not (item.client_id == self.app.client_id and item.order_id in freed):
                         freed_resting += item.open_quantity
+        # The quote is read here, after the ledger and the book: a /close or /sell all that must first
+        # release its attached stops is checked against it (and can_send) right before the cancel.
         quote = self.quote(row.con_id, row.primary_exchange or "") if row.kind == "order" else None
         facts = self.live_facts(row, ledger=ledger, resting=resting, quote=quote, snapshot=snapshot)
         result = self.mo.revalidate_claimed(row, facts=facts, contract=contract)
@@ -3456,19 +3697,30 @@ class ManualDesk:
         elif result.kind == "bot_flatten":
             self.close_bot_position(row)
         elif result.kind == "close_all":
-            self.close_all(row)
+            if released is not None:
+                self.close_all(row, released)
+                return
+            # MEDIUM-1: each holding is decided first; only the stops of holdings it will sell are released.
+            freeing, kept = self.closeall_releases(row)
+            if freeing:
+                self.release(row, freeing, facts, kept=kept)
+            else:
+                self.close_all(row, kept=kept)
         elif result.action == "BUY":
             self.buy(row, result, facts)
         else:
             self.send(row, result, facts)
 
-    def release(self, row: Any, freeing: list[tuple[int, int]], facts: Any) -> None:
+    def release(self, row: Any, freeing: list[tuple[int, int]], facts: Any, *,
+                kept: Mapping[int, str] | None = None) -> None:
         """Cancel the owner's own attached stops that a whole-holding sell needs, then wait for IBKR.
 
         The sell is sent only after IBKR reports every one of them dead (follow_releases), so two
         sells never work on the same shares. A stop whose buy still works keeps protecting what
         that buy may still fill: a /close or /sell all is refused (manual_buy_still_working), a
-        /closeall leaves that holding reserved.
+        /closeall leaves that holding reserved. The caller checked the holding (a /closeall each
+        one, closeall_releases) right before this; can_send is the last check before the cancel.
+        If the sell then does not leave, each holding is paged by name (report_unsold).
         """
         with self.app.lock:
             working = sorted({parent for _, parent in freeing
@@ -3480,6 +3732,8 @@ class ManualDesk:
             return
         if not self.can_send(row):
             return
+        holdings = self.stop_holdings(row, [stop_id for stop_id, parent in freeing if parent not in working])
+        release = Release(row=row, stop_ids=frozenset(), since=self.bridge.now(), kept=dict(kept or {}))
         cancelled: list[int] = []
         for stop_id, parent in freeing:
             if parent in working:
@@ -3487,12 +3741,29 @@ class ManualDesk:
             self.app.cancelOrder(stop_id)
             cancelled.append(stop_id)
         if not cancelled:
-            self.process_safely(row, released=True)
+            self.process_safely(row, released=release)
             return
-        self.releases[row.id] = Release(row=row, stop_ids=frozenset(cancelled), since=self.bridge.now())
-        self.write(row.id, "sending", event={"releasing_stops": cancelled})
+        release.stop_ids, release.holdings = frozenset(cancelled), holdings
+        self.releases[row.id] = release
+        named = [{"stop": stop_id, "con_id": con_id, "symbol": symbol}
+                 for con_id, (symbol, stop_ids) in sorted(holdings.items()) for stop_id in sorted(stop_ids)]
+        self.write(row.id, "sending", event={"releasing_stops": cancelled, "releasing": named})
         log("MANUAL", f"RELEASE {row.summary()} #{row.short_id}: cancelling your attached stop(s) {cancelled} first;"
             " the sell follows once IBKR confirms")
+
+    def stop_holdings(self, row: Any, stop_ids: list[int]) -> dict[int, tuple[str, frozenset[int]]]:
+        """conId -> (symbol, the stops on it) for the attached stops a release cancels (what a page names)."""
+        with self.app.lock:
+            shown = {stop_id: self.app.open_orders.get(stop_id) for stop_id in stop_ids}
+            names = {con_id: contract[0] for (account, con_id), contract in self.app.position_contracts.items()
+                     if account == self.bridge.account}
+        holdings: dict[int, tuple[str, set[int]]] = {}
+        for stop_id in stop_ids:
+            item = shown.get(stop_id)
+            con_id = item.con_id if item is not None and item.con_id else (row.con_id or 0)
+            symbol = (item.symbol if item is not None else "") or names.get(con_id) or row.symbol or f"conId {con_id}"
+            holdings.setdefault(con_id, (symbol, set()))[1].add(stop_id)
+        return {con_id: (symbol, frozenset(ids)) for con_id, (symbol, ids) in holdings.items()}
 
     def buy(self, row: Any, validated: Any, facts: Any) -> None:
         """A risk-increasing owner order (v7c, D5): the day risk budget, then the buy and its attached stop."""
@@ -3634,8 +3905,13 @@ class ManualDesk:
             self.tracked[row.id].status = "sent"
         log("MANUAL", f"CLOSE {row.symbol} #{row.short_id}: bot bracket {outcome}")
 
-    def close_all(self, row: Any) -> None:
-        """Close every bot bracket and sell every unreserved owner long US stock at market."""
+    def close_all(self, row: Any, released: Release | None = None, *, kept: Mapping[int, str] | None = None) -> None:
+        """Close every bot bracket and sell every unreserved owner long US stock at market.
+
+        A holding whose attached stop closeall_releases kept (it could not sell it) is reported not
+        sold with that reason and keeps its stop; the stop still reserves its shares here anyway.
+        """
+        kept = dict(released.kept if released is not None else kept or {})
         if not self.can_send(row):
             return
         track = ManualTrack(row_id=row.id, order_ref=row.order_ref, kind="close_all", summary=row.summary(),
@@ -3669,17 +3945,16 @@ class ManualDesk:
             )
         children: list[dict[str, object]] = []
         for con_id, shown, (symbol, security_type, currency, exchange) in holdings:
-            shares = shown - self.unsettled_qty(con_id) if shown > 0 else shown
             held = True
-            if shown > 0 and shares < shown:  # never silent: a kept-back holding cannot end "filled"
-                kept = "not sold" if shares <= 0 else f"{share_text(shares)} of {share_text(shown)} sold"
-                track.notes.append(f"{symbol}: {share_text(shown - shares)} sh just sold do not show in the position"
-                                   f" yet — {kept}")
-                if shares <= 0:
-                    continue
-            problem = self.close_all_problem(row, con_id, shares, symbol, security_type, currency, snapshot)
-            quote = None if problem else self.quote(con_id, exchange)
-            problem = problem or market_quote_problem(self.mo, quote, self.bridge.now())
+            if con_id in kept:  # decided before any stop was cancelled: its stop is kept, nothing is sold
+                track.notes.append(f"{symbol}: {kept[con_id]} — not sold; its stop is kept")
+                continue
+            shares, problem, note = self.closeall_sale(row, con_id, shown, (symbol, security_type, currency, exchange),
+                                                       snapshot)
+            if note:  # never silent: a kept-back holding cannot end "filled"
+                track.notes.append(note)
+            if shares <= 0 and not problem:
+                continue
             if not problem and (self.bridge.stop_event.is_set() or not self.app.isConnected()):
                 problem, stopped = "bridge stopping or TWS disconnected", True  # never send after a stop
             if problem:
@@ -3716,8 +3991,71 @@ class ManualDesk:
         log("MANUAL", f"CLOSEALL #{row.short_id}: {len(track.order_ids)} sell order(s), {len(track.bot_ids)} bot"
             f" close(s) — {status}" + (f"; {notes}" if notes else ""))
 
+    def closeall_sale(self, row: Any, con_id: int, shown: Decimal, contract: tuple[str, str, str, str],
+                      snapshot: list[AccountOrder] | None,
+                      freed: frozenset[int] = frozenset()) -> tuple[Decimal, str | None, str | None]:
+        """One holding of a /closeall: (shares to sell, why it is not sold, a note on shares kept back).
+
+        ``freed`` are the owner's attached stops on it that would be cancelled first: they do not
+        reserve shares here. A fresh real-time quote is read only for a holding that passes the rest.
+        """
+        symbol, security_type, currency, exchange = contract
+        shares = shown - self.unsettled_qty(con_id) if shown > 0 else shown
+        note = None
+        if shown > 0 and shares < shown:
+            kept_back = "not sold" if shares <= 0 else f"{share_text(shares)} of {share_text(shown)} sold"
+            note = f"{symbol}: {share_text(shown - shares)} sh just sold do not show in the position yet — {kept_back}"
+            if shares <= 0:
+                return shares, None, note
+        problem = self.close_all_problem(row, con_id, shares, symbol, security_type, currency, snapshot, freed)
+        quote = None if problem else self.quote(con_id, exchange)
+        return shares, problem or market_quote_problem(self.mo, quote, self.bridge.now()), note
+
+    def closeall_releases(self, row: Any) -> tuple[list[tuple[int, int]], dict[int, str]]:
+        """The owner's attached stops a /closeall cancels first, and why each other holding keeps its own.
+
+        N18 MEDIUM-1: every holding with an attached stop is decided before anything is cancelled,
+        with close_all's own checks (a long US stock in whole shares, not the bot's, no other
+        working sell or stop on it, no stop whose buy still works, a fresh real-time quote no
+        wider than 1 %). Only a holding that passes has its stops released; one that fails keeps
+        its stop and is reported not sold. close_all checks again once IBKR confirms the cancel.
+        """
+        stops: dict[int, list[tuple[int, int]]] = {}
+        with self.app.lock:
+            for stop_id, parent in self.own_entry_stops(None):
+                item = self.app.open_orders.get(stop_id)
+                stops.setdefault(item.con_id if item is not None else 0, []).append((stop_id, parent))
+            working = {parent for items in stops.values() for _, parent in items
+                       if self.app.order_status.get(parent) in WORKING_ORDER_STATUSES}
+            positions = {con_id: shares for (account, con_id), shares in self.app.positions.items()
+                         if account == self.bridge.account}
+            contracts = dict(self.app.position_contracts)
+        freeing: list[tuple[int, int]] = []
+        kept: dict[int, str] = {}
+        if not stops:
+            return freeing, kept
+        snapshot = self.open_orders_snapshot()
+        bot = {b.con_id for b in self.bridge.brackets.values() if b.active or b.status == "needs_attention"}
+        bot |= self.foreign_bot_con_ids(snapshot)
+        for con_id, items in sorted(stops.items()):
+            shown = positions.get(con_id, Decimal("0"))
+            if con_id <= 0 or shown <= 0 or con_id in bot:
+                continue  # nothing of the owner's to sell there: close_all leaves it, and its stop stays
+            if any(parent in working for _, parent in items):
+                kept[con_id] = "your buy there still works and its stop protects what it buys"
+                continue
+            contract = contracts.get((self.bridge.account, con_id), ("?", "", "", ""))
+            freed = frozenset(stop_id for stop_id, _ in items)
+            shares, problem, _ = self.closeall_sale(row, con_id, shown, contract, snapshot, freed)
+            if problem or shares <= 0:
+                kept[con_id] = problem or "its shares just sold do not show in the position yet"
+                continue
+            freeing.extend(items)
+        return freeing, kept
+
     def close_all_problem(self, row: Any, con_id: int, shares: Decimal, symbol: str, security_type: str,
-                          currency: str, snapshot: list[AccountOrder] | None) -> str | None:
+                          currency: str, snapshot: list[AccountOrder] | None,
+                          freed: frozenset[int] = frozenset()) -> str | None:
         if shares < 0:
             return f"short {share_text(-shares)} (sells only)"
         if security_type != "STK" or currency != "USD":
@@ -3729,7 +4067,8 @@ class ManualDesk:
         ledger = self.run(self.mo.ledger_facts(symbol=self.mo.normalize_symbol(symbol), now=self.bridge.now(),
                                                exclude_order_id=row.id))
         resting = sum((item.open_quantity for item in snapshot
-                       if self.reserves_shares(item, con_id, ledger.counted_order_refs)), Decimal("0"))
+                       if self.reserves_shares(item, con_id, ledger.counted_order_refs)
+                       and not (item.client_id == self.app.client_id and item.order_id in freed)), Decimal("0"))
         reserved = ledger.open_manual_sell_qty + int(resting.to_integral_value(rounding=ROUND_CEILING))
         if reserved > 0:
             return f"{reserved} of {share_text(shares)} reserved by working sells/stops — cancel them first"
@@ -3739,6 +4078,7 @@ class ManualDesk:
     def cancel(self, row: Any) -> None:
         release = self.releases.pop(row.id, None)
         if release is not None:  # its sell never left: only the owner's stops were being cancelled
+            self.report_unsold(row, release, why="you cancelled the sell while its stops were being released")
             if self.write(row.id, "cancelled", error="cancelled while its attached stops were being released;"
                           " nothing sold"):
                 log("MANUAL", f"CANCELLED {row.summary()} #{row.short_id}: nothing sold")
@@ -3884,6 +4224,8 @@ class ManualDesk:
         if new in MANUAL_TERMINAL:
             self.tracked.pop(track.row_id, None)
             if track.side == "BUY" and track.kind == "order":  # a dead buy's GTC stop must not outsize what it holds
+                if self.unshown_fills(track.order_ids, track.con_id, track.order_ref) > 0:
+                    self.settling[track.row_id] = track  # reserved until the position shows its fills (LOW-1)
                 self.fit_later(track.order_ref, next(iter(sorted(track.symbols)), "?"), track.con_id, track.exchange)
 
     def close_all_outcome(self, track: ManualTrack, per_order: dict[int, int]) -> tuple[str, str]:
