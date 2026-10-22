@@ -416,10 +416,53 @@ ERRORS  LAUNCH_REFUSED registry code=78 reason=<token>   → duplicate spec name
 #### 4.1.3 `shadow agent` — LaunchAgent control
 ```
 STATUS  [NOW]
-WHO     OWNER (the P2 write half, which would let AGENT+ run this inside the window, is [PLANNED] and needs its own review; LEARNED.md blocks agents today)
+WHO     OWNER only: by hand (the manual blocks of 6.2 and 6.3), or through `deploy apply` /
+        `deploy undo` (4.1.4, 4.1.5), which are OWNER only as well: TTY-only by design (D-2,
+        resolved with P2). LEARNED.md blocks agents.
 SYNTAX  $CTL shadow agent install | enable | disable | status
 EXAMPLE $CTL shadow agent disable; sleep 5; pgrep -fl 'autotraderctl.py' || echo none
 EXPECT  'none'; tail -n 1 $L/supervisor.log → SUPERVISOR_STOP reason=SIGTERM
+```
+
+#### 4.1.4 `deploy apply` — the one-command install (P2)
+```
+STATUS  [NOW] from L-P2 (the last manual install, Sat 2026-10-24); the first real run is L-P2d
+WHO     OWNER only, at a Terminal. TTY-only by design: with no terminal on stdin it refuses
+        not_interactive (exit 78, nothing changed), and nothing changes until the owner types back
+        the candidate's 7-character short sha. Agents never run it, also not through `script`,
+        `expect`, a pty or `tmux send-keys` (Part 5, D-2, LEARNED).
+FROM    the candidate's worktree (`backend/`), with --repo the live checkout; a shell whose HOME is
+        the account's own and with DB_PATH unset (6.2)
+SYNTAX  .venv/bin/python autotraderctl.py deploy apply --candidate <REF> --repo <LIVE CHECKOUT>
+          --expect-parent <40 hex> --expect-pin <64 hex> --scope <A,B>
+          [--expect-migration <N>] [--expect-fenced <A,B>] [--label <X>] [--ledger <GLOB>]
+        --db-path is refused (exit 2): it acts on the robot's own database.
+EFFECT  Runbook 6.2 STEP 0-5 in one run: pre-checks (deploy check's included), the plan, the typed
+        sha, the PREV line in deploys.log, stop, `git merge --ff-only <40-hex sha>`, [db migrate],
+        the live dry run, start, the post-checks, the PASS line and a ledger-ready line (4.10).
+        Start window 18:40 → 06:50 ET (O6), read before the plan, when the sha is typed, before
+        the fast-forward and before the start. One run at a time ($D/deploy.lock).
+EXIT    0 PASS · 78 refused, nothing changed · 3 rolled back or aborted: the previous code runs
+        again · 4 halted: the robot is left disabled (after an interrupt: where it stood) ·
+        5 the undo failed: the robot is left disabled · 2 a bad argument, nothing ran (6.2)
+```
+
+#### 4.1.5 `deploy undo` — the one-command rollback (P2)
+```
+STATUS  [NOW] from L-P2. It undoes only a deploy that `deploy apply` wrote: the DEPLOY …
+        result=PASS line for live HEAD and its PREV line must carry schema=v<n>. Every hand-written
+        deploy (through P1-B.4) undoes by hand, 6.3 (undo_schema_unknown).
+WHO     OWNER only, at a Terminal; TTY-only like `deploy apply` (not_interactive); the owner types
+        back the --to short sha
+FROM    the worktree of the deploy being undone (`backend/`), never the live checkout
+SYNTAX  .venv/bin/python autotraderctl.py deploy undo --repo <LIVE CHECKOUT> --to <PREV_SHA, 40 hex>
+          --reason <one lowercase token>
+EFFECT  Runbook 6.3 in one run: stop, `git reset --keep <PREV_SHA>`, HEAD re-read, the dry run with
+        the old pin, start, `DEPLOY rollback to <PREV_SHA> result=ROLLBACK reason=<token>`. Only
+        flat, only 18:40 → 06:50 ET, never across a migration (undo_needs_db_restore prints the
+        restore; D4).
+EXIT    3 rolled back (its success code) · 78 refused, nothing changed · 4 interrupted ·
+        5 the undo failed: the robot is left disabled · 2 a bad argument, nothing ran (6.3)
 ```
 
 ### 4.2 Database
@@ -738,11 +781,51 @@ What the phone says:
 The ledger is the decision and evidence log. It lives **in the repo**: `docs/reviews/<date>-ledger.md`, with reports beside it (`docs/reviews/<date>-<subject>-review.md`). During a deploy, lines are first written **outside the git tree** to `$L/deploys.log` (the live tree must stay clean for the fast-forward) and copied into the repo ledger afterwards as a docs commit.
 
 ```
-<ISO-time> | [<label>] <sha> verdict=GO scope=<slices> bridge_sha=<64hex> | <result, reviewer> | <report path>
-<ISO-time> DEPLOY <candidate>@<sha> PREV_SHA=<sha> pin=<12hex> result=PASS|ROLLBACK
+<ISO-time> | [<label>] <sha> verdict=GO scope=<slices> bridge_sha=<64hex> [migration=<N>] | <result, reviewer> | <report path>
+<ISO-time> | DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12hex> result=PASS | <who, how, the checks> | <where it was first written>
 <ISO-time> DECISION owner: <one line, exact numbers>
 <ISO-time> INCIDENT <id> signal=<…> action=<…> result=<…>
 ```
+
+The `DEPLOY` line names the release label (one or two words, e.g. `P1-B`, `R-B v7a`) and the
+deployed head's 7-character short sha, as every deploy line since 2026-10-16 does (`DEPLOY P1-B
+9558442 PREV_SHA=2608230… pin=7d313fd075d2 result=PASS`). `PREV_SHA` is all 40 hex characters,
+`pin` the first 12 of the reviewed bridge sha256. The older `DEPLOY <candidate>@<sha>` form is
+retired (`deploy undo` still reads it). A deploy that needs `--expect-migration N` needs
+`migration=N` on its verdict line (`verdict_migration_missing`).
+
+**`$L/deploys.log`** (outside the tree). `deploy apply` and `deploy undo` append these lines
+themselves, one write and one fsync per line; the file is private (0600) and never a symbolic
+link (`deploys_log_unusable`). `<iso>` is local time with its offset, as `date -Iseconds` writes
+it; `schema=v<n>` is the database's applied schema version:
+
+```
+<iso> <label> PREV_SHA=<40hex> schema=v<n>                                                written before the stop
+<iso> DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12hex> result=PASS schema=v<n>          after every post-check
+<iso> DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12hex> result=ABORTED reason=<token>    git never moved; PREV runs again (exit 3)
+<iso> DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12hex> result=HALTED reason=<token> [backup=<path|none>] [next: <action>]   exit 4
+<iso> DEPLOY rollback to <40hex> result=ROLLBACK reason=<token>                            the undo passed (exit 3)
+<iso> DEPLOY rollback to <40hex> result=UNDO_FAILED reason=<token> [next: <action>]        exit 5 (exit 4 for an interrupted `deploy undo`)
+```
+
+- The PREV line is a `deploy apply` run's first deploys.log line, written after the typed sha
+  and before anything stops: if a run dies with no later line (a crash, `kill -9`), its
+  `PREV_SHA` is the rollback target (6.3, by hand, only when flat).
+- After a migration started, the HALTED line names the backup `db migrate` printed:
+  `backup=<path>`, or `backup=none` when none was read (after an interrupt with none read, the
+  field is left out and the `next:` text says `backup=none`). `next:` is on a HALTED line after
+  an interrupt or an unexpected error, and on the UNDO_FAILED line of an interrupted
+  `deploy undo`: it names the next action, for a terminal that closed.
+- After a PASS, `deploy apply` prints the line for the repo ledger, to copy as it is (add notes
+  in the third field):
+  `<iso> | DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12hex> result=PASS | owner-run via autotraderctl deploy apply (<the tool's short sha>); <n> dry-run lines ok; post-checks ok | ~/Library/Logs/AutotraderV1/deploys.log`
+- `deploy undo` finds the newest `result=PASS` line whose short sha is live HEAD's, takes its
+  `PREV_SHA`, and reads `schema=` from it and from the PREV line before it. Hand-written lines
+  carry no `schema=` (`undo_schema_unknown`: undo by hand). Never write `schema=` into a line by
+  hand, except the line the tool itself prints for you (OPTION 1, 6.3): the undo trusts it to
+  tell a code-only deploy from a migrated one.
+- The manual runbook (6.2 fallback) writes the same PREV and PASS lines without `schema=`, and
+  6.3's manual block the same ROLLBACK line.
 
 ### 4.11 Clock
 
@@ -801,7 +884,7 @@ LOGS    heartbeat.log: HEARTBEAT_START every=60s timeout=10s host=<host> · HEAR
 | Build / test / mutate in worktrees and scratch copies | — | ✓ | ✓ | ✓ |
 | Run an independent review (separate agent) | — | ✓ | ✓ | ✓ |
 | `run --dry-run`, `--preflight`, `deploy check` (read-only) | — | ✓ | ✓ | ✓ |
-| Deploy (merge/reset live tree, agent disable/enable) | — | ✗ | ✗ (P2 write half pending) | ✓ |
+| Deploy (merge/reset live tree, agent disable/enable): `deploy apply` / `deploy undo` `[NOW]`, or the manual blocks of 6.2 / 6.3 | — | ✗ | ✗ (`deploy apply` / `deploy undo` are TTY-only by design and wait for the owner's typed sha; never driven through `script`, `expect`, a pty or `tmux`; an agent-run path would be a separate reviewed change that the owner decides) | ✓ (`deploy apply` / `deploy undo` at a Terminal, or by hand) |
 | `db migrate` on live DB | — | ✗ | ✗ | ✓ |
 | `paper stop --identity` | `[NOW]` the Sentinel's auto-fence rules only (Part 8.4; reason `sentinel: …`; stop only, never resume) | ✗ | ✓ (owner asked for this exact stop) | ✓ |
 | `/halt <IDENTITY>` (phone) | — | ✗ | ✗ | ✓ |
@@ -843,19 +926,201 @@ Pattern to copy: **v7a** (identity-agnostic logic, MOMO-only data) → one obser
 
 ### 6.2 Deploy runbook (generic)
 
-Variables: set them in the shell before STEP 0, each to its real value (no angle brackets; Part 2.1):
-`CANDIDATE` (the branch, e.g. `CANDIDATE=ops-p1b`), `EXPECTED_PARENT` (the live sha now),
-`EXPECTED_PIN` (the reviewed bridge sha256), `VERDICT_SHA` (the sha the ledger's verdict line names),
-`SCOPE` (the reviewed slices, comma-separated), `NEXT_SESSION` (the next session date, e.g.
-`NEXT_SESSION=2026-10-19`) and `LEDGER`, the ledger's path such as `docs/reviews/2026-10-17-ledger.md`
-(read from the candidate branch: the live tree may not have it). `PREV_SHA` is set by STEP 0 itself.
+From L-P2 a deploy is one owner-run command, `autotraderctl deploy apply` (4.1.4) `[NOW]`. It does
+what STEP 0–5 of the manual runbook below do, in order, reads every result itself and writes the
+deploys.log lines (4.10). The manual blocks stay as the fallback. Either way the deploy starts
+in the window, after the owner read the review (I-3), on a head whose full gates incl. Docker
+passed (6.1).
+
+**Variables.** Set them in the shell first, each to its real value (no angle brackets; Part 2.1):
+`WORKTREE` (the candidate's worktree folder under `/Users/salomon/aiautomation/.claude/worktrees/`,
+e.g. `WORKTREE=ops-p1b`), `CANDIDATE` (its branch, e.g. `CANDIDATE=ops-p1b`), `EXPECTED_PARENT`
+(the live HEAD now, all 40 hex characters), `EXPECTED_PIN` (the verdict line's `bridge_sha=`, 64
+hex) and `SCOPE` (slices that the verdict line's `scope=` lists, comma-separated). The manual
+fallback adds `VERDICT_SHA`, `NEXT_SESSION`, `LEDGER` and `LABEL` (below).
+
+**A. Before the run.** From the candidate's worktree:
+
+```bash
+cd /Users/salomon/aiautomation/.claude/worktrees/${WORKTREE:?}/backend
+git -C .. status --short
+git -C /Users/salomon/aiautomation rev-parse HEAD
+```
+
+Expect, line by line:
+1. nothing on screen (the `cd`);
+2. nothing. The tool refuses any change in its own checkout and any untracked file under
+   `backend/` (`candidate_worktree_dirty`): the review saw HEAD only. A `backend/.venv` that is a
+   symbolic link shows here as `?? backend/.venv` and is refused too: the worktree needs a real
+   venv directory (`.venv/` is ignored only as a directory);
+3. `EXPECTED_PARENT`.
+
+Keep the live checkout free of other git activity while the run lasts (an IDE, an agent's
+`git status` there): such a reader holds `.git/index.lock` for a moment. The tool waits up to 5 s
+for the lock to go, then refuses before the stop (`live_index_lock`) or, during an undo, stops
+with the robot disabled (`undo_tree_dirty`).
+
+**B. The run.** Its own block, in a Terminal (the tool needs one), from a shell whose `HOME` is
+the account's own and with `DB_PATH` unset (`paths_not_canonical`):
+
+```bash
+.venv/bin/python autotraderctl.py deploy apply --candidate "${CANDIDATE:?}" --repo /Users/salomon/aiautomation --expect-parent "${EXPECTED_PARENT:?}" --expect-pin "${EXPECTED_PIN:?}" --scope "${SCOPE:?}"
+```
+
+Add to the same line only when needed:
+- `--expect-migration N`: the database must have exactly migration N pending, and every matched
+  verdict line must carry `migration=N` (`migration_unexpected`, `verdict_migration_missing`).
+  The tool then runs `db migrate` after the fast-forward, and a later failure HALTs (6.3).
+- `--expect-fenced A,B`: the identity fences that stand (below).
+- `--label X`: the deploys.log label. The default is the verdict line's release label (e.g. `P2`);
+  a label that is not one or two release words refuses (`label_missing`), and then `--label` is
+  needed.
+- `--ledger GLOB`: the ledgers to search on the candidate (default every
+  `docs/reviews/*ledger*.md`).
+
+`--db-path` is refused. A malformed value (a short `--expect-parent`, a `--expect-pin` that is not
+64 hex, an empty `--scope`, a name in `--expect-fenced` that is not sendable) prints argparse's
+`usage:` and `error:` lines and exits 2: nothing ran.
+
+**What it does, in order.**
+1. **Pre-checks.** `deploy check`'s nine checks (verdict, tree_clean, parent, files, schema,
+   fence, clock, window, pin; `--skip-clock` cannot be passed) print as `check …` lines; the
+   tool's own pre-checks print only a refusal. Any refusal prints `REFUSE <token>: <detail>`, then
+   `deploy apply: REFUSED <tokens> (exit 78; nothing changed)`: no deploys.log line, no live
+   command. The tokens:
+
+   | Token | Refuses when |
+   |---|---|
+   | `not_interactive` | stdin is not a terminal (an agent's shell, a pipe) |
+   | `deploy_lock_busy` | another `deploy apply` / `deploy undo` holds `$D/deploy.lock` |
+   | `runs_from_live_checkout` | the tool runs from the live checkout itself |
+   | `not_candidate_worktree` | the tool's own checkout is not at the candidate's head |
+   | `candidate_worktree_dirty` | the tool's own checkout has a tracked change, or an untracked file under `backend/` |
+   | `paths_not_canonical` | `HOME` is not the account's home, or the database is not `$D/autotrader.db` (`DB_PATH` set elsewhere) |
+   | `start_cutoff` | outside 18:40 → 06:50 ET (O6; Israel 01:40 → 13:50, and 00:40 → 12:50 in the week Israel is ET + 6) |
+   | `deploy_check_<check>` | that `deploy check` check refused, e.g. `deploy_check_parent` (live HEAD is not `--expect-parent`, or not an ancestor of the candidate), `deploy_check_fence` (the global kill switch is stopped), `deploy_check_window` (outside 18:30 → 07:20 ET) |
+   | `migration_unexpected`, `verdict_migration_missing` | with `--expect-migration` (above) |
+   | `prev_sha_invalid` | live HEAD is not a 40-hex commit that is an ancestor of the candidate, or its bridge pin cannot be read |
+   | `live_python_missing` | `/Users/salomon/aiautomation/backend/.venv/bin/python` is not executable, or the live `autotraderctl.py` is missing |
+   | `changed_paths_unreadable` | git cannot list the paths HEAD..candidate changes |
+   | `deploy_tool_scope_missing` | the candidate changes `deploy_apply.py`, `deploy_check.py`, `launchd.py` or `db_admin.py`, and `--scope` does not list `P2` |
+   | `pin_verdict_missing` | the matched verdict line has no `bridge_sha=` |
+   | `pin_expected` | `--expect-pin`, the verdict's `bridge_sha=`, the candidate's `REVIEWED_BRIDGE_SHA256` and the candidate's bridge file (sha256) are not all equal |
+   | `fenced_unexpected` | the stopped sendable identity fences are not exactly `--expect-fenced`, or the fence table cannot be read |
+   | `migrate_lock_busy` | a `db migrate` holds `<db>.migrate.lock` |
+   | `deploys_log_unusable` | `$L/deploys.log` is a symbolic link or not a regular file, or its folder is missing or a link |
+   | `live_index_lock` | `.git/index.lock` in the live checkout is still there after 5 s; the detail names the remedy: `pgrep -x git \|\| echo none`, and only when it prints none, `rm` the lock |
+   | `label_missing` | above |
+
+2. **The plan, and the typed sha.** `PLAN (nothing has changed yet):` lists live HEAD (PREV_SHA),
+   the candidate's full sha and label, the bridge pin (and the live one), the database and its
+   schema, the paths, the session and the expected fences, then the numbered steps. Then:
+   `Type the candidate's short sha (7 characters) to go on; anything else aborts:`. Type the 7
+   characters within 300 s. When you type, the window, live HEAD and the upcoming session are
+   read again: a late answer or a changed fact refuses (`confirm_timeout`, `start_cutoff`,
+   `live_head_moved`, `session_date_changed`; exit 78, nothing written). A wrong sha, an empty
+   line or Ctrl-C at the prompt refuses `confirm_mismatch` (exit 78).
+3. **The PREV line** into deploys.log (`OK deploys.log: …`, 4.10).
+4. **Stop.** `shadow agent disable` of the live checkout, then up to 75 s for all of: no
+   supervisor, no trading process, a free `supervisor.lock`, and (when a supervisor ran) a new
+   `SUPERVISOR_STOP reason=SIGTERM` line. A disable that exits non-zero is noted and the wait goes
+   on (launchctl's own 10 s limit can end it while launchd still stops the robot).
+5. **The window again, then the fast-forward** to the candidate's resolved 40-hex sha, never the
+   branch name: `git -C /Users/salomon/aiautomation merge --ff-only <sha>`. Then HEAD must be the
+   candidate (`head_mismatch`), each pinned file on disk must hash to its pin
+   (`bridge_sha_mismatch`), and the tree must be only benign (`tree_dirty_after_ff`).
+6. **Only with `--expect-migration N`:** `db migrate` (its `backup` and `migrated  v<N-1> -> v<N>`
+   lines are read), then `db status` must say `state     schema v<N> is current`
+   (`migrate_failed`, `migrate_unparsed`, `migrate_status_not_current`).
+7. **The live dry run** for the upcoming session (`OK dry run: <n> required lines, no !!!, no
+   WARNING:`). It must exit 0 (`dry_run_exit`), print no `!!!` (`dry_run_bang`) and no line
+   starting `WARNING:` (`dry_run_warning`), and exactly one of each of these lines:
+   `bridge       reviewed (sha256 <pin12>)` and `bridge       INFO bridge sha256=<pin64>`
+   (`dry_run_pin`); `bridge       INFO fenced identities = none`, or with `--expect-fenced`
+   `bridge       CRITICAL fenced identities = <A, B>` (`dry_run_fenced`);
+   `bridge       INFO sendable identities = <the candidate's sorted set>` (`dry_run_sendable`);
+   `registry     sendable identities, size table and strategy registry agree` (`dry_run_registry`);
+   `database     schema v<n> current (<db path>)` (`dry_run_schema`); `session      <D> (…` with
+   `SESSION_WAIT date=<D>` (`dry_run_session`); and
+   `heartbeat    Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url present (the child validates the URL)`
+   (`dry_run_heartbeat`: a deploy needs the heartbeat item). A candidate whose bridge has
+   `DAY_RISK_BUDGET_PCT` also needs its one `day risk budget 3% of net liquidation` line
+   (`dry_run_budget`).
+8. **The window again, then the start.** `shadow agent enable`, then up to 60 s for: one
+   `SUPERVISOR_START pid=<n> mode=daily` from the live checkout and no other supervisor,
+   `SESSION_WAIT date=<D>`, `CHILD_START telegram` and `CHILD_START heartbeat` running under that
+   supervisor, no `LAUNCH_REFUSED`, `LOG_ROTATION_FAILED` or `PREFLIGHT_WARNING` in
+   `supervisor.log` or its newest archive, and the `LOG_ROTATED` line when a rotation is due
+   (`post_start_*`). Then it waits until telegram and heartbeat have run 20 s since their
+   `CHILD_START` with no exit or restart (`post_start_child_exited`), and checks the plist
+   (WorkingDirectory `/Users/salomon/aiautomation/backend`, the live venv's python, the plist the
+   live checkout writes, loaded: `post_start_plist`) and HEAD == the candidate (`post_start_head`).
+9. **The PASS line** into deploys.log, the ledger-ready line on screen (4.10), and
+   `deploy apply: PASS <label> <short> (exit 0)`.
+
+A failure in steps 5–8 of a code-only deploy undoes it by itself (D4): stop, then
+`git reset --keep <PREV_SHA>` and HEAD re-read (`undo_reset_noop` when HEAD is not PREV_SHA), or
+no reset at all when HEAD is still PREV_SHA (git never moved: `result=ABORTED`); then the tree
+(no `index.lock`, nothing beyond the benign file), the dry run with the old pin, the old bridge's
+fenced line and the heartbeat line, the start, and the ROLLBACK or ABORTED line (exit 3). After
+step 6 ran, a failure HALTs instead (exit 4; 6.3).
+
+**Do not close the Terminal window while it runs.** After the typed sha, a closed window
+(SIGHUP), SIGTERM or Ctrl-C halts the run where it stands (exit 4, `reason=interrupted`) and
+writes the HALTED line with its `next:` action; a signal that lands during a git write waits
+for git to finish. A run killed outright (`kill -9`, a crash) leaves only its PREV line: that
+`PREV_SHA` is the rollback target (6.3).
+
+**Exit codes, and what the owner does next.** The last line names the code and the robot's state:
+
+| Exit | Last line | The robot | The owner |
+|---|---|---|---|
+| `0` | `deploy apply: PASS <label> <short> (exit 0)` | runs the candidate, checked | Keep the printed ledger line for the repo ledger (4.10); observe one session before any step that depends on it (6.1) |
+| `78` | `deploy apply: REFUSED <tokens> (exit 78; nothing changed)` | untouched; no deploys.log line | Read each `REFUSE <token>: <detail>`, fix that cause, and run again for a fresh plan. The manual blocks are not a way around a refusal |
+| `3` | `deploy apply: ROLLED BACK reason=<token> (exit 3; <prev> runs again)`, or `deploy apply: ABORTED reason=<token> (exit 3; git never moved; <prev> runs again)` | runs the previous code, dry-run and start checked again | Read the `FAIL <token>` line above it; find its cause before another attempt |
+| `4` | `deploy apply: HALTED reason=<token> (exit 4; the robot is disabled)`; after an interrupt or an unexpected error `deploy apply: HALTED reason=interrupted (exit 4)` (or `internal_error`) | disabled; after an interrupt or an unexpected error, where it stood (`Nothing more was run. Live HEAD is …`) | Follow what it printed, one line at a time (below) |
+| `5` | `deploy apply: UNDO FAILED reason=<undo token> after <token> (exit 5; the robot is disabled)` | disabled | The printed `MANUAL ROLLBACK (runbook 6.3)` block, only when flat (6.3) |
+| `2` | argparse's `usage:` and `error:` lines | untouched | Fix the argument |
+
+Exit 4, by its token:
+- `stop_wait_timeout`: the stop did not finish in 75 s, and git is untouched. The processes
+  still running are listed; when they are gone, the one printed command restarts the previous
+  code: `( cd /Users/salomon/aiautomation/backend && … shadow agent enable )`.
+- any failure after `--expect-migration` started: the robot is left disabled and the `RESTORE` is
+  printed, never run (6.3, D4).
+- `interrupted`, `internal_error`: the HALTED line's `next:` and the printed block say what to do.
+  `git never moved (HEAD <PREV_SHA>): … shadow agent enable, then the start lines` appears only
+  when no git write had started, HEAD is PREV_SHA and the tree is clean with no `index.lock`;
+  otherwise it is runbook 6.3 back to PREV_SHA (the block printed with literal values), or the
+  restore after a migration.
+
+**A fence that stands: `--expect-fenced`.** When a sendable identity's own fence row is stopped
+(a Sentinel fence, a `/halt`, a `paper stop --identity`), the run refuses `fenced_unexpected` and
+names the identities, until `--expect-fenced` lists exactly those (comma-separated, case-exact;
+only sendable names). A Sentinel fence never expires by itself (8.4), so after a fenced day expect
+this. Example: `--expect-fenced ORB_V2`; the dry run must then print
+`bridge       CRITICAL fenced identities = ORB_V2` (two: `GAP_GO_V2, ORB_V2`). The flag only
+states what you saw: a deploy never lifts a fence, and a resume stays its own owner decision
+(4.3.4). An active global kill switch (the `paper` row stopped) refuses the deploy
+(`deploy_check_fence`): it has no resume.
+
+**The manual fallback.** The blocks below are the runbook as it was before P2. They stay for a
+deploy the tool cannot make (the tool itself broken, which the owner hears about first) and for
+what a halt printed. They run in the live checkout's `backend/` with Part 2.1's preamble
+(`cd /Users/salomon/aiautomation/backend`, `CTL`, `L`); the manual window is I-4's, 18:30 → 07:20
+ET. Besides the variables above, set `VERDICT_SHA` (the sha the ledger's verdict line names),
+`NEXT_SESSION` (the next session date, e.g. `NEXT_SESSION=2026-10-19`), `LEDGER`, the ledger's path
+such as `docs/reviews/2026-10-17-ledger.md` (read from the candidate branch: the live tree may not
+have it), and `LABEL`, the verdict line's release label (e.g. `LABEL=P1-B`; the deploys.log lines
+carry it, 4.10). `PREV_SHA` is set by STEP 0 itself.
 
 `autotraderctl deploy check` (read-only, from P1-A on) runs every STEP 0 check below and exits 78 on
-any refusal. **Run it from the candidate's worktree**, not from the live checkout: its schema check
-compares the database with the migrations of the code that runs it, so only the candidate's code
-notices a migration the candidate adds. **`--repo` is required** and names the live checkout the
-candidate is deployed into; `parent` refuses when that checkout's HEAD is the candidate itself
-(the candidate checked against itself proves nothing). From the candidate worktree's `backend/`:
+any refusal; `deploy apply` runs it as its first pre-check. **Run it from the candidate's
+worktree**, not from the live checkout: its schema check compares the database with the
+migrations of the code that runs it, so only the candidate's code notices a migration the
+candidate adds. **`--repo` is required** and names the live checkout the candidate is deployed
+into; `parent` refuses when that checkout's HEAD is the candidate itself (the candidate checked
+against itself proves nothing). From the candidate worktree's `backend/`:
 
 ```bash
 .venv/bin/python autotraderctl.py deploy check --candidate "${CANDIDATE:?}" --repo /Users/salomon/aiautomation --scope "${SCOPE:?}"
@@ -874,8 +1139,8 @@ being a release name with a digit (`v7a`, `P1-A`); a sha with `verdict=GO` anywh
 git -C .. show "${CANDIDATE:?}:${LEDGER:?}" | grep -E "${VERDICT_SHA:?} verdict=GO"
 git -C .. diff --name-only "${VERDICT_SHA:?}..${CANDIDATE:?}"
 git -C .. status --short
-git -C .. rev-parse --short HEAD
-PREV_SHA=$(git -C .. rev-parse HEAD); echo "$(date -Iseconds) ${CANDIDATE:?} PREV_SHA=$PREV_SHA" >> $L/deploys.log
+git -C .. rev-parse HEAD
+PREV_SHA=$(git -C .. rev-parse HEAD); echo "$(date -Iseconds) ${LABEL:?} PREV_SHA=${PREV_SHA:?}" >> $L/deploys.log
 git -C .. merge-base --is-ancestor HEAD "${CANDIDATE:?}" && echo ff-ok
 git -C .. diff --stat "HEAD..${CANDIDATE:?}"
 $CTL db status
@@ -888,11 +1153,12 @@ Expect, line by line:
 1. the ledger's verdict line for `VERDICT_SHA` (this check comes FIRST);
 2. only paths under `docs/reviews/` (I-11), or nothing when the verdict names the candidate's head;
 3. only known-benign entries;
-4. `EXPECTED_PARENT`;
-5. nothing on screen: the line goes to `$L/deploys.log`, outside the tree;
+4. `EXPECTED_PARENT`, all 40 characters;
+5. nothing on screen: the line goes to `$L/deploys.log`, outside the tree (an empty `PREV_SHA`
+   stops it with `zsh: PREV_SHA: parameter not set`: abort, LEARNED);
 6. `ff-ok`;
 7. only the reviewed files;
-8. `schema v16 current`;
+8. `schema v16 is current`;
 9. the kill switch inactive;
 10. an offset of at most ±2 s;
 11. a time inside 18:30 → 07:20 ET.
@@ -942,10 +1208,11 @@ last line only when every check above passed:
 ```bash
 git -C .. rev-parse --short HEAD
 PIN=$(shasum -a 256 scripts_local/paper_bridge.py | cut -c1-12)
-echo "$(date -Iseconds) DEPLOY ${CANDIDATE:?}@$(git -C .. rev-parse --short HEAD) PREV_SHA=${PREV_SHA:?} pin=$PIN result=PASS" >> $L/deploys.log
+echo "$(date -Iseconds) DEPLOY ${LABEL:?} $(git -C .. rev-parse --short HEAD) PREV_SHA=${PREV_SHA:?} pin=$PIN result=PASS" >> $L/deploys.log
 ```
 
-Expect the candidate's sha, then nothing on screen (the `DEPLOY` line goes to `$L/deploys.log`).
+Expect the candidate's sha, then nothing on screen (the `DEPLOY` line goes to `$L/deploys.log`, in
+4.10's form: `DEPLOY <label> <short> PREV_SHA=<40hex> pin=<12hex> result=PASS`).
 
 **STEP 4 and the log rotation.** A supervisor start whose newest 18:35 ET boundary has no `supervisor.log.<date>` archive yet rotates the logs at once. That is always the case for the first P1-B start, wherever it falls in the window (at 18:30–18:35 the rotation takes the previous day's date, and the 18:35 one follows a few minutes later), and for any start after a supervisor that was down across 18:35. The first rotation moves the whole multi-day `supervisor.log` and every child log into `<name>.log.<date>`. The new `supervisor.log` then holds the carried lines (`SUPERVISOR_START`, `CHILD_START telegram`, `CHILD_START heartbeat` when the heartbeat is configured, `SESSION_WAIT date=<NEXT_SESSION>`) followed by `LOG_ROTATED date=<YYYY-MM-DD> renamed=<n> truncated=<n> pruned=<n> carried=<n>`, written in one write. So `tail -n 3` may read `CHILD_START telegram … | SESSION_WAIT … | LOG_ROTATED …`, or with the heartbeat `CHILD_START heartbeat … | SESSION_WAIT … | LOG_ROTATED …`.
 - A `LOG_ROTATED` line after them is **expected** on the first start after 18:35 and is not a failure.
@@ -954,16 +1221,113 @@ Expect the candidate's sha, then nothing on screen (the `DEPLOY` line goes to `$
 
 ### 6.3 Rollback
 
-Only when FLAT with no working bot orders; never mid-session. `PREV_SHA` is STEP 0's (also in
-`$L/deploys.log`); set `NEXT_SESSION`, and `REASON` to one line saying why, first.
+Only when FLAT with no working bot orders; never mid-session. Before any rollback the owner looks
+at TWS: no positions, no working orders. `deploy undo`'s own flatness check reads only the
+bridge's newest state file: it cannot see the owner's Telegram orders, anything placed in TWS, or
+what the bridge failed to save.
+
+**`deploy undo` `[NOW]`** (4.1.5), for a deploy that `deploy apply` wrote. Set `WORKTREE` to the
+worktree of the deploy being undone, `PREV_SHA` to the full `PREV_SHA=` (40 hex) of the
+`DEPLOY … result=PASS` line for live HEAD in `$L/deploys.log`, and `REASON` to one lowercase token
+(a letter, then letters, digits or `_`; e.g. `REASON=dry_run_bang`; anything else exits 2):
+
+```bash
+cd /Users/salomon/aiautomation/.claude/worktrees/${WORKTREE:?}/backend
+.venv/bin/python autotraderctl.py deploy undo --repo /Users/salomon/aiautomation --to "${PREV_SHA:?}" --reason "${REASON:?}"
+```
+
+It prints its plan (`back to <PREV_SHA> (bridge pin <old pin12>)`, the dry run's date) and asks
+for the `--to` short sha (7 characters), within 300 s; when you type, the window, live HEAD and
+the session are read again (as 6.2). Then:
+1. stop, as 6.2 step 4;
+2. `git reset --keep <PREV_SHA>`, then HEAD is read again and must be PREV_SHA
+   (`undo_reset_noop`);
+3. the tree: no `.git/index.lock` (after 5 s) and nothing outside `.claude/settings.local.json`
+   (`undo_tree_dirty`);
+4. the dry run of the previous code: `bridge       reviewed (sha256 <old pin12>)`,
+   `database     schema v<n> current (…)`, the fenced line that bridge prints for the stopped
+   fences, the heartbeat line, no `!!!`, no `WARNING:` (`undo_dry_run`);
+5. enable, and the start checks of 6.2 step 8 (`undo_post_start`);
+6. `DEPLOY rollback to <PREV_SHA> result=ROLLBACK reason=<token>` into deploys.log, and
+   `deploy undo: ROLLED BACK reason=<token> (exit 3)`.
+
+The undo's dry run and start check also accept the previous code's mid-session start
+(`SESSION_START date=<D>` at once, no `SESSION_WAIT`; the real 2026-10-13 restart). That is a
+safety net for a clock that jumped (a sleeping Mac), not a path the tool normally takes:
+`deploy undo` refuses to start outside 18:40 → 06:50 ET.
+
+Refusals (exit 78, before anything stops; nothing changed):
+
+| Token | Refuses when | Then |
+|---|---|---|
+| `not_interactive`, `deploy_lock_busy`, `runs_from_live_checkout`, `start_cutoff`, `paths_not_canonical`, `live_python_missing`, `deploys_log_unusable` | as in 6.2 | as in 6.2 |
+| `prev_sha_invalid` | `--to` is not a 40-hex commit, or its bridge pin cannot be read | take the sha from deploys.log again |
+| `undo_prev_mismatch` | deploys.log has no `DEPLOY … result=PASS` line for live HEAD (for example a run that died before its PASS line), or `--to` is not that line's `PREV_SHA` | `PREV_SHA` from that line; with no PASS line, the manual block below with the run's PREV line |
+| `undo_schema_unknown` | that PASS line or its PREV line has no `schema=v<n>`: every hand-written deploy, through P1-B.4 | `$CTL db status`, then the manual block below |
+| `undo_needs_db_restore` | the deploy migrated (the PREV and PASS schemas differ); the restore is printed | the restore by hand (below) |
+| `undo_not_flat` | the bridge's newest state file holds a working entry or shares, or cannot be read ("flatness unknown") | wait until flat, after the close |
+| `undo_tree_dirty` | `.git/index.lock` in the live checkout after 5 s, or a change outside `.claude/settings.local.json` | the remedy in the detail (`pgrep -x git \|\| echo none`; `rm` the lock only when it printed none); any other change: stop and ask |
+| `confirm_mismatch`, `confirm_timeout`, `start_cutoff`, `live_head_moved`, `session_date_changed` | at the typed sha, as in 6.2 | run it again |
+
+Outcomes:
+- **exit 3** `deploy undo: ROLLED BACK reason=<token> (exit 3)`: the previous code runs, checked.
+  Copy the ROLLBACK line into the ledger later (4.10).
+- **exit 5** `deploy undo: UNDO FAILED reason=<undo token> after <token> (exit 5; the robot is
+  disabled)`, one of `undo_stop_timeout`, `undo_prev_invalid`, `undo_reset_failed`,
+  `undo_reset_noop`, `undo_tree_dirty`, `undo_dry_run`, `undo_post_start`, `internal_error`. The
+  robot is left disabled, the `UNDO_FAILED` line is written, and the
+  `MANUAL ROLLBACK (runbook 6.3)` block is printed with literal values: run it one line at a
+  time, only when flat. When the failure is the previous code's own dry run or start (for example
+  a `PREFLIGHT_WARNING heartbeat` line), the tool says so: if the robot ran that way before the
+  deploy, the block's last enable restores that state. The automatic undo inside `deploy apply`
+  ends the same way (6.2, exit 5).
+- **exit 4** `deploy undo: HALTED reason=interrupted (exit 4)`: Ctrl-C, a closed window or
+  SIGTERM after the typed sha. The `UNDO_FAILED … next: runbook 6.3 …` line is written and the
+  manual block printed.
+
+**A deploy that migrated the database (D4).** It is never undone by a command; a database
+restore is never automated.
+- `deploy apply --expect-migration N`: any failure after the migration started HALTs (exit 4).
+  The robot is left disabled, the HALTED line carries `backup=<path|none>`, and a
+  `RESTORE (never run by this command)` block is printed with literal values. Run it one
+  numbered line at a time, each only after the one before passed:
+  1. `pgrep -fl /Users/salomon/aiautomation/backend/ || echo none`, expect `none`;
+  2. move `autotrader.db`, `-wal` and `-shm` aside (`….v<N>-failed-<UTC stamp>`);
+  3. `cp` the backup this run printed over `autotrader.db`;
+  4. `git -C /Users/salomon/aiautomation reset --keep <PREV_SHA>`, then `rev-parse HEAD`, expect
+     PREV_SHA;
+  5. in `backend/`, the dry run, expect the old pin's `bridge       reviewed (sha256 …)` and
+     `database     schema v<N-1> current`, no `!!!`;
+  6. enable.
+- No `backup` line read: `db migrate` refused before it changed anything, or its output was not
+  understood. The block shows `db status` and the state it reads: at v<N-1>, "no database restore
+  is needed", and only pgrep, reset, dry run and enable remain; otherwise STOP and ask before
+  copying anything. Copy no file you did not see this run make, never an older backup.
+- When only the start came after 06:50 ET (`start_cutoff` after a passed dry run, nothing
+  enabled), OPTION 1 comes first: start the migrated candidate by hand, only before 07:20 ET,
+  with the tool's own PASS line (`schema=v<N>`) to append after both looks; later, leave the robot
+  disabled until after the close (from 18:40 ET), or take OPTION 2, the restore.
+- `deploy undo` across a migration refuses `undo_needs_db_restore` and prints the same restore,
+  with the newest backup of that version pair (the deploy migrated and passed, so its backup is
+  the newest).
+
+**The manual fallback** (the rollback as before P2): for a deploy the tool did not write
+(`undo_schema_unknown`), a run that died before its PASS line (`undo_prev_mismatch`; its PREV
+line names PREV_SHA), or when the tool printed this block (exit 4 or 5). In the live checkout's
+`backend/` with Part 2.1's preamble. `PREV_SHA` is STEP 0's (also in `$L/deploys.log`); set
+`NEXT_SESSION`, and `REASON` to one line saying why, first.
 
 ```bash
 $CTL shadow agent disable
 git -C .. reset --keep "${PREV_SHA:?}"
+git -C .. rev-parse HEAD
+git -C .. status --short
 $CTL run --dry-run --date "${NEXT_SESSION:?}"
 ```
 
-The dry run must show the PREVIOUS pin. Only then:
+Expect, after the disable: `rev-parse` prints `PREV_SHA` (anything else: the reset did not
+happen; stop, LEARNED); `status` shows nothing outside `.claude/settings.local.json` (anything
+more: stop there, do not enable, ask); the dry run shows the PREVIOUS pin. Only then:
 
 ```bash
 $CTL shadow agent enable
@@ -1202,9 +1566,15 @@ cannot be seen without reading log lines: Playbook 7.8, by hand.
     file, no state file 5 min into the window, or no update (state file or heartbeat) for 5 min:
     `⚠️ sentinel blind since HH:MM ET — <why>; no auto-fence while it cannot see`, at most once per
     30 min, and no fence while blind. Then once: `✅ sentinel sees the bridge state again (HH:MM ET); auto-fence active`.
-- **One fence per identity per day.** Resume is always the owner's: `$CTL paper resume --identity
-  <ID> --reason "…"` (4.3.4). A resume of today's Sentinel fence holds for the rest of the day, even
-  if the notifier's state file is lost (the trace in the row's reason).
+- **At most one fence per identity per day, and a fence never expires by itself.** It blocks
+  that identity's new entries on every session day after it too, until the owner's
+  `$CTL paper resume --identity <ID> --reason "…"` (4.3.4): nothing else lifts it (the Sentinel
+  never resumes, the phone has no resume, and a deploy never writes a fence). A Monday fence still
+  blocks Tuesday. Each session day the notifier repeats it once at its 07:55 ET start
+  (`⛔ Fenced at start — no new entries for:`, one `• <ID>: <reason> (since …)` line per stopped
+  identity). A resume of today's Sentinel fence holds for the rest of the day, even if the
+  notifier's state file is lost (the trace in the row's reason). While it stands, `deploy apply`
+  refuses `fenced_unexpected` until `--expect-fenced <ID>` names it (6.2).
 - **The thresholds** are code constants in `backend/trading/operations/sentinel.py` (the owner's
   numbers of 2026-10-15; the losing streak 4 since 2026-10-17); changing one is a reviewed
   constants commit.
@@ -1260,7 +1630,7 @@ This document carries no snapshot. The live sha, the candidate branches, the pin
 | Phase | Content | Status |
 |---|---|---|
 | P1 Unattended days | In this order: phone `/status` + `/fences` + `/halt` with nonce · alert hysteresis (one shared state machine) · dead-man's switch **outside** the Mac (external ping monitor) · overnight Gateway watch with quiet hours and a 05:55/07:40 ET page, competing-login page in session hours · restart-count cap that ignores exits while the port is closed and lifts when it reopens · OPS section in the 16:05 report and log rotation. Two deploys at most; none on v7b day or before v7b's first clean session; no bridge change. | `[PLANNED]` |
-| P2 One-command deploy | Read-only half first: `autotraderctl deploy --check` (every STEP 0 refusal, verdict grep over every ledger, I-11 head rule, window check; no writes). Write half after P1 with its own review. | `[PLANNED]` |
+| P2 One-command deploy | Read-only half `autotraderctl deploy check` (every STEP 0 refusal, verdict grep over every ledger, I-11 head rule, window check; no writes; from P1-A). Write half `deploy apply` / `deploy undo` (4.1.4, 4.1.5, 6.2, 6.3): owner-run and TTY-only, reviewed N17 to N17e, installed at L-P2 (Sat 24 Oct, the last manual install). L-P2d (Sun 25 Oct, this docs-only layer) is the first real `deploy apply`. | `[NOW]` |
 | P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; Stage 2 after the thresholds and five unchanged approvals. v7c (open-risk term) gates the first step up. | Auto-fence `[NOW]` (the Sentinel, 8.4); the rest as tagged in 8.2 |
 | P4 C2 replaces the bridge | After v7b's clean paper week: re-review #3, merge, port v7's exact allowlist / caps / fences / preflight / orderRef identity (migration: the ledger's `at1:` CHECK), move readers to the ledger, engine as a pinned child, drill, five clean sessions, manual desk, go-wide book, delete the old stack. | Built, unwired |
 | LIVE | Separate milestone, separate decision | Out of scope |
@@ -1317,7 +1687,7 @@ Resolved as stated; `AGENTS.md` wins wherever it speaks.
 | # | Version 1.0 said | Repository / code | Resolution in this version |
 |---|---|---|---|
 | D-1 | Deploy freeze ends 16:15 ET (2.3) vs window 18:30 → 07:20 (I-4) | Recorder and replay are supervisor children until 18:30 | 18:30 → 07:20 ET everywhere |
-| D-2 | AGENT+ may run `shadow agent enable` in the window | LEARNED.md blocks agents from `enable` | OWNER only until the P2 write half is reviewed |
+| D-2 | AGENT+ may run `shadow agent enable` in the window | LEARNED.md blocks agents from `enable` | Resolved with P2 (installed at L-P2): OWNER only. `deploy apply` / `deploy undo` are TTY-only by design (no terminal: `not_interactive`) and change nothing until the owner types back the short sha; an agent-run path would be a separate reviewed change that the owner decides (4.1.3–4.1.5, Part 5) |
 | D-3 | Phone `/stop <ID>` for identity stops | `/stop <sym> <price>` is a protective stop order | `/halt <IDENTITY>` |
 | D-4 | 7.7 "re-run once" | The opener already retries; the artefact did not reproduce | A refusal is a defect |
 | D-5 | "telegram forwards CRITICAL lines" | The notifier forwards; telegram handles commands | Corrected in 2.2 |

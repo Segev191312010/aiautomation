@@ -81,3 +81,44 @@
 
 ## Test fixtures copy the real log format
 - One screener sweep logs TWO `sweep D:` lines (the main `qualified=… quoted=…` line and, since 2026-10-14, a `day universe …` line about 10 ms later). P1-A.4's "3 successes" rule was correct against one-line fixtures and wrong in production, where it cleared after two real sweeps (review N14b, 2026-10-17). Build alert-counting fixtures from real log lines, and add a meta-test that the fixture has the production shape.
+
+## Deploy tool lessons (P2, 2026-10-21/22)
+- Always validate PREV_SHA, and re-read HEAD after `git reset --keep`. On 2026-10-16
+  (v7b rehearsal) an empty `$PREV_SHA` made `git reset --keep` a silent no-op in zsh. PREV_SHA
+  must be 40 hex, a commit, and an ancestor of the candidate before anything stops
+  (`deploy apply`: `prev_sha_invalid`), and after the reset HEAD must print PREV_SHA (the undo
+  stops with `undo_reset_noop`, exit 5; the manual 6.3 block reads `rev-parse HEAD`).
+- `deploy apply` and `deploy undo` are TTY-only by design: with no terminal they refuse
+  `not_interactive`, and nothing changes until the owner types back the short sha. The terminal
+  is a speed bump, not a lock (review N17 I-1): agents never run them, also not through
+  `script`, `expect`, a Python `pty` or `tmux send-keys`. An agent-run path would be a separate
+  reviewed change that the owner decides.
+- A stale `.git/index.lock` is refused before the stop (P2.3, `live_index_lock`; review
+  N17c-L1). On P2.2 it passed every pre-check: the deploy stopped the robot, the fast-forward
+  failed, and the undo would not restart the previous code on that tree (exit 5, the robot
+  disabled). Check every precondition of a git write before the first step that changes the
+  robot, and give the refusal its remedy. The tool waits 5 s for a concurrent reader's lock
+  (N17c-L2); keep IDEs and agents' git out of the live checkout during a deploy.
+- "git never moved" is said only before the first git write (P2.2; review N17b-L1). HEAD alone
+  does not prove it: a `merge --ff-only` or `reset --keep` cut short can leave `index.lock` and
+  part of the new tree under the old HEAD. The tool marks the write before it starts, holds
+  signals until git returns (git runs in its own session), and says "git never moved" only when
+  no write started, HEAD is PREV_SHA and the tree is clean with no `index.lock`; otherwise it
+  prints runbook 6.3.
+- A typed confirmation stands for the plan printed at that moment only (P2.1; review N17
+  MEDIUM-1). The prompt waits for ever: in N17's repro an answer typed 12 hours late stopped the
+  robot outside the window, and one typed after 07:55 ET on a session day would have left it
+  stopped and disabled (the automatic undo could not restart it: a mid-session start writes no
+  `SESSION_WAIT`). The answer now expires after 300 s, and the window, live HEAD and the upcoming
+  session are read again when it comes.
+- When `db migrate` printed no `backup` line, never restore "the newest" backup (P2.1; review
+  N17 MEDIUM-2). Backups are named by time and version pair only, so an older attempt's file can
+  match, and copied over the live data it loses every row since. Copy only the file this run
+  printed; with none, `db status` decides whether the database changed at all.
+- `deploy apply` and `deploy undo` act on the real LaunchAgent whatever `HOME` and `DB_PATH`
+  say, so they refuse `paths_not_canonical` in a shell pointed at a copy (the 2026-10-14 rule
+  for agents' tests; review N17 LOW-4). They run from the owner's own Terminal.
+- Two tests failed only sometimes (review N17 LOW-7). One typed the short sha upper-cased, which
+  is the right sha when its 7 characters are all digits (about 3.7 % of commits); one restored a
+  file by a plain write, and git's whole-second index times judged it by whether the second had
+  rolled over. A fixture must not depend on a sha's letters or on the wall-clock second.
