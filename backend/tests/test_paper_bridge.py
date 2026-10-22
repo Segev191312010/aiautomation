@@ -4279,6 +4279,44 @@ def test_v7c_manual_buy_sends_attached_stop(
     assert bridge.account_open_risk().total == Decimal(new_risk)
 
 
+def test_v7c_budget_lines_parse_in_session_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3-B3: the session checker's rule 7 reads the bridge's own lines, a bot entry's and an owner buy's
+    (its fixtures copy this format; LEARNED "Test fixtures copy the real log format")."""
+    from trading.operations import session_check as sc
+
+    def budget(out: list[tuple[str, str]]) -> Any:
+        [text] = [text for kind, text in out if kind == "INFO" and text.startswith(pb.V7C_BUDGET_OK)]
+        check = sc.parse_budget_ok(sc.LogLine("bridge.log", 1, 0, None, "INFO", text))
+        assert isinstance(check, sc.BudgetCheck), check
+        return check
+
+    bridge, _, _ = v7c_world(tmp_path / "bot", held=9900, decisions=(decision_row("d1", "AAPL"),))
+    capsys.readouterr()
+    bridge.tick()
+    out = events(capsys)
+    check = budget(out)
+    assert (check.key, check.total, check.net_liquidation, check.problems) == (
+        ("bot", "AAPL", "MOMO_HOD_V2"), Decimal("19850.00"), Decimal("665000.00"), ())
+    [sent] = [text for kind, text in out if kind == "SENT"]
+    found = sc._SENT.match(sent)
+    assert found is not None and ("bot", found["symbol"], found["label"]) == check.key  # the pair rule 7 makes
+
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    row_id = queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
+    broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"))
+    desk = desk_bridge(tmp_path / "manual", broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
+    capsys.readouterr()
+    desk.tick()
+    out = events(capsys)
+    check = budget(out)
+    assert (check.key, check.total, check.problems) == (("manual", row_id[:6]), Decimal("50.00"), ())
+    [buy] = manual_lines(out)
+    placed = sc._MANUAL_BUY.match(buy)
+    assert placed is not None and placed["short"] == row_id[:6] and placed["stop"]
+
+
 def manual_buy_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str = "/buy 10 AAPL 185 stop 180"
                      ) -> tuple[Any, FakeBroker, Clock, str, int, int]:
     ledger = manual_ledger(tmp_path, monkeypatch)

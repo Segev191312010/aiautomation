@@ -15,7 +15,7 @@ only these inputs and never changes any of them:
   (``DECISIONS_SQL``, ``parse_intent``), the account snapshots a decision may
   have been sized from, and ``autotrader_execution_fences``.
 
-Six rules, each PASS, WARN or FAIL with its evidence lines:
+Seven rules, each PASS, WARN or FAIL with its evidence lines:
 
 1. identities: every SENT names a sendable identity of that day's bridge and
    of ``SENDABLE_IDENTITIES``, its state bracket and its ledger decision carry
@@ -42,7 +42,18 @@ Six rules, each PASS, WARN or FAIL with its evidence lines:
    once the realized loss had reached it;
 6. fences: every fence row is listed; an identity (or the global switch)
    stopped during the day is a WARN, an entry sent while its fence was
-   stopped is a FAIL.
+   stopped is a FAIL;
+7. day risk budget (bridge v7c, owner decisions D1 and D5): every accepted
+   risk-increasing order, a bot SENT or an owner buy's MANUAL SENT, is
+   matched to the ``v7c_budget_ok`` line the bridge logs right before it,
+   whose realized + open + new total must stay within 3 % of its net
+   liquidation (one cent of the bridge's rounding allowed). A malformed budget
+   line, a total above 3 %, a process that logged another cap or slippage
+   factor, an entry of a v7c process without its line and a
+   ``v7c_budget_invariant_broken`` page FAIL. An entry of a process that
+   logged no day risk budget (a pre-v7c bridge) cannot be verified:
+   ``day_risk_budget_unverified`` (WARN, never PASS). Over-budget, widened-stop
+   and wrong-thread pages are WARNs; refusals are counted.
 
 Exit 0 when no rule FAILs (WARN allowed), 1 when one does, 2 when an input is
 missing. Every line of the report is masked: an account id (``DU`` and five
@@ -66,6 +77,16 @@ from typing import Any, cast
 from trading.contracts import AccountSnapshot, PortfolioSnapshot, RiskPolicy, RuleSetup
 from trading.operations.log_tailer import line_time, without_carried
 from trading.research.live_ledger import BRIDGE_STATE_DIRECTORY, STATE_SCHEMA_PREFIX
+from trading.research.v7c_report import (
+    DAY_RISK_BUDGET_PCT,
+    STOP_SLIPPAGE_FACTOR,
+    V7C_BUDGET_INVARIANT_BROKEN,
+    V7C_BUDGET_OK,
+    V7C_BUDGET_OVER,
+    V7C_STOP_WIDENED,
+    V7C_WRONG_THREAD,
+    block_token,
+)
 from trading.risk.engine import policy_quantity, scaled_quantity
 from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
 from trading.risk.portfolio import portfolio_from_account
@@ -113,6 +134,14 @@ MAX_DAILY_LOSS_PCT = Decimal("2")
 MAX_ORDER_NOTIONAL_PCT = Decimal("25")
 MAX_ORDER_RISK_PCT = Decimal("1")
 SHADOW_ONLY_REASON = "shadow-only strategy"  # paper_bridge.py SHADOW_ONLY
+# Rule 7: an accepted entry the log cannot verify (its process logged no day
+# risk budget: a bridge older than v7c) is named, never passed.
+DAY_RISK_BUDGET_UNVERIFIED = "day_risk_budget_unverified"
+# The bridge logs each budget amount rounded to the cent: a total may read up
+# to half a cent above what it compared, and three rounded parts may sum up
+# to 1.5 cents away from their rounded total.
+BUDGET_ROUNDING = Decimal("0.01")
+BUDGET_SUM_TOLERANCE = Decimal("0.02")
 # A decision is sized from the strategy's own account snapshot, not the
 # bridge's: without a recorded snapshot the identity-row bound allows the
 # logged net liquidation to have been this much higher (a x1 ORB is x4).
@@ -176,6 +205,24 @@ _SUPERVISOR = re.compile(r"^(?P<at>\S+)\s+(?:!!!\s+)?(?P<event>[A-Z_]+)\s+bridge
 _CODE = re.compile(r"\bcode=(?P<code>\S+)")
 _RESTART = re.compile(r"\brestart_in=(?P<restart>\S+)")
 _ARCHIVE_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Bridge v7c's day risk budget lines (paper_bridge.py budget_line, process_decision,
+# ManualDesk.buy); a test feeds the bridge's own lines through these.
+_BUDGET_RULE_START = "day risk budget "
+_BUDGET_RULE = re.compile(r"^day risk budget (?P<pct>\d+(?:\.\d+)?)% of net liquidation, account level \(.*;"
+                          r" stop slippage factor (?P<factor>\d+(?:\.\d+)?)\)$")
+_BUDGET_OK = re.compile(
+    r"^v7c_budget_ok (?P<symbol>.+?) \((?P<label>[^()]*)\): realized (?P<realized>\d+\.\d{2})"
+    r" \+ open (?P<open>\d+\.\d{2}) \+ new (?P<new>\d+\.\d{2}) = (?P<total>\d+\.\d{2})"
+    r" \((?P<percent>\d+\.\d{2})%\) <= (?P<cap>\d+(?:\.\d+)?)% of (?P<net_liq>\d+\.\d{2})"
+    r" \(source=(?P<source>bot|manual)\)$"
+)
+_MANUAL_LABEL = re.compile(r"^manual #(?P<short>[0-9a-f]+)$")
+# An owner buy as the bridge places it (v7c: with its attached stop); a status
+# follow-up after a restart says "(orders [...])" and places nothing.
+_MANUAL_BUY = re.compile(r"^SENT BUY .+ #(?P<short>[0-9a-f]+) \(order (?P<order>\d+)\)(?P<stop> with its stop .+)?$")
+_MANUAL_REJECTED = re.compile(r"^REJECTED .* \((?P<code>[a-z0-9_]+)\)$")
+_V7C_PAGE = re.compile(r"^(?P<token>v7c_[a-z_]+)\b")
+_BUDGET_OK_START = re.compile(r"^v7c_budget_ok\b")
 
 
 def mask_accounts(text: str) -> str:
@@ -1347,6 +1394,155 @@ def _rule_fences(context: _Context) -> RuleResult:
     return RuleResult(6, "fences", PASS, f"{rows}; {connects} connect(s) logged fenced identities = none", details)
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetCheck:
+    """One ``v7c_budget_ok`` line: the order it let through and the numbers it was let through at."""
+
+    line: LogLine
+    key: tuple[str, ...]  # ("bot", symbol, identity) or ("manual", short id)
+    total: Decimal  # the larger of the logged total and its logged parts' sum (fail closed)
+    net_liquidation: Decimal
+    problems: tuple[str, ...] = ()
+
+    @property
+    def percent(self) -> Decimal:
+        return self.total * 100 / self.net_liquidation
+
+
+def parse_budget_ok(line: LogLine) -> BudgetCheck | str:
+    """A budget line's numbers and what is wrong with them; a malformed line is its failure text."""
+    found = _BUDGET_OK.match(line.text)
+    if found is None:
+        return f"malformed {V7C_BUDGET_OK} line: {line.evidence()}"
+    label, source = found.group("label").strip(), found.group("source")
+    manual = _MANUAL_LABEL.match(label)
+    if (manual is not None) != (source == "manual"):
+        return f"malformed {V7C_BUDGET_OK} line (label {label!r}, source={source}): {line.evidence()}"
+    realized, open_risk, new, logged, net_liq, cap = (
+        Decimal(found.group(name)) for name in ("realized", "open", "new", "total", "net_liq", "cap")
+    )
+    if net_liq <= 0:
+        return f"malformed {V7C_BUDGET_OK} line (net liquidation {net_liq}): {line.evidence()}"
+    parts = realized + open_risk + new
+    if abs(parts - logged) > BUDGET_SUM_TOLERANCE:
+        return (f"malformed {V7C_BUDGET_OK} line (realized + open + new = {parts}, logged total {logged}):"
+                f" {line.evidence()}")
+    key = ("manual", manual.group("short")) if manual is not None else ("bot", found.group("symbol"), label)
+    total = max(parts, logged)
+    problems: list[str] = []
+    if cap != DAY_RISK_BUDGET_PCT:
+        problems.append(f"the bridge let an order through at a {_plain(cap)}% cap, the approved day risk budget"
+                        f" is {_plain(DAY_RISK_BUDGET_PCT)}%: {line.evidence()}")
+    limit = net_liq * DAY_RISK_BUDGET_PCT / 100
+    if total > limit + BUDGET_ROUNDING:
+        problems.append(f"accepted at a day risk of {total} = {_percent(total, net_liq)} of net liquidation"
+                        f" {net_liq}, above {_plain(DAY_RISK_BUDGET_PCT)}% ({limit}): {line.evidence()}")
+    return BudgetCheck(line=line, key=key, total=total, net_liquidation=net_liq, problems=tuple(problems))
+
+
+def _rule_day_risk_budget(context: _Context) -> RuleResult:
+    failures: list[str] = []
+    warnings: list[str] = []
+    details: list[str] = []
+    approved = f"{_plain(DAY_RISK_BUDGET_PCT)}% (stop slippage factor {STOP_SLIPPAGE_FACTOR})"
+    budget_runs: set[int] = set()
+    for run in context.section.runs:
+        for line in run.lines:
+            if line.kind != "INFO" or not line.text.startswith(_BUDGET_RULE_START):
+                continue
+            found = _BUDGET_RULE.match(line.text)
+            if found is None:
+                failures.append(f"malformed day risk budget line: {line.evidence()}")
+                continue
+            budget_runs.add(run.index)
+            if (Decimal(found.group("pct")), Decimal(found.group("factor"))) != (DAY_RISK_BUDGET_PCT,
+                                                                                STOP_SLIPPAGE_FACTOR):
+                failures.append(f"the bridge ran a day risk budget of {found.group('pct')}% (stop slippage factor"
+                                f" {found.group('factor')}), the approved is {approved}: {line.evidence()}")
+    pending: dict[tuple[str, ...], list[BudgetCheck]] = {}
+    verified: list[tuple[str, BudgetCheck]] = []
+    unverified: list[str] = []
+    missing: list[str] = []
+    refused: Counter[str] = Counter()
+
+    def accepted(key: tuple[str, ...], name: str, line: LogLine) -> None:
+        checks = pending.get(key)
+        if checks:
+            verified.append((name, checks.pop(0)))
+        elif line.run in budget_runs:
+            missing.append(f"{name} sent without its {V7C_BUDGET_OK} line, by a process that enforces the day"
+                           f" risk budget: {line.evidence()}")
+            failures.append(missing[-1])
+        else:
+            unverified.append(f"{name}: no {V7C_BUDGET_OK} line (its process logged no day risk budget):"
+                              f" {line.evidence()}")
+
+    for line in context.section.lines():
+        kind, text = line.kind, line.text
+        if kind == "INFO" and _BUDGET_OK_START.match(text):
+            check = parse_budget_ok(line)
+            if isinstance(check, str):
+                failures.append(check)
+                continue
+            failures += check.problems
+            pending.setdefault(check.key, []).append(check)
+        elif kind == "SENT":
+            sent = _SENT.match(text)
+            if sent is not None:  # an unreadable SENT is rule 2's failure
+                identity, symbol = sent.group("label").strip(), sent.group("symbol")
+                orders = f"{sent.group('parent')}-{sent.group('last')}"
+                accepted(("bot", symbol, identity), f"{identity} {symbol} (orders {orders})", line)
+        elif kind == "MANUAL":
+            buy = _MANUAL_BUY.match(text)
+            if buy is not None:
+                short = buy.group("short")
+                accepted(("manual", short), f"owner buy #{short} (order {buy.group('order')})", line)
+                continue
+            rejected = _MANUAL_REJECTED.match(text)
+            if rejected is not None and block_token(rejected.group("code")) is not None:
+                refused[f"manual {rejected.group('code')}"] += 1
+        elif kind == "SKIP":
+            skip = _SKIP.match(text)
+            token = block_token(skip.group("reason")) if skip is not None else None
+            if token is not None:
+                refused[f"bot {token}"] += 1
+        elif kind == "CRITICAL":
+            page = _V7C_PAGE.match(text)
+            token = page.group("token") if page is not None else ""
+            if token == V7C_BUDGET_INVARIANT_BROKEN:
+                failures.append(f"the bridge's budget tripwire fired: {line.evidence()}")
+            elif token in {V7C_BUDGET_OVER, V7C_STOP_WIDENED, V7C_WRONG_THREAD}:
+                warnings.append(f"{token} page: {line.evidence()}")
+    for checks in pending.values():
+        details += [f"budget checked, no order followed (stopped or disconnected): {check.line.evidence()}"
+                    for check in checks]
+    entries = len(verified) + len(unverified) + len(missing)
+    by_source = Counter(check.key[0] for _, check in verified)
+    refusals = ", ".join(f"{name} x{count}" for name, count in sorted(refused.items())) or "none"
+    details.insert(0, f"refused risk-increasing orders: {refusals}")
+    details += [f"{name}: {_percent(check.total, check.net_liquidation)} of net liquidation"
+                f" {check.net_liquidation}: {check.line.evidence()}" for name, check in verified]
+    if failures:
+        return RuleResult(7, "day risk budget", FAIL, f"{len(failures)} problem(s); first: {failures[0]}",
+                          failures + unverified + warnings + details)
+    if unverified:
+        return RuleResult(7, "day risk budget", WARN,
+                          f"{DAY_RISK_BUDGET_UNVERIFIED}: {len(unverified)} of {entries} accepted"
+                          f" entr{'y' if entries == 1 else 'ies'} without a {V7C_BUDGET_OK} line (a bridge older"
+                          " than v7c logged no day risk budget); never a PASS", unverified + warnings + details)
+    if not verified:
+        summary = f"no risk-increasing order sent; refused: {refusals}"
+    else:
+        name, top = max(verified, key=lambda item: item[1].percent)
+        summary = (f"{len(verified)} accepted entr{'y' if len(verified) == 1 else 'ies'} ({by_source['bot']} bot,"
+                   f" {by_source['manual']} manual) within {_plain(DAY_RISK_BUDGET_PCT)}% of net liquidation,"
+                   f" highest {_percent(top.total, top.net_liquidation)} ({name}); refused: {refusals}")
+    if warnings:
+        return RuleResult(7, "day risk budget", WARN, f"{len(warnings)} flag(s); first: {warnings[0]}",
+                          [*warnings, summary, *details])
+    return RuleResult(7, "day risk budget", PASS, summary, details)
+
+
 def _inputs(context: _Context, logs: Path, data: Path, db: Path, supervisor_files: int) -> list[str]:
     section = context.section
     first, last = section.runs[0], section.runs[-1]
@@ -1371,7 +1567,7 @@ def _inputs(context: _Context, logs: Path, data: Path, db: Path, supervisor_file
 
 
 def check_session(day: date, *, logs: Path, data: Path, db: Path) -> SessionReport:
-    """The six rules for ``day``; nothing read is ever written."""
+    """The seven rules for ``day``; nothing read is ever written."""
     report = SessionReport(session_date=day)
     session = market_session(day)
     if session is None:
@@ -1395,6 +1591,7 @@ def check_session(day: date, *, logs: Path, data: Path, db: Path) -> SessionRepo
             report.rules = [
                 _rule_identities(context), _rule_attribution(context), _rule_caps(context),
                 _rule_size(context), _rule_daily_loss(context), _rule_fences(context),
+                _rule_day_risk_budget(context),
             ]
             report.inputs = _inputs(context, logs, data, db, supervisor_files)
     except InputsMissing as exc:
@@ -1408,12 +1605,14 @@ def check_session(day: date, *, logs: Path, data: Path, db: Path) -> SessionRepo
 
 __all__ = [
     "BRIDGE_IDENTITY_CAPS",
+    "DAY_RISK_BUDGET_UNVERIFIED",
     "DECISIONS_SQL",
     "EXIT_FAILED",
     "EXIT_INPUTS_MISSING",
     "EXIT_PASSED",
     "FAIL",
     "IdentityCaps",
+    "BudgetCheck",
     "InputsMissing",
     "PASS",
     "SessionReport",
@@ -1422,6 +1621,7 @@ __all__ = [
     "entry_deadline",
     "mask_accounts",
     "open_read_only",
+    "parse_budget_ok",
     "parse_intent",
     "read_bridge_section",
     "strategy_name_from_spec",

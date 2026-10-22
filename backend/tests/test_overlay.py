@@ -731,15 +731,17 @@ def test_the_nights_weekly_summary_carries_the_section_before_the_replay(night):
     sections = [block.splitlines() for block in summary.split("\n\n")]
     assert sections[0][0] == "Paper promotion (paper-promotion-v1; reports only, nothing is granted)"
     assert sections[1][0].startswith("Window research") and sections[2][0].startswith("Live R")
-    assert sections[3] == [
+    # Rewritten for v7c P3-B3 (explicit, not weakened): the v7c section follows live R, phase 3 follows it.
+    assert sections[3][0].startswith("V7C day risk budget")
+    assert sections[4] == [
         "Phase-3 readiness (AP_MOMO_HOD_V1 vs MOMO_HOD_V2 on the same setups, net R): no paired setups yet",
         "  not ready: managed sessions 0/20, judged setups 0/30, AI-picked setups 0/10,"
         " no bounds yet (two managed days with trades needed)",
     ]
-    assert sections[4][0] == "Research replay 2026-10-12..2026-10-12: 1 sessions, 2 symbols"
+    assert sections[5][0] == "Research replay 2026-10-12..2026-10-12: 1 sessions, 2 symbols"
     directory = night["root"] / "reports" / "2026-10-12"
     evidence_report = json.loads((directory / "evidence.json").read_text())
     assert evidence_report["phase3"]["readable"] is True
     assert evidence_report["phase3"]["pairs"]["total"] == 0
     assert evidence_report["phase3"]["range"]["start"] is None  # every session so far
-    assert (directory / "evidence.txt").read_text().rstrip("\n").endswith(sections[3][-1])
+    assert (directory / "evidence.txt").read_text().rstrip("\n").endswith(sections[4][-1])
