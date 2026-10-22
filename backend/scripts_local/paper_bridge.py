@@ -1445,6 +1445,7 @@ class Bridge:
         self.stops_seen: dict[tuple[int, int], Decimal] = {}  # (client, order id) -> stop price last seen
         self.unprotected_since: dict[tuple[str, ...], datetime] = {}
         self.attention_gaps: dict[str, datetime] = {}  # needs_attention bracket -> first read the account held less
+        self.oversized_since: dict[tuple[str, ...], datetime] = {}  # oversized-stop episode -> first tick seen
         self.open_orders_sent: dict[int, datetime] = {}  # open-orders request number -> when it was sent
         self.watch_failures = 0
         with self.app.lock:  # rejections of restored legs must be CRITICAL too
@@ -2569,7 +2570,8 @@ class Bridge:
         with self.app.open_orders_answer:
             return self.app.open_orders_answer.wait_for(lambda: self.app.open_orders_answered >= wanted, timeout)
 
-    def refresh_order_book(self, *, timeout: float | None = None) -> list[AccountOrder] | None:
+    def refresh_order_book(self, *, timeout: float | None = None,
+                           wait_owed: bool = False) -> list[AccountOrder] | None:
         """Every client's working orders (reqAllOpenOrders), TWS's own stops included; None when TWS
         does not finish in time (the previous book then ages out after ORDER_BOOK_MAX_AGE).
 
@@ -2580,12 +2582,21 @@ class Bridge:
         /closeall sells nothing it cannot check, and the budget keeps the last full book until it
         ages out. While a request is owed no new one is sent and this returns None at once, so a
         tick never waits on an answer TWS lost (N18c-LOW-1); once TWS answers, the next request
-        completes again.
+        completes again. ``wait_owed`` (the owner desk, N18d-LOW-1): first wait, inside the same
+        budget, for the owed answer, then send this request; None only if the budget runs out, so a
+        slow TWS (3-10 s) does not refuse the owner's exits while the watch's request is still owed.
         """
+        budget = self.sync_timeout if timeout is None else timeout
+        deadline = time.monotonic() + budget
         wanted = self.request_open_orders(all_clients=True)
+        if wanted is None and wait_owed:
+            with self.app.lock:
+                owed = self.app.open_orders_requested
+            if self.open_orders_complete(owed, budget):  # TWS answers in order: then nothing is owed
+                wanted = self.request_open_orders(all_clients=True)
         if wanted is None:
             return None
-        if not self.open_orders_complete(wanted, self.sync_timeout if timeout is None else timeout):
+        if not self.open_orders_complete(wanted, max(0.0, deadline - time.monotonic())):
             return None
         with self.app.lock:
             book = list(self.app.account_orders.values())
@@ -2666,15 +2677,26 @@ class Bridge:
         """LOW-8 (owner Q6: WARN only, never a block): working stops that would sell more shares than
         they cover, once per contract and quantity; CRITICAL when they would sell more than the whole
         account position (the account would be short if they all fired). Stops sized to an owner buy
-        are left out (stops_sized_to_a_buy, N18b-LOW-1)."""
+        are left out (stops_sized_to_a_buy, N18b-LOW-1). Like the unprotected page, it waits for the
+        condition to outlast POSITION_GAP_GRACE (N18d-LOW-2): a position report that trails a fill must
+        not advise resizing or cancelling a stop that covers real shares. An ended episode pages again."""
+        now = self.now()
+        current: set[tuple[str, ...]] = set()
         for symbol, stops, covered, position in risk.oversized:
             key = (V7C_STOP_OVERSIZED, symbol, str(stops), str(covered))
+            current.add(key)
+            if now - self.oversized_since.setdefault(key, now) < POSITION_GAP_GRACE:
+                continue
             text = (f"{V7C_STOP_OVERSIZED} {symbol}: working stops sell {share_text(stops)} sh but cover"
                     f" {share_text(covered)} held")
             self.alert_once(key, f"WARN {text} — counted as covering; entries are not blocked", kind="INFO")
             if stops > position:
                 self.alert_once((*key, "short"), f"{text}: if they all fire the account is short"
                                 f" {share_text(stops - position)} sh — resize or cancel the extra stop in TWS")
+        for key in [key for key in self.oversized_since if key not in current]:
+            del self.oversized_since[key]
+            self.alerted.discard(key)
+            self.alerted.discard((*key, "short"))
 
     def watch_budget(self) -> None:
         """Every tick: re-read the book on its cadence, note stop prices, page once per widened stop,
@@ -3303,13 +3325,19 @@ class ManualDesk:
                 continue
             if now < fit.due:
                 continue
-            if self.unshown_fills({fit.parent_id}, fit.con_id, fit.order_ref) > 0:
+            unshown = self.unshown_fills({fit.parent_id}, fit.con_id, fit.order_ref) > 0
+            # N18d-LOW-3: a sale the position does not show yet (its update may even have come first) is
+            # taken off the owner's shares again: the fit could read 0 held and cancel a stop on shares
+            # really held. It waits, fail closed, until the contract has no unsettled sale.
+            if unshown or self.unsettled_qty(fit.con_id) > 0:
                 fit.waiting_since = fit.waiting_since or now
                 if now - fit.waiting_since >= POSITION_LAG_ALERT:
+                    after = (f"your buy's fill (order {fit.parent_id})" if unshown else
+                             f"a sale of {fit.symbol} it does not show yet")
                     self.note_once(("fit-position-lag", str(stop_id)), "CRITICAL",
                                    f"{fit.symbol}: no position update {int((now - fit.waiting_since).total_seconds())}s"
-                                   f" after your buy's fill (order {fit.parent_id}) — its attached stop {stop_id} is"
-                                   " kept as it is until the position shows the shares; check TWS")
+                                   f" after {after} — its attached stop {stop_id} is kept as it is until the position"
+                                   " shows the shares; check TWS")
                 continue
             remaining = _whole(getattr(cached, "totalQuantity", 0)) - stop_filled
             bought = self.entry_fills(fit.parent_id)
@@ -3625,8 +3653,9 @@ class ManualDesk:
 
     def open_orders_snapshot(self) -> list[AccountOrder] | None:
         """Every client's working orders, including stops the owner placed by hand in TWS (it also
-        refreshes the bridge's book, which the day risk budget reads)."""
-        return self.bridge.refresh_order_book()
+        refreshes the bridge's book, which the day risk budget reads). It waits for a request the
+        watch still owes, inside its own budget, rather than refuse at once (N18d-LOW-1)."""
+        return self.bridge.refresh_order_book(wait_owed=True)
 
     def reserves_shares(self, item: AccountOrder, con_id: int, counted: frozenset[str]) -> bool:
         # Every working sell on the contract can still take shares: the owner's own (TWS or
