@@ -60,7 +60,7 @@ THE ENVELOPE     = the limits inside which the machine trades:
 | Area | Machine does |
 |---|---|
 | Signals | Strategy children evaluate rules and write decisions to the DB |
-| Sizing | RiskPolicy base × fixed identity multiplier × (managed factor if managed) |
+| Sizing | RiskPolicy base × the identity's size in force (read once at the session start from the size store, else its reviewed baseline: 3.1) × (managed factor if managed). Size **step-downs** apply by themselves at the next session (8.2) |
 | Gating | Allowlist, caps, entries/day, deadlines, daily loss, fences |
 | Orders | Bracket per entry: parent LMT + target LMT + **stop STP resting at IB** |
 | Exits | Targets/stops at IB; 15:45 ET flatten; working-parent expiry at the deadline |
@@ -72,8 +72,8 @@ THE ENVELOPE     = the limits inside which the machine trades:
 
 | Area | Why it stays human |
 |---|---|
-| Any **increase** in risk (multiplier up, cap up, entries/day up, new sendable identity) | A system that can raise its own limits has no limits |
-| The ceilings themselves | They define the envelope |
+| Any **increase** in risk (a size step up, cap up, entries/day up, a higher day risk budget, new sendable identity) | A system that can raise its own limits has no limits. A size step up happens only through the owner's own phone approval of one proposal (`/approve` then `/confirm`, `[PLANNED]` P3-D), **never automatically** (owner decision D2, 2026-10-18); until P3-D is live no size can go up |
+| The ceilings themselves (×1 for every identity, PAPER only: D3) and the baselines | They define the envelope; each changes only in a reviewed commit |
 | Moving toward **LIVE** | Separate future milestone; nothing on this roadmap moves toward it implicitly |
 | IBKR 2FA login (weekly, Sunday) | IBKR requires it |
 | Reading reviews and approving deploys | Review ≠ deploy |
@@ -235,17 +235,17 @@ Registry: `shadow_service.STRATEGIES` (`backend/trading/operations/shadow_servic
 
 | Key | Spec name (identity) | Send status | Notes |
 |---|---|---|---|
-| `momo` | `MOMO_HOD_V2` | **Sendable** `[NOW]` | Full size (×1) |
-| `orb-v2` | `ORB_V2` | **Sendable** `[NOW]` (v7b) | ×0.25 |
-| `vwap-v2` | `VWAP_PB_V2` | **Sendable** `[NOW]` (v7b) | ×0.5 |
-| `gap-v2` | `GAP_GO_V2` | **Sendable** `[NOW]` (v7b) | ×0.5 |
+| `momo` | `MOMO_HOD_V2` | **Sendable** `[NOW]` | Baseline full size (×1); size in force: 3.1 |
+| `orb-v2` | `ORB_V2` | **Sendable** `[NOW]` (v7b) | Baseline ×0.25 |
+| `vwap-v2` | `VWAP_PB_V2` | **Sendable** `[NOW]` (v7b) | Baseline ×0.5 |
+| `gap-v2` | `GAP_GO_V2` | **Sendable** `[NOW]` (v7b) | Baseline ×0.5 |
 | `momo-ap` | `AP_MOMO_HOD_V1` | Shadow only | The only **managed** strategy (AI day-manager sizing) |
 | `orb`, `vwap`, `gap` | `ORB_V1`, `VWAP_PB_V1`, `GAP_GO_V1` | Shadow only, not scheduled | Registered for the CLI and the replay |
 | — | `SH_MOMO_HOD_V3` | `[PLANNED]` shadow exit research | **Never sendable** |
 
 Rules:
 - The send gate is **exact match** on the identity name. Prefix matching (`startswith("MOMO_HOD")`) is the old, removed design: never reintroduce it.
-- Spec names must be unique across the registry; the launch preflight refuses duplicates and any disagreement between the registry, the sendable tuple and the size table.
+- Spec names must be unique across the registry; the launch preflight refuses duplicates and any disagreement between the registry, the sendable tuple, the size (baseline) table and the ceiling table.
 - `SENDABLE_IDENTITIES` lives in `backend/trading/sendable_identities.py`; the bridge carries its own frozen copy, pinned equal by test.
 - Every sendable child polls before every shadow child (`STRATEGY_POLL_OFFSETS`); the launch refuses any other order.
 
@@ -259,16 +259,27 @@ Rules:
 quantity = floor( policy_quantity × identity_multiplier × managed_multiplier )
 
 policy_quantity      RiskPolicy base: 0.5 % of NLV at risk, ≤ 15 % of NLV notional
-identity_multiplier  fixed per identity, frozen (trading/risk/identity_sizing.py)
+identity_multiplier  the identity's size in force for the session: read ONCE at its start from
+                     the size store (autotrader_size_events, migration 18), else its reviewed
+                     baseline (trading/risk/identity_sizing.py); never above its ceiling
 managed_multiplier   1 for unmanaged identities; AI day-manager value for managed ones
 ```
 
-| Identity | Multiplier | Max risk / order | Max notional / order |
-|---|---|---|---|
-| MOMO_HOD_V2 | 1 | 0.50 % | 15.0 % |
-| VWAP_PB_V2 | 0.5 | 0.25 % | 7.5 % |
-| GAP_GO_V2 | 0.5 | 0.25 % | 7.5 % |
-| ORB_V2 | 0.25 | 0.125 % | 3.75 % |
+| Identity | Baseline | Ceiling (PAPER) | Max risk / order at baseline | Max notional / order at baseline |
+|---|---|---|---|---|
+| MOMO_HOD_V2 | ×1 | ×1 | 0.50 % | 15.0 % |
+| VWAP_PB_V2 | ×0.5 | ×1 | 0.25 % | 7.5 % |
+| GAP_GO_V2 | ×0.5 | ×1 | 0.25 % | 7.5 % |
+| ORB_V2 | ×0.25 | ×1 | 0.125 % | 3.75 % |
+
+**Size in force** `[NOW]` (P3-C; owner decisions D2 and D3, 2026-10-18):
+- **Ladder.** A size moves one rung of ×0.25 → ×0.5 → ×1 at a time, and only through rows of `autotrader_size_events`. No row in force: the baseline.
+- **Only at a session start.** Each strategy child reads its size once, at the start of its run (after its connect wait, from about 09:23 ET), and keeps it all session; a restarted child reads the same size. An event written after the session's start (07:55 ET) is ignored that session (CRITICAL `size_event_written_mid_session`) and takes effect at the next one.
+- **Exactly two writers** (D6). The nightly automatic step-down (`trading/research/size_writer.py`, P3-E, ships with this layer): one rung down, effective at the next session, with a silent note (8.2). The owner's phone approval of one step-up proposal (`/approve` then `/confirm`, `[PLANNED]` P3-D): until it is live no size can go up. No CLI verb, agent, AI manager or hand edit writes a size (I-10).
+- **Ceiling ×1 for all four, PAPER only**, keyed by account mode (`IDENTITY_SIZE_CEILING["paper"]`, `CURRENT_ACCOUNT_MODE = "paper"`). LIVE has no ceiling row and no path (D3: a future LIVE milestone starts every size at ×0.25; nothing is built for it).
+- **Fail closed** (I-7, O13). An unreadable store (migration 18 pending included), a size above the ceiling, an account mode or identity without a ceiling, or an event chain that does not start at the baseline: the identity has no size, every setup of its run is blocked `identity_sizing_missing`, one CRITICAL names the token. Never a cached, remembered or default size.
+- **Evidence.** Every decision's sidecar line records the size it was sized with, and its realism (8.2). `session check` rule 4 checks every SENT against the size in force that day, read from the store: an unreadable store is a WARN `size_in_force_unknown` (each SENT held only to the ×1 ceiling), never a PASS and never the baseline.
+- **AGENTS.md.** Its PAPER authority bullet still names each identity's baseline size and wins until the owner approves the amendment that ships with this layer (Appendix D, D-15).
 
 **Bridge ceiling** (backstop, must never bind in normal operation): 1 % risk / 25 % notional per order.
 
@@ -289,7 +300,7 @@ def scaled_quantity(q: int, m: Decimal) -> int:
     return int((Decimal(q) * m).to_integral_value(ROUND_FLOOR))   # 0 → size_scaled_to_zero
 ```
 
-Worked example (NLV $100,000, entry $50.00, stop $49.00):
+Worked example at the baselines (NLV $100,000, entry $50.00, stop $49.00):
 
 ```
 by_risk      = 100,000 × 0.005 / 1.00 = 500 sh
@@ -322,14 +333,29 @@ VWAP_PB_V2 ×0.5 → floor(0.5) = 0 → terminal decision "size_scaled_to_zero"
 - With `max_entries_per_day = 1`, ORB/GAP evidence is "first signal of the day only". This limitation is known and accepted.
 - Caps rows are validated at import (positions ≥ 1, entries None or ≥ 1, offset in (0, 6 h]) and the table is read-only at runtime.
 
-### 3.3 Daily loss
+### 3.3 Daily loss and the day risk budget (bridge v7c, account level) `[NOW]`
+
+Owner decisions D1 and D5 (2026-10-18). The source of truth is `paper_bridge.py` (`budget_problem`, `account_open_risk`, `account_realized_loss`).
 
 ```
-shared across all identities · basis = realized P&L today · limit = −2 % of NLV
-at the limit: BLOCK new entries · NEVER flatten (stops/targets and 15:45 handle exits)
+scope            the whole account: bot brackets, owner manual orders, any other position
+DAY RISK BUDGET  a risk-increasing order is sent only if
+                   realized_loss + open_risk + new_risk  ≤  3 % of NLV
+                 realized_loss = max(0, −net realized P&L today)        gains never fund risk
+                 open_risk     = Σ held × max(0, avg entry − CURRENT stop)
+                               + Σ unfilled × (limit − stop)             every new bracket counts
+                 each risk × STOP_SLIPPAGE_FACTOR (1.0; never below 1; measured nightly)
+DAILY LOSS       account realized loss ≥ 2 % of NLV → no risk-increasing order (daily_loss_limit)
+NEVER BLOCKED    exits, closes, cancels, stop-tightening, the 15:45 flatten
+NEVER            a flatten because of either rule · a same-day override (D5)
 ```
 
-Budget: worst-case concurrent open risk = 3 × 0.5 + 0.25 + 0.25 + 0.125 = **2.125 %** (63.75 % notional), so the −2 % block can be overshot by ~0.125 % plus slippage; a worst realized day is about 4 %. Accepted for paper evidence (owner, 2026-10-15). **An open-risk term (v7c) gates the first approved promotion above current sizes** — at all four identities ×1 the figure becomes 3.0 %.
+- **Current stops.** The open risk follows the stop actually working: the lowest working SELL STP on the contract, from every client's open orders (re-read every 30 s). A stop the owner raises in TWS (the bot never moves a stop) frees budget; a widened stop is counted at its new price and pages `v7c_stop_widened` (CRITICAL); the position is never flattened.
+- **Check and reservation are one step.** The check runs on the bridge loop right before `placeOrder`, after the quote wait and the fences, and the order is stored before it leaves: two decisions of one tick cannot spend the same budget.
+- **Unprotected shares** (no covering stop, a short, or a bot position whose stop leg is dead) refuse every risk-increasing order, bot and manual (`v7c_unprotected_position`), until the position is closed or protected by a stop that stays working (GTC).
+- **Owner manual entries carry a stop** (`/buy 100 AAPL at 180 stop 175`); a buy without one is refused. Its risk is qty × (entry − stop). Manual realized losses count toward the −2 % block.
+- **Every block is logged with its numbers:** `v7c_day_risk_budget: realized X + open Y + new Z = W (P%) > 3% of N` (bridge.log, the bracket's `skip_reason`, the manual row's reject code); every accepted entry logs `v7c_budget_ok`. The nightly `v7c` report counts blocked trades with what they would have made, by source (bot / manual), and the stop slippage per identity; `session check` rule 7 matches every accepted entry to its own budget line.
+- **The numbers stay.** The cap stays at 3 % while sizes grow (with every identity at its ×1 ceiling the caps' worst case is 3 × 0.5 + 0.5 + 0.5 + 0.5 = 3.0 %); 2.5 % is revisited with data from at least 20 v7c sessions (O11). The −2 % realized block stays. Changing either is a reviewed change.
 
 ### 3.4 Order structure
 
@@ -1099,35 +1125,61 @@ $CTL paper stop --reason "owner emergency stop"
 ## PART 8 — PROMOTION AND DEMOTION (EARN-IT-BY-RESULTS)
 
 ### 8.1 Current state
-Multipliers and caps are **code constants**. Any change is a constants commit → review → deploy. There is no runtime promotion yet.
+Sizes live in the database (`autotrader_size_events`, migration 18) and change only at a session start (3.1). The baselines, the ladder, the ceilings, the caps and the day risk budget are **code constants**: changing one is a constants commit → review → deploy. Step-downs are automatic (8.2); a step-up needs the owner's phone approval (`[PLANNED]` P3-D): until that is live, no size can go up.
 
-### 8.2 Mode (owner decision 2026-10-15: build toward `auto_within_ceiling` in two stages)
+### 8.2 Mode (owner decision D2, 2026-10-18: every step up by phone approval, step-downs automatic)
 
 ```
-STAGE 1  propose              [PLANNED] P1-B  the promotion rule runs nightly in propose mode, as the
+STAGE 1  propose              [NOW] P1-B      the promotion rule runs nightly in propose mode, as the
                                              promoter's own shadow. It writes proposals with their evidence
-                                             (proposals.json + one Telegram line each); nothing changes until
-                                             the owner approves; approved steps ship as constants commits.
+                                             (proposals.json; delivered as in Stage 2); nothing changes until
+                                             the owner approves, and an approved step up is a size event
+                                             (Stage 2), never a constants commit.
                                              Auto-fence (risk-reducing, Part 8.4) is allowed to the runtime.
                                              Every decision records its effective multiplier
                                              (size_multiplier_effective, in the decision-sizing sidecar
                                              <db stem>-decision-sizing/<run>.jsonl beside the database, never
                                              in the fingerprinted decision), so a size step never restarts
                                              the identity's evidence; decisions before the sidecar derive it
-                                             from the run's source_sha. A sidecar write is bounded to 2 s;
+                                             from the run's source_sha, and a run at or after the size
+                                             store's install without a sidecar line from the store's events.
+                                             Sidecar version 2 (P3-F, D3) adds each decision's realism: its
+                                             quantity, the newest bar's volume, the size as % of that
+                                             volume and the quote's spread in bps, flagged
+                                             size_above_bar_volume_pct (> 1 %) and spread_above_bps
+                                             (> 50 bps) (O4); evidence only, no gate reads them. Readers
+                                             accept version 1 and 2 lines. A sidecar write is bounded to 2 s;
                                              after a timeout or an OS error the sidecar is off for the rest
                                              of that run (sizing_record_failed once, then one "disabled for
                                              this run" line). Decisions are never affected.
                                              No "up" proposal is emitted while the open-risk term (v7c)
                                              is not deployed.
-STAGE 2  auto_within_ceiling  [PLANNED]      PAPER only. Flip only after (a) one identity met the written
-                                             thresholds and (b) the owner's last 5 proposal decisions were
-                                             unchanged approvals. The flip = migration (multiplier rows) +
-                                             code-pinned per-identity ceiling (never above ×1.0) + ES review
-                                             of the rule. A missing runtime row falls back to the pinned
-                                             constant, never the ceiling; an unreadable DB skips entries.
-                                             Every change pages the owner.
+STAGE 2  owner-approved sizes (D2; replaces the "auto_within_ceiling" stage of 2026-10-15, which is not
+         built and will not be: an approval streak measures the owner, not the strategy, and repeated
+         nightly looks inflate false positives)
+  sizes      [NOW] P3-C   live in the database, change only at a session start, never above the
+                          ceiling (×1 for all four, PAPER only: D3); fail closed (3.1)
+  step down  [NOW] P3-E   ships with this layer. A demotion applies BY ITSELF at the next session,
+                          one rung down, with a silent, informational note; below ×0.25 the
+                          identity is fenced instead (reason "sentinel: demotion to shadow-only
+                          (…)", through fence_identity: it obeys SENTINEL_FENCES_LIVE, and resume
+                          stays the owner's). It never raises a size.
+  step up    delivery     [NOW] P3-E  the night's proposals go out as ONE batched message, silent
+                          (disable_notification), with Approve / Reject buttons per proposal id;
+                          a normal-sound reminder 2 h before the deadline (05:55 ET) while one is
+                          pending; at the deadline (the next session's start, 07:55 ET) a silent
+                          "expired, sizes unchanged" note.
+             approval     [PLANNED] P3-D  NEVER automatic. Approve starts `/approve <pid>`; the bot
+                          answers with the proposal and a 6-hex code, and `/confirm <code>` within
+                          60 s writes the step up, effective at the next session not yet started.
+                          Bound to one proposal id, expires at the next session's start, accepted
+                          only from the owner's Telegram user id in the private chat; refused while
+                          a /halt is pending, and for an expired, superseded, fenced or
+                          above-ceiling proposal. Reject is one tap. Until P3-D is live the buttons
+                          do nothing: every proposal expires and the sizes stay.
 In BOTH stages: ceilings, new sendable identities and anything toward LIVE are owner decisions.
+Every schedule is anchored to America/New_York in code; the messages show the real deadline in
+Israel time as well (clock-change weeks: 25 Oct–1 Nov 2026 and 14–26 Mar 2027, Israel = ET+6).
 ```
 
 ### 8.3 Promotion rule (owner accepted these defaults on 2026-10-15)
@@ -1208,6 +1260,12 @@ cannot be seen without reading log lines: Playbook 7.8, by hand.
 - **The thresholds** are code constants in `backend/trading/operations/sentinel.py` (the owner's
   numbers of 2026-10-15; the losing streak 4 since 2026-10-17); changing one is a reviewed
   constants commit.
+- **Size step-down** (D2; P3-E, ships with this layer): the other risk-reducing action allowed to the
+  runtime. When the nightly promotion rule finds a demotion, the size writer lowers that identity
+  one rung by itself (a `step_down` event, effective at the next session's start; a silent note on
+  the phone). Below ×0.25 it fences the identity instead, through the same `fence_identity` path
+  (reason `sentinel: demotion to shadow-only (…)`), so it obeys `SENTINEL_FENCES_LIVE` and resume
+  stays the owner's. It never raises a size and never touches a session that has started.
 - **A sleeping Mac** stops it together with the notifier and the bridge: the external dead-man's
   switch (4.12) covers that.
 
@@ -1261,7 +1319,7 @@ This document carries no snapshot. The live sha, the candidate branches, the pin
 |---|---|---|
 | P1 Unattended days | In this order: phone `/status` + `/fences` + `/halt` with nonce · alert hysteresis (one shared state machine) · dead-man's switch **outside** the Mac (external ping monitor) · overnight Gateway watch with quiet hours and a 05:55/07:40 ET page, competing-login page in session hours · restart-count cap that ignores exits while the port is closed and lifts when it reopens · OPS section in the 16:05 report and log rotation. Two deploys at most; none on v7b day or before v7b's first clean session; no bridge change. | `[PLANNED]` |
 | P2 One-command deploy | Read-only half first: `autotraderctl deploy --check` (every STEP 0 refusal, verdict grep over every ledger, I-11 head rule, window check; no writes). Write half after P1 with its own review. | `[PLANNED]` |
-| P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; Stage 2 after the thresholds and five unchanged approvals. v7c (open-risk term) gates the first step up. | Auto-fence `[NOW]` (the Sentinel, 8.4); the rest as tagged in 8.2 |
+| P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; v7c, the 3 % account-level day risk budget (3.3), gates every step up; the size store with automatic step-downs, the nightly proposal delivery and the realism fields (3.1, 8.2); phone approval of step-ups (P3-D). Stage 2 is the owner's decision D2 (2026-10-18): every step up by phone approval, step-downs automatic, never "auto within ceiling". | Auto-fence `[NOW]` (the Sentinel, 8.4); v7c `[NOW]` (3.3); size store, step-downs, delivery and realism `[NOW]` with this layer; phone approval `[PLANNED]` (P3-D) |
 | P4 C2 replaces the bridge | After v7b's clean paper week: re-review #3, merge, port v7's exact allowlist / caps / fences / preflight / orderRef identity (migration: the ledger's `at1:` CHECK), move readers to the ledger, engine as a pinned child, drill, five clean sessions, manual desk, go-wide book, delete the old stack. | Built, unwired |
 | LIVE | Separate milestone, separate decision | Out of scope |
 
@@ -1330,3 +1388,4 @@ Resolved as stated; `AGENTS.md` wins wherever it speaks.
 | D-12 | Part 5 gave AGENT+ `/closeall`; 4.3.2–4.3.4 and D-10 disagreed on stop/resume | AGENTS.md: orders come only from deterministic code; phone order commands are the owner's | `/closeall` and phone orders OWNER only; stop AGENT+ only when asked; D-10 reworded (found by the v7b head re-read, 2026-10-15) |
 | D-13 | Part 5 / 6.1 let an unattended agent edit the bridge and commit | AGENTS.md: do not commit, push or rewrite history unless the owner asks | Commits only on worktree branches for work the owner asked for; push only when asked |
 | D-14 | 4.8 / 6.1 tested with pytest only | AGENTS.md: `SKIP_DOCKER=1 scripts/run_quality_gates.sh` before any commit, Docker gates before shipping | Added to 4.8, 6.1 and the deploy step |
+| D-15 | 3.1 and Part 8 (P3-F, 2026-10-22): sizes live in the database, step down by themselves and go up only by the owner's phone approval | AGENTS.md:7-11 writes each identity's size into the PAPER authority grant (plan C8) | AGENTS.md wins until the owner approves its amendment (plan Appendix A), which ships with the size-store layer. Nothing can disagree in effect before then: with no event every size is its baseline, a step-down only lowers risk, and no size can go up before P3-D |

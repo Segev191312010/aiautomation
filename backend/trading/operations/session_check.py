@@ -13,7 +13,10 @@ only these inputs and never changes any of them:
 * the database, opened ``file:...?mode=ro`` with ``query_only`` (never
   written, never migrated): the decisions exactly as the bridge reads them
   (``DECISIONS_SQL``, ``parse_intent``), the account snapshots a decision may
-  have been sized from, and ``autotrader_execution_fences``.
+  have been sized from, and ``autotrader_execution_fences``; and the size
+  store (``size_history.read_size_store``: migration 18's install time, and
+  the events through ``identity_sizing.read_size_events``, each its own
+  ``mode=ro`` open).
 
 Seven rules, each PASS, WARN or FAIL with its evidence lines:
 
@@ -30,13 +33,23 @@ Seven rules, each PASS, WARN or FAIL with its evidence lines:
    cap, and no entry comes at or after its last-entry time (the real XNYS
    close less its offset, half days included);
 4. size: every SENT's shares equal its decision's intent quantity (and the
-   state's), and that quantity is floor(policy quantity x identity row). The
-   policy quantity is recomputed with ``trading.risk.engine.policy_quantity``
-   at multiplier 1 only from recorded inputs (an account snapshot of the run
-   whose portfolio fingerprint is the decision's, and the default risk policy
-   by fingerprint); without them the rule says ``size check: inputs not
+   state's), and that quantity is floor(policy quantity x size in force). The
+   size in force is the identity's size for D as its strategy child read it
+   at the session's start: the latest size event effective on or before D and
+   written before the session's start, else the reviewed baseline row (also
+   for a database without the size store, or a session that started before
+   the store's install). A store that cannot be read (or whose event chain
+   does not start at the baseline, or whose size is above the ceiling) names
+   no size: ``size_in_force_unknown`` (WARN, never PASS, never the baseline),
+   and the quantity is held only to the paper ceiling (x1). An event written
+   after the session's start is not in force (the child ignored it) and is
+   flagged ``size_event_written_mid_session`` (WARN). The policy quantity is
+   recomputed with ``trading.risk.engine.policy_quantity`` at multiplier 1
+   only from recorded inputs (an account snapshot of the run whose portfolio
+   fingerprint is the decision's, and the default risk policy by
+   fingerprint); without them the rule says ``size check: inputs not
    recorded`` (WARN, never PASS). Either way it FAILs a quantity above the
-   identity row's size even at the logged net liquidation +10 %, or above the
+   size in force even at the logged net liquidation +10 %, or above the
    bridge's order ceilings (25 % notional, 1 % risk of net liquidation);
 5. daily loss: realized P&L >= -2 % of net liquidation, or no entry was sent
    once the realized loss had reached it;
@@ -78,6 +91,7 @@ from typing import Any, cast
 from trading.contracts import AccountSnapshot, PortfolioSnapshot, RiskPolicy, RuleSetup
 from trading.operations.log_tailer import line_time, without_carried
 from trading.research.live_ledger import BRIDGE_STATE_DIRECTORY, STATE_SCHEMA_PREFIX
+from trading.research.size_history import SizeStoreView, read_size_store
 from trading.research.v7c_report import (
     DAY_RISK_BUDGET_PCT,
     STOP_SLIPPAGE_FACTOR,
@@ -89,11 +103,17 @@ from trading.research.v7c_report import (
     block_token,
 )
 from trading.risk.engine import policy_quantity, scaled_quantity
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+from trading.risk.identity_sizing import (
+    CURRENT_ACCOUNT_MODE,
+    IDENTITY_SIZE_CEILING,
+    IDENTITY_SIZE_MULTIPLIER,
+    SIZE_EVENT_WRITTEN_MID_SESSION,
+)
 from trading.risk.portfolio import portfolio_from_account
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import GLOBAL_FENCE, IDENTITY_FENCE_PREFIX
+from trading.storage.size_schema import SIZE_STORE_MIGRATION
 
 EXIT_PASSED = 0
 EXIT_FAILED = 1
@@ -164,6 +184,9 @@ ACCOUNT_SNAPSHOTS_SQL = (
     "SELECT payload_json FROM autotrader_account_snapshots WHERE run_id = ? ORDER BY observed_at, id"
 )
 FENCES_SQL = "SELECT name, stopped, reason, updated_at FROM autotrader_execution_fences ORDER BY name"
+# Rule 4: a SENT whose size in force the store cannot name is held to the
+# ceiling alone and never passes (it is never checked against the baseline).
+SIZE_IN_FORCE_UNKNOWN = "size_in_force_unknown"
 
 BRIDGE_LOG = "bridge.log"
 SUPERVISOR_LOG = "supervisor.log"
@@ -953,6 +976,7 @@ class _Context:
     fences: list[FenceRecord]
     timeline: Timeline
     connection: sqlite3.Connection
+    sizes: Mapping[str, SizeInForce] = field(default_factory=dict)
 
     @property
     def logged_sendable(self) -> set[str] | None:
@@ -1199,6 +1223,61 @@ def _recorded_portfolio(context: _Context, decision: LedgerDecision) -> Portfoli
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class SizeInForce:
+    """One sendable identity's size for the checked session, and where it came from.
+
+    ``factor`` is ``None`` when the size store names no size; the rule then
+    never falls back to the baseline row.
+    """
+
+    factor: Decimal | None
+    source: str
+    baseline: bool = False
+    ignored: tuple[int, ...] = ()
+
+    @property
+    def label(self) -> str:
+        if self.factor is None:
+            return "size unknown"
+        return f"{_factor(self.factor)} row" if self.baseline else f"{_factor(self.factor)} size in force"
+
+
+def _size_in_force(store: SizeStoreView, identity: str, day: date) -> SizeInForce | None:
+    """``identity``'s size in the session ``day`` as its strategy child read it at the session's start.
+
+    The store's own rule (``SizeStoreView.size_for``, the one ``size_history`` sizes
+    store-era runs with; it folds into ``identity_sizing``'s public size-in-force
+    read once that lands). Without a size store in this database, or for a
+    session that started before the store's install, the child had no store to
+    read: the reviewed baseline row. A store that cannot be read names no size
+    (``factor`` None), never the baseline. ``None`` for a name without a
+    baseline row (not sendable).
+    """
+    baseline = IDENTITY_SIZE_MULTIPLIER.get(identity)
+    if baseline is None:
+        return None
+    size = store.size_for(identity, day)
+    if size is None:
+        why = (f"no size store in this database (migration {SIZE_STORE_MIGRATION} not applied)"
+               if store.installed_at is None else
+               f"the session started before the size store's install ({store.installed_at.isoformat()})")
+        return SizeInForce(baseline, f"baseline row: {why}", baseline=True)
+    return SizeInForce(size.factor, size.source, baseline=size.factor is not None and size.event_id is None,
+                       ignored=size.ignored)
+
+
+def read_sizes_in_force(db: Path, day: date) -> dict[str, SizeInForce]:
+    """Every sendable identity's size in the session ``day`` (rule 4's reference), read-only."""
+    store = read_size_store(db)
+    sizes: dict[str, SizeInForce] = {}
+    for identity in sorted(IDENTITY_SIZE_MULTIPLIER):
+        size = _size_in_force(store, identity, day)
+        if size is not None:
+            sizes[identity] = size
+    return sizes
+
+
 @dataclass(slots=True)
 class _Sized:
     """One SENT's size verdict: its failures, its evidence line, and what stayed unchecked."""
@@ -1207,6 +1286,7 @@ class _Sized:
     detail: str = ""
     exact: bool = False
     unchecked: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
 
 
 def _size_entry(context: _Context, entry: Entry) -> _Sized:
@@ -1224,11 +1304,23 @@ def _size_entry(context: _Context, entry: Entry) -> _Sized:
                                                                        entry.target):
         sized.failures.append(f"{entry.name}: SENT {entry.qty} @ {entry.entry}/{entry.stop}/{entry.target}, its"
                               f" decision's intent {intent.quantity} @ {intent.entry}/{intent.stop}/{intent.target}")
-    row = IDENTITY_SIZE_MULTIPLIER.get(entry.identity)
-    if row is None:
+    size = context.sizes.get(entry.identity)
+    if size is None:
         sized.failures.append(f"{entry.name}: {entry.identity} has no identity size row")
         return sized
     parts = [f"{intent.quantity} sh = SENT = intent" + (" = state" if bracket is not None else "")]
+    row = size.factor
+    label = size.label
+    if row is None:
+        # The store names no size: hold the quantity to the ceiling, never pass it on the baseline.
+        ceiling = IDENTITY_SIZE_CEILING.get(CURRENT_ACCOUNT_MODE, MappingProxyType({})).get(entry.identity)
+        if ceiling is None:
+            sized.failures.append(f"{entry.name}: {entry.identity} has no {CURRENT_ACCOUNT_MODE} ceiling")
+            return sized
+        row, label = ceiling, f"{_factor(ceiling)} {CURRENT_ACCOUNT_MODE} ceiling"
+        sized.unknown.append(f"{entry.name}: {SIZE_IN_FORCE_UNKNOWN} ({size.source}); checked only against the"
+                             f" {label}")
+    parts.append(f"size in force {_factor(size.factor) if size.factor is not None else 'unknown'} ({size.source})")
     net_liq = entry.net_liquidation
     if net_liq is None:
         sized.unchecked.append(f"{entry.name}: the bridge logged no net liquidation in this process:"
@@ -1248,10 +1340,17 @@ def _size_entry(context: _Context, entry: Entry) -> _Sized:
     if recorded is not None:
         policy = _policy_quantity(recorded, entry.entry, entry.stop)
         expected = scaled_quantity(policy, row)
-        sized.exact = expected == intent.quantity
-        if not sized.exact:
-            sized.failures.append(f"{entry.name}: {intent.quantity} sh, but floor(policy {policy} x {_factor(row)})"
-                                  f" = {expected} at the recorded net liquidation {recorded.net_liquidation}")
+        if size.factor is None:  # never exact: only a quantity above the ceiling is decided
+            if intent.quantity > expected:
+                sized.failures.append(f"{entry.name}: {intent.quantity} sh is above its {label}: floor(policy"
+                                      f" {policy} x {_factor(row)}) = {expected} at the recorded net liquidation"
+                                      f" {recorded.net_liquidation}")
+        else:
+            sized.exact = expected == intent.quantity
+            if not sized.exact:
+                sized.failures.append(f"{entry.name}: {intent.quantity} sh, but floor(policy {policy} x"
+                                      f" {_factor(row)}) = {expected} at the recorded net liquidation"
+                                      f" {recorded.net_liquidation}")
         parts.insert(1, f"floor(policy {policy} x {_factor(row)}) = {expected} at the recorded net liquidation"
                         f" {recorded.net_liquidation}")
         sized.detail = f"{entry.name}: " + "; ".join(parts)
@@ -1275,11 +1374,11 @@ def _size_entry(context: _Context, entry: Entry) -> _Sized:
     implied = f"x{(Decimal(intent.quantity) / policy).quantize(Decimal('0.01'))}" if policy > 0 else "x?"
     band = f"+{_plain(NET_LIQUIDATION_BAND * 100)}%"
     if intent.quantity > bound:
-        sized.failures.append(f"{entry.name}: {intent.quantity} sh is above its {_factor(row)} row: at most {bound}"
+        sized.failures.append(f"{entry.name}: {intent.quantity} sh is above its {label}: at most {bound}"
                               f" sh even at net liquidation {high.quantize(Decimal('0.01'))} (logged {band}); about"
                               f" {implied} of the policy size {policy} at {reference}")
     parts.insert(2, f"about {implied} of the policy size {policy} at the logged net liquidation {reference};"
-                    f" row {_factor(row)} allows at most {bound} at {band}")
+                    f" {label} allows at most {bound} at {band}")
     sized.detail = f"{entry.name}: " + "; ".join(parts)
     return sized
 
@@ -1287,6 +1386,7 @@ def _size_entry(context: _Context, entry: Entry) -> _Sized:
 def _rule_size(context: _Context) -> RuleResult:
     failures: list[str] = []
     unchecked: list[str] = []
+    unknown: list[str] = []
     details = [f"the bridge's ceiling refused a decision: {skip.line.evidence()}"
                for skip in context.timeline.skips if "exceeds" in skip.reason and "net liquidation" in skip.reason]
     exact = 0
@@ -1294,26 +1394,38 @@ def _rule_size(context: _Context) -> RuleResult:
         sized = _size_entry(context, entry)
         failures += sized.failures
         unchecked += sized.unchecked
+        unknown += sized.unknown
         exact += sized.exact
         if sized.detail:
             details.append(sized.detail)
+    sent = sorted({entry.identity for entry in context.timeline.entries})
+    flags = [f"{SIZE_EVENT_WRITTEN_MID_SESSION}: {name} size event(s) {', '.join(map(str, size.ignored))} written"
+             " after the session's start: not in force this session (its child ignored them)"
+             for name in sent if (size := context.sizes.get(name)) is not None and size.ignored]
     entries = len(context.timeline.entries)
     if failures:
         return RuleResult(4, "size", FAIL, f"{len(failures)} problem(s); first: {failures[0]}",
-                          failures + unchecked + details)
+                          failures + unknown + flags + unchecked + details)
     if not entries:
         return RuleResult(4, "size", PASS, "no SENT: nothing was sized", details)
+    if unknown:
+        return RuleResult(4, "size", WARN,
+                          f"{SIZE_IN_FORCE_UNKNOWN}: the size store names no size for {len(unknown)} of {entries}"
+                          f" SENT, each held only to the {CURRENT_ACCOUNT_MODE} ceiling (never a PASS); first:"
+                          f" {unknown[0]}", unknown + flags + unchecked + details)
+    if flags:
+        return RuleResult(4, "size", WARN, f"{len(flags)} flag(s); first: {flags[0]}", flags + unchecked + details)
     if exact < entries:
         rest = f"; {len(unchecked)} check(s) could not run, see details" if unchecked else ""
         return RuleResult(4, "size", WARN,
                           f"size check: inputs not recorded for {entries - exact} of {entries} SENT; every SENT's"
                           " shares equal its decision's intent and stay inside the bridge's ceilings and below its"
-                          f" identity row at the logged net liquidation{rest}", unchecked + details)
+                          f" size in force at the logged net liquidation{rest}", unchecked + details)
     if unchecked:
         return RuleResult(4, "size", WARN, f"{entries} SENT sized exactly; {len(unchecked)} check(s) could not run",
                           unchecked + details)
     return RuleResult(4, "size", PASS,
-                      f"{entries} SENT = floor(policy quantity x identity row) from recorded inputs", details)
+                      f"{entries} SENT = floor(policy quantity x size in force) from recorded inputs", details)
 
 
 def _rule_daily_loss(context: _Context) -> RuleResult:
@@ -1574,6 +1686,9 @@ def _inputs(context: _Context, logs: Path, data: Path, db: Path, supervisor_file
         f" ({data})",
         f"database {db} (read-only, mode=ro): {len(context.decisions)} shadow_accepted decision(s) on {context.day},"
         f" {len(context.fences)} fence row(s)",
+        "sizes in force (size store, read-only): " + ("; ".join(
+            f"{name} {_factor(size.factor) if size.factor is not None else 'unknown'} ({size.source})"
+            for name, size in sorted(context.sizes.items())) or "none"),
         f"XNYS close {context.closes_at:%H:%M} ET{' (half day)' if context.closes_at.time() != time(16) else ''}",
     ]
 
@@ -1599,6 +1714,7 @@ def check_session(day: date, *, logs: Path, data: Path, db: Path) -> SessionRepo
                 day=day, closes_at=session.closes_at.astimezone(NY), section=section, supervisor=supervisor,
                 state=state, decisions=decisions, fences=fences,
                 timeline=replay(section, state, decisions), connection=connection,
+                sizes=read_sizes_in_force(db, day),
             )
             report.rules = [
                 _rule_identities(context), _rule_attribution(context), _rule_caps(context),
@@ -1627,7 +1743,9 @@ __all__ = [
     "BudgetCheck",
     "InputsMissing",
     "PASS",
+    "SIZE_IN_FORCE_UNKNOWN",
     "SessionReport",
+    "SizeInForce",
     "WARN",
     "check_session",
     "entry_deadline",
@@ -1636,5 +1754,6 @@ __all__ = [
     "parse_budget_ok",
     "parse_intent",
     "read_bridge_section",
+    "read_sizes_in_force",
     "strategy_name_from_spec",
 ]

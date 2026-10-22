@@ -10,6 +10,7 @@ it opens (it used to drop the factor: every identity sized x1).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
 import json
@@ -636,3 +637,198 @@ def test_the_sidecar_module_reads_no_decision_back_and_touches_no_authority():
     assert not [name for name in imported if name.startswith(forbidden)], imported
     for statement in ("INSERT", "UPDATE ", "DELETE", "CREATE "):
         assert statement not in source
+
+
+# --------------------------------------------------------------------------
+# Sidecar version 2 (P3-F, owner decision D3): each decision's realism beside it
+# --------------------------------------------------------------------------
+
+# The realism keys of a version 2 line: none of them may ever reach a decision payload.
+REALISM_KEYS = ("bar_volume", "size_pct_of_bar_volume", "size_above_bar_volume_pct", "spread_bps", "spread_above_bps")
+
+
+def _row(**realism) -> DecisionSizing:
+    return DecisionSizing(
+        decision_id="decision-1", run_id="run-1", candidate_id="c-1", strategy_id="s-1", strategy_version=1,
+        strategy_name="VWAP_PB_V2", sendable=True, outcome="shadow_accepted", identity_factor=Decimal("0.5"),
+        managed_factor=Decimal("1"), decided_at=datetime(2026, 11, 9, 15, 0, tzinfo=timezone.utc), **realism,
+    )
+
+
+def _bps(bid: Decimal, ask: Decimal) -> Decimal:
+    """The spread in basis points of the midpoint, computed here from the quote's own sides."""
+    return ((ask - bid) / ((ask + bid) / 2) * 10000).quantize(Decimal("0.01"))
+
+
+def test_realism_thresholds_pinned():
+    """Owner decision D3 with the plan's defaults (O4): 1 % of the bar's volume, 50 bps of spread."""
+    assert sidecar.SIZING_SCHEMA == "autotrader-v1/decision-sizing"
+    assert sidecar.SIZING_VERSION == 2
+    assert sidecar.SIZING_READ_VERSIONS == frozenset({1, 2})
+    assert type(sidecar.SIZE_ABOVE_BAR_VOLUME_PCT) is Decimal and sidecar.SIZE_ABOVE_BAR_VOLUME_PCT == Decimal("1")
+    assert type(sidecar.SPREAD_ABOVE_BPS) is Decimal and sidecar.SPREAD_ABOVE_BPS == Decimal("50")
+
+
+@pytest.mark.anyio
+async def test_sidecar_v2_fields_and_flags():
+    """The production pipeline records each decision's quantity, the newest bar's volume, the size
+    as a share of that volume and the quote's spread, from the very inputs it assessed."""
+    capture = _Capture()
+    decision = (await _assess(_pipeline(capture, identity_multiplier=Decimal("0.5")))).decision
+    assert decision is not None and decision.risk is not None and decision.risk.intent is not None
+    [row] = capture.rows
+    now = BF_B.signal_end + timedelta(seconds=15)  # the moment _assess decides at
+    bars, quote = BF_B.bars_until(now), BF_B.quote(now)
+    volume = max(bars, key=lambda bar: bar.interval_end_utc).volume
+    assert (row.version, row.quantity, row.bar_volume) == (2, decision.risk.intent.quantity, volume)
+    assert (row.quantity, volume) == (1863, Decimal("3098"))  # floor(3726 x 0.5) shares on a 3098-share bar
+    assert row.size_pct_of_bar_volume == Decimal("60.1356")  # 1863 / 3098 x 100
+    assert row.spread_bps == _bps(quote.bid, quote.ask) == Decimal("3.74")  # 26.76 / 26.77
+    assert (row.size_above_bar_volume_pct, row.spread_above_bps) == (True, False)
+    payload = row.payload()
+    assert payload["version"] == 2
+    assert {key: payload[key] for key in ("quantity", *REALISM_KEYS)} == {
+        "quantity": 1863, "bar_volume": "3098", "size_pct_of_bar_volume": "60.1356",
+        "size_above_bar_volume_pct": True, "spread_bps": "3.74", "spread_above_bps": False,
+    }
+
+    # No trade intent (after the cutoff, no quote): no quantity and no share of volume; the bar's
+    # volume is still recorded. A candidate whose data never arrived: no realism at all.
+    pipeline = _pipeline(capture, identity_multiplier=Decimal("0.5"))
+    late = datetime(2026, 10, 12, 21, 0, tzinfo=timezone.utc)
+    rejected = (
+        await pipeline.assess_one(
+            run_id="run-replay", strategy=RECORD,
+            item=_bf_b_without_quote(), portfolio=PortfolioSnapshot(observed_at=late, net_liquidation="665000"),
+            policy=RiskPolicy(), session_date=late, admitted_symbols=frozenset({"BF B"}), now=late,
+        )
+    ).decision
+    blocked = await pipeline.record_data_blocked(run_id="run-replay", strategy=RECORD, candidate=BF_B.candidate())
+    late_row, blocked_row = capture.rows[1:]
+    assert rejected is not None and (late_row.decision_id, blocked_row.decision_id) == (rejected.id, blocked.id)
+    assert (late_row.quantity, late_row.size_pct_of_bar_volume, late_row.size_above_bar_volume_pct) == (None, None, None)
+    assert late_row.bar_volume == max(_bf_b_without_quote().bars, key=lambda bar: bar.interval_end_utc).volume
+    assert (late_row.spread_bps, late_row.spread_above_bps) == (None, None)
+    assert [getattr(blocked_row, key) for key in ("quantity", *REALISM_KEYS)] == [None] * 6
+
+    # The flags at their thresholds: exactly 1 % of the bar or 50 bps is not above; one step past is.
+    assert _row(quantity=100, bar_volume=Decimal("10000")).size_pct_of_bar_volume == Decimal("1")
+    assert _row(quantity=100, bar_volume=Decimal("10000")).size_above_bar_volume_pct is False
+    assert _row(quantity=101, bar_volume=Decimal("10000")).size_pct_of_bar_volume == Decimal("1.01")
+    assert _row(quantity=101, bar_volume=Decimal("10000")).size_above_bar_volume_pct is True
+    assert _row(quantity=3, bar_volume=Decimal("400")).size_pct_of_bar_volume == Decimal("0.75")
+    assert _row(quantity=3, bar_volume=Decimal("400")).size_above_bar_volume_pct is False
+    assert _row(spread_bps=Decimal("50")).spread_above_bps is False
+    assert _row(spread_bps=Decimal("50.01")).spread_above_bps is True
+    assert _row(spread_bps=Decimal("12.5")).spread_above_bps is False
+    # Any order is above 1 % of a bar that traded nothing; its share is not a number.
+    empty = _row(quantity=1, bar_volume=Decimal("0"))
+    assert (empty.size_pct_of_bar_volume, empty.size_above_bar_volume_pct) == (None, True)
+    # A spread computed from a quote: 10.00 / 10.10 is 99.50 bps, flagged.
+    from trading.contracts import QuoteSnapshot
+
+    wide = QuoteSnapshot(con_id=1, bid=Decimal("10.00"), ask=Decimal("10.10"), observed_at=now, min_tick=Decimal("0.01"))
+    record = sidecar.decision_sizing(
+        decision, strategy_name="VWAP_PB_V2", sendable=True, identity_factor=Decimal("0.5"),
+        managed_factor=Decimal("1"), bars=bars, quote=wide,
+    )
+    assert (record.spread_bps, record.spread_above_bps) == (_bps(wide.bid, wide.ask), True)
+    assert record.spread_bps == Decimal("99.50")
+
+
+def test_sidecar_reads_v1_and_v2(tmp_path):
+    """A T-8 (version 1) line and a version 2 line are both evidence; a line whose share of volume
+    or flags disagree with its own fields, or of a version this code does not know, is not."""
+    directory = tmp_path / "autotrader-decision-sizing"
+    directory.mkdir(mode=0o700)
+    v1_line = {  # exactly what T-8 wrote: no realism keys
+        "schema": "autotrader-v1/decision-sizing", "version": 1, "decision_id": "decision-v1", "run_id": "run-1",
+        "candidate_id": "c-1", "strategy_id": "s-1", "strategy_version": 1, "strategy_name": "ORB_V2",
+        "sendable": True, "outcome": "shadow_accepted", "identity_factor": "0.25", "managed_factor": "1",
+        "size_multiplier_effective": "0.25", "decided_at": "2026-10-19T14:00:00+00:00",
+    }
+    v2 = replace(_row(quantity=750, bar_volume=Decimal("50000"), spread_bps=Decimal("8.5")), decision_id="decision-v2")
+    v2_line = v2.payload()
+    assert (v2_line["size_pct_of_bar_volume"], v2_line["size_above_bar_volume_pct"]) == ("1.5", True)
+    (directory / "run-1.jsonl").write_text(json.dumps(v1_line) + "\n" + json.dumps(v2_line) + "\n")
+
+    index = read_decision_sizing(directory)
+    assert index.unreadable == ()
+    old, new = index.records["decision-v1"], index.records["decision-v2"]
+    assert (old.version, old.identity_factor, old.size_multiplier_effective) == (1, Decimal("0.25"), Decimal("0.25"))
+    assert [getattr(old, key) for key in ("quantity", *REALISM_KEYS)] == [None] * 6
+    assert old.payload() == v1_line  # a version 1 record stays one: no realism keys appear
+    assert new == v2 and new.payload() == v2_line
+
+    tampered = {
+        "share": v2_line | {"size_pct_of_bar_volume": "0.5"},
+        "size flag": v2_line | {"size_above_bar_volume_pct": False},
+        "spread flag": v2_line | {"spread_above_bps": True},
+        "flag as a number": v2_line | {"spread_above_bps": 0},
+        "missing flag": {key: value for key, value in v2_line.items() if key != "spread_above_bps"},
+        "version 3": v2_line | {"version": 3},
+        "version true": v1_line | {"version": True},
+        "version text": v2_line | {"version": "2"},
+        "quantity bool": v2_line | {"quantity": True},
+        "quantity zero": v2_line | {"quantity": 0, "size_pct_of_bar_volume": "0", "size_above_bar_volume_pct": False},
+        "negative volume": v2_line | {"bar_volume": "-1"},
+        "volume text": v2_line | {"bar_volume": "lots"},
+    }
+    for name, line in tampered.items():
+        bad = tmp_path / name.replace(" ", "-")
+        bad.mkdir(mode=0o700)
+        (bad / "run-1.jsonl").write_text(json.dumps(line | {"decision_id": "decision-x"}) + "\n")
+        result = read_decision_sizing(bad)
+        assert (result.records, result.unreadable) == ({}, ("run-1.jsonl:1",)), name
+    with pytest.raises(ValueError, match="version 1 record has no realism"):
+        _row(quantity=1, version=1)
+    with pytest.raises(ValueError, match="not one this code reads"):
+        _row(version=3)
+
+
+@pytest.mark.anyio
+async def test_decision_payload_unchanged_by_sidecar_v2(tmp_path, monkeypatch):
+    """The realism lives beside the decision, never in it: the golden decisions (ORB, and the
+    recorded MOMO day through the repository runner with the default recorder) keep their keys
+    and stored digests, and no realism key reaches a stored payload."""
+    from config import cfg
+    from db.core import init_db
+    import sqlite3
+
+    for review in ("PROPOSE", "ABSTAIN", "fail"):
+        capture = _Capture()
+        recorded: list[str] = []
+
+        async def record(*, decision: Decision, owner_id: str) -> None:
+            recorded.append(decision.model_dump_json())
+
+        pipeline = ShadowPipeline(proposal_provider=_OrbReviewer(review), decision_recorder=record,
+                                  setup_recorder=_setups, sizing_recorder=capture)
+        now = datetime(2026, 1, 2, 16, 30, tzinfo=timezone.utc)
+        [decision] = await pipeline.run(
+            run_id="run-golden-orb", strategy=_orb_strategy(), candidates=[_orb_input()],
+            portfolio=PortfolioSnapshot(observed_at=now, net_liquidation="100000"),
+            policy=RiskPolicy(), session_date=now.date(), now=now,
+        )
+        outcome, digest = GOLDEN_ORB[review]
+        assert (decision.outcome.value, decision.decision_key, decision.setup_fingerprint) == (outcome, ORB_KEY, ORB_SETUP)
+        assert _digest(decision) == digest, review
+        # The bytes recorded are the decision's own, and its sidecar line is version 2.
+        assert recorded == [decision.model_dump_json()]
+        [row] = capture.rows
+        assert row.version == 2 and row.decision_id == decision.id
+        assert not [key for key in REALISM_KEYS if key in recorded[0]], review
+
+    database = tmp_path / "momo.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    decisions, _ = await _replay_momo_session(database, monkeypatch)  # the default (version 2) recorder
+    _assert_golden_momo(decisions, database)  # outcomes, keys and stored payload digests
+    with sqlite3.connect(database) as db:
+        stored = [payload for (payload,) in db.execute("SELECT payload_json FROM autotrader_candidate_decisions")]
+    assert len(stored) == 2 and not [key for key in REALISM_KEYS for payload in stored if key in payload]
+    index = read_decision_sizing(sizing_directory(database))
+    assert index.unreadable == () and {row.version for row in index.records.values()} == {2}
+    bf_b = index.records[decisions["BF B"].id]
+    assert (bf_b.quantity, bf_b.size_multiplier_effective) == (BF_B_POLICY_QTY, Decimal("1"))
+    assert bf_b.bar_volume is not None and bf_b.spread_bps is not None
