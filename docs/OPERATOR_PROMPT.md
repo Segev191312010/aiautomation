@@ -451,7 +451,7 @@ EXIT    0 PASS · 78 refused, nothing changed · 3 rolled back or aborted: the p
 ```
 STATUS  [NOW] from L-P2. It undoes only a deploy that `deploy apply` wrote: the DEPLOY …
         result=PASS line for live HEAD and its PREV line must carry schema=v<n>. Every hand-written
-        deploy (through P1-B.4) undoes by hand, 6.3 (undo_schema_unknown).
+        deploy (through L-P2) undoes by hand, 6.3 (undo_schema_unknown).
 WHO     OWNER only, at a Terminal; TTY-only like `deploy apply` (not_interactive); the owner types
         back the --to short sha
 FROM    the worktree of the deploy being undone (`backend/`), never the live checkout
@@ -1263,7 +1263,7 @@ Refusals (exit 78, before anything stops; nothing changed):
 | `not_interactive`, `deploy_lock_busy`, `runs_from_live_checkout`, `start_cutoff`, `paths_not_canonical`, `live_python_missing`, `deploys_log_unusable` | as in 6.2 | as in 6.2 |
 | `prev_sha_invalid` | `--to` is not a 40-hex commit, or its bridge pin cannot be read | take the sha from deploys.log again |
 | `undo_prev_mismatch` | deploys.log has no `DEPLOY … result=PASS` line for live HEAD (for example a run that died before its PASS line), or `--to` is not that line's `PREV_SHA` | `PREV_SHA` from that line; with no PASS line, the manual block below with the run's PREV line |
-| `undo_schema_unknown` | that PASS line or its PREV line has no `schema=v<n>`: every hand-written deploy, through P1-B.4 | `$CTL db status`, then the manual block below |
+| `undo_schema_unknown` | that PASS line or its PREV line has no `schema=v<n>`: every hand-written deploy, through L-P2 | `$CTL db status`, then the manual block below |
 | `undo_needs_db_restore` | the deploy migrated (the PREV and PASS schemas differ); the restore is printed | the restore by hand (below) |
 | `undo_not_flat` | the bridge's newest state file holds a working entry or shares, or cannot be read ("flatness unknown") | wait until flat, after the close |
 | `undo_tree_dirty` | `.git/index.lock` in the live checkout after 5 s, or a change outside `.claude/settings.local.json` | the remedy in the detail (`pgrep -x git \|\| echo none`; `rm` the lock only when it printed none); any other change: stop and ask |
