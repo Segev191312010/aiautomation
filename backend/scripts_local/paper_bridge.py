@@ -83,7 +83,9 @@ Safety rules (all enforced here because the shadow pipeline sizes per run):
   decisions of one tick cannot both spend the same budget. Exits, closes,
   cancels, the flatten and stop changes are never checked, and nothing is
   ever flattened because of the budget: an over-budget account or a widened
-  stop pages (CRITICAL) and only blocks new risk.
+  stop pages (CRITICAL) and only blocks new risk. An open-orders request TWS
+  has not answered for ORDER_BOOK_UNANSWERED_ALERT pages CRITICAL once: no
+  book completes until it is answered, and it is never written off.
 - Every order carries orderRef autotrader:<IDENTITY>:<decision id prefix>, so
   IBKR reports attribute fills per identity; parse_ref reads it back.
 - A new entry needs an account position in its contract that is known and
@@ -226,6 +228,9 @@ ORDER_BOOK_REFRESH = timedelta(seconds=30)
 ORDER_BOOK_MAX_AGE = timedelta(seconds=90)
 ORDER_BOOK_TIMEOUT_S = 3.0  # one refresh never holds the loop longer than this
 UNPROTECTED_RECHECK = timedelta(seconds=5)  # a book older than this is re-read before an unprotected page
+# An open-orders request TWS has not answered for this long pages CRITICAL once (N18b-LOW-2): until it
+# is answered no book completes, and it is never written off (its late end would complete a later one).
+ORDER_BOOK_UNANSWERED_ALERT = timedelta(seconds=60)
 if not Decimal("0") < DAY_RISK_BUDGET_PCT <= Decimal("3"):  # tripwire: the owner's cap is 3 %
     raise ValueError(f"DAY_RISK_BUDGET_PCT must be in (0, 3], not {DAY_RISK_BUDGET_PCT}")
 if not STOP_SLIPPAGE_FACTOR >= Decimal("1"):  # tripwire: a factor below 1 would shrink every risk
@@ -244,6 +249,7 @@ V7C_PNL_SOURCE = "v7c_pnl_source"
 V7C_PNL_MISMATCH = "v7c_pnl_mismatch"
 V7C_PNL_STALE = "v7c_pnl_stale"
 V7C_STOP_OVERSIZED = "v7c_stop_oversized"
+V7C_ORDER_BOOK_UNAVAILABLE = "v7c_order_book_unavailable"
 DAILY_LOSS_LIMIT = "daily_loss_limit"
 # What an unprotected position's page tells the owner. Never "/stop SYM PRICE":
 # a Telegram stop is a DAY order, so it would unblock only until the close. "or in
@@ -1440,6 +1446,7 @@ class Bridge:
         self.stops_seen: dict[tuple[int, int], Decimal] = {}  # (client, order id) -> stop price last seen
         self.unprotected_since: dict[tuple[str, ...], datetime] = {}
         self.attention_gaps: dict[str, datetime] = {}  # needs_attention bracket -> first read the account held less
+        self.open_orders_sent: dict[int, datetime] = {}  # open-orders request number -> when it was sent
         self.watch_failures = 0
         with self.app.lock:  # rejections of restored legs must be CRITICAL too
             for bracket in brackets.values():
@@ -2286,6 +2293,31 @@ class Bridge:
             found.append((Decimal(entry.quantity), entry.stop))
         return found, fresh
 
+    def stops_sized_to_a_buy(self, con_id: int) -> Decimal:
+        """Open shares of this client's stops on the contract that are sized to an owner buy, not to
+        what is held yet (N18b-LOW-1): a stop attached to a buy that still works, and every stop the
+        desk still sizes itself (its buy followed, its fills settling, its fit pending). They are never
+        "oversized": the stop of a partly filled or unfilled buy covers what that buy may still fill,
+        and a page telling the owner to resize or cancel it would strip the buy's protection."""
+        managed = self.manual.sizing_stops() if self.manual is not None else set()
+        legs = {leg for bracket in self.brackets.values() for leg in bracket.legs}
+        with self.app.lock:
+            own = [(order_id, cached, self.app.order_status.get(order_id), self.app.open_orders.get(order_id),
+                    self.app.order_filled.get(order_id, 0),
+                    self.app.order_status.get(_whole(getattr(cached, "parentId", 0) or 0)))
+                   for order_id, cached in self.app.order_objects.items()]
+        total = Decimal("0")
+        for order_id, cached, status, row, filled, parent_status in own:
+            if status not in LIVE_ORDER_STATUSES or order_id in legs or row is None or row.con_id != con_id:
+                continue
+            attached = _whole(getattr(cached, "parentId", 0) or 0) > 0
+            if not (order_id in managed or (attached and parent_status in WORKING_ORDER_STATUSES)):
+                continue
+            cover = self.stop_cover(cached, filled)
+            if cover is not None:
+                total += cover[0]
+        return total
+
     def account_open_risk(self, entry: PendingEntry | None = None) -> OpenRisk:
         """Open risk to current stops across the account (v7c), and every position no stop covers.
 
@@ -2350,8 +2382,9 @@ class Bridge:
                 continue
             stops, fresh = self.covering_stops(con_id, entry)
             covered = sum((quantity for quantity, _ in stops), Decimal("0"))
-            if covered > other and entry is None:
-                oversized.append((symbol, covered, other, shares))
+            sized = covered - self.stops_sized_to_a_buy(con_id)
+            if sized > other and entry is None:
+                oversized.append((symbol, sized, other, shares))
             if covered < other:
                 unknown = "" if fresh else " (no fresh open-orders book: stops placed in TWS are unknown)"
                 unprotected.append((symbol, f"{share_text(other)} sh held, working stops cover"
@@ -2516,6 +2549,7 @@ class Bridge:
                 self.app.account_orders.clear()
             self.app.open_orders_requested += 1
             wanted = self.app.open_orders_requested
+        self.open_orders_sent[wanted] = self.now()
         if all_clients:
             self.app.reqAllOpenOrders()
         else:
@@ -2590,10 +2624,36 @@ class Bridge:
             del self.unprotected_since[key]
             self.alerted.discard(key)  # LOW-4: the episode is over; the next one pages again
 
+    def page_book_unanswered(self) -> None:
+        """N18b-LOW-2: an open-orders request TWS has not answered for ORDER_BOOK_UNANSWERED_ALERT pages
+        CRITICAL once per episode. Until it is answered no book completes (MEDIUM-2: it is never
+        written off), so the owner must know; the episode ends, and the next one pages again, once TWS
+        has answered every request. Nothing is exited or reconnected here: a restart is the owner's."""
+        with self.app.lock:
+            requested, answered = self.app.open_orders_requested, self.app.open_orders_answered
+        for number in [number for number in self.open_orders_sent if number <= answered]:
+            del self.open_orders_sent[number]
+        key = (V7C_ORDER_BOOK_UNAVAILABLE,)
+        if answered >= requested:
+            if key in self.alerted:
+                self.alerted.discard(key)
+                log("INFO", f"{V7C_ORDER_BOOK_UNAVAILABLE}: TWS answered every open-orders request again — the order"
+                    " book is back")
+            return
+        sent = self.open_orders_sent.get(answered + 1)  # TWS answers in order: the oldest unanswered one
+        if sent is None or self.now() - sent < ORDER_BOOK_UNANSWERED_ALERT:
+            return
+        self.alert_once(key, f"{V7C_ORDER_BOOK_UNAVAILABLE}: TWS has not answered an open-orders request for"
+                        f" {int((self.now() - sent).total_seconds())}s — the order book is unavailable: Telegram"
+                        " sells, /close and /closeall are refused, and stops placed in TWS no longer count for the"
+                        " day risk budget, so a position they protect blocks every entry; check TWS and restart the"
+                        " robot")
+
     def warn_oversized(self, risk: OpenRisk) -> None:
         """LOW-8 (owner Q6: WARN only, never a block): working stops that would sell more shares than
         they cover, once per contract and quantity; CRITICAL when they would sell more than the whole
-        account position (the account would be short if they all fired)."""
+        account position (the account would be short if they all fired). Stops sized to an owner buy
+        are left out (stops_sized_to_a_buy, N18b-LOW-1)."""
         for symbol, stops, covered, position in risk.oversized:
             key = (V7C_STOP_OVERSIZED, symbol, str(stops), str(covered))
             text = (f"{V7C_STOP_OVERSIZED} {symbol}: working stops sell {share_text(stops)} sh but cover"
@@ -2624,6 +2684,7 @@ class Bridge:
                 risk = self.account_open_risk()
         self.page_unprotected(risk)
         self.warn_oversized(risk)
+        self.page_book_unanswered()
         for bracket in self.brackets.values():
             if bracket.skipped or bracket.parent is None or not self.holds_or_may_hold(bracket):
                 continue
@@ -3018,6 +3079,7 @@ class ManualDesk:
         # LOW-1: finished buys whose fills the account position does not show yet; they stay in the
         # day risk budget's reservation until a position update stamped after the fills arrives.
         self.settling: dict[str, ManualTrack] = {}
+        self.buy_baselines: dict[int, Decimal] = {}  # a buy's order id -> the account position when it was placed
 
     # ---- plumbing -------------------------------------------------------
     @staticmethod
@@ -3131,10 +3193,47 @@ class ManualDesk:
                     and row.account in {"", self.bridge.account}]
             unshown = sum(row.shares for row in rows
                           if row.arrival > self.app.reconciled_arrival and row.positions_seen >= shown)
+            filled = 0
             for order_id in own:
                 executed = sum(row.shares for row in rows if row.order_id == order_id)
                 unshown += max(0, self.app.order_filled.get(order_id, 0) - executed)
+                filled += max(executed, self.app.order_filled.get(order_id, 0))
+            position = self.app.positions.get((self.bridge.account, con_id))
+        if unshown > 0 and self.position_holds_the_fills(own, position, filled):
+            return 0
         return unshown
+
+    def position_before_buy(self, con_id: int) -> Decimal | None:
+        """The position a new buy's fills will add to: the last report plus every other owner buy fill on
+        the contract that it does not show yet. An upper bound (sells not shown yet are not taken off),
+        so position_holds_the_fills can only wait longer, never accept a report early."""
+        reported = self.bridge.account_position(con_id)
+        if reported is None:
+            return None
+        return reported + sum(self.unshown_fills(track.order_ids, track.con_id, track.order_ref)
+                              for track in [*self.tracked.values(), *self.settling.values()]
+                              if track.side == "BUY" and track.kind == "order" and track.con_id == con_id)
+
+    def position_holds_the_fills(self, own: set[int], position: Decimal | None, filled: int) -> bool:
+        """N18b-LOW-3: TWS may push a position update before the fill's execution, and no later update need
+        come. The fills then count as shown once the account position, as last reported, holds at least
+        the position when the buy was placed plus everything it filled: a report that already includes
+        them. Never by time, and never from a position requested afresh (a TWS whose position lags, the
+        MEDIUM-1b case, would answer with the lagging number). A buy placed before a restart has no
+        baseline: only the stamp rule applies (fail closed: reserved, stop not fitted)."""
+        if len(own) != 1 or position is None or filled <= 0:
+            return False
+        before = self.buy_baselines.get(next(iter(own)))
+        return before is not None and position >= before + filled
+
+    def sizing_stops(self) -> set[int]:
+        """The attached stops the desk still sizes itself: of a buy it follows, whose fills are settling,
+        or whose fit is pending (N18b-LOW-1: never reported oversized meanwhile)."""
+        stops = set(self.stop_fits)
+        for track in [*self.tracked.values(), *self.settling.values()]:
+            if track.side == "BUY" and track.kind == "order":
+                stops |= track.stop_ids | self.attached.get(track.order_ref, set())
+        return stops
 
     def settle_buys(self) -> None:
         """LOW-1: a finished buy leaves the reservation once the position shows all of its fills."""
@@ -3784,10 +3883,13 @@ class ManualDesk:
                             quantity=validated.quantity, status="sending", side="BUY", symbols={row.symbol},
                             entry_price=validated.reference_price, entry_stop=validated.entry_stop_price,
                             exchange=validated.primary_exchange, con_id=validated.con_id)
+        before = self.position_before_buy(validated.con_id)  # N18b-LOW-3: nothing of this buy has filled yet
         # Before placeOrder: a failure from here on is "unknown", never "error", and the track is the
         # buy's reservation in the day risk budget (pending_entries) before anything leaves.
         self.tracked[row.id] = track
         parent_id, stop_id = self.place_entry(row, validated)
+        if before is not None:
+            self.buy_baselines[parent_id] = before
         track.order_ids.add(parent_id)
         track.stop_ids.add(stop_id)
         track.con_ids[parent_id] = validated.con_id

@@ -5567,3 +5567,204 @@ def test_fix1_n22_the_post_submit_invariant_reads_the_stored_order(
     assert bridge.brackets["d1"].status == "sent"
     assert ("CRITICAL", "v7c_budget_invariant_broken: open risk grew by 150.00 with AAPL (MOMO_HOD_V2), more than"
             " its own 50.00 (0.00 -> 150.00) — check TWS") in events(capsys)
+
+
+# ---- v7c fix 2: review N18b (LOW-1..4) ----------------------------------------------------------------------------
+
+
+def oversized_pages(out: list[tuple[str, str]]) -> list[str]:
+    return [text for text in critical(out) if "v7c_stop_oversized" in text]
+
+
+def test_fix2_low1_no_oversized_page_while_a_partly_filled_buy_still_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18b probe P15: fix 1 paged "short 6 sh — resize or cancel the extra stop" on the buy's own stop.
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch)  # 10 @ 185 stop 180
+    broker.execDetails(-1, None, execution("0000e0d5.000002a1.01.01", parent_id, 4, 185.0, acctNumber=ACCOUNT,
+                                           orderRef=f"manual:{buy_id}", side="BOT", time="20261013  10:00:30"))
+    broker.orderStatus(parent_id, "Submitted", 4, 6, 185.0)  # 4 of 10 bought; the buy still works for 6
+    push_position(broker, AAPL_ID, 4)
+    capsys.readouterr()
+    for _ in range(3):
+        clock.advance(2)
+        bridge.tick()
+
+    assert bridge.account_open_risk().oversized == () and oversized_pages(events(capsys)) == []
+    assert broker.cancelled == [] and stop_id not in [order_id for order_id, _ in broker.placed[2:]]
+
+
+def test_fix2_low1_no_oversized_page_for_an_unfilled_buy_next_to_held_shares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18b probe P15b: 100 held under the owner's TWS stop, an unfilled /buy 10 whose stop cannot fire yet.
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    queue_manual("/buy 10 AAPL 185 stop 180", message_id=1, owner_shares=100)
+    broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), positions={AAPL_ID: 100}, contracts=STOCK)
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 100.0, 190.0)
+    broker.book.append((7, SimpleNamespace(conId=AAPL_ID, symbol="AAPL"), tws_stop(7, 100, 181.0), "PreSubmitted",
+                        100.0))
+    clock = Clock(MANUAL_T0 + timedelta(seconds=2))
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
+    capsys.readouterr()
+    for _ in range(3):
+        bridge.tick()
+        clock.advance(2)
+
+    assert [sent.action for _, sent in broker.placed] == ["BUY", "SELL"]
+    assert bridge.account_open_risk().oversized == () and oversized_pages(events(capsys)) == []
+
+
+def test_fix2_low1_a_buy_that_still_works_never_makes_its_stop_oversized_even_without_the_desk(
+    tmp_path: Path
+) -> None:
+    # The owner desk is off for this run (its startup failed), yet a /buy placed earlier still works at IBKR.
+    contract = SimpleNamespace(conId=AAPL_ID, symbol="AAPL")
+    parent = pb.order("BUY", "LMT", 10, ACCOUNT, "manual:earlier", lmtPrice=185.0, tif="DAY")
+    attached = stop_leg(51, 10, 180.0, parent=50, ref="manual:earlier")
+    broker = connected_broker(positions={AAPL_ID: 4}, contracts=STOCK, live_orders={50: "Submitted", 51: "PreSubmitted"},
+                              order_objects={50: parent, 51: attached})
+    broker.open_order_contracts.update({50: contract, 51: contract})
+    broker.reqOpenOrders()
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 4.0, 185.0)  # 4 of the 10 bought so far
+    bridge = make_bridge(tmp_path, broker)  # no ManualDesk attached
+    assert bridge.refresh_order_book() is not None
+
+    assert bridge.account_open_risk().oversized == ()  # its stop is sized to the buy, which may fill 6 more
+    broker.orderStatus(50, "Cancelled", 4, 6, 185.0)  # the buy dies: the 10-share stop now oversells 4 held
+    assert bridge.account_open_risk().oversized == (("AAPL", Decimal("10"), Decimal("4"), Decimal("4")),)
+
+
+def test_fix2_low1_a_dead_buys_stop_pages_only_once_the_desk_has_fitted_it_and_it_still_oversells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch)  # 10 @ 185 stop 180
+    broker.execDetails(-1, None, execution("0000e0d5.000002a2.01.01", parent_id, 4, 185.0, acctNumber=ACCOUNT,
+                                           orderRef=f"manual:{buy_id}", side="BOT", time="20261013  10:00:30"))
+    push_position(broker, AAPL_ID, 4)
+    broker.orderStatus(parent_id, "Cancelled", 4, 6, 185.0)  # the rest of the buy is cancelled
+    capsys.readouterr()
+    for _ in range(12):  # the fit's grace, then the fit and TWS's echo of it
+        clock.advance(2)
+        bridge.tick()
+    assert [(order_id, sent.totalQuantity) for order_id, sent in broker.placed[2:]] == [(stop_id, 4)]
+    assert oversized_pages(events(capsys)) == []  # never paged while the desk sized the stop itself
+
+    push_position(broker, AAPL_ID, 2)  # later the owner sells 2 in TWS: the 4-share stop now oversells
+    for _ in range(2):
+        clock.advance(2)
+        bridge.tick()
+    assert oversized_pages(events(capsys)) == [
+        "v7c_stop_oversized AAPL: working stops sell 4 sh but cover 2 held: if they all fire the account is short"
+        " 2 sh — resize or cancel the extra stop in TWS"]
+
+
+def test_fix2_low2_an_unanswered_book_request_pages_once_after_60s_and_again_in_a_later_episode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    clock = Clock(DECIDED + timedelta(seconds=5))
+    broker = held_answers(contracts=STOCK)
+    bridge = make_bridge(tmp_path, broker, clock=clock)
+    bridge.sync_timeout = 0.001
+    broker.hold = True  # TWS does not answer request 1 (and, in order, nothing after it)
+    capsys.readouterr()
+    pages: list[list[str]] = []
+    for _ in range(13):  # 0..120 s
+        bridge.tick()
+        pages.append([text for text in critical(events(capsys)) if "v7c_order_book_unavailable" in text])
+        clock.advance(10)
+    page = ("v7c_order_book_unavailable: TWS has not answered an open-orders request for 60s — the order book is"
+            " unavailable: Telegram sells, /close and /closeall are refused, and stops placed in TWS no longer count"
+            " for the day risk budget, so a position they protect blocks every entry; check TWS and restart the"
+            " robot")
+    assert pages[:6] == [[]] * 6 and pages[6] == [page] and pages[7:] == [[]] * 6  # at 60 s, once
+
+    while broker.owed:  # TWS answers the backlog: the episode ends
+        broker.deliver()
+    broker.hold = False
+    bridge.tick()
+    assert ("INFO", "v7c_order_book_unavailable: TWS answered every open-orders request again — the order book is"
+            " back") in events(capsys)
+    assert bridge.book_fresh()
+
+    broker.hold = True  # a later episode pages again
+    for _ in range(9):
+        clock.advance(10)
+        bridge.tick()
+    assert len([text for text in critical(events(capsys)) if "v7c_order_book_unavailable" in text]) == 1
+
+
+def test_fix2_low3_a_position_reported_before_the_execution_fits_the_stop_with_no_double_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # N18b probe P14: fix 1 kept the 4 shares unshown forever: counted twice, the stop never fitted.
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch)  # 10 @ 185 stop 180
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 4.0, 185.0)  # TWS shows the 4 shares first ...
+    broker.account_positions[AAPL_ID] = 4
+    broker.execDetails(-1, None, execution("0000e0d5.000002b1.01.01", parent_id, 4, 185.0, acctNumber=ACCOUNT,
+                                           orderRef=f"manual:{buy_id}", side="BOT", time="20261013  10:00:30"))
+    broker.orderStatus(parent_id, "Cancelled", 4, 6, 185.0)  # ... then the execution; the rest is cancelled
+    assert bridge.manual.unshown_fills({parent_id}, AAPL_ID, f"manual:{buy_id}") == 0
+    assert bridge.account_open_risk().lines == ("AAPL account 4 held @ 185.0, stop 180.0: 20.00",)  # counted once
+    capsys.readouterr()
+    for _ in range(12):
+        clock.advance(2)
+        bridge.tick()
+
+    assert broker.cancelled == [] and [(order_id, sent.totalQuantity) for order_id, sent in broker.placed[2:]] == [
+        (stop_id, 4)]  # fitted to the 4 shares the buy holds
+    assert not critical(events(capsys))
+    assert bridge.account_open_risk().total == Decimal("20.00") and bridge.manual.settling == {}
+
+
+def test_fix2_low3_a_report_that_does_not_hold_the_fills_on_top_of_earlier_ones_never_shows_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = manual_ledger(tmp_path, monkeypatch)
+    first = queue_manual("/buy 10 AAPL 185 stop 180", message_id=1)
+    second = queue_manual("/buy 10 AAPL 186 stop 180", message_id=2)
+    broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), contracts=STOCK)
+    broker.own_in_all_open_orders = True
+    clock = Clock(MANUAL_T0 + timedelta(seconds=2))
+    bridge = desk_bridge(tmp_path, broker, ledger, clock=clock)
+    bridge.tick()
+    [(first_buy, _), _] = broker.placed
+    fill(broker, first_buy, 10, 185.0, f"manual:{first}", "0000e0d5.000002b2.01.01")  # its position update lags
+    clock.advance(1)
+    bridge.tick()  # the first buy is filled and settling; the second goes out
+    [_, _, (second_buy, _), _] = broker.placed
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 10.0, 185.0)  # the first buy's update arrives: 10 held
+    fill(broker, second_buy, 10, 186.0, f"manual:{second}", "0000e0d5.000002b3.01.01")  # the second's lags
+
+    # 10 held is the first buy's: the second's 10 stay reserved until a report holds 20.
+    assert bridge.manual.unshown_fills({second_buy}, AAPL_ID, f"manual:{second}") == 10
+    assert bridge.account_open_risk().total == Decimal("110.00")  # 10 x (185 - 180) + 10 x (186 - 180)
+    broker.position(ACCOUNT, STOCK[AAPL_ID], 20.0, 185.5)
+    assert bridge.manual.unshown_fills({second_buy}, AAPL_ID, f"manual:{second}") == 0
+
+
+def test_fix2_low4_g06_a_market_buy_filled_above_the_ask_counts_at_its_fill_price(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge, broker, clock, buy_id, parent_id, _ = manual_buy_world(tmp_path, monkeypatch, "/buy 10 AAPL stop 185")
+    assert bridge.account_open_risk().total == Decimal("50.10")  # sized at the ask 190.01
+    fill(broker, parent_id, 10, 191.0, f"manual:{buy_id}", "0000e0d5.000002c1.01.01")  # filled a dollar higher
+    clock.advance(2)
+    bridge.tick()
+    assert manual_row(buy_id).status == "filled"
+    assert bridge.account_open_risk().total == Decimal("60.00")  # 10 x (191 - 185) until the position shows it
+
+
+def test_fix2_low4_g08_a_fill_ibkr_reports_by_status_before_its_execution_stays_reserved_and_unfitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge, broker, clock, buy_id, parent_id, stop_id = manual_buy_world(tmp_path, monkeypatch,
+                                                                         "/buy 10 AAPL stop 185")
+    broker.orderStatus(parent_id, "Filled", 10, 0, 190.01)  # the status first; no execution, no position yet
+    for _ in range(10):  # 20 s, past the stop fit's grace
+        clock.advance(2)
+        bridge.tick()
+
+    assert manual_row(buy_id).status == "filled"
+    assert broker.cancelled == [] and [order_id for order_id, _ in broker.placed] == [parent_id, stop_id]
+    assert bridge.account_open_risk().total == Decimal("50.10")  # still reserved: 10 x (190.01 - 185)
