@@ -6,6 +6,11 @@ Markdown or HTML: reason codes contain underscores), at most one request per
 an exception; a message that still fails after three attempts is logged and
 dropped.
 
+A message may be silent (``disable_notification``: it arrives without a sound,
+owner decision D7 for the night's size proposals) and may carry an inline
+keyboard (``reply_markup``, on its last part). Both go through the same queue
+and the same sender: ``TelegramNotifier.send``; ``notify`` is a plain send.
+
 The bot token is a credential that travels in the request path
 (``/bot<token>/<method>``). No log line here contains a URL, httpx's own
 request logging (which prints full URLs at INFO) is held at WARNING and
@@ -82,7 +87,16 @@ class TelegramConfigError(RuntimeError):
 
 
 class MessageSender(Protocol):
-    async def send_message(self, chat_id: int, text: str) -> None: ...
+    """``send_message(chat_id, text)``; the two options are passed only when set."""
+
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        disable_notification: bool = False,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,9 +279,22 @@ class TelegramBotAPI:
     def redact(self, text: str) -> str:
         return _redact(text, self._secrets)
 
-    async def send_message(self, chat_id: int, text: str) -> None:
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        disable_notification: bool = False,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> None:
         # No parse_mode: plain text cannot be mangled by Markdown or HTML parsing.
-        await self.call("sendMessage", {"chat_id": chat_id, "text": text})
+        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if disable_notification:
+            # Silent: delivered without a sound (owner decision D7).
+            payload["disable_notification"] = True
+        if reply_markup is not None:
+            payload["reply_markup"] = dict(reply_markup)
+        await self.call("sendMessage", payload)
 
     async def get_me(self) -> Mapping[str, Any]:
         result = await self.call("getMe", {})
@@ -398,6 +425,8 @@ async def discover_chat(api: TelegramBotAPI) -> TelegramChat | None:
 class _Outgoing:
     text: str
     done: asyncio.Future[bool]
+    silent: bool = False
+    reply_markup: Mapping[str, Any] | None = None
 
 
 def _resolve(future: asyncio.Future[bool], delivered: bool) -> None:
@@ -447,7 +476,19 @@ class TelegramNotifier:
         return self._queue.qsize()
 
     def notify(self, text: str) -> asyncio.Future[bool]:
-        """Queue ``text`` for delivery. Must be called from the running event loop."""
+        """Queue ``text`` for delivery, with sound. Must be called from the running event loop."""
+        return self.send(text)
+
+    def send(
+        self,
+        text: str,
+        *,
+        silent: bool = False,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> asyncio.Future[bool]:
+        """Queue ``text``: ``silent`` arrives without a sound (``disable_notification``),
+        ``reply_markup`` (an inline keyboard) rides on the message's last part.
+        Must be called from the running event loop; never raises."""
         done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         try:
             message = normalize_text(text)
@@ -458,7 +499,10 @@ class TelegramNotifier:
             elif self._queue.qsize() >= self._max_queued:
                 reason = f"{self._max_queued} messages are already queued"
             else:
-                self._queue.put_nowait(_Outgoing(text=message, done=done))
+                markup = None if reply_markup is None else dict(reply_markup)
+                self._queue.put_nowait(
+                    _Outgoing(text=message, done=done, silent=bool(silent), reply_markup=markup)
+                )
                 self._ensure_sender()
                 return done
             logger.warning("Telegram message not queued: %s", reason)
@@ -500,7 +544,7 @@ class TelegramNotifier:
                 return
             delivered = False
             try:
-                delivered = await self._deliver(item.text)
+                delivered = await self._deliver(item)
             except asyncio.CancelledError:
                 _resolve(item.done, False)
                 raise
@@ -508,10 +552,15 @@ class TelegramNotifier:
                 logger.error("Telegram sender error: %s", type(exc).__name__)
             _resolve(item.done, delivered)
 
-    async def _deliver(self, text: str) -> bool:
-        parts = split_message(text)
-        for part in parts:
-            if not await self._send_part(part):
+    async def _deliver(self, item: _Outgoing) -> bool:
+        parts = split_message(item.text)
+        for index, part in enumerate(parts, start=1):
+            options: dict[str, Any] = {}
+            if item.silent:
+                options["disable_notification"] = True
+            if item.reply_markup is not None and index == len(parts):
+                options["reply_markup"] = item.reply_markup
+            if not await self._send_part(part, options):
                 return False
         logger.debug("Telegram message delivered in %d part(s)", len(parts))
         return True
@@ -522,11 +571,12 @@ class TelegramNotifier:
         if delay > 0:
             await self._sleep(delay)
 
-    async def _send_part(self, part: str) -> bool:
+    async def _send_part(self, part: str, options: Mapping[str, Any]) -> bool:
         for attempt in range(1, self._max_attempts + 1):
             await self._wait_turn()
             try:
-                await self._sender.send_message(self._chat_id, part)
+                # The options only when set: a plain message is exactly (chat, text).
+                await self._sender.send_message(self._chat_id, part, **options)
             except TelegramAPIError as exc:
                 self._last_attempt = self._monotonic()
                 if exc.retry_after is not None:

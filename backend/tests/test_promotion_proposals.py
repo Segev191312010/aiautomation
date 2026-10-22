@@ -285,7 +285,10 @@ def test_the_text_section_lists_proposals_first_then_every_identity(monkeypatch)
     )
     proposals = PromotionProposals(as_of=START, identities=reports)
     assert proposals.lines() == [
-        "Promotion proposals (promotion-proposals-v1, propose mode: nothing changes until the owner approves)",
+        # Rewritten for P3-E (explicit, not weakened): D2 makes a step down automatic, so the header
+        # no longer says "nothing changes until the owner approves"; the line itself is still pinned.
+        "Promotion proposals (promotion-proposals-v1, propose mode: a step up waits for the owner's approval;"
+        " a step down applies by itself at the next session)",
         "HELD ORB_V2: eligible for ×0.5 but v7c (open-risk term) is not deployed",
         "DEMOTION PROPOSAL VWAP_PB_V2: ×0.5 → ×0.25; 24 trades, expectancy -0.40R (upper bound -0.40R),"
         " slippage 0.03R/trade, sessions 12",
@@ -367,7 +370,9 @@ def test_the_nightly_job_writes_proposals_and_the_weekly_text_carries_them(night
     (summary,) = night["sent"]
     evidence = summary.split("\n\n")[0].splitlines()
     header = evidence.index(
-        "Promotion proposals (promotion-proposals-v1, propose mode: nothing changes until the owner approves)"
+        # Rewritten for P3-E (explicit, not weakened): the D2 header, see the text-section test.
+        "Promotion proposals (promotion-proposals-v1, propose mode: a step up waits for the owner's approval;"
+        " a step down applies by itself at the next session)"
     )
     assert evidence[header + 1 :] == [
         "MOMO_HOD_V2 ×1: probation 2/5; at the ×1 ceiling",
@@ -525,9 +530,18 @@ def test_an_unreadable_fence_table_proposes_nothing(tmp_path):
         connection.execute("CREATE TABLE autotrader_execution_fences (name TEXT PRIMARY KEY)")  # no stopped column
     with pytest.raises(sqlite3.Error):
         promoter.read_fences(database)
-    proposals = collect_proposals(database=database, ledger=LiveLedger(), live=LiveEvidence(), as_of=START)
+    # Rewritten for P3-E (explicit, not weakened): without ``current=`` the promoter now reads the size
+    # store first (this database has none, so the report would be unreadable for that reason); the
+    # sizes are handed in, as the nightly job does, so the fence read is still what fails here.
+    sizes = {name: Decimal("0.5") for name in ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")}
+    proposals = collect_proposals(
+        database=database, ledger=LiveLedger(), live=LiveEvidence(), as_of=START, current=sizes
+    )
     assert not proposals.readable and proposals.note == "OperationalError"
     assert not any(line.startswith("PROPOSAL ") for line in proposals.lines())
+    # And without them: the unreadable size store alone proposes nothing (never the baseline).
+    unsized = collect_proposals(database=database, ledger=LiveLedger(), live=LiveEvidence(), as_of=START)
+    assert not unsized.readable and unsized.note == "identity_size_store_unreadable"
     # No database, or a schema before the fence table: nothing is fenced.
     assert promoter.read_fences(tmp_path / "missing.db") == {}
     empty = tmp_path / "empty.db"

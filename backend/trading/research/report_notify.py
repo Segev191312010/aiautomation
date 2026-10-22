@@ -28,6 +28,14 @@ chat as ONE message:
             supervisor restart that reruns the replay never sends it twice;
     now     on demand (``autotraderctl research replay --notify``).
 
+The night's size changes (plan P3-E, owner decision D7) leave the same child
+every night there is news, through ``notify_size_batch``: ONE silent message
+(``disable_notification``) with every step up waiting for the owner, every
+automatic step down and every demotion fence of the night, read back from the
+size store, each proposal id at most once (``trading.operations.size_notify``
+keeps the record and builds the text; the Approve/Reject buttons only once
+phone approval exists). A night without news reads no secret at all.
+
 Telegram that is not set up (no usable bot token in the Keychain, no pinned
 owner chat) is skipped silently: the replay's own report files are the record.
 The chat id comes only from telegram.json, as the assistant pins it, never from
@@ -78,6 +86,8 @@ NOTIFY_MODES: tuple[NotifyMode, ...] = ("never", "weekly", "now")
 
 # Outcomes, named so callers branch on codes rather than prose.
 SENT = "sent"
+# The size batch: nothing of the night was left to deliver.
+NOTHING_NEW = "nothing_new"
 NOT_REQUESTED = "not_requested"
 NOT_DUE = "not_due"
 ALREADY_SENT = "already_sent"
@@ -93,6 +103,7 @@ OUTCOME_TEXT = {
         " autotraderctl notify test)"
     ),
     FAILED: "Telegram did not accept it (details in the shadow log)",
+    NOTHING_NEW: "no size change of the night was left to deliver",
 }
 
 WEEKLY_STATE_FILENAME = "telegram-weekly.json"
@@ -288,6 +299,66 @@ async def deliver_summary(
     return SENT
 
 
+async def deliver_size_batch(
+    database: Path, night: date, *, env: ReportNotifyEnvironment | None = None
+) -> str:
+    """The night's size changes as ONE silent message, each proposal id once.
+
+    The items are read back from the size store (so a replay restarted after
+    a failed send still delivers), minus every id the delivery record already
+    has; the record is written only once Telegram accepted the whole message.
+    """
+    from trading.operations import size_notify
+
+    environment = env or ReportNotifyEnvironment.current()
+    record = size_notify.delivery_state_file(environment.paths)
+    items = size_notify.unsent_items(database, night, record)
+    if not items:
+        return NOTHING_NEW
+    token = _usable_token(environment)
+    chat_id = None if token is None else _pinned_chat(environment.paths)
+    if token is None or chat_id is None:
+        logger.info("Telegram is not set up; size changes not sent")
+        return NOT_CONFIGURED
+    text = size_notify.batch_text(items, night=night)
+    markup = size_notify.approval_markup(size_notify.proposal_ids(items))
+    try:
+        async with TelegramBotAPI(token, transport=environment.transport) as api:
+            notifier = TelegramNotifier(
+                api,
+                chat_id=chat_id,
+                sleep=environment.sleep,
+                monotonic=environment.monotonic,
+            )
+            try:
+                delivered = await notifier.send(text, silent=True, reply_markup=markup)
+            finally:
+                await notifier.aclose()
+    except Exception as exc:  # noqa: BLE001 - by type only: no text that could carry the token
+        logger.warning("size changes not sent: %s", type(exc).__name__)
+        return FAILED
+    if not delivered:
+        logger.warning("size changes not delivered")
+        return FAILED
+    try:
+        size_notify.record_delivered(record, [item.proposal_id for item in items], environment.clock())
+    except (OSError, PathSecurityError, ValueError) as exc:
+        logger.warning("size delivery record not saved: %s", type(exc).__name__)
+    logger.info("size changes sent to Telegram (silent): %s", dict(size_notify.describe(items)))
+    return SENT
+
+
+def notify_size_batch(
+    database: Path, night: date, *, env: ReportNotifyEnvironment | None = None
+) -> str:
+    """Synchronous entry for the nightly evidence. A Telegram problem never raises."""
+    try:
+        return asyncio.run(deliver_size_batch(database, night, env=env))
+    except Exception as exc:  # noqa: BLE001 - by type only: no text that could carry the token
+        logger.warning("size changes not sent: %s", type(exc).__name__)
+        return FAILED
+
+
 def _r(value: Decimal | None) -> str:
     if value is None:
         return "n/a"
@@ -465,6 +536,7 @@ __all__ = [
     "FAILED",
     "NOTIFY_MODES",
     "NOT_CONFIGURED",
+    "NOTHING_NEW",
     "NOT_DUE",
     "NOT_REQUESTED",
     "OUTCOME_TEXT",
@@ -473,12 +545,14 @@ __all__ = [
     "NotifyMode",
     "ReportNotifyEnvironment",
     "compose_summary",
+    "deliver_size_batch",
     "deliver_summary",
     "evidence_lines",
     "evidence_text",
     "iso_week",
     "latest_closed_session",
     "live_r_lines",
+    "notify_size_batch",
     "notify_summary",
     "phase3_lines",
     "summary_message",

@@ -10,7 +10,16 @@ the evidence for the paper promotion rule, in this order:
 3. the paper promotion rule for every registered strategy (reports only),
    then the promoter in propose mode for every sendable identity
    (``trading.research.promotion_proposals``: proposals only, it changes no
-   constant, row or fence) with each identity's size steps;
+   constant, row or fence) with each identity's size steps, its ``current``
+   the size in force for the next session read from the size store
+   (migration 18; unreadable: nothing is proposed); right after it the size
+   writer (``trading.research.size_writer``, plan P3-E) records the night in
+   the store: one evaluation per identity, a step up as a proposal that waits
+   for the owner, a step down applied at the next session, a demotion below
+   the bottom rung as a fence through the Sentinel's ``fence_identity``; and
+   the night's news goes to the phone as one silent message
+   (``NightlyEnvironment.deliver_sizes``; ``report_notify.notify_size_batch``
+   in production, nothing in a test that does not hand one in);
 4. live/shadow decision parity (T-9): a sendable identity whose live
    decisions the replay does not reproduce is fenced (``paper:<IDENTITY>``
    stopped=1, reason ``sentinel: replay mismatch <n> decisions``) through the
@@ -42,9 +51,10 @@ reads its fences from, ``fence_database`` (N15a LOW-4).
 
 The reports land next to the replay's (``evidence.json``, ``windows.json``,
 ``live-r.json``, ``proposals.json``, ``evidence.txt``). Nothing here can place
-an order or change an authority: the only write besides the tracker's table is
-the stop-only identity fence; a database that is not this code's schema is
-left alone.
+an order or change an authority: the only writes besides the tracker's table
+are the stop-only identity fences and the size writer's rows (a step down, never
+a step up: that is the owner's phone approval); a database that is not this
+code's schema is left alone.
 """
 from __future__ import annotations
 
@@ -79,6 +89,7 @@ from trading.research.paper_promotion import (
 )
 from trading.research.promotion_proposals import PromotionProposals, collect_proposals
 from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
+from trading.research.size_writer import NightPlan, SizeNight, not_written, plan_night, sizes_in_force, write_night
 from trading.research.v7c_report import NOT_COLLECTED, V7CReport, collect_v7c_report, failed_report
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
 from trading.scheduler.sessions import market_session
@@ -96,6 +107,8 @@ _R_QUANTUM = Decimal("0.0001")
 Clock = Callable[[], datetime]
 # Per identity, the replay's equality report against its live run (T-9 hook).
 DecisionComparer = Callable[[Sequence[ReplayResult]], Mapping[str, ReplayEqualityReport]]
+# The night's size changes to the phone: (database, night) -> report_notify's outcome code.
+SizeBatchSender = Callable[[Path, date], str]
 
 PARITY_NOT_COMPARED = "not_compared"
 PARITY_COMPARED = "compared"
@@ -132,12 +145,19 @@ class NightlyEnvironment:
     # database, the one ``current()`` names).
     compare_decisions: DecisionComparer | None = None
     fence_store: FenceStore | None = None
+    # The silent size batch (None: not sent; production: report_notify.notify_size_batch).
+    deliver_sizes: SizeBatchSender | None = None
 
     @classmethod
     def current(cls) -> NightlyEnvironment:
         from config import cfg
+        from trading.research.report_notify import notify_size_batch
 
-        return cls(database=Path(cfg.DB_PATH).expanduser(), bridge_directory=bridge_state_directory())
+        return cls(
+            database=Path(cfg.DB_PATH).expanduser(),
+            bridge_directory=bridge_state_directory(),
+            deliver_sizes=notify_size_batch,
+        )
 
 
 def fence_database(environment: NightlyEnvironment) -> Path:
@@ -154,6 +174,18 @@ def _store_database() -> Path:
     from config import cfg
 
     return Path(cfg.DB_PATH).resolve()
+
+
+def _fence_store(environment: NightlyEnvironment) -> FenceStore | None:
+    """The store a nightly fence is written through, only when it writes the
+    database the promoter and the size writer read (N15a LOW-4); else None."""
+    if environment.fence_store is not None:
+        return environment.fence_store
+    if _store_database() != fence_database(environment):
+        return None
+    from trading.storage.runtime_fence import SQLitePaperKillStore
+
+    return SQLitePaperKillStore()
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +340,8 @@ class NightlyEvidence:
     parity: DecisionParity = field(default_factory=_not_compared)
     # Refused orders, stop slippage and P&L by source (bridge v7c); None: not collected.
     v7c: V7CReport | None = None
+    # The size writer's night (plan P3-E) and its silent batch; None: not run.
+    sizes: SizeNight | None = None
 
 
 def week_start(day: date) -> date:
@@ -388,13 +422,29 @@ def collect_evidence(
         logger.exception("decision parity failed")
         parity = DecisionParity(status=_failed(exc))
     as_of = now.astimezone(NEW_YORK).date()
+    plan: NightPlan | None = None
     try:
         # After step 4 on purpose: a mismatch fence written tonight holds
         # tonight's proposal for that identity (the promoter reads the fences).
-        proposals = collect_proposals(database=fence_database(environment), ledger=live_r, live=live, as_of=as_of)
+        # "current" is the size in force for the next session, from the store, per
+        # identity: one without a size is left out (the size writer names it, CRITICAL),
+        # and the others are judged as usual.
+        plan = plan_night(environment.clock())
+        current, unreadable = sizes_in_force(fence_database(environment), plan.session)
+        for name, problem in unreadable.items():
+            logger.warning("promotion proposals: %s left out: %s", name, problem)
+        if current:
+            proposals = collect_proposals(
+                database=fence_database(environment), ledger=live_r, live=live, as_of=as_of, current=current
+            )
+        else:
+            first = next(iter(unreadable.values()), None)
+            note = first.token if first is not None else "no_sendable_identity"
+            proposals = PromotionProposals(as_of=as_of, readable=False, note=note)
     except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("promotion proposals failed")
-        proposals = PromotionProposals(as_of=as_of, readable=False, note=_failed(exc))
+        proposals = PromotionProposals(as_of=as_of, readable=False, note=getattr(exc, "token", _failed(exc)))
+    sizes = _write_sizes(environment, proposals, plan)
     try:
         # Every managed session so far: phase 3 is a cumulative question.
         phase3 = read_scorecard(environment.database, end=as_of, days=None)
@@ -434,7 +484,36 @@ def collect_evidence(
         proposals=proposals,
         parity=parity,
         v7c=v7c,
+        sizes=sizes,
     )
+
+
+def _write_sizes(
+    environment: NightlyEnvironment, proposals: PromotionProposals, plan: NightPlan | None
+) -> SizeNight:
+    """The size writer right after the promoter, then the night's silent batch.
+    Each stands alone: a failure is logged and named, never raised."""
+    if plan is None:
+        sizes = not_written("no night planned")
+    else:
+        try:
+            sizes = write_night(
+                database=fence_database(environment),
+                proposals=proposals,
+                plan=plan,
+                fence_store=_fence_store(environment),
+            )
+        except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+            logger.exception("size writer failed")
+            sizes = not_written(_failed(exc), plan)
+    if environment.deliver_sizes is None or plan is None:
+        return sizes
+    try:
+        outcome = environment.deliver_sizes(fence_database(environment), plan.night)
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("size batch failed")
+        outcome = _failed(exc)
+    return replace(sizes, delivery=outcome)
 
 
 def write_evidence(
@@ -466,6 +545,7 @@ def write_evidence(
             "size_steps": None if evidence.proposals is None else evidence.proposals.size_steps.payload(),
             "decision_parity": evidence.parity.payload(),
             "v7c": (evidence.v7c or failed_report(as_of, NOT_COLLECTED)).payload(),
+            "sizes": None if evidence.sizes is None else evidence.sizes.payload(),
         },
         "windows.json": {
             "schema": "autotrader-v1/research-windows",
@@ -504,6 +584,7 @@ __all__ = [
     "REPLAY_WINDOW",
     "SWEEP_LATEST_START",
     "DecisionComparer",
+    "SizeBatchSender",
     "DecisionParity",
     "LiveHour",
     "NightlyEnvironment",

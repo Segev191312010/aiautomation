@@ -44,7 +44,11 @@ the pre-session leads), the restart cap's lines outside that window, and a
 competing login in the recorder's log. At each lead, with the port open, it
 runs the pre-session data check (T-4b, ``pre_session_check``): one
 daily-history request on the assistant's own TWS data client 21. It sends
-text only; its log checkpoints are kept in the assistant's state file.
+text only; its log checkpoints are kept in the assistant's state file. It
+also sends the size proposals' reminder and expiry note (plan P3-E,
+``size_notify.ProposalWatch``) through this one sender, reading the size store
+read-only; a pending migration 18 reads as no proposal, so it never needs the
+size tables at the assistant's required migration.
 
 Schema. The assistant never migrates. It starts while only migrations newer
 than ``schema_gate.TELEGRAM_ASSISTANT_REQUIRES`` are pending, so /stop and
@@ -1917,9 +1921,11 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
     notifier = TelegramNotifier(
         send_api, chat_id=owner, sleep=environment.sleep, monotonic=environment.monotonic
     )
+    from config import cfg
     from trading.manager.telegram import ManagerDesk
     from trading.operations.overnight_watch import OvernightWatch, notifier_port_outage
     from trading.operations.pre_session_check import PreSessionCheck
+    from trading.operations.size_notify import ProposalWatch
 
     overnight = OvernightWatch(
         log_directory=environment.paths.log_directory,
@@ -1939,6 +1945,12 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
             unavailable=tools.tws_problem_text or "",
             probe=environment.gateway_probe,
             sleep=environment.sleep,
+        ),
+        # Plan P3-E: the size proposals' 05:55 ET reminder (normal sound, once phone
+        # approval exists) and 07:55 ET expiry note (silent), on this one sender.
+        proposals=ProposalWatch(
+            database=Path(cfg.DB_PATH).expanduser(),
+            deliver=lambda text, silent: notifier.send(text, silent=silent),
         ),
     )
     assistant = TelegramAssistant(

@@ -39,6 +39,10 @@ Triggers (each fences the identity once per day; the first to fire wins):
     (``trading.research.nightly``; the notifier is not running then) with the
     same store, the same ``fence_identity`` and the reason grammar
     ``replay_mismatch_reason``.
+  * a demotion below the bottom rung of the size ladder: raised by the
+    nightly size writer (``trading.research.size_writer``, plan P3-E) through
+    the same ``fence_identity``, reason ``sentinel: demotion to shadow-only
+    (...)``; resume stays the owner's.
   * NOT implemented: an unattributed fill (an execution whose orderRef starts
     ``autotrader:`` that matches no bracket). The bridge state records only
     each bracket's aggregated fills (``filled``/``avg_entry``/``exit_filled``/
@@ -50,8 +54,9 @@ Log-only first (owner, 2026-10-17), live since P1-B.4: ``SENTINEL_FENCES_LIVE``
 shipped False for the first session(s) (P1-B, installed 2026-10-18) and is True
 since the owner, after reviewing the 🔎 lines, agreed through a reviewed
 one-line change of that constant (never an environment variable or a setting).
-The switch is read inside ``fence_identity``, the one write path, so both
-writers obey it: the Sentinel's triggers and the nightly replay-mismatch hook.
+The switch is read inside ``fence_identity``, the one write path, so every
+writer obeys it: the Sentinel's triggers, the nightly replay-mismatch hook and
+the nightly size writer's demotion fence.
 Log-only (False), ``fence_identity`` never calls the store: it logs ``sentinel
 would fence <ID>: <trigger>`` and returns ``WOULD_FENCE``, and the phone gets
 ``🔎 auto-fence (log-only): would stop <ID> — <trigger>`` once per identity per
@@ -236,7 +241,7 @@ async def fence_identity(
 
     Log-only (``SENTINEL_FENCES_LIVE`` is False): ``WOULD_FENCE``, after one
     log line, and the store is never called, so no row can be written by
-    either writer (the Sentinel, the nightly replay hook).
+    any writer (the Sentinel, the nightly replay hook, the nightly size writer).
 
     Only an exact sendable identity reaches the store, so the global ``paper``
     row (``identity=None``) can never be written from here, and nothing here

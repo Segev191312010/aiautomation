@@ -1,12 +1,19 @@
-"""The nightly promoter, Stage 1: propose mode, the promoter's own shadow (T-8).
+"""The nightly promoter: propose mode, the promoter's own shadow (T-8).
 
-Owner decision 2026-10-15: promotion builds toward ``auto_within_ceiling`` in
-two stages. In Stage 1 the rule below runs every night after the replay and
-only PROPOSES. It writes ``proposals.json`` and one line per proposal for the
-weekly Telegram summary; the owner decides (a ``DECISION owner:`` ledger line)
-and an approved step ships as a reviewed constants commit. Nothing here writes
-a constant, a database row or a fence: the module reads, and the nightly job
-writes its report file beside the other evidence.
+The rule below runs every night after the replay and only PROPOSES: it writes
+``proposals.json`` and one line per proposal for the weekly Telegram summary.
+Nothing here writes a constant, a database row or a fence: the module reads,
+and the nightly job writes its report file beside the other evidence. What
+happens to a proposal is owner decision D2 (2026-10-18), carried out by the
+nightly size writer (``trading.research.size_writer``, plan P3-E) right after
+this module: a step up waits for the owner's phone approval of that one
+proposal (never automatic); a step down applies by itself at the next session.
+
+``current``, the size each identity is judged at, is the size in force for the
+next session, read from the size store (``identity_sizing.size_in_force``,
+migration 18), the same store the session start reads; never the reviewed
+baseline table alone, which is only where the store starts from. A store that
+cannot be read leaves the whole report unreadable: nothing is proposed.
 
 The rule (owner-accepted defaults, OPERATOR_PROMPT Part 8.3), per sendable
 identity, over its window (the sessions under its current evidence identity
@@ -75,7 +82,8 @@ from trading.research.size_history import (
     read_decision_refs,
     read_size_steps,
 )
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, SIZE_LADDER
+from trading.risk.identity_sizing import SIZE_LADDER, SizeNotInForce, size_in_force
+from trading.scheduler.sessions import next_market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.decision_sizing import SizingIndex, read_decision_sizing, sizing_directory
 from trading.storage.migrations import SCHEMA_READ_TIMEOUT_SECONDS
@@ -218,6 +226,13 @@ class IdentityProposal:
     # and its stopped fence's reason, if any.
     hold: str | None = None
     fence: str | None = None
+    # The session of each closed real trade in the window, oldest first: the
+    # size writer counts the new ones since a size event (P3-E fix 1).
+    trade_sessions: tuple[date, ...] = ()
+
+    def trades_since(self, session: date) -> int:
+        """Closed real trades in the window on or after ``session``."""
+        return sum(1 for day in self.trade_sessions if day >= session)
 
     @property
     def token(self) -> str | None:
@@ -406,6 +421,7 @@ def evaluate_identity(evidence: IdentityEvidence, *, open_risk_term_deployed: bo
         trades_by_multiplier=evidence.trades_by_multiplier,
         hold=hold,
         fence=evidence.fence,
+        trade_sessions=tuple(sorted(trade.session_date for trade in trades)),
     )
 
 
@@ -422,7 +438,10 @@ class PromotionProposals:
 
     def lines(self) -> list[str]:
         """The weekly summary's lines: proposals first, then each identity's standing."""
-        lines = [f"Promotion proposals ({RULE_VERSION}, propose mode: nothing changes until the owner approves)"]
+        lines = [
+            f"Promotion proposals ({RULE_VERSION}, propose mode: a step up waits for the owner's approval;"
+            " a step down applies by itself at the next session)"
+        ]
         if not self.readable:
             lines.append(f"not evaluated: {self.note}")
             return lines
@@ -440,7 +459,8 @@ class PromotionProposals:
             "as_of": self.as_of.isoformat(),
             "grants": (
                 "nothing: a proposal changes no constant, database row or fence;"
-                " an approved step ships as a reviewed constants commit"
+                " the nightly size writer records it: a step up waits for the owner's phone approval,"
+                " a step down applies by itself at the next session"
             ),
             "open_risk_term_deployed": OPEN_RISK_TERM_DEPLOYED,
             "readable": self.readable,
@@ -613,9 +633,21 @@ def collect_proposals(
 ) -> PromotionProposals:
     """The nightly call: every sendable identity under the rule, read-only.
 
+    ``current`` is each identity's size in force for the next session; the
+    nightly job hands in the one read its size writer also uses. Without it,
+    the store is read here for the first session after ``as_of``
+    (``identity_sizing.size_in_force``, ``mode=ro``): a store that cannot be
+    read makes the report unreadable (nothing proposed), never the baseline.
     ``fences`` (tests) replaces the read of the fence table (``read_fences``).
     """
-    sizes = {name: IDENTITY_SIZE_MULTIPLIER[name] for name in SENDABLE_IDENTITIES} if current is None else dict(current)
+    if current is None:
+        session = next_market_session(as_of).session_date
+        try:
+            sizes = {name: size_in_force(database, name, session) for name in SENDABLE_IDENTITIES}
+        except SizeNotInForce as exc:
+            return PromotionProposals(as_of=as_of, readable=False, note=exc.token)
+    else:
+        sizes = dict(current)
     index = read_decision_sizing(sizing_directory(database)) if sizing is None else sizing
     steps = read_size_steps(database, index, current=sizes)
     decision_ids = [trade.decision_id for trade in ledger.trades if trade.strategy in sizes]
