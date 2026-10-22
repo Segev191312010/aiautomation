@@ -46,11 +46,12 @@ from decimal import Decimal, InvalidOperation
 import logging
 from pathlib import Path
 import sqlite3
+import time
 from types import MappingProxyType
 from urllib.parse import quote
 
 from trading.risk.engine import NO_SCALING, require_size_multiplier
-from trading.scheduler.sessions import MarketSession, market_session
+from trading.scheduler.sessions import MarketSession, market_session, next_market_session
 from trading.storage import migrations as schema_migrations
 from trading.storage.migrations import (
     SCHEMA_CHECKSUM_MISMATCH,
@@ -160,6 +161,18 @@ def identity_multiplier(name: str, *, sendable: bool) -> Decimal | None:
     return require_size_multiplier(value)
 
 
+# A busy, locked or failing database at the session start is read again,
+# briefly, inside the child (N19a, open question 2): only these SQLite result
+# codes. Every other failure is deterministic and gives None at once; nothing
+# here ever exits the child (exit 75 belongs to the schema gate).
+SIZE_READ_ATTEMPTS = 3
+SIZE_READ_RETRY_SECONDS = 1.0
+_TRANSIENT_SQLITE_CODES = frozenset(
+    {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_IOERR, sqlite3.SQLITE_CANTOPEN}
+)
+_pause = time.sleep
+
+
 class SizeStoreUnreadable(RuntimeError):
     """The size store gave no complete, well-formed history: no size is read from it."""
 
@@ -199,12 +212,23 @@ def read_size_events(
     if not path.is_file():
         raise SizeStoreUnreadable(f"no database at {path}")
     uri = f"file:{quote(str(path.resolve()))}?mode=ro"
-    try:
-        with closing(sqlite3.connect(uri, uri=True, timeout=SCHEMA_READ_TIMEOUT_SECONDS)) as db:
-            _require_size_store(db)
-            rows = db.execute(_EVENTS, (identity, account_mode)).fetchall()
-    except sqlite3.Error as exc:
-        raise SizeStoreUnreadable(f"{type(exc).__name__}: {exc}") from exc
+    for attempt in range(1, SIZE_READ_ATTEMPTS + 1):
+        try:
+            with closing(sqlite3.connect(uri, uri=True, timeout=SCHEMA_READ_TIMEOUT_SECONDS)) as db:
+                _require_size_store(db)
+                rows = db.execute(_EVENTS, (identity, account_mode)).fetchall()
+            break
+        except sqlite3.OperationalError as exc:
+            transient = (getattr(exc, "sqlite_errorcode", 0) & 0xFF) in _TRANSIENT_SQLITE_CODES
+            if not transient or attempt == SIZE_READ_ATTEMPTS:
+                raise SizeStoreUnreadable(f"{type(exc).__name__}: {exc} (attempt {attempt})") from exc
+            logger.warning(
+                "size store read %d/%d failed (%s); reading again in %.1f s",
+                attempt, SIZE_READ_ATTEMPTS, exc, SIZE_READ_RETRY_SECONDS,
+            )
+            _pause(SIZE_READ_RETRY_SECONDS)
+        except sqlite3.Error as exc:
+            raise SizeStoreUnreadable(f"{type(exc).__name__}: {exc}") from exc
     return tuple(_event(row) for row in rows)
 
 
@@ -261,25 +285,37 @@ def _event(row: Sequence[object]) -> SizeEvent:
         raise SizeStoreUnreadable(f"size event {event_id!r} does not parse: {exc}") from exc
 
 
+def _session_start_of(day: date) -> date:
+    """The session whose start an event effective on ``day`` takes effect at."""
+    return day if market_session(day) is not None else next_market_session(day).session_date
+
+
 def _chain_problem(events: Sequence[SizeEvent], baseline: Decimal) -> str | None:
     """Why ``events`` are not one history from ``baseline``, else None.
 
     The database checks each step against the previous event; only code
-    knows the baseline the first step must start from. Each event is one
-    rung in its kind's direction, from the size before it, effective at a
-    later session than the one before it.
+    knows the baseline the first step must start from, and the session
+    calendar. Each event is one rung in its kind's direction, from the size
+    before it, taking effect at a later session start than the one before it
+    (an event dated on a holiday takes effect at the next session, so it may
+    not share that start with the next event: N19a LOW-5).
     """
     size = baseline
     previous: SizeEvent | None = None
+    previous_start: date | None = None
     for event in events:
         if event.from_mult != size:
             return f"event {event.event_id} steps from x{event.from_mult}, but the size before it is x{size}"
         direction = {STEP_UP: 1, STEP_DOWN: -1}.get(event.kind)
         if direction is None or SIZE_LADDER.index(event.to_mult) - SIZE_LADDER.index(event.from_mult) != direction:
             return f"event {event.event_id} ({event.kind} x{event.from_mult} -> x{event.to_mult}) is not one rung"
-        if previous is not None and event.effective_session <= previous.effective_session:
-            return f"event {event.event_id} is not effective after event {previous.event_id}"
-        size, previous = event.to_mult, event
+        starts = _session_start_of(event.effective_session)
+        if previous is not None and previous_start is not None and starts <= previous_start:
+            return (
+                f"event {event.event_id} takes effect at the {starts.isoformat()} session start, not after"
+                f" event {previous.event_id}'s ({previous_start.isoformat()}): one step per session"
+            )
+        size, previous, previous_start = event.to_mult, event, starts
     return None
 
 

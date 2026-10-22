@@ -241,6 +241,7 @@ def test_v18_is_pinned_and_holds_the_ladder_the_code_uses(store):
     for table in size_schema.SIZE_STORE_TABLES:
         assert ("table", table) in names
         assert ("trigger", f"{table}_no_update") in names and ("trigger", f"{table}_no_delete") in names
+        assert ("trigger", f"{table}_no_replace") in names  # N19a MEDIUM-1
     assert ("view", size_schema.SIZE_PROPOSAL_STATE_VIEW) in names
 
 
@@ -365,7 +366,10 @@ def test_v18_step_downs_chain_and_one_step_per_session(store):
         "ORB_V2", "0.25", "0", proposal_id=bottom, effective=TUESDAY, at=at, kind=STEP_DOWN))
     # One decision per proposal; an approval only before its deadline (two hours here).
     store.decide(down, "auto_applied", actor="size_writer", at=at)
-    assert "UNIQUE" in store.refused(DECISION, (down, "auto_applied", "size_writer", _stamp(at)))
+    # (The no-replace trigger answers before the primary key does: fix 1, N19a MEDIUM-1.)
+    assert "size decisions are append-only" in store.refused(
+        DECISION, (down, "auto_applied", "size_writer", _stamp(at))
+    )
     assert SIZE_APPROVAL_AFTER_DEADLINE in store.refused(
         DECISION, (up, "approved", OWNER_TELEGRAM_ACTOR, _stamp(at + timedelta(hours=2)))
     )
@@ -402,6 +406,194 @@ def test_v18_step_downs_chain_and_one_step_per_session(store):
         "pending", "approved", "auto_applied", "would_fence"
     )
     assert events == [("1", "0.5", "2026-10-13"), ("0.5", "0.25", "2026-10-14")]
+
+
+# --- N19a fix 1: no REPLACE, no upsert, no silent IGNORE; exact rungs and stamps --------
+
+EVALUATION = """INSERT INTO autotrader_size_evaluations (identity, as_of, status, fingerprint, created_at)
+    VALUES (?, ?, ?, ?, ?)"""
+
+
+def _rows(path: Path) -> dict[str, list[tuple[object, ...]]]:
+    with closing(sqlite3.connect(path)) as db:
+        return {table: sorted(db.execute(f"SELECT * FROM {table}").fetchall(), key=repr)
+                for table in size_schema.SIZE_STORE_TABLES}
+
+
+def _conflicting_inserts(path: Path, table: str) -> list[tuple[str, tuple[object, ...]]]:
+    """Every way to insert ``table``'s first row again, by its key, with a conflict clause."""
+    with closing(sqlite3.connect(path)) as db:
+        columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+        row = db.execute(f"SELECT * FROM {table} LIMIT 1").fetchone()
+    names, marks = ", ".join(columns), ", ".join("?" * len(columns))
+    last = columns[-1]
+    return [
+        (f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({marks})", row),
+        (f"REPLACE INTO {table} ({names}) VALUES ({marks})", row),
+        (f"INSERT OR IGNORE INTO {table} ({names}) VALUES ({marks})", row),
+        (f"INSERT INTO {table} ({names}) VALUES ({marks}) ON CONFLICT DO NOTHING", row),
+        (f"INSERT INTO {table} ({names}) VALUES ({marks}) ON CONFLICT DO UPDATE SET {last} = excluded.{last}", row),
+    ]
+
+
+def test_v18_refuses_replace_upsert_and_silent_ignore_on_every_table(store):
+    """MEDIUM-1: REPLACE and upserts delete without the delete trigger; OR IGNORE must not drop in silence."""
+    at = night_before(TUESDAY)
+    up = store.propose("ORB_V2", "0.25", "0.5", at=at)
+    store.decide(up, "approved", actor=OWNER_TELEGRAM_ACTOR, at=at + timedelta(minutes=30))
+    store.event("ORB_V2", "0.25", "0.5", proposal_id=up, effective=TUESDAY, at=at + timedelta(minutes=30))
+    store.write(EVALUATION, ("ORB_V2", "2026-10-12", "proposed", "b" * 64, _stamp(at)))
+    before = _rows(store.path)
+    for table in size_schema.SIZE_STORE_TABLES:
+        for sql, row in _conflicting_inserts(store.path, table):
+            refusal = store.refused(sql, row)
+            if table != size_schema.SIZE_EVENTS_TABLE:  # an event's own chain triggers may answer first
+                assert "append-only" in refusal, (table, sql, refusal)
+    assert _rows(store.path) == before
+    # The keyed tables have no implicit rowid to replace a row through.
+    with closing(sqlite3.connect(store.path)) as db:
+        without_rowid = {name for _schema, name, _type, _cols, wr, _strict in db.execute("PRAGMA table_list") if wr}
+    assert {size_schema.SIZE_PROPOSALS_TABLE, size_schema.SIZE_DECISIONS_TABLE} <= without_rowid
+    with pytest.raises(sqlite3.DatabaseError):
+        store.write(f"INSERT OR REPLACE INTO {size_schema.SIZE_PROPOSALS_TABLE} (rowid, proposal_id) VALUES (1, 'x')",
+                    ())
+    # No row can sit at the id an auto-assigned insert shows its triggers (-1).
+    momo = store.propose("MOMO_HOD_V2", "1", "0.5", at=at)
+    store.decide(momo, "auto_applied", actor="size_writer", at=at)
+    params = store.event_params("MOMO_HOD_V2", "1", "0.5", proposal_id=momo, effective=WEDNESDAY, at=at)
+    assert "CHECK" in store.refused(EVENT.replace("(identity,", "(id, identity,").replace("VALUES (", "VALUES (-1, "),
+                                    params)
+    # Ordinary appends still work, after all those refusals.
+    store.step("GAP_GO_V2", "0.5", "0.25", effective=WEDNESDAY, at=at)
+    store.write(EVALUATION, ("ORB_V2", "2026-10-13", "held", "c" * 64, _stamp(at)))
+    after = _rows(store.path)
+    assert {table: len(rows) for table, rows in after.items()} == {
+        size_schema.SIZE_PROPOSALS_TABLE: 3, size_schema.SIZE_DECISIONS_TABLE: 3,
+        size_schema.SIZE_EVENTS_TABLE: 2, size_schema.SIZE_EVALUATIONS_TABLE: 2,
+    }
+
+
+def test_v18_review_repros_are_refused(store, sizing_log):
+    """N19a's three reproductions on a migrated v18 database, each refused."""
+    at = night_before(TUESDAY)
+    decision = f"INSERT {{}} INTO {size_schema.SIZE_DECISIONS_TABLE} (proposal_id, decision, actor, at) VALUES (?, ?, ?, ?)"
+    # [04]/[05] an owner rejection rewritten to an approval.
+    vwap = store.propose("VWAP_PB_V2", "0.5", "1", at=at)
+    store.decide(vwap, "rejected", actor=OWNER_TELEGRAM_ACTOR, at=at + timedelta(minutes=5))
+    approve = (vwap, "approved", OWNER_TELEGRAM_ACTOR, _stamp(at + timedelta(minutes=10)))
+    for sql in (decision.format("OR REPLACE"), decision.replace("INSERT {} INTO", "REPLACE INTO"),
+                decision.format("") + " ON CONFLICT(proposal_id) DO UPDATE SET decision = excluded.decision"):
+        assert "size decisions are append-only" in store.refused(sql, approve), sql
+    with closing(sqlite3.connect(store.path)) as db:
+        assert db.execute("SELECT state FROM autotrader_size_proposal_state WHERE proposal_id = ?",
+                          (vwap,)).fetchone() == ("rejected",)
+    params = store.event_params("VWAP_PB_V2", "0.5", "1", proposal_id=vwap, effective=TUESDAY, at=at)
+    assert SIZE_STEP_UP_NEEDS_OWNER_APPROVAL in store.refused(EVENT, params)
+
+    # [06] a MOMO step down erased: replaced, through its id, by an approved ORB step up.
+    erased = store.step("MOMO_HOD_V2", "1", "0.5", effective=TUESDAY, at=at)
+    orb = store.propose("ORB_V2", "0.25", "0.5", at=at)
+    store.decide(orb, "approved", actor=OWNER_TELEGRAM_ACTOR, at=at + timedelta(minutes=5))
+    columns = "(id, identity, from_mult, to_mult, effective_session, kind, proposal_id, created_at, account_mode)"
+    row = (erased, "ORB_V2", "0.25", "0.5", "2026-10-14", STEP_UP, orb, _stamp(at + timedelta(minutes=6)), "paper")
+    for verb in ("INSERT OR REPLACE", "REPLACE"):
+        sql = f"{verb} INTO {size_schema.SIZE_EVENTS_TABLE} {columns} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        assert "size events are append-only" in store.refused(sql, row), verb
+    assert read(store.path, "MOMO_HOD_V2", WEDNESDAY) == Decimal("0.5")  # never x1 again by deletion
+
+    # [07] ORB's approval rewritten into a MOMO 0.5 -> 1 step up.
+    rewrite = (orb, "2026-10-12", "MOMO_HOD_V2", STEP_UP, "0.5", "1", "a" * 64,
+               _stamp(at + timedelta(hours=2)), _stamp(at))
+    for verb in ("INSERT OR REPLACE", "REPLACE"):
+        sql = PROPOSAL.replace("INSERT INTO", f"{verb} INTO")
+        assert "size proposals are append-only" in store.refused(sql, rewrite), verb
+    momo_up = store.event_params("MOMO_HOD_V2", "0.5", "1", proposal_id=orb, effective=WEDNESDAY, at=at)
+    assert SIZE_STEP_UP_NEEDS_OWNER_APPROVAL in store.refused(EVENT, momo_up)
+
+    # [09] an evaluation rewritten.
+    store.write(EVALUATION, ("ORB_V2", "2026-10-12", "proposed", "b" * 64, _stamp(at)))
+    sql = EVALUATION.replace("INSERT INTO", "INSERT OR REPLACE INTO")
+    assert "size evaluations are append-only" in store.refused(sql, ("ORB_V2", "2026-10-12", "held", "c" * 64,
+                                                                     _stamp(at)))
+    assert criticals(sizing_log) == []
+
+
+def test_v18_an_approval_raises_only_its_own_rung(store):
+    """LOW-1: the step triggers match the proposal's from and to, not only its identity."""
+    at = night_before(TUESDAY)
+    store.step("ORB_V2", "0.25", "0.5", effective=TUESDAY, at=at)  # ORB_V2 now x0.5
+    stale = store.propose("ORB_V2", "0.25", "0.5", at=at)  # an approved step, never used
+    store.decide(stale, "approved", actor=OWNER_TELEGRAM_ACTOR, at=at + timedelta(minutes=5))
+    higher = store.event_params("ORB_V2", "0.5", "1", proposal_id=stale, effective=WEDNESDAY,
+                                at=at + timedelta(minutes=10))
+    assert SIZE_STEP_UP_NEEDS_OWNER_APPROVAL in store.refused(EVENT, higher)
+    # The step-down twin: an automatic 1 -> 0.5 never lowers 0.5 -> 0.25.
+    store.step("MOMO_HOD_V2", "1", "0.5", effective=TUESDAY, at=at)
+    old = store.propose("MOMO_HOD_V2", "1", "0.5", at=at)
+    store.decide(old, "auto_applied", actor="size_writer", at=at)
+    lower = store.event_params("MOMO_HOD_V2", "0.5", "0.25", proposal_id=old, effective=WEDNESDAY,
+                               at=at + timedelta(minutes=10))
+    assert SIZE_STEP_DOWN_NEEDS_AUTO_APPLIED in store.refused(EVENT, lower)
+
+
+BAD_STAMPS = (
+    "2026-02-30T10:00:00+00:00",  # no such day (SQLite would normalise it to March 2)
+    "2026-10-22T24:00:00+00:00",  # hour 24
+    "2026-10-22T10:60:00+00:00",
+    "2026-10-22T10:00:00.1+00:00",  # not the six-digit fraction Python writes
+    "1999-12-31T10:00:00+00:00",
+    "0000-01-01T00:00:00+00:00",
+    "2026-10-22T10:00:00Z",
+    "2026-10-22T10:00:00-04:00",
+    "2026-10-22 10:00:00+00:00",
+)
+
+
+def test_v18_refuses_stamps_and_dates_python_cannot_read(store):
+    """LOW-6: no row the reader cannot parse, so no identity is ever blocked for good by one."""
+    at = night_before(TUESDAY)
+    good = store.propose("ORB_V2", "0.25", "0.5", at=at)
+    store.decide(good, "approved", actor=OWNER_TELEGRAM_ACTOR, at=at + timedelta(minutes=5))
+    for bad in BAD_STAMPS:
+        proposal = ("e" * 10, "2026-10-12", "GAP_GO_V2", STEP_DOWN, "0.5", "0.25", "a" * 64, None, bad)
+        assert "CHECK" in store.refused(PROPOSAL, proposal), bad
+        deadline = ("e" * 10, "2026-10-12", "GAP_GO_V2", STEP_UP, "0.5", "1", "a" * 64, bad, _stamp(at))
+        assert "CHECK" in store.refused(PROPOSAL, deadline), bad
+        assert "CHECK" in store.refused(EVALUATION, ("GAP_GO_V2", "2026-10-12", "held", "b" * 64, bad)), bad
+        event = ("ORB_V2", "0.25", "0.5", "2026-10-14", STEP_UP, good, bad, "paper")
+        assert "CHECK" in store.refused(EVENT, event), bad
+    vwap = store.propose("VWAP_PB_V2", "0.5", "1", at=at)
+    for bad in BAD_STAMPS:
+        assert "CHECK" in store.refused(DECISION, (vwap, "rejected", OWNER_TELEGRAM_ACTOR, bad)), bad
+    for day in ("2026-02-30", "1999-12-31", "2026-10-17", "2026-10-18", "20261014"):
+        event = ("ORB_V2", "0.25", "0.5", day, STEP_UP, good, _stamp(at), "paper")
+        assert "CHECK" in store.refused(EVENT, event), day
+    assert "CHECK" in store.refused(EVALUATION, ("GAP_GO_V2", "1999-12-31", "held", "b" * 64, _stamp(at)))
+    # What the store accepts, Python reads: whole seconds and six-digit fractions.
+    store.event("ORB_V2", "0.25", "0.5", proposal_id=good, effective=TUESDAY, at=at + timedelta(microseconds=7))
+    assert read(store.path, "ORB_V2", TUESDAY) == Decimal("0.5")
+
+
+def test_one_step_per_session_start_not_per_date(store, sizing_log):
+    """LOW-5: two events with no session start between them never both apply at one start."""
+    friday, saturday = date(2026, 10, 16), date(2026, 10, 17)
+    vwap = store.propose("VWAP_PB_V2", "0.5", "1", at=et(friday, 20, 0))
+    store.decide(vwap, "approved", actor=OWNER_TELEGRAM_ACTOR, at=et(friday, 20, 30))
+    weekend = store.event_params("VWAP_PB_V2", "0.5", "1", proposal_id=vwap, effective=saturday,
+                                 at=et(friday, 20, 30))
+    assert "CHECK" in store.refused(EVENT, weekend)  # a weekend date is never a session
+    # A holiday is a weekday: alone, its event takes effect at the next session's start ...
+    thanksgiving, black_friday = date(2026, 11, 26), date(2026, 11, 27)
+    store.step("GAP_GO_V2", "0.5", "0.25", effective=thanksgiving, at=night_before(thanksgiving))
+    assert read(store.path, "GAP_GO_V2", date(2026, 11, 25)) == Decimal("0.5")
+    assert read(store.path, "GAP_GO_V2", black_friday) == Decimal("0.25")
+    assert criticals(sizing_log) == []
+    # ... and a second event for that same start is two rungs at one start: refused.
+    store.step("GAP_GO_V2", "0.25", "0.5", effective=black_friday, at=night_before(black_friday))
+    assert read(store.path, "GAP_GO_V2", black_friday) is None
+    assert read(store.path, "GAP_GO_V2", date(2026, 11, 30)) is None
+    assert criticals(sizing_log) == [SIZE_EVENT_CHAIN_BROKEN] * 2
+    assert "one step per session" in [r for r in sizing_log.records if r.levelno == logging.CRITICAL][-1].getMessage()
 
 
 # --- the session-start read --------------------------------------------------------
@@ -591,6 +783,98 @@ def test_the_event_chain_starts_at_the_baseline(store, sizing_log, monkeypatch):
     monkeypatch.setattr(identity_sizing, "IDENTITY_SIZE_MULTIPLIER", MappingProxyType(rows))
     assert read(store.path, "GAP_GO_V2", TUESDAY) is None
     assert criticals(sizing_log)[-1] == SIZE_EVENT_CHAIN_BROKEN
+
+
+def test_the_reader_refuses_a_step_against_its_kind(store, sizing_log):
+    """LOW-2: a raise labelled step_down, written past the CHECKs (any writer can switch them off)."""
+    at = night_before(TUESDAY)
+    raise_ = store.propose("VWAP_PB_V2", "0.5", "1", at=at, kind=STEP_DOWN, ignore_checks=True)
+    store.decide(raise_, "auto_applied", actor="size_writer", at=at)
+    store.event("VWAP_PB_V2", "0.5", "1", proposal_id=raise_, effective=TUESDAY, at=at, kind=STEP_DOWN,
+                ignore_checks=True)
+    assert read(store.path, "VWAP_PB_V2", TUESDAY) is None
+    assert criticals(sizing_log) == [SIZE_EVENT_CHAIN_BROKEN]
+
+
+def test_the_reader_refuses_events_out_of_session_order(store, sizing_log):
+    """LOW-2: the reader keeps the order rule itself, without the database's trigger."""
+    with closing(sqlite3.connect(store.path)) as db:
+        db.execute("DROP TRIGGER autotrader_size_events_after_previous")  # a damaged store, not v18's rules
+        db.commit()
+    at = night_before(TUESDAY)
+    store.step("GAP_GO_V2", "0.5", "0.25", effective=WEDNESDAY, at=at)
+    store.step("GAP_GO_V2", "0.25", "0.5", effective=TUESDAY, at=at)  # one rung on, but an earlier session
+    assert read(store.path, "GAP_GO_V2", WEDNESDAY) is None
+    assert read(store.path, "GAP_GO_V2", TUESDAY) is None
+    assert criticals(sizing_log) == [SIZE_EVENT_CHAIN_BROKEN] * 2
+
+
+def _rollback_journal_copy(store: SizeLedger, tmp_path: Path) -> Path:
+    """The store in rollback-journal mode, where a writer's lock makes a reader busy."""
+    copy = tmp_path / "busy.db"
+    shutil.copy(store.path, copy)
+    with closing(sqlite3.connect(copy)) as db:
+        assert db.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
+    return copy
+
+
+def test_a_busy_store_is_read_again_then_fails_closed(tmp_path, store, sizing_log, monkeypatch):
+    """Open question 2 (adopted): only a transient SQLite failure is retried, three tries, never an exit."""
+    assert (identity_sizing.SIZE_READ_ATTEMPTS, identity_sizing.SIZE_READ_RETRY_SECONDS) == (3, 1.0)
+    busy = _rollback_journal_copy(store, tmp_path)
+    holder = sqlite3.connect(busy, isolation_level=None)
+    monkeypatch.setattr(identity_sizing, "SCHEMA_READ_TIMEOUT_SECONDS", 0.05)
+    pauses: list[float] = []
+
+    def pause_and_release(seconds: float) -> None:
+        pauses.append(seconds)
+        holder.execute("COMMIT")  # the writer finishes while the reader waits
+
+    monkeypatch.setattr(identity_sizing, "_pause", pause_and_release)
+    holder.execute("BEGIN EXCLUSIVE")
+    assert read(busy, "ORB_V2", TUESDAY) == Decimal("0.25")
+    assert pauses == [1.0] and criticals(sizing_log) == []
+    assert [r.levelno for r in sizing_log.records].count(logging.WARNING) == 1
+
+    # Held throughout: three tries, then None with the CRITICAL (no exit, no exception).
+    pauses.clear()
+    monkeypatch.setattr(identity_sizing, "_pause", pauses.append)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        assert read(busy, "ORB_V2", TUESDAY) is None
+    finally:
+        holder.execute("COMMIT")
+        holder.close()
+    assert pauses == [1.0, 1.0]
+    assert criticals(sizing_log) == [IDENTITY_SIZE_STORE_UNREADABLE]
+    assert "attempt 3" in [r for r in sizing_log.records if r.levelno == logging.CRITICAL][-1].getMessage()
+
+    # A deterministic failure is never retried.
+    pauses.clear()
+    dropped = tmp_path / "dropped.db"
+    shutil.copy(store.path, dropped)
+    with closing(sqlite3.connect(dropped)) as db:
+        db.execute("DROP TABLE autotrader_size_events")
+        db.commit()
+    assert read(dropped, "ORB_V2", TUESDAY) is None
+    assert pauses == []
+
+
+async def test_an_exception_from_the_size_read_never_becomes_a_size(tmp_path, monkeypatch):
+    """LOW-3: the composition root lets a failing read fail the run; it never substitutes a size."""
+    from tests.test_shadow_service import _pipeline_keywords, _size_store
+    from trading.operations import shadow_service
+
+    await _size_store(tmp_path, monkeypatch)
+
+    def crashing(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("size read crashed")
+
+    monkeypatch.setattr(shadow_service, "session_identity_multiplier", crashing)
+    captured: dict[str, object] = {}
+    with pytest.raises(RuntimeError, match="size read crashed"):
+        await _pipeline_keywords(monkeypatch, "orb-v2", captured=captured)
+    assert "pipeline" not in captured and captured["spec_name"] == "ORB_V2"
 
 
 def test_a_sendable_name_without_a_baseline_row_is_none_never_one(store, sizing_log, monkeypatch):
@@ -850,13 +1134,29 @@ SIZE_WRITER_IMPORTERS = {
     "trading.operations.telegram_size_approval": frozenset({"trading/operations/telegram_bot.py"}),
 }
 _EXCLUDED_ROOTS = frozenset({"tests", ".venv", ".tmp", "node_modules", "__pycache__"})
-_INSERT_INTO_EVENTS = re.compile(
-    r"\b(?:INSERT|REPLACE)\b(?:\s+OR\s+[A-Z]+)?\s+INTO\s+(?:[\w\"`\[\]]+\.)?[\"`\[]?"
-    + size_schema.SIZE_EVENTS_TABLE
-    + r"\b",
-    re.IGNORECASE,
+# The tables a write to which changes a size: only the two writers insert into
+# them (D6; N19a LOW-4 adds the decisions, where an approval lives).
+SIZE_WRITE_TABLES = (size_schema.SIZE_EVENTS_TABLE, size_schema.SIZE_DECISIONS_TABLE)
+# Modules that may name those tables together with any write word: the schema
+# (DDL), the reader and the two writers. Another module that does is a writer
+# until a review adds it here.
+SIZE_WRITE_TABLE_NAMERS = frozenset({
+    "trading/storage/size_schema.py", "trading/risk/identity_sizing.py", *SIZE_EVENT_WRITERS,
+})
+# The one module that may record an owner approval.
+APPROVAL_WRITER = "trading/operations/telegram_size_approval.py"
+_WRITE_TABLE_CONSTANTS = frozenset({"SIZE_EVENTS_TABLE", "SIZE_DECISIONS_TABLE", "SIZE_STORE_TABLES"})
+_COMMENTS = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
+_PERCENT_FIELD = re.compile(r"%(?:\([^)]*\))?[-#0 +]*\d*(?:\.\d+)?[sdifrxXeEgGc]")
+_BRACE_FIELD = re.compile(r"\{[^{}]*\}")
+_INSERT_INTO = re.compile(
+    r"\b(?:INSERT|REPLACE)\b(?:\s+OR\s+\w+)?\s+INTO\s+(?:[\w\"`\[\]]+\.)?[\"`\[]?(?P<table>\w+)", re.IGNORECASE
 )
-_INSERT_INTO_ANY = re.compile(r"\b(?:INSERT|REPLACE)\b(?:\s+OR\s+[A-Z]+)?\s+INTO\b", re.IGNORECASE)
+_CONFLICT_CLAUSE = re.compile(r"\bINSERT\s+OR\s+(?:REPLACE|IGNORE)\b|\bREPLACE\s+INTO\b|\bON\s+CONFLICT\b", re.IGNORECASE)
+_NAMES_WRITE_TABLE = re.compile(r"size_events|size_decisions|autotrader_size_\{\}", re.IGNORECASE)
+_WRITE_WORD = re.compile(r"\b(?:INSERT|REPLACE|UPSERT)\b", re.IGNORECASE)
+_WRITE_IDENTIFIER = re.compile(r"(?:^|_)(?:insert|replace|upsert|executescript|executemany)(?:_|$)", re.IGNORECASE)
+_APPROVAL = re.compile(r"\bapproved\b|owner_telegram", re.IGNORECASE)
 
 
 def _production_files(suffix: str) -> list[Path]:
@@ -889,46 +1189,129 @@ def _docstrings(tree: ast.AST) -> set[int]:
     return ids
 
 
+def _constant(node: ast.AST) -> object:
+    """A literal operand (str, int, float, or a tuple of those), else ``_UNKNOWN``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float)):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        values = tuple(_constant(item) for item in node.elts)
+        return _UNKNOWN if _UNKNOWN in values else values
+    return _UNKNOWN
+
+
+_UNKNOWN = object()
+
+
 def _fold(node: ast.AST) -> str | None:
-    """A string expression's text: constants, f-strings ("{}" for each value), and + of those."""
+    """A string expression's text, as far as the source fixes it ("{}" for the rest).
+
+    Constants, f-strings, ``+``, ``%`` formatting, ``.format`` and ``.join``:
+    the ways a statement's table name can be split across literals (N19a
+    LOW-4: ``"INSERT INTO autotrader_%s" % "size_events"`` folds whole).
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
         return "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left, right = _fold(node.left), _fold(node.right)
-        if left is not None and right is not None:
-            return left + right
+        if left is None and right is None:
+            return None
+        return ("{}" if left is None else left) + ("{}" if right is None else right)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        template = _fold(node.left)
+        if template is None:
+            return None
+        operand = _constant(node.right)
+        if operand is not _UNKNOWN:
+            try:
+                return template % operand
+            except (TypeError, ValueError, KeyError):
+                pass
+        return _PERCENT_FIELD.sub("{}", template)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        base = _fold(node.func.value)
+        if base is not None and node.func.attr == "format":
+            arguments = [_constant(item) for item in node.args]
+            keywords = {item.arg: _constant(item.value) for item in node.keywords if item.arg}
+            if _UNKNOWN not in arguments and _UNKNOWN not in keywords.values() and len(keywords) == len(node.keywords):
+                try:
+                    return base.format(*arguments, **keywords)
+                except (IndexError, KeyError, ValueError, AttributeError):
+                    pass
+            return _BRACE_FIELD.sub("{}", base)
+        if base is not None and node.func.attr == "join" and len(node.args) == 1:
+            items = node.args[0]
+            if isinstance(items, (ast.List, ast.Tuple)):
+                return base.join("{}" if (part := _fold(item)) is None else part for item in items.elts)
     return None
 
 
-def size_event_writes(source: str) -> list[str]:
-    """Why ``source`` would insert a size event; empty when it cannot.
+def _sql(text: str) -> str:
+    """``text`` without SQL comments, its whitespace collapsed (``INSERT /* x */ INTO``)."""
+    return " ".join(_COMMENTS.sub(" ", text).split())
 
-    Exact: a string (a constant, an f-string or a + of them) that inserts into
-    the events table. Indirect: a module that names the table (its literal or
-    ``SIZE_EVENTS_TABLE``) and holds any INSERT ... INTO string, as an
-    f-string over that name would. Docstrings and trigger timing clauses
-    (``BEFORE INSERT ON``) are not writes.
+
+def _identifiers(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.alias):
+            names.add(node.name.rsplit(".", 1)[-1])
+            if node.asname:
+                names.add(node.asname)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+    return names
+
+
+def size_store_violations(source: str, relative: str) -> list[str]:
+    """Every way the module at ``relative`` could write a size or an approval outside D6.
+
+    1. An INSERT/REPLACE INTO the events or decisions table, outside the two writers.
+    2. Outside the reviewed namers: naming either table (its literal, a split of
+       it, or its constant) together with any write word, in a string or an
+       identifier (a generic ``insert(db, table, row)`` helper called with the
+       table's name: N19a M18).
+    3. A conflict clause (``INSERT OR REPLACE|IGNORE``, ``REPLACE INTO``,
+       ``ON CONFLICT``) on a size table anywhere, and any conflict clause in a
+       writer: they must check, then insert.
+    4. An owner approval (``approved``, ``owner_telegram``) recorded anywhere but
+       ``telegram_size_approval.py``.
+    Docstrings, comments and trigger timing (``BEFORE INSERT ON``) are not writes.
+    The scan is a tripwire, not a proof: code that builds its SQL at run time
+    from data (an environment variable, ``chr`` codes) is beyond any static
+    reading. The database's own triggers hold whatever writes.
     """
     tree = ast.parse(source)
     skip = _docstrings(tree)
-    texts = [
-        text
-        for node in ast.walk(tree)
-        if id(node) not in skip and (text := _fold(node)) is not None
-    ]
-    reasons = [f"inserts: {text.strip()[:80]!r}" for text in texts if _INSERT_INTO_EVENTS.search(text)]
-    names_table = any(size_schema.SIZE_EVENTS_TABLE in text for text in texts) or any(
-        (isinstance(node, ast.Name) and node.id == "SIZE_EVENTS_TABLE")
-        or (isinstance(node, ast.Attribute) and node.attr == "SIZE_EVENTS_TABLE")
-        or (isinstance(node, ast.alias) and node.name == "SIZE_EVENTS_TABLE")
-        for node in ast.walk(tree)
+    texts = [_sql(text) for node in ast.walk(tree) if id(node) not in skip and (text := _fold(node)) is not None]
+    identifiers = _identifiers(tree)
+    violations: list[str] = []
+    inserts = sorted({
+        match.group("table").lower()
+        for text in texts for match in _INSERT_INTO.finditer(text)
+        if match.group("table").lower() in SIZE_WRITE_TABLES
+    })
+    if inserts and relative not in SIZE_EVENT_WRITERS:
+        violations.append(f"inserts into {', '.join(inserts)}")
+    names_table = any(_NAMES_WRITE_TABLE.search(text) for text in texts) or bool(identifiers & _WRITE_TABLE_CONSTANTS)
+    write_word = any(_WRITE_WORD.search(text) for text in texts) or any(
+        _WRITE_IDENTIFIER.search(name) for name in identifiers
     )
-    if names_table and not reasons:
-        reasons += [f"names the table and inserts: {text.strip()[:80]!r}" for text in texts
-                    if _INSERT_INTO_ANY.search(text)]
-    return reasons
+    if names_table and write_word and relative not in SIZE_WRITE_TABLE_NAMERS:
+        violations.append("names a size write table beside a write word, outside the reviewed modules")
+    for text in texts:
+        if _CONFLICT_CLAUSE.search(text) and ("autotrader_size_" in text.lower() or relative in SIZE_EVENT_WRITERS):
+            violations.append(f"conflict clause on a size table: {text[:80]!r}")
+    if relative in SIZE_WRITE_TABLE_NAMERS - {APPROVAL_WRITER, "trading/storage/size_schema.py"} and (
+        any(_APPROVAL.search(text) for text in texts) or "OWNER_TELEGRAM_ACTOR" in identifiers
+    ):
+        violations.append("records an owner approval outside telegram_size_approval.py")
+    return violations
 
 
 def _imports(tree: ast.AST, relative: str) -> set[str]:
@@ -954,40 +1337,59 @@ def test_only_two_writers_insert_size_events():
     # The scan covers the whole backend: the bridge, the CLI, the children, the API.
     assert {"scripts_local/paper_bridge.py", "trading/cli.py", "autotraderctl.py", "main.py",
             "trading/storage/size_schema.py", "trading/risk/identity_sizing.py"} <= relative
-    writers = {
-        path.relative_to(BACKEND).as_posix(): reasons
+    violations = {
+        rel: found
         for path in sources
-        if (reasons := size_event_writes(path.read_text(encoding="utf-8")))
+        if (found := size_store_violations(path.read_text(encoding="utf-8"), rel := path.relative_to(BACKEND).as_posix()))
     }
-    assert set(writers) <= SIZE_EVENT_WRITERS, writers
-    # Before P3-D/P3-E nothing writes one at all: the store holds no event until they ship.
-    present = {name for name in SIZE_EVENT_WRITERS if (BACKEND / name).exists()}
-    assert set(writers) <= present
-    # No SQL file outside the tests touches the table either.
+    assert not violations, violations
+    # No SQL file outside the tests touches the write tables either.
     sql = _production_files(".sql")
-    assert not [path for path in sql if size_schema.SIZE_EVENTS_TABLE in path.read_text(encoding="utf-8")]
+    assert not [path for path in sql if _NAMES_WRITE_TABLE.search(path.read_text(encoding="utf-8"))]
+
+
+ROGUE = "trading/research/rogue_sizes.py"
+WRITER = "trading/research/size_writer.py"
 
 
 @pytest.mark.parametrize(
-    ("source", "writes"),
+    ("relative", "source", "flagged"),
     [
-        ('X = "INSERT INTO autotrader_size_events (identity) VALUES (?)"\n', True),
-        ('X = """insert or ignore into\n  main."autotrader_size_events" values (?)"""\n', True),
-        ('X = "REPLACE INTO autotrader_size_events VALUES (?)"\n', True),
-        ('X = "INSERT INTO " + "autotrader_size_events VALUES (?)"\n', True),
-        ('T = "autotrader_size_events"\nX = f"INSERT INTO {T} VALUES (?)"\n', True),
-        ('from trading.storage.size_schema import SIZE_EVENTS_TABLE\nX = f"INSERT INTO {SIZE_EVENTS_TABLE} (x)"\n',
+        (ROGUE, 'X = "INSERT INTO autotrader_size_events (identity) VALUES (?)"\n', True),
+        (ROGUE, 'X = """insert or ignore into\n  main."autotrader_size_events" values (?)"""\n', True),
+        (ROGUE, 'X = "REPLACE INTO autotrader_size_events VALUES (?)"\n', True),
+        (ROGUE, 'X = "INSERT INTO " + "autotrader_size_events VALUES (?)"\n', True),
+        (ROGUE, 'X = "INSERT INTO autotrader_%s (identity) VALUES (?)" % "size_events"\n', True),  # M16
+        (ROGUE, 'X = "INSERT /* step */ INTO autotrader_size_events (identity) VALUES (?)"\n', True),  # M17
+        (ROGUE, 'X = "INSERT -- why\\n INTO autotrader_size_events VALUES (?)"\n', True),
+        (ROGUE, 'X = "INSERT\\n\\t INTO\\n autotrader_size_events VALUES (?)"\n', True),
+        (ROGUE, 'X = "INSERT INTO autotrader_{} (x) VALUES (?)".format("size_events")\n', True),
+        (ROGUE, 'X = " ".join(["INSERT", "INTO", "autotrader_size_events", "VALUES (?)"])\n', True),
+        (ROGUE, 'db.executescript("BEGIN; INSERT INTO autotrader_size_decisions VALUES (1); COMMIT;")\n', True),
+        (ROGUE, 'X = "INSERT INTO autotrader_size_decisions VALUES (?)"\n', True),
+        (ROGUE, 'from trading.storage.rogue_helper import insert\n'
+                'insert(db, "autotrader_size_events", {"identity": "ORB_V2"})\n', True),  # M18
+        (ROGUE, 'T = "autotrader_size_" + kind\ndb.execute(f"INSERT INTO {T} VALUES (?)", row)\n', True),
+        (ROGUE, 'from trading.storage.size_schema import SIZE_EVENTS_TABLE\nX = f"INSERT INTO {SIZE_EVENTS_TABLE} (x)"\n',
          True),
-        ('from trading.storage import size_schema as s\nX = "INSERT INTO %s VALUES (?)" % s.SIZE_EVENTS_TABLE\n',
+        (ROGUE, 'from trading.storage import size_schema as s\nX = "INSERT INTO %s VALUES (?)" % s.SIZE_EVENTS_TABLE\n',
          True),
-        ('X = "BEFORE INSERT ON autotrader_size_events BEGIN SELECT 1; END"\n', False),
-        ('X = "SELECT to_mult FROM autotrader_size_events WHERE identity = ?"\n', False),
-        ('"""Never insert a size event into autotrader_size_events here."""\n', False),
-        ('X = "INSERT INTO autotrader_size_decisions VALUES (?)"\n', False),
+        (ROGUE, 'def insert(db, table, row):\n    db.execute(f"INSERT INTO {table} VALUES (?)", row)\n', False),
+        (ROGUE, 'X = "SELECT to_mult FROM autotrader_size_events WHERE identity = ?"\n', False),
+        (ROGUE, '"""Never insert a size event into autotrader_size_events here."""\n', False),
+        (ROGUE, 'X = "INSERT INTO autotrader_size_proposals VALUES (?)"\n', False),
+        ("trading/storage/size_schema.py", 'X = "BEFORE INSERT ON autotrader_size_events BEGIN SELECT 1; END"\n', False),
+        ("trading/risk/identity_sizing.py",
+         'from trading.storage.size_schema import SIZE_EVENTS_TABLE\nX = f"SELECT * FROM {SIZE_EVENTS_TABLE}"\n', False),
+        (WRITER, 'X = "INSERT INTO autotrader_size_events (identity) VALUES (?)"\n', False),
+        (WRITER, "X = \"INSERT INTO autotrader_size_decisions VALUES (?, 'approved', ?, ?)\"\n", True),
+        (APPROVAL_WRITER, "X = \"INSERT INTO autotrader_size_decisions VALUES (?, 'approved', ?, ?)\"\n", False),
+        (WRITER, 'X = "INSERT OR IGNORE INTO autotrader_size_events (identity) VALUES (?)"\n', True),
+        (WRITER, 'X = "INSERT INTO autotrader_size_events (identity) VALUES (?) ON CONFLICT DO NOTHING"\n', True),
     ],
 )
-def test_the_writer_scan_finds_every_shape_of_insert(source, writes):
-    assert bool(size_event_writes(source)) is writes, size_event_writes(source)
+def test_the_writer_scan_finds_every_shape_of_insert(relative, source, flagged):
+    assert bool(size_store_violations(source, relative)) is flagged, size_store_violations(source, relative)
 
 
 def test_the_import_scan_resolves_relative_imports():
@@ -1014,5 +1416,5 @@ def test_no_cli_verb_writes_sizes():
     assert not offenders, offenders
     for entry in ("trading/cli.py", "autotraderctl.py"):
         source = (BACKEND / entry).read_text(encoding="utf-8")
-        assert not size_event_writes(source), entry
+        assert not size_store_violations(source, entry), entry
         assert not any(table in source for table in size_schema.SIZE_STORE_TABLES), entry

@@ -50,8 +50,10 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     17: ("manual-entry-stop", "3819025e3c91b79e401587ecc0fdd327b6b14136999f204eedc81133ac6fe735"),
     # Not yet applied in production: the identity size store (owner decision D2,
     # plan P3-C), applied by the L-sizes `deploy apply --expect-migration 18`
-    # after v7c's migration 17 is live.
-    18: ("identity-size-store", "bfa4bca8d87816a6a093453f4c24e24c34e642f79fce8698e186d6141de5643c"),
+    # after v7c's migration 17 is live. Re-pinned explicitly by P3-C fix 1 (review
+    # N19a MEDIUM-1, LOW-5, LOW-6: no-replace triggers, exact UTC stamps, weekday
+    # sessions) before any database applied it; was bfa4bca8d878...643c at 857aceb.
+    18: ("identity-size-store", "ed98582dd8a09c7acb917e38a67703911382b2e13c1f165bd5003ab1a920eabf"),
 }
 
 

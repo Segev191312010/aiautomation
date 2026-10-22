@@ -269,14 +269,15 @@ async def _size_store(tmp_path, monkeypatch) -> Path:
 
 
 async def _pipeline_keywords(
-    monkeypatch, strategy_name: str, *, at: datetime | None = None
+    monkeypatch, strategy_name: str, *, at: datetime | None = None, captured: dict[str, object] | None = None
 ) -> tuple[dict[str, object], str]:
     """Run ``run_shadow_session`` on fakes; the ``ShadowPipeline`` keywords and the spec name.
 
     ``at`` (default 09:00 ET on TUESDAY) is the clock; the fake sleep moves it
     forward, so the session's own wait for its connect slot is real.
+    ``captured`` (optional) receives what the fakes saw, also when the run raises.
     """
-    captured: dict[str, object] = {}
+    captured = {} if captured is None else captured
     clock = {"now": et(TUESDAY, 9, 0) if at is None else at}
 
     class FakeActor:

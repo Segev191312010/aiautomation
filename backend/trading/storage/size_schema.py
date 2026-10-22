@@ -9,9 +9,17 @@ in ``trading/operations/telegram_size_approval.py``), and a test allows no
 other module to insert a size event. The shadow child reads the store once
 at its session start (``trading.risk.identity_sizing``).
 
-Tables (all ``autotrader_size_*``), every one append-only (a BEFORE
-UPDATE/DELETE trigger aborts any change), in the conventions of
-``trading.storage.manager_schema`` (UTC ISO-8601 text, real dates, digests):
+Tables (all ``autotrader_size_*``), every one append-only: a BEFORE
+UPDATE/DELETE trigger aborts any change, and a BEFORE INSERT trigger refuses
+an existing key, so ``INSERT OR REPLACE``, ``REPLACE INTO`` and upserts cannot
+rewrite a row either (they delete without firing the delete trigger) and
+``OR IGNORE`` cannot drop one in silence. The keyed tables have no implicit
+rowid to replace through (WITHOUT ROWID). Conventions as in
+``trading.storage.manager_schema``, stricter where a row must stay readable
+forever: timestamps are UTC exactly as Python's ``isoformat`` writes them
+(``_utc_exact``), dates are real dates from 2000 on, and an event's
+``effective_session`` is a weekday (the reader refuses two events at one
+session start, holidays included):
 
 ``proposals``    one per proposed step: a 10-hex id, the night it was
                  evaluated (``as_of``), the identity, ``step_up`` or
@@ -54,7 +62,6 @@ from trading.storage.manager_schema import (
     _digest,
     _json,
     _token,
-    _utc,
 )
 
 SIZE_STORE_MIGRATION = 18
@@ -113,6 +120,53 @@ def _one_rung(*, down_to_shadow_only: bool) -> str:
     return f"((kind = '{STEP_UP}' AND ({pairs(ups)})) OR (kind = '{STEP_DOWN}' AND ({pairs(downs)})))"
 
 
+def _utc_exact(column: str) -> str:
+    """UTC text exactly as Python's ``isoformat`` writes it, and a real instant.
+
+    Stricter than the manager tables' ``_utc`` (N19a LOW-6): that one lets
+    SQLite normalise an impossible time (``2026-02-30``, hour 24) that Python
+    then cannot parse, and an append-only row that can never be read would
+    block its identity for good. No fraction or exactly six digits; a year
+    from 2000; hour 00-23; ``datetime()`` must give back the same instant.
+    """
+    stamp = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"
+    return (
+        f"(({column} GLOB '{stamp}+00:00'"
+        f" OR {column} GLOB '{stamp}.[0-9][0-9][0-9][0-9][0-9][0-9]+00:00')"
+        f" AND substr({column}, 1, 4) >= '2000' AND substr({column}, 12, 2) <= '23'"
+        f" AND datetime({column}) IS replace(substr({column}, 1, 19), 'T', ' '))"
+    )
+
+
+def _calendar_day(column: str) -> str:
+    """A real ``YYYY-MM-DD`` date from 2000 on (Python parses every one)."""
+    return f"({_day(column)} AND {column} >= '2000-01-01')"
+
+
+def _weekday(column: str) -> str:
+    """A calendar day from Monday to Friday: the shape of a session date.
+
+    Holidays are the reader's: it maps each event to its first XNYS session
+    and refuses two at one session start (N19a LOW-5)."""
+    return f"({_calendar_day(column)} AND strftime('%w', {column}) NOT IN ('0', '6'))"
+
+
+def _no_replace(table: str, noun: str, key: str) -> str:
+    """Refuse an insert whose key already exists, whatever its conflict clause.
+
+    ``INSERT OR REPLACE``, ``REPLACE INTO`` and an upsert resolve a key
+    conflict by deleting the old row without firing its BEFORE DELETE trigger
+    (``recursive_triggers`` is off), so ``_append_only`` alone let a rejection
+    become an approval or a step down disappear (N19a MEDIUM-1). A trigger's
+    RAISE(ABORT) also overrides ``OR IGNORE``: a duplicate is refused loudly,
+    never dropped in silence. ``key`` compares ``existing`` with ``NEW``.
+    """
+    return f"""CREATE TRIGGER IF NOT EXISTS {table}_no_replace
+    BEFORE INSERT ON {table}
+    WHEN EXISTS (SELECT 1 FROM {table} AS existing WHERE {key})
+    BEGIN SELECT RAISE(ABORT, '{noun} are append-only'); END"""
+
+
 def _identity(column: str) -> str:
     """A catalogue identity name such as MOMO_HOD_V2."""
     return (
@@ -130,7 +184,7 @@ SIZE_PROPOSALS_SCHEMA = (
     f"""CREATE TABLE IF NOT EXISTS {SIZE_PROPOSALS_TABLE} (
         proposal_id TEXT PRIMARY KEY
             CHECK(length(proposal_id) = 10 AND proposal_id NOT GLOB '*[^0-9a-f]*'),
-        as_of TEXT NOT NULL CHECK{_day("as_of")},
+        as_of TEXT NOT NULL CHECK{_calendar_day("as_of")},
         identity TEXT NOT NULL CHECK{_identity("identity")},
         kind TEXT NOT NULL CHECK(kind IN {_KINDS}),
         from_mult TEXT NOT NULL CHECK(from_mult IN {_RUNG}),
@@ -138,16 +192,17 @@ SIZE_PROPOSALS_SCHEMA = (
         evidence_json TEXT NOT NULL CHECK{_json("evidence_json", "object")},
         evidence_fingerprint TEXT NOT NULL CHECK{_digest("evidence_fingerprint")},
         nights_since_last_step INTEGER NOT NULL CHECK(nights_since_last_step >= 0),
-        deadline_at TEXT NULL CHECK(deadline_at IS NULL OR {_utc("deadline_at")}),
+        deadline_at TEXT NULL CHECK(deadline_at IS NULL OR {_utc_exact("deadline_at")}),
         rule_version TEXT NOT NULL
             CHECK(length(rule_version) BETWEEN 1 AND 64 AND rule_version NOT GLOB '*[^a-z0-9.-]*'),
-        created_at TEXT NOT NULL CHECK{_utc("created_at")},
+        created_at TEXT NOT NULL CHECK{_utc_exact("created_at")},
         CHECK{_one_rung(down_to_shadow_only=True)},
         -- A step up waits for the owner until its deadline; a step down never waits.
         CHECK((kind = '{STEP_UP}') = (deadline_at IS NOT NULL)),
         CHECK(deadline_at IS NULL OR julianday(deadline_at) > julianday(created_at))
-    )""",
+    ) WITHOUT ROWID""",
     *_append_only(SIZE_PROPOSALS_TABLE, "size proposals"),
+    _no_replace(SIZE_PROPOSALS_TABLE, "size proposals", "existing.proposal_id = NEW.proposal_id"),
 )
 
 SIZE_DECISIONS_SCHEMA = (
@@ -155,12 +210,13 @@ SIZE_DECISIONS_SCHEMA = (
         proposal_id TEXT PRIMARY KEY,
         decision TEXT NOT NULL CHECK(decision IN {_DECISIONS}),
         actor TEXT NOT NULL CHECK{_token("actor")},
-        at TEXT NOT NULL CHECK{_utc("at")},
+        at TEXT NOT NULL CHECK{_utc_exact("at")},
         -- Only the owner, from Telegram, can approve a size up (D2).
         CHECK(decision != 'approved' OR actor = '{OWNER_TELEGRAM_ACTOR}'),
         FOREIGN KEY(proposal_id) REFERENCES {SIZE_PROPOSALS_TABLE}(proposal_id)
-    )""",
+    ) WITHOUT ROWID""",
     *_append_only(SIZE_DECISIONS_TABLE, "size decisions"),
+    _no_replace(SIZE_DECISIONS_TABLE, "size decisions", "existing.proposal_id = NEW.proposal_id"),
     # The decision fits its proposal's kind (and exists: whatever the
     # foreign-key pragma of the writing connection).
     f"""CREATE TRIGGER IF NOT EXISTS {SIZE_DECISIONS_TABLE}_fit_proposal
@@ -190,14 +246,14 @@ SIZE_DECISIONS_SCHEMA = (
 
 SIZE_EVENTS_SCHEMA = (
     f"""CREATE TABLE IF NOT EXISTS {SIZE_EVENTS_TABLE} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id >= 1),
         identity TEXT NOT NULL CHECK{_identity("identity")},
         from_mult TEXT NOT NULL CHECK(from_mult IN {_RUNG}),
         to_mult TEXT NOT NULL CHECK(to_mult IN {_RUNG}),
-        effective_session TEXT NOT NULL CHECK{_day("effective_session")},
+        effective_session TEXT NOT NULL CHECK{_weekday("effective_session")},
         kind TEXT NOT NULL CHECK(kind IN {_KINDS}),
         proposal_id TEXT NOT NULL UNIQUE,
-        created_at TEXT NOT NULL CHECK{_utc("created_at")},
+        created_at TEXT NOT NULL CHECK{_utc_exact("created_at")},
         account_mode TEXT NOT NULL CHECK(account_mode = '{PAPER_ACCOUNT_MODE}'),
         CHECK{_one_rung(down_to_shadow_only=False)},
         -- Never back-dated: an event takes effect on or after the day it was written.
@@ -207,6 +263,9 @@ SIZE_EVENTS_SCHEMA = (
     f"""CREATE INDEX IF NOT EXISTS idx_{SIZE_EVENTS_TABLE}_identity
         ON {SIZE_EVENTS_TABLE}(identity, account_mode, id)""",
     *_append_only(SIZE_EVENTS_TABLE, "size events"),
+    _no_replace(
+        SIZE_EVENTS_TABLE, "size events", "existing.id = NEW.id OR existing.proposal_id = NEW.proposal_id"
+    ),
     # D2: a size goes up only on the owner's own approval of this very step.
     f"""CREATE TRIGGER IF NOT EXISTS {SIZE_EVENTS_TABLE}_step_up_approved
     BEFORE INSERT ON {SIZE_EVENTS_TABLE}
@@ -257,15 +316,20 @@ SIZE_EVENTS_SCHEMA = (
 
 SIZE_EVALUATIONS_SCHEMA = (
     f"""CREATE TABLE IF NOT EXISTS {SIZE_EVALUATIONS_TABLE} (
-        id INTEGER PRIMARY KEY,
+        id INTEGER PRIMARY KEY CHECK(id >= 1),
         identity TEXT NOT NULL CHECK{_identity("identity")},
-        as_of TEXT NOT NULL CHECK{_day("as_of")},
+        as_of TEXT NOT NULL CHECK{_calendar_day("as_of")},
         status TEXT NOT NULL CHECK{_token("status")},
         fingerprint TEXT NOT NULL CHECK{_digest("fingerprint")},
-        created_at TEXT NOT NULL CHECK{_utc("created_at")},
+        created_at TEXT NOT NULL CHECK{_utc_exact("created_at")},
         UNIQUE(identity, as_of)
     )""",
     *_append_only(SIZE_EVALUATIONS_TABLE, "size evaluations"),
+    _no_replace(
+        SIZE_EVALUATIONS_TABLE,
+        "size evaluations",
+        "existing.id = NEW.id OR (existing.identity = NEW.identity AND existing.as_of = NEW.as_of)",
+    ),
 )
 
 SIZE_PROPOSAL_STATE_SCHEMA = (
