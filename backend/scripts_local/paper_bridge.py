@@ -85,7 +85,8 @@ Safety rules (all enforced here because the shadow pipeline sizes per run):
   ever flattened because of the budget: an over-budget account or a widened
   stop pages (CRITICAL) and only blocks new risk. An open-orders request TWS
   has not answered for ORDER_BOOK_UNANSWERED_ALERT pages CRITICAL once: no
-  book completes until it is answered, and it is never written off.
+  new request is sent and no book completes until it is answered, and it is
+  never written off.
 - Every order carries orderRef autotrader:<IDENTITY>:<decision id prefix>, so
   IBKR reports attribute fills per identity; parse_ref reads it back.
 - A new entry needs an account position in its contract that is known and
@@ -1207,14 +1208,12 @@ class BrokerState:
     def openOrderEnd(self) -> None:
         # N18 MEDIUM-2. ibapi 9.81 decodes message 53 (OPEN_ORDER_END) with no field at all, and TWS
         # may send one unasked (with the open orders it reports at connect), so an end is counted
-        # only against a request still unanswered: it never completes a later request early. TWS
-        # answers requests in order, so an end that leaves a newer request unanswered closes an
-        # older answer, which may have straddled the newer request's clear: its orders are dropped.
+        # only against a request still unanswered: it never completes a later request early. The
+        # bridge sends no request while one is owed (Bridge.request_open_orders, N18c-LOW-1), so an
+        # answer can never straddle a newer request's clear.
         with self.open_orders_answer:
             if self.open_orders_answered < self.open_orders_requested:
                 self.open_orders_answered += 1
-                if self.open_orders_answered < self.open_orders_requested:
-                    self.account_orders.clear()
             self.open_orders_answer.notify_all()
 
     def execDetails(self, request_id: int, contract: Any, execution: Any) -> None:
@@ -2542,9 +2541,18 @@ class Bridge:
                 f" its own {money(budget.new_risk)} ({money(budget.open_risk)} -> {money(after)}) — check TWS")
             traceback.print_stack(file=sys.stderr)
 
-    def request_open_orders(self, *, all_clients: bool) -> int:
-        """Send one open-orders request; the answer count that completes it (see openOrderEnd)."""
+    def request_open_orders(self, *, all_clients: bool) -> int | None:
+        """Send one open-orders request; the answer count that completes it (see openOrderEnd).
+
+        None, and nothing is sent, while an earlier request is still owed (N18c-LOW-1): TWS answers
+        in order, so a new request could only complete after that one, and an answer TWS lost would
+        then hide behind every later end (no request would ever complete, and the owed one would
+        never age to its ORDER_BOOK_UNANSWERED_ALERT page). A slow TWS is unchanged: once its late
+        answer arrives the next request is sent and completes.
+        """
         with self.app.lock:
+            if self.app.open_orders_answered < self.app.open_orders_requested:
+                return None
             if all_clients:
                 self.app.account_orders.clear()
             self.app.open_orders_requested += 1
@@ -2570,9 +2578,13 @@ class Bridge:
         request id) must not pass for this one's (N18 MEDIUM-2). While one is owed this returns
         None, and every caller fails closed: an owner sell is refused open_orders_unavailable, a
         /closeall sells nothing it cannot check, and the budget keeps the last full book until it
-        ages out. Once TWS answers the backlog, the next request completes again.
+        ages out. While a request is owed no new one is sent and this returns None at once, so a
+        tick never waits on an answer TWS lost (N18c-LOW-1); once TWS answers, the next request
+        completes again.
         """
         wanted = self.request_open_orders(all_clients=True)
+        if wanted is None:
+            return None
         if not self.open_orders_complete(wanted, self.sync_timeout if timeout is None else timeout):
             return None
         with self.app.lock:
@@ -2626,9 +2638,10 @@ class Bridge:
 
     def page_book_unanswered(self) -> None:
         """N18b-LOW-2: an open-orders request TWS has not answered for ORDER_BOOK_UNANSWERED_ALERT pages
-        CRITICAL once per episode. Until it is answered no book completes (MEDIUM-2: it is never
-        written off), so the owner must know; the episode ends, and the next one pages again, once TWS
-        has answered every request. Nothing is exited or reconnected here: a restart is the owner's."""
+        CRITICAL once per episode. Until it is answered no new request is sent and no book completes
+        (MEDIUM-2: it is never written off), so the owner must know; the episode ends, and the next one
+        pages again, once TWS has answered. Nothing is exited or reconnected here: a restart is the
+        owner's."""
         with self.app.lock:
             requested, answered = self.app.open_orders_requested, self.app.open_orders_answered
         for number in [number for number in self.open_orders_sent if number <= answered]:
@@ -2774,6 +2787,8 @@ class Bridge:
         self.app.exec_done.clear()
         self.app.positions_done.clear()
         wanted = self.request_open_orders(all_clients=False)
+        if wanted is None:  # never at connect: the counters belong to this connection (one App per run)
+            raise ReconciliationError("an earlier open-orders request of this connection is still unanswered")
         execution_filter = ExecutionFilter()
         execution_filter.clientId = self.app.client_id
         self.app.reqExecutions(EXEC_REQUEST_ID, execution_filter)
