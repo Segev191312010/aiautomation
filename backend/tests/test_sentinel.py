@@ -5,10 +5,13 @@ Bracket (tests.test_paper_bridge loads scripts_local/paper_bridge.py), so the
 Sentinel reads exactly what the bridge writes. Fences go to a scratch database
 (conftest isolates HOME and DB_PATH); nothing touches the live state.
 
-The Sentinel ships log-only (owner, 2026-10-17: ``SENTINEL_FENCES_LIVE = False``
-for its first session). Most tests here protect the live auto-fence the owner
-turns on afterwards (P1-B.4), unchanged, so the module's autouse fixture
-switches it on; the log-only tests run with the shipped value.
+The Sentinel shipped log-only (owner, 2026-10-17: ``SENTINEL_FENCES_LIVE = False``
+for its first session(s), P1-B) and ships live since P1-B.4 (owner, after the
+log-only week). Most tests here protect the live auto-fence, so the module's
+autouse fixture pins it on whatever the shipped value; the log-only tests pin
+it off explicitly (the branch stays the switch's documented other state); the
+shipped value itself is pinned by one test and driven, unpatched, through the
+real fence store by another.
 """
 from __future__ import annotations
 
@@ -64,14 +67,15 @@ TODAY = date(2026, 10, 14)  # a Wednesday session
 
 @pytest.fixture(autouse=True)
 def fences_live(monkeypatch) -> None:
-    """The live auto-fence (P1-B.4's switch), for the tests that protect it unchanged."""
+    """The live auto-fence (P1-B.4's switch), pinned on for the tests that protect it."""
     monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
 
 
 def _log_only(monkeypatch) -> None:
-    """Back to the shipped switch, which must be log-only."""
-    assert SHIPPED_FENCES_LIVE is False
-    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", SHIPPED_FENCES_LIVE)
+    """The log-only branch (the switch off), for the tests that protect it."""
+    # P1-B.4 (owner): the Sentinel ships live, so the switch is set False here
+    # explicitly; the shipped value is pinned by the ships-live test instead.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", False)
 
 
 def _et(hour: int, minute: int, second: int = 0, *, day: date = TODAY) -> datetime:
@@ -734,7 +738,8 @@ async def test_the_end_of_the_bridge_window_is_not_seeing_again(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Log-only: the shipped switch (owner, 2026-10-17: log-only for the first session)
+# The switch: shipped log-only for the first session(s) (owner, 2026-10-17),
+# live since P1-B.4 (owner, after reviewing the 🔎 lines)
 # --------------------------------------------------------------------------
 
 ORB_WOULD = "🔎 auto-fence (log-only): would stop ORB_V2 — daily loss 1.30 R > 1.25 R (realized -$130.00)"
@@ -747,10 +752,12 @@ class NoStore:
         raise AssertionError("log-only reached the fence store")
 
 
-def test_the_sentinel_ships_log_only_and_the_switch_is_one_code_constant():
+def test_the_sentinel_ships_live_and_the_switch_is_one_code_constant():
     import ast
 
-    assert SHIPPED_FENCES_LIVE is False
+    # P1-B.4 (owner, after the log-only week): the shipped value is True (it was
+    # False, log-only, in P1-B); the one-constant pin below is unchanged.
+    assert SHIPPED_FENCES_LIVE is True
     source = inspect.getsource(sentinel)
     assigned = [
         node.value
@@ -758,11 +765,131 @@ def test_the_sentinel_ships_log_only_and_the_switch_is_one_code_constant():
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "SENTINEL_FENCES_LIVE" for target in node.targets)
     ]
-    assert len(assigned) == 1 and isinstance(assigned[0], ast.Constant) and assigned[0].value is False
+    assert len(assigned) == 1 and isinstance(assigned[0], ast.Constant) and assigned[0].value is True
     # Read inside the one write path: the Sentinel and the nightly replay hook both obey it.
     assert "SENTINEL_FENCES_LIVE" in inspect.getsource(fence_identity)
     # Never an environment variable or a setting.
     assert "os.environ" not in source and "getenv(" not in source
+
+
+def test_shipped_switch_writes_fence_row_through_real_store(tmp_path, monkeypatch):
+    """P1-B.4 (owner, after the log-only week): with the SHIPPED switch (this
+    module's autouse pin undone), both writers' production paths write the
+    ``paper:<IDENTITY>`` stopped=1 row, reason ``sentinel: …``, through the real
+    ``SQLitePaperKillStore`` on a migrated database: the notifier's Sentinel
+    (``run_notifier``) and the nightly replay's parity step
+    (``check_decision_parity`` with its default store). A second trigger the
+    same day writes no second fence, and the owner's ``paper resume`` leaves
+    the trace ``owner_resumed_on`` reads, so the Sentinel leaves the row alone."""
+    import asyncio
+
+    from config import cfg
+    from tests.schema_support import migrate_database
+    from tests.test_notify_service import (
+        CHAT_ID,
+        SESSION,
+        FakeTelegram,
+        FakeTime,
+        _bracket as notify_bracket,
+        _environment,
+        _et as session_et,
+        _write_bridge_state,
+    )
+    from trading.cli import main
+    from trading.operations import notify_service
+    from trading.operations.notifier import save_chat_id, telegram_config_file
+    from trading.operations.notify_service import run_notifier, state_file
+    from trading.operations.paths import UserPaths
+    from trading.replay import ReplayEqualityReport, ReplayMismatch
+    from trading.research.nightly import NightlyEnvironment, check_decision_parity
+    from trading.storage import runtime_fence
+
+    # The value the module ships with, never this module's autouse pin.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", SHIPPED_FENCES_LIVE)
+    database = migrate_database(tmp_path / "autotrader.db")
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    clock = FakeTime(session_et(10, 0))
+    # The store stamps its rows with the wall clock: here the simulated session's.
+    monkeypatch.setattr(runtime_fence, "_now", lambda: clock.now.isoformat())
+    paths = UserPaths(home=tmp_path / "home")
+    save_chat_id(telegram_config_file(paths), CHAT_ID)
+    paths.log_directory.mkdir(parents=True, exist_ok=True)
+    for name in ("bridge.log", "screener.log", "supervisor.log"):
+        (paths.log_directory / name).write_text("")
+    orb = dict(strategy="orb", strategy_name="ORB_V2", entry="50.00", stop="49.00", filled=100, exit_filled=100)
+    first_loss = notify_bracket("ABC", "closed", realized_pnl="-130.00", **orb)
+
+    def notifier_until(hour: int, minute: int) -> list[str]:
+        monkeypatch.setattr(notify_service, "SESSION_END", time(hour, minute))
+        telegram = FakeTelegram()
+        assert asyncio.run(run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock))) == 0
+        return [text for text in telegram.sent() if "auto-fence" in text]
+
+    # 1. The notifier path: 20 Sentinel checks (10:00-10:10) over ORB_V2's limit.
+    _write_bridge_state(paths, {"orb": first_loss})
+    assert notifier_until(10, 10) == [
+        "⛔ auto-fence ORB_V2: daily loss 1.30 R > 1.25 R (realized -$130.00) — new entries blocked;"
+        " resume: autotraderctl paper resume --identity ORB_V2"
+    ]
+    fenced = _rows(database)
+    assert {name: row[:2] for name, row in fenced.items()} == {
+        "paper:ORB_V2": (1, "sentinel: daily loss 1.30 R > 1.25 R (realized -$130.00)"),
+    }
+    assert fenced["paper:ORB_V2"][1].startswith(sentinel.REASON_PREFIX)
+    assert bridge.identity_fence_active(database, "ORB_V2")  # what the pinned bridge reads
+
+    # 2. A second trigger the same day (a restart, a bigger loss): no second fence,
+    # neither from the restarted Sentinel nor through the store itself.
+    second_loss = notify_bracket("XYZ", "closed", realized_pnl="-100.00", **orb)
+    _write_bridge_state(paths, {"orb": first_loss, "orb2": second_loss})
+    assert notifier_until(10, 20) == []
+    second = "sentinel: daily loss 2.30 R > 1.25 R (realized -$230.00)"
+    stored = SQLitePaperKillStore()
+    assert asyncio.run(fence_identity(stored, identity="ORB_V2", reason=second, resumed_on=SESSION)) == (
+        sentinel.ALREADY_FENCED
+    )
+    assert _rows(database) == fenced  # same reason, same time: never rewritten
+
+    # 3. The owner's `paper resume` (the CLI's annotate) leaves the trace; the
+    # Sentinel, even with its notifier memory lost, never fences it again today.
+    clock.now = session_et(11, 30)
+    assert main(["paper", "resume", "--db-path", str(database), "--identity", "ORB_V2",
+                 "--reason", "owner: checked"]) == 0
+    stopped, reason, resumed_at = _rows(database)["paper:ORB_V2"]
+    assert (stopped, reason) == (0, f"owner: checked (lifts sentinel fence of {SESSION.isoformat()})")
+    assert owner_resumed_on(FenceRow(False, reason, resumed_at), SESSION)
+    assert not bridge.identity_fence_active(database, "ORB_V2")
+    state_file(paths, SESSION).unlink()
+    assert notifier_until(11, 40) == []
+    assert _rows(database)["paper:ORB_V2"] == (0, reason, resumed_at)
+    assert asyncio.run(fence_identity(stored, identity="ORB_V2", reason=second, resumed_on=SESSION)) == (
+        sentinel.OWNER_RESUMED
+    )
+
+    # 4. The nightly path: a replay mismatch, the parity step's default store.
+    mismatch = ReplayMismatch(category="decisions", identity="candidate-0", reason="fingerprint_mismatch")
+    reports = {"GAP_GO_V2": ReplayEqualityReport(
+        recorded_fingerprint="a" * 64, replayed_fingerprint="b" * 64, mismatches=(mismatch, mismatch),
+    )}
+    nightly = NightlyEnvironment(
+        database=database, bridge_directory=paths.data_directory / "bridge", clock=lambda: clock.now,
+        compare_decisions=lambda _results: reports,
+    )
+    clock.now = session_et(17, 40)
+    parity = check_decision_parity((), nightly)
+    assert (parity.fenced, parity.already_fenced, parity.would_fence, dict(parity.failed)) == (
+        ("GAP_GO_V2",), (), (), {}
+    )
+    gap = _rows(database)["paper:GAP_GO_V2"]
+    assert gap[:2] == (1, "sentinel: replay mismatch 2 decisions")
+    assert bridge.identity_fence_active(database, "GAP_GO_V2")
+    # A second trigger the same night: kept, never a second fence.
+    clock.now = session_et(17, 50)
+    parity = check_decision_parity((), nightly)
+    assert (parity.fenced, parity.already_fenced) == ((), ("GAP_GO_V2",))
+    assert _rows(database)["paper:GAP_GO_V2"] == gap
+    # Never the global row.
+    assert set(_rows(database)) == {"paper:ORB_V2", "paper:GAP_GO_V2"}
 
 
 async def test_log_only_fence_identity_never_reaches_the_store_for_either_writer(monkeypatch, caplog):

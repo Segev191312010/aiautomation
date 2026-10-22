@@ -288,7 +288,7 @@ def _fence_rows(database: Path) -> dict[str, tuple[int, str]]:
 
 @pytest.fixture
 def fences_live(monkeypatch) -> None:
-    """The live auto-fence (P1-B.4's switch): the Sentinel ships log-only (owner, 2026-10-17)."""
+    """The live auto-fence (P1-B.4's switch, shipped True since P1-B.4), pinned on explicitly."""
     from trading.operations import sentinel
 
     monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
@@ -308,9 +308,9 @@ def test_without_a_comparer_the_parity_step_says_not_compared_and_fences_nothing
 
 
 def test_in_log_only_a_replay_mismatch_writes_no_fence_and_the_report_says_would_fence(
-    night, fence_db, caplog
+    night, fence_db, caplog, monkeypatch
 ):
-    """The shipped switch (log-only): the nightly hook judges as when live, through
+    """The switch off (log-only): the nightly hook judges as when live, through
     the same ``fence_identity``, writes no row, and records WOULD_FENCE."""
     import logging
 
@@ -318,7 +318,8 @@ def test_in_log_only_a_replay_mismatch_writes_no_fence_and_the_report_says_would
     from trading.research.nightly import fence_replay_mismatches
     from trading.storage.runtime_fence import SQLitePaperKillStore
 
-    assert sentinel.SENTINEL_FENCES_LIVE is False
+    # P1-B.4 (owner): the Sentinel ships live, so log-only is set explicitly here.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", False)
     caplog.set_level(logging.INFO)
 
     def compare(_results):
