@@ -226,6 +226,13 @@ class IdentityProposal:
     # and its stopped fence's reason, if any.
     hold: str | None = None
     fence: str | None = None
+    # The session of each closed real trade in the window, oldest first: the
+    # size writer counts the new ones since a size event (P3-E fix 1).
+    trade_sessions: tuple[date, ...] = ()
+
+    def trades_since(self, session: date) -> int:
+        """Closed real trades in the window on or after ``session``."""
+        return sum(1 for day in self.trade_sessions if day >= session)
 
     @property
     def token(self) -> str | None:
@@ -414,6 +421,7 @@ def evaluate_identity(evidence: IdentityEvidence, *, open_risk_term_deployed: bo
         trades_by_multiplier=evidence.trades_by_multiplier,
         hold=hold,
         fence=evidence.fence,
+        trade_sessions=tuple(sorted(trade.session_date for trade in trades)),
     )
 
 

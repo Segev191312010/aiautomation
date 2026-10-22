@@ -15,15 +15,16 @@ into Telegram text, and it is all the two children share about it:
   start, a NORMAL-sound reminder at the first pre-session lead (05:55 ET,
   ``gateway_watch.PRE_SESSION_LEADS``: two hours before the 07:55 ET
   deadline) when a proposal is still pending, and at the deadline a silent
-  "expired, sizes unchanged" note naming each proposal nobody decided.
+  "expired, sizes unchanged" note naming each proposal nobody decided. Both
+  only once phone approval exists: before it, "expired" is noise (P3-E fix 1).
   Step-downs need no answer: they are in the silent batch only.
 
 Approval from the phone (``/approve``, the inline Approve/Reject buttons and
 their ``callback_query`` handling) is P3-D and does not exist yet. Until it
 ships, ``PHONE_APPROVAL_LIVE`` is False: the batch carries no buttons and no
 "approve by" wording (it says the sizes stay unchanged and approval arrives
-later), and no reminder is sent, because nothing could be done with it. P3-D
-flips the constant in its own reviewed change; a test pins it False until then.
+later), and no reminder or expiry note is sent, because nothing could be
+done with either. P3-D flips the constant in its own reviewed change; a test pins it False until then.
 
 Every schedule is anchored to America/New_York in code (the deadline is the
 session's start, ``db_admin.trading_day``, 07:55 ET, the same instant as
@@ -411,7 +412,8 @@ class ProposalWatch:
                 self._deliver(reminder_text(pending, deadline), False)
                 memory[REMINDED_KEY] = stamp
         elif deadline <= now < deadline + EXPIRY_NOTE_GRACE:
-            if memory.get(EXPIRED_KEY) == stamp:
+            # Before phone approval exists every proposal "expires": noise, not news.
+            if not PHONE_APPROVAL_LIVE or memory.get(EXPIRED_KEY) == stamp:
                 return
             expired = pending_proposals(self._database, deadline)
             if expired:

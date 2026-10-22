@@ -15,6 +15,7 @@ import asyncio
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 import inspect
+import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -28,7 +29,7 @@ import pytest
 
 from tests.schema_support import migrate_database
 from tests.test_nightly_evidence import night  # noqa: F401 - the fixture: the hermetic night
-from tests.test_promotion_proposals import STRONG, _evidence
+from tests.test_promotion_proposals import STRONG, _evidence, _history, _trade
 from tests.test_size_store import SizeLedger, criticals, sizing_log  # noqa: F401 - the fixture
 from trading.operations import sentinel
 from trading.operations.db_admin import trading_day
@@ -37,15 +38,19 @@ from trading.research.promotion_proposals import (
     DEMOTION_PROPOSED,
     PROPOSED,
     RULE_VERSION,
+    IdentityEvidence,
     PromotionProposals,
+    ShadowOutcome,
     evaluate_identity,
 )
 from trading.research.size_writer import (
+    DEMOTION_MIN_NEW_TRADES,
+    DEMOTION_WAITING,
     OWNER_RESUME_HOLDS,
     WRITE_MARGIN,
     NightPlan,
     plan_night,
-    sizes_for_session,
+    sizes_in_force,
     write_night,
 )
 from trading.risk import identity_sizing
@@ -87,14 +92,38 @@ def start(day: date) -> datetime:
     return trading_day(session).starts_at
 
 
-def verdicts(database: Path, plan: NightPlan, **kinds: str) -> PromotionProposals:
-    """The promoter's real rule on synthetic evidence, at each identity's size in force."""
-    sizes = sizes_for_session(database, plan.session)
+def dated(nets_by_day: dict[date, list[str]], *, identity: str, current: str) -> IdentityEvidence:
+    """Evidence whose real trades are on the given sessions (the size writer counts
+    the new ones since a size event), in the shape of the promoter tests' own."""
+    days = sorted(nets_by_day)
+    trades = tuple(
+        _trade(day, f"{identity}-{day.isoformat()}-{number}", net, identity=identity)
+        for day in days
+        for number, net in enumerate(nets_by_day[day])
+    )
+    return IdentityEvidence(
+        identity=identity, current=Decimal(current), evidence_identity="e" * 64, window=tuple(days),
+        trades=trades,
+        shadow={trade.decision_id: ShadowOutcome(True, trade.gross_r + Decimal("0.03")) for trade in trades},
+        incidents=(), first_real_order=days[0], probation_sessions=len(days),
+        size_history=_history(identity, days, current, 12),
+    )
+
+
+def verdicts(database: Path, plan: NightPlan, **kinds) -> PromotionProposals:
+    """The promoter's real rule on synthetic evidence, at each identity's size in
+    force; an identity without a readable size gets no verdict (as in the nightly
+    job). A kind is a name, or a callable of the current size giving the evidence."""
+    sizes, _unreadable = sizes_in_force(database, plan.session)
     items = []
     for name in SENDABLE_IDENTITIES:
+        if name not in sizes:
+            continue
         kind = kinds.get(name, "thin")
         current = str(sizes[name])
-        if kind == "strong":
+        if callable(kind):
+            evidence = kind(current)
+        elif kind == "strong":
             evidence = _evidence(STRONG, identity=name, current=current)
         elif kind == "losing":
             evidence = _evidence(LOSING, sessions=12, identity=name, current=current)
@@ -155,6 +184,34 @@ def events_of(database: Path, identity: str) -> list[tuple]:
         " WHERE identity = ? ORDER BY id",
         (identity,),
     )
+
+
+class _Records(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def writer_log() -> Iterator[_Records]:
+    """The size writer's own logger (``autotrader.shadow.sizes``)."""
+    logger = logging.getLogger("autotrader.shadow.sizes")
+    handler = _Records()
+    level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
+
+
+def writer_criticals(log: _Records) -> list[str]:
+    return [record.getMessage().split(":", 1)[0] for record in log.records if record.levelno == logging.CRITICAL]
 
 
 @pytest.fixture
@@ -634,6 +691,128 @@ def test_the_writers_statements_are_plain_inserts_into_the_size_tables():
     source = Path(size_writer.__file__).read_text(encoding="utf-8")
     for forbidden in ("REPLACE", "OR IGNORE", "ON CONFLICT", "UPDATE ", "DELETE", "executemany", "executescript"):
         assert forbidden not in source.upper(), forbidden
+
+
+# --- P3-E fix 1: no cascade on the same evidence; one identity never blocks the others -----
+
+# Twelve bad sessions before the first night (two real trades each, net -0.8 R a day).
+BAD_SESSIONS = (
+    date(2026, 9, 30), date(2026, 10, 1), date(2026, 10, 2), date(2026, 10, 5), date(2026, 10, 6),
+    date(2026, 10, 7), date(2026, 10, 8), date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 13),
+    date(2026, 10, 14), date(2026, 10, 16),
+)
+BAD = {day: ["-1", "0.2"] for day in BAD_SESSIONS}
+
+
+def momo(nets_by_day: dict[date, list[str]]):
+    return lambda current: dated(nets_by_day, identity="MOMO_HOD_V2", current=current)
+
+
+def test_no_cascade_on_the_same_evidence(database, writer_log, monkeypatch):
+    """Owner/coordinator decision (P3-E fix 1, open question 1): after a size event the
+    next step down waits for DEMOTION_MIN_NEW_TRADES new closed trades since it."""
+    assert DEMOTION_MIN_NEW_TRADES == 5 and DEMOTION_WAITING == "demotion_waiting_new_evidence"
+    # Three bad nights in a row on the same trades: exactly one step.
+    nights = [run_night(database, et(day, 17, 40), MOMO_HOD_V2=momo(BAD)) for day in (MONDAY, TUESDAY, WEDNESDAY)]
+    assert [event[:3] for event in events_of(database, "MOMO_HOD_V2")] == [("1", "0.5", "2026-10-20")]
+    assert [change.kind for change in nights[0].changes] == ["step_down"]
+    assert [(night.changes, dict(night.waiting)) for night in nights[1:]] == [
+        ((), {"MOMO_HOD_V2": "0/5 new trades since the 2026-10-20 session"}),
+    ] * 2
+    assert len(proposals_of(database, "MOMO_HOD_V2")) == 1
+    statuses = rows(
+        database, "SELECT status FROM autotrader_size_evaluations WHERE identity = 'MOMO_HOD_V2' ORDER BY id"
+    )
+    assert [row[0] for row in statuses] == ["demotion_proposed", DEMOTION_WAITING, DEMOTION_WAITING]
+    waits = [record.getMessage() for record in writer_log.records if record.getMessage().startswith(DEMOTION_WAITING)]
+    assert len(waits) == 2 and all("MOMO_HOD_V2" in text for text in waits)
+    # Four new losing trades since the step: still waiting.
+    four = {**BAD, TUESDAY: ["-1", "-1"], WEDNESDAY: ["-1", "-1"]}
+    thursday = run_night(database, et(THURSDAY, 17, 40), MOMO_HOD_V2=momo(four))
+    assert thursday.changes == () and thursday.waiting == {"MOMO_HOD_V2": "4/5 new trades since the 2026-10-20 session"}
+    # The fifth: the next step.
+    five = {**four, THURSDAY: ["-1"]}
+    friday = run_night(database, et(FRIDAY, 17, 40), MOMO_HOD_V2=momo(five))
+    assert [(change.kind, change.to_mult) for change in friday.changes] == [("step_down", "0.25")]
+    assert [event[:3] for event in events_of(database, "MOMO_HOD_V2")] == [
+        ("1", "0.5", "2026-10-20"), ("0.5", "0.25", "2026-10-26"),
+    ]
+    # Below the bottom rung waits the same way: no fence on the evidence of the last step.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
+    store = RecordingStore()
+    after = run_night(database, et(NEXT_MONDAY, 17, 40), fence_store=store, MOMO_HOD_V2=momo(five))
+    assert store.calls == [] and fence_row(database, "MOMO_HOD_V2") is None
+    assert after.changes == () and after.waiting == {"MOMO_HOD_V2": "0/5 new trades since the 2026-10-26 session"}
+
+
+def test_one_identity_never_blocks_the_others(tmp_path, database, writer_log, monkeypatch):
+    """P3-E fix 1 (open question 4): an identity whose size cannot be read, or whose
+    night fails, is skipped with ONE CRITICAL size token and named in the night's
+    summary; every other identity's evaluation, step down, proposal and fence is written."""
+    # ORB_V2's history does not start at its reviewed baseline (x0.25): no size can be read.
+    SizeLedger(database).step("ORB_V2", "0.5", "0.25", effective=MONDAY, at=et(date(2026, 10, 16), 20))
+    result = run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing", GAP_GO_V2="strong")
+
+    assert result.status == "written" and result.failed == {"ORB_V2": SIZE_EVENT_CHAIN_BROKEN}
+    assert sorted(result.evaluated) == ["GAP_GO_V2", "MOMO_HOD_V2", "VWAP_PB_V2"]
+    assert [(change.identity, change.kind) for change in result.changes] == [
+        ("VWAP_PB_V2", "step_down"), ("GAP_GO_V2", "proposal"),
+    ]
+    assert writer_criticals(writer_log) == [SIZE_EVENT_CHAIN_BROKEN]
+    assert "SKIPPED: ORB_V2 (size_event_chain_broken)" in result.summary()
+    assert result.payload()["failed"] == {"ORB_V2": SIZE_EVENT_CHAIN_BROKEN}
+
+    # A night that fails for one identity: the fence and the proposal of the others still land.
+    from config import cfg
+
+    other = migrate_database(tmp_path / "one-fails.db")
+    monkeypatch.setattr(cfg, "DB_PATH", str(other))
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
+    real = size_writer._nights_since_last_step
+
+    def failing(db, identity, night):
+        if identity == "VWAP_PB_V2":
+            raise RuntimeError("disk full")
+        return real(db, identity, night)
+
+    monkeypatch.setattr(size_writer, "_nights_since_last_step", failing)
+    writer_log.records.clear()
+    mixed = run_night(
+        other, et(MONDAY, 17, 40), fence_store=SQLitePaperKillStore(),
+        ORB_V2="losing", VWAP_PB_V2="losing", GAP_GO_V2="strong",
+    )
+    assert mixed.failed == {"VWAP_PB_V2": "runtimeerror"}
+    assert [(change.identity, change.kind) for change in mixed.changes] == [
+        ("ORB_V2", "fenced"), ("GAP_GO_V2", "proposal"),
+    ]
+    assert fence_row(other, "ORB_V2")[0] == 1 and proposals_of(other, "VWAP_PB_V2") == []
+    skipped = [token for token in writer_criticals(writer_log) if token != "size writer"]
+    assert skipped == [identity_sizing.SIZE_WRITER_IDENTITY_SKIPPED]
+    # The skipped identity is written the next night, once its trouble is gone.
+    monkeypatch.setattr(size_writer, "_nights_since_last_step", real)
+    assert "VWAP_PB_V2" in run_night(other, et(TUESDAY, 17, 40), VWAP_PB_V2="losing").evaluated
+
+
+def test_the_nightly_job_judges_and_writes_every_identity_it_can_read(night, monkeypatch):
+    from tests.test_nightly_evidence import TUESDAY as NIGHT_TUESDAY, _environment, _et
+    from trading.research.replay import run_replay_cli
+
+    database = night["database"]
+    # ORB_V2's history does not start at its baseline: only ORB_V2 has no size.
+    SizeLedger(database).step(
+        "ORB_V2", "0.5", "0.25", effective=NIGHT_TUESDAY, at=_et(NIGHT_TUESDAY - timedelta(days=1), 20, 0)
+    )
+    monkeypatch.setattr(size_writer, "_utc_now", lambda: _et(NIGHT_TUESDAY, 17, 40))
+    assert run_replay_cli([], environment=_environment(night, _et(NIGHT_TUESDAY, 17, 40))) == 0
+
+    directory = night["root"] / "reports" / "2026-10-12"
+    document = json.loads((directory / "proposals.json").read_text())
+    assert document["readable"] is True
+    assert [item["identity"] for item in document["identities"]] == ["MOMO_HOD_V2", "VWAP_PB_V2", "GAP_GO_V2"]
+    sizes = json.loads((directory / "evidence.json").read_text())["sizes"]
+    assert sizes["failed"] == {"ORB_V2": SIZE_EVENT_CHAIN_BROKEN}
+    assert sorted(sizes["evaluated"]) == ["GAP_GO_V2", "MOMO_HOD_V2", "VWAP_PB_V2"]
+    assert "SKIPPED: ORB_V2 (size_event_chain_broken)" in sizes["summary"]
 
 
 # --- the nightly job: "current" from the store ---------------------------------------

@@ -10,7 +10,7 @@ the proposal half; the approval is P3-D's ``/approve`` handler. AGENTS.md's
 It runs in the replay child's nightly evidence (``trading.research.nightly``,
 its only importer), right after the promoter (``promotion_proposals.
 collect_proposals``), which was handed ``current`` = the size in force for
-the next session (``sizes_for_session``: ``identity_sizing.size_in_force``,
+the next session (``sizes_in_force``: ``identity_sizing.size_in_force``,
 the same store the session start reads). For the night ``plan_night`` names
 (the newest closed session, the store's ``as_of``) and the next session that
 has not started (``WRITE_MARGIN`` ahead of the clock), per sendable identity:
@@ -37,7 +37,20 @@ has not started (``WRITE_MARGIN`` ahead of the clock), per sendable identity:
   until the next loss).
 
 Every other verdict is an evaluation row only. A night whose proposals could
-not be built, or whose store cannot be read, writes nothing.
+not be built writes nothing.
+
+No cascade on the same evidence (P3-E fix 1): after any size event of an
+identity, a demotion waits until ``DEMOTION_MIN_NEW_TRADES`` new closed real
+trades of that identity exist since the event's session. Until then the
+night's DEMOTION_PROPOSED verdict is recorded as ``demotion_waiting_new_
+evidence`` (an evaluation, no proposal, no event, no fence).
+
+Per identity, fail-closed (P3-E fix 1): an identity whose size cannot be read,
+or whose night the writer may not or could not write, is skipped with ONE
+CRITICAL line (the size read's own token, or ``size_writer_identity_skipped``;
+the Telegram child forwards both from the replay child's log) and named in
+the night's summary; its sizes stay as they are, it is retried the next
+night, and every other identity's night is written as usual.
 
 Every timestamp the writer stores (a row's ``created_at``, a decision's
 ``at``) is the real current UTC time from ONE helper, ``_utc_now``, read
@@ -82,6 +95,8 @@ from trading.risk.identity_sizing import (
     CURRENT_ACCOUNT_MODE,
     IDENTITY_SIZE_CEILING,
     SIZE_LADDER,
+    SIZE_WRITER_IDENTITY_SKIPPED,
+    SizeNotInForce,
     size_in_force,
 )
 from trading.scheduler.sessions import next_market_session
@@ -125,6 +140,11 @@ NO_FENCE_STORE = "no_fence_store"
 FENCE_FAILED = "fence_failed"
 # An owner's resume of a demotion fence holds until the identity trades again.
 OWNER_RESUME_HOLDS = "owner_resume_holds"
+# No cascade on the same evidence (P3-E fix 1, coordinator decision on open
+# question 1): after a size event, the next demotion needs this many new
+# closed real trades of the identity since the event's session.
+DEMOTION_MIN_NEW_TRADES = 5
+DEMOTION_WAITING = "demotion_waiting_new_evidence"
 
 # The writer refuses a night whose session starts this soon by its own clock.
 SESSION_STARTED = "session_started"
@@ -165,6 +185,11 @@ _NIGHTS_EVALUATED = f"""
     SELECT count(*) FROM {SIZE_EVALUATIONS_TABLE}
     WHERE identity = ? AND as_of < ? AND (? IS NULL OR as_of > ?)
 """
+_LAST_EVENT_SESSION = f"""
+    SELECT effective_session FROM {SIZE_EVENTS_TABLE}
+    WHERE identity = ? AND account_mode = ?
+    ORDER BY id DESC LIMIT 1
+"""
 _LAST_DEMOTION_FENCE = f"""
     SELECT p.evidence_json, d.decision FROM {SIZE_PROPOSALS_TABLE} p
     JOIN {SIZE_DECISIONS_TABLE} d ON d.proposal_id = p.proposal_id
@@ -204,11 +229,21 @@ def plan_night(now: datetime) -> NightPlan:
         candidate = next_market_session(candidate.session_date)
 
 
-def sizes_for_session(database: str | Path, session: date) -> dict[str, Decimal]:
-    """Each sendable identity's size in force for ``session``, from the store
-    (``identity_sizing.size_in_force``); raises ``SizeNotInForce`` (fail-closed:
-    the promoter gets no "current" it did not read)."""
-    return {name: size_in_force(database, name, session) for name in SENDABLE_IDENTITIES}
+def sizes_in_force(
+    database: str | Path, session: date
+) -> tuple[dict[str, Decimal], dict[str, SizeNotInForce]]:
+    """Each sendable identity's size in force for ``session`` from the store
+    (``identity_sizing.size_in_force``), per identity: the sizes that could be
+    read, and why each other one could not. An identity without a size gets no
+    "current" (fail-closed) and never holds up the others."""
+    sizes: dict[str, Decimal] = {}
+    problems: dict[str, SizeNotInForce] = {}
+    for name in SENDABLE_IDENTITIES:
+        try:
+            sizes[name] = size_in_force(database, name, session)
+        except SizeNotInForce as exc:
+            problems[name] = exc
+    return sizes, problems
 
 
 # --------------------------------------------------------------------------
@@ -251,8 +286,27 @@ class SizeNight:
     superseded: tuple[str, ...] = ()
     held: Mapping[str, str] = field(default_factory=dict)
     failed: Mapping[str, str] = field(default_factory=dict)
+    # Demotions waiting for new evidence (DEMOTION_MIN_NEW_TRADES): identity -> "n/5 since <session>".
+    waiting: Mapping[str, str] = field(default_factory=dict)
     # The silent batch's outcome (report_notify's code); "not_attempted" without a sender.
     delivery: str = "not_attempted"
+
+    def summary(self) -> str:
+        """One line for the log and the report: what was written, and every identity skipped."""
+        if self.status != WRITTEN:
+            return f"size writer: night not written ({self.note})"
+        parts = [
+            f"size writer: night {self.night} for the {self.session} session:",
+            f"{len(self.evaluated)} evaluated, {len(self.already)} already,",
+            f"{len(self.changes)} change(s), {len(self.expired)} expired, {len(self.superseded)} superseded",
+        ]
+        if self.waiting:
+            parts.append("; waiting: " + ", ".join(f"{name} ({why})" for name, why in self.waiting.items()))
+        if self.held:
+            parts.append("; held: " + ", ".join(f"{name} ({why})" for name, why in self.held.items()))
+        if self.failed:
+            parts.append("; SKIPPED: " + ", ".join(f"{name} ({why})" for name, why in self.failed.items()))
+        return " ".join(parts)
 
     def payload(self) -> dict[str, object]:
         return {
@@ -267,7 +321,9 @@ class SizeNight:
             "superseded": list(self.superseded),
             "held": dict(self.held),
             "failed": dict(self.failed),
+            "waiting": dict(self.waiting),
             "delivery": self.delivery,
+            "summary": self.summary(),
         }
 
 
@@ -443,10 +499,40 @@ class _Tally:
     superseded: list[str] = field(default_factory=list)
     held: dict[str, str] = field(default_factory=dict)
     failed: dict[str, str] = field(default_factory=dict)
+    waiting: dict[str, str] = field(default_factory=dict)
+
+
+def _skip(
+    tally: _Tally, identity: str, reason: str, *, token: str = SIZE_WRITER_IDENTITY_SKIPPED, detail: str = ""
+) -> None:
+    """Skip one identity's night, fail-closed: ONE CRITICAL with a size token
+    (the phone's tripwire list), named in the night's summary; the others go on."""
+    tally.failed[identity] = reason
+    logger.critical(
+        "%s: %s skipped by the nightly size writer (%s%s); its sizes stay as they are, retried next night",
+        token, identity, reason, f": {detail}" if detail else "",
+    )
+
+
+def _waiting_for_new_evidence(db: sqlite3.Connection, item: IdentityProposal) -> str | None:
+    """A demotion after a size event waits for new evidence: the "n/5 since
+    <session>" it waits with, else None (no event yet, or enough new trades)."""
+    if item.status != DEMOTION_PROPOSED:
+        return None
+    row = db.execute(_LAST_EVENT_SESSION, (item.identity, CURRENT_ACCOUNT_MODE)).fetchone()
+    if row is None:
+        return None
+    since = date.fromisoformat(str(row[0]))
+    fresh = item.trades_since(since)
+    if fresh >= DEMOTION_MIN_NEW_TRADES:
+        return None
+    return f"{fresh}/{DEMOTION_MIN_NEW_TRADES} new trades since the {since.isoformat()} session"
 
 
 def _failure_token(exc: BaseException) -> str:
-    """A database refusal's own token (the triggers' RAISE texts are tokens)."""
+    """A database refusal's own token (the triggers' RAISE texts are tokens), else the error's type."""
+    if not isinstance(exc, sqlite3.Error):
+        return type(exc).__name__.lower()[:64]
     text = str(exc).strip().split(":", 1)[0].split(" ", 1)[0]
     return text if _TOKEN.fullmatch(text) else type(exc).__name__.lower()
 
@@ -473,7 +559,7 @@ def _write_identity(
         stamp = _utc_now()
         if _session_started(plan, stamp):
             db.execute("ROLLBACK")
-            tally.failed[name] = SESSION_STARTED
+            _skip(tally, name, SESSION_STARTED)
             return
         if _evaluated(db, name, plan.night):
             db.execute("ROLLBACK")
@@ -483,7 +569,13 @@ def _write_identity(
         expired, superseded = _close_open_step_ups(db, identity=name, night=plan.night, stamp=stamp)
         current = _rung_text(item.current)
         change: SizeChange | None = None
-        if item.status == PROPOSED:
+        waiting = _waiting_for_new_evidence(db, item)
+        status = item.token or item.status
+        if waiting is not None:
+            # No cascade on the same evidence: recorded, nothing else.
+            status = DEMOTION_WAITING
+            logger.warning("%s: %s demotion waits (%s)", DEMOTION_WAITING, name, waiting)
+        elif item.status == PROPOSED:
             target = _rung_text(item.proposed) if item.proposed is not None else ""
             pid = _insert_proposal(
                 db, item=item, kind=STEP_UP, origin=current, target=target, nights=nights,
@@ -509,7 +601,7 @@ def _write_identity(
             db.execute(_DECISION, (pid, fence_outcome, WRITER_ACTOR, _utc(stamp)))
             change = SizeChange(name, pid, fence_outcome, current, SHADOW_ONLY_MULT)
         _evidence_json, fingerprint = _evidence(item)
-        db.execute(_EVALUATION, (name, plan.night.isoformat(), item.token or item.status, fingerprint, _utc(stamp)))
+        db.execute(_EVALUATION, (name, plan.night.isoformat(), status, fingerprint, _utc(stamp)))
         db.execute("COMMIT")
     except BaseException:
         if db.in_transaction:
@@ -518,6 +610,8 @@ def _write_identity(
     tally.evaluated.append(name)
     tally.expired += expired
     tally.superseded += superseded
+    if waiting is not None:
+        tally.waiting[name] = waiting
     if change is not None:
         tally.changes.append(change)
 
@@ -551,6 +645,8 @@ def _demotion_fence(
     name = item.identity
     if _evaluated(db, name, plan.night):
         return None  # _write_identity records it as already evaluated
+    if _waiting_for_new_evidence(db, item) is not None:
+        return None  # _write_identity records the wait: no fence on the same evidence
     expected = FENCED_DECISION if sentinel.SENTINEL_FENCES_LIVE else WOULD_FENCE_DECISION
     previous = _previous_fence_trades(db, name, plan.night)
     if previous is not None and previous == (expected, item.trades):
@@ -559,10 +655,10 @@ def _demotion_fence(
         tally.held[name] = OWNER_RESUME_HOLDS
         return None
     if fence_store is None:
-        tally.failed[name] = NO_FENCE_STORE
+        _skip(tally, name, NO_FENCE_STORE, detail="no fence store writes the evidence database")
         return None
     if _session_started(plan, _utc_now()):
-        tally.failed[name] = SESSION_STARTED
+        _skip(tally, name, SESSION_STARTED)
         return None
     try:
         outcome = asyncio.run(
@@ -570,14 +666,14 @@ def _demotion_fence(
         )
     except Exception as exc:  # noqa: BLE001 - named; retried by the next run (no row written)
         logger.exception("demotion fence for %s NOT written", name)
-        tally.failed[name] = f"{FENCE_FAILED}_{type(exc).__name__.lower()}"[:64]
+        _skip(tally, name, f"{FENCE_FAILED}_{type(exc).__name__.lower()}"[:64])
         return None
     if outcome in (sentinel.FENCED, sentinel.ALREADY_FENCED):
         logger.critical("size writer: %s demoted to shadow-only, fenced (%s)", name, outcome)
         return FENCED_DECISION
     if outcome == sentinel.WOULD_FENCE:
         return WOULD_FENCE_DECISION
-    tally.failed[name] = f"{FENCE_FAILED}_{outcome}"[:64]
+    _skip(tally, name, f"{FENCE_FAILED}_{outcome}"[:64])
     return None
 
 
@@ -595,13 +691,17 @@ def write_night(
     path = Path(database).expanduser()
     if not path.is_file():
         return not_written("no database", plan)
-    try:
-        sizes = sizes_for_session(path, plan.session)
-    except Exception as exc:  # noqa: BLE001 - SizeNotInForce and its causes: nothing is written
-        token = getattr(exc, "token", type(exc).__name__)
-        logger.error("size writer: no size in force for %s (%s); nothing written", plan.session, exc)
-        return not_written(str(token), plan)
+    sizes, unreadable = sizes_in_force(path, plan.session)
+    if not sizes:
+        # Not one size can be read (an unreadable store, migration 18 pending): no night.
+        first = next(iter(unreadable.values()), None)
+        token = first.token if first is not None else "no_sendable_identity"
+        for name, problem in unreadable.items():
+            logger.critical("%s: %s skipped by the nightly size writer (%s)", problem.token, name, problem.detail)
+        return not_written(token, plan)
     tally = _Tally()
+    for name, problem in unreadable.items():
+        _skip(tally, name, problem.token, token=problem.token, detail=problem.detail)
     with closing(_connect(path)) as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -621,29 +721,29 @@ def write_night(
             raise
         tally.expired += expired
         for item in proposals.identities:
-            if item.identity not in SENDABLE_IDENTITIES:
+            if item.identity not in SENDABLE_IDENTITIES or item.identity in tally.failed:
                 continue
             problem = _check(item, sizes)
             if problem is not None:
-                logger.error("size writer: %s not written: %s", item.identity, problem)
-                tally.failed[item.identity] = problem
+                _skip(tally, item.identity, problem)
                 continue
-            fence_outcome = None
-            if item.status == DEMOTION_PROPOSED and item.proposed is None:
-                fence_outcome = _demotion_fence(db, item, plan=plan, fence_store=fence_store, tally=tally)
-                if item.identity in tally.failed:
-                    continue
+            # Each identity alone: whatever goes wrong with one never stops the others.
             try:
+                fence_outcome = None
+                if item.status == DEMOTION_PROPOSED and item.proposed is None:
+                    fence_outcome = _demotion_fence(db, item, plan=plan, fence_store=fence_store, tally=tally)
+                    if item.identity in tally.failed:
+                        continue
                 _write_identity(db, item, plan=plan, fence_outcome=fence_outcome, tally=tally)
-            except sqlite3.Error as exc:
-                logger.error("size writer: %s refused by the store: %s", item.identity, exc)
-                tally.failed[item.identity] = _failure_token(exc)
+            except Exception as exc:  # noqa: BLE001 - one identity's failure is named, never the night's
+                logger.exception("size writer: %s not written", item.identity)
+                _skip(tally, item.identity, _failure_token(exc), detail=str(exc)[:200])
     for change in tally.changes:
         logger.warning(
             "size writer: %s %s x%s -> %s (%s)", change.kind, change.identity, change.from_mult,
             change.to_mult, change.proposal_id,
         )
-    return SizeNight(
+    night = SizeNight(
         status=WRITTEN,
         night=plan.night,
         session=plan.session,
@@ -654,10 +754,15 @@ def write_night(
         superseded=tuple(tally.superseded),
         held=dict(tally.held),
         failed=dict(tally.failed),
+        waiting=dict(tally.waiting),
     )
+    logger.info("%s", night.summary())
+    return night
 
 
 __all__ = [
+    "DEMOTION_MIN_NEW_TRADES",
+    "DEMOTION_WAITING",
     "NOT_WRITTEN",
     "OWNER_RESUME_HOLDS",
     "SESSION_STARTED",
@@ -672,6 +777,6 @@ __all__ = [
     "not_written",
     "plan_night",
     "proposal_id",
-    "sizes_for_session",
+    "sizes_in_force",
     "write_night",
 ]

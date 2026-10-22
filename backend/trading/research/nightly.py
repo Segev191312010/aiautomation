@@ -89,7 +89,7 @@ from trading.research.paper_promotion import (
 )
 from trading.research.promotion_proposals import PromotionProposals, collect_proposals
 from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
-from trading.research.size_writer import NightPlan, SizeNight, not_written, plan_night, sizes_for_session, write_night
+from trading.research.size_writer import NightPlan, SizeNight, not_written, plan_night, sizes_in_force, write_night
 from trading.research.v7c_report import NOT_COLLECTED, V7CReport, collect_v7c_report, failed_report
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
 from trading.scheduler.sessions import market_session
@@ -426,12 +426,21 @@ def collect_evidence(
     try:
         # After step 4 on purpose: a mismatch fence written tonight holds
         # tonight's proposal for that identity (the promoter reads the fences).
-        # "current" is the size in force for the next session, from the store.
+        # "current" is the size in force for the next session, from the store, per
+        # identity: one without a size is left out (the size writer names it, CRITICAL),
+        # and the others are judged as usual.
         plan = plan_night(environment.clock())
-        current = sizes_for_session(fence_database(environment), plan.session)
-        proposals = collect_proposals(
-            database=fence_database(environment), ledger=live_r, live=live, as_of=as_of, current=current
-        )
+        current, unreadable = sizes_in_force(fence_database(environment), plan.session)
+        for name, problem in unreadable.items():
+            logger.warning("promotion proposals: %s left out: %s", name, problem)
+        if current:
+            proposals = collect_proposals(
+                database=fence_database(environment), ledger=live_r, live=live, as_of=as_of, current=current
+            )
+        else:
+            first = next(iter(unreadable.values()), None)
+            note = first.token if first is not None else "no_sendable_identity"
+            proposals = PromotionProposals(as_of=as_of, readable=False, note=note)
     except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("promotion proposals failed")
         proposals = PromotionProposals(as_of=as_of, readable=False, note=getattr(exc, "token", _failed(exc)))

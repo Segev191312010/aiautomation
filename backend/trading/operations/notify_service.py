@@ -189,6 +189,7 @@ from trading.risk.identity_sizing import (
     SIZE_EVENT_CHAIN_BROKEN,
     SIZE_EVENT_WRITTEN_MID_SESSION,
     SIZE_READ_BEFORE_SESSION_START,
+    SIZE_WRITER_IDENTITY_SKIPPED,
 )
 from trading.research.live_ledger import bridge_state_directory
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
@@ -332,8 +333,10 @@ TRIPWIRE_ALERT_INTERVAL = timedelta(minutes=30)
 # A sendable identity without a size for the session (plan P3-C/P3-E): the
 # session-start read's CRITICAL tokens (trading.risk.identity_sizing), the
 # event it ignored as written mid-session, and the pipeline's block of every
-# setup of a run without a size. Forwarded from the strategy children's logs
-# with normal sound, each token once per session date.
+# setup of a run without a size; and the nightly size writer skipping one
+# identity (P3-E fix 1). Forwarded with normal sound, each token once per
+# date: here from the strategy children's logs, by the Telegram child's
+# overnight watch from the replay child's log.
 SIZE_TRIPWIRES = (
     IDENTITY_SIZE_STORE_UNREADABLE,
     IDENTITY_SIZE_ABOVE_CEILING,
@@ -343,6 +346,7 @@ SIZE_TRIPWIRES = (
     SIZE_READ_BEFORE_SESSION_START,
     SENDABLE_WITHOUT_CEILING,
     IDENTITY_SIZING_MISSING,
+    SIZE_WRITER_IDENTITY_SKIPPED,
 )
 # Only the CRITICAL line itself (``<time> CRITICAL <logger> <token>: ...``),
 # never a decision line that merely names the block as its risk code, and

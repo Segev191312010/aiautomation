@@ -256,16 +256,24 @@ def test_reminder_0555_et_normal_sound_only_if_pending(tmp_path, database, monke
     assert none == []
 
 
-def test_no_reminder_while_phone_approval_does_not_exist(tmp_path, database):
+def test_no_reminder_and_no_expiry_note_while_phone_approval_does_not_exist(tmp_path, database):
+    """P3-E fix 1 (open question 3): before P3-D a proposal cannot be approved, so
+    neither the 05:55 reminder nor the 07:55 "expired" note is news."""
     run_night(database, et(MONDAY, 17, 40), ORB_V2="strong")
-    delivered, _sent = _watch_run(tmp_path, database, et(TUESDAY, 4, 0), et(TUESDAY, 7, 50), {})
-    assert delivered == []  # the 07:55 note is the deadline's, below
+    memory: dict[str, str] = {}
+    delivered, _sent = _watch_run(tmp_path, database, et(TUESDAY, 4, 0), et(TUESDAY, 9, 0), memory)
+    assert delivered == [] and memory == {}
 
 
-def test_expiry_note_0755_et(tmp_path, database):
+def test_expiry_note_0755_et(tmp_path, database, monkeypatch):
+    # Rewritten for P3-E fix 1 (explicit, not weakened): the note exists only once phone
+    # approval does (P3-D's flip, patched here); the not-live state is the test above.
+    monkeypatch.setattr(size_notify, "PHONE_APPROVAL_LIVE", True)
     run_night(database, et(MONDAY, 17, 40), ORB_V2="strong", GAP_GO_V2="strong")
     orb, gap = night_items(database, MONDAY)
-    memory: dict[str, str] = {}
+    # The 05:55 reminder went out already (its own test): only the deadline's note here.
+    reminded = {size_notify.REMINDED_KEY: start(TUESDAY).astimezone(UTC).isoformat()}
+    memory: dict[str, str] = dict(reminded)
 
     delivered, _sent = _watch_run(tmp_path / "a", database, et(TUESDAY, 7, 30), et(TUESDAY, 9, 30), memory)
 
@@ -281,7 +289,7 @@ def test_expiry_note_0755_et(tmp_path, database):
     assert EXPIRY_NOTE_GRACE == timedelta(hours=1)
     # A proposal decided before the deadline is not "expired"; a closed day has no deadline.
     SizeLedger(database).decide(orb.proposal_id, "rejected", actor="owner_telegram", at=et(TUESDAY, 1, 0))
-    later, _sent = _watch_run(tmp_path / "c", database, et(TUESDAY, 7, 50), et(TUESDAY, 8, 30), {})
+    later, _sent = _watch_run(tmp_path / "c", database, et(TUESDAY, 7, 50), et(TUESDAY, 8, 30), dict(reminded))
     assert [text.split(": ", 1)[1] for _at, text, _silent in later] == [f"{gap.proposal_id} (GAP_GO_V2 ×0.5 → ×1)"]
     assert ProposalWatch.schedule(et(date(2026, 10, 24), 7, 55)) is None
     # A store without migration 18 (the assistant tolerates it pending): no note, no failure.
@@ -382,6 +390,8 @@ async def test_the_telegram_child_sends_the_expiry_note_silently_through_its_one
         clock=clock.clock, sleep=clock.sleep, gateway_probe=opened,
     )
     save_chat_id(telegram_config_file(environment.paths), OWNER)
+    # The note exists once phone approval does (P3-E fix 1): P3-D's flip, patched here.
+    monkeypatch.setattr(size_notify, "PHONE_APPROVAL_LIVE", True)
 
     assert await run_bounded(bot.run_telegram_assistant(env=environment)) == bot.EXIT_CONFIG
     notes = [item for item in sent if item["text"].startswith("⌛")]
@@ -430,7 +440,7 @@ def test_size_criticals_reach_the_phone(tmp_path, monkeypatch):
     assert notify_service.SIZE_TRIPWIRES == (
         "identity_size_store_unreadable", "identity_size_above_ceiling", "account_mode_without_ceiling",
         "size_event_chain_broken", "size_event_written_mid_session", "size_read_before_session_start",
-        "sendable_without_ceiling", "identity_sizing_missing",
+        "sendable_without_ceiling", "identity_sizing_missing", "size_writer_identity_skipped",
     )
     # Real CRITICAL lines, from the real code and the real log format.
     shadow = logging.getLogger("autotrader.shadow")
@@ -510,3 +520,49 @@ def test_the_reminder_schedule_is_the_watchs_lead_and_the_sessions_start():
         # Two hours before it: the first pre-session lead (05:55 ET).
         assert reminder_at == pre_session_leads(day)[0] == deadline - PRE_SESSION_LEADS[0]
         assert reminder_at == deadline - timedelta(hours=2)
+
+
+# --- P3-E fix 1: the size writer's skip reaches the phone from the replay log ----------------
+
+
+def test_a_size_writer_skip_in_the_replay_log_reaches_the_phone_once_a_night(tmp_path, database):
+    """The replay child's log line, as its console handler writes it, read by the
+    Telegram child's overnight watch: one page per token per ET date, normal sound."""
+    import inspect
+
+    from tests.test_overnight_watch import append
+    from trading import cli
+
+    # The replay child's console format (cli._interactive_research_logger), copied, not guessed.
+    replay_format = "%(asctime)s %(levelname)s %(message)s"
+    assert f'logging.Formatter("{replay_format}")' in inspect.getsource(cli._interactive_research_logger)
+    SizeLedger(database).step("ORB_V2", "0.5", "0.25", effective=MONDAY, at=et(date(2026, 10, 16), 20))
+    capture = _Records()
+    sizes = logging.getLogger("autotrader.shadow.sizes")
+    sizes.addHandler(capture)
+    try:
+        run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing")
+    finally:
+        sizes.removeHandler(capture)
+    formatter = logging.Formatter(replay_format)
+    lines = [line for record in capture.records for line in formatter.format(record).splitlines()]
+    assert sum(" CRITICAL size_event_chain_broken: ORB_V2 skipped" in line for line in lines) == 1
+
+    clock = Time(et(MONDAY, 17, 30), et(MONDAY, 18, 30))
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "replay.log").write_text("")
+    memory: dict[str, str] = {}
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory)
+    clock.at(et(MONDAY, 17, 41), append(logs / "replay.log", *lines))
+    clock.at(et(MONDAY, 17, 50), append(logs / "replay.log", *lines))  # a restarted replay, the same night
+    sent = asyncio.run(drive(watch))
+
+    assert [text.splitlines()[0] for text in sent] == ["🚨 Size tripwire: size_event_chain_broken"]
+    assert "ORB_V2 skipped by the nightly size writer" in sent[0]
+    assert memory["replay_size_tripwire:size_event_chain_broken"] == "2026-10-19"
+    # The next night it pages again.
+    clock = Time(et(TUESDAY, 17, 30), et(TUESDAY, 18, 0))
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory)
+    clock.at(et(TUESDAY, 17, 41), append(logs / "replay.log", *lines))
+    assert len(asyncio.run(drive(watch))) == 1

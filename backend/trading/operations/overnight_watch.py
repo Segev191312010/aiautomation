@@ -35,9 +35,14 @@ schedule); this module probes, reads the logs and sends:
   * the night's size proposals (plan P3-E, ``size_notify.ProposalWatch``) for
     the session about to start, at any hour and whatever the port: at the
     first pre-session lead (05:55 ET) a normal-sound reminder while a step up
-    still waits for the owner (only once phone approval exists), and at the
-    07:55 ET deadline one silent "expired, sizes unchanged" note. Its sends go
-    through the assistant's one Telegram sender, the silent flag included.
+    still waits for the owner, and at the 07:55 ET deadline one silent
+    "expired, sizes unchanged" note, both only once phone approval exists.
+    Its sends go through the assistant's one Telegram sender, the silent flag
+    included;
+  * ``replay.log`` at any hour: the nightly size writer's CRITICAL size lines
+    (``notify_service.SIZE_TRIPWIRES``: an identity it skipped, fail-closed),
+    with normal sound, each token once per ET date (the notifier, which
+    forwards the same tokens from the strategy logs, is not running then).
 
 A stop is never lost. ``TelegramAssistant.stop`` cancels this task and waits
 for it; Python 3.11's ``asyncio.wait_for`` runs its awaitable in a task of its
@@ -91,6 +96,7 @@ from trading.operations.notify_service import (
     ibkr_session_problem,
     notifier_gateway_outage,
     restart_cap_event,
+    size_tripwire,
 )
 from trading.operations.paths import UserPaths
 from trading.operations.size_notify import ProposalWatch
@@ -101,6 +107,10 @@ logger = logging.getLogger("autotrader.shadow.telegram")
 SUPERVISOR_LOG = "supervisor"
 RECORDER_LOG = "recorder"
 RECORDER_LOG_NAME = "recorder.log"
+REPLAY_LOG = "replay"
+REPLAY_LOG_NAME = "replay.log"
+# Memory key per size token: the ET date its replay-log line last reached the phone.
+REPLAY_SIZE_TRIPWIRE_KEY = "replay_size_tripwire:{token}"
 # The loop's resolution: log lines, the competing-login re-page and the
 # hysteresis's clean-stretch close are seen within this long.
 WATCH_TICK_SECONDS = 30.0
@@ -219,6 +229,7 @@ class OvernightWatch:
         self._tailers = {
             SUPERVISOR_LOG: LogTailer(log_directory / SUPERVISOR_LOG_NAME),
             RECORDER_LOG: LogTailer(log_directory / RECORDER_LOG_NAME),
+            REPLAY_LOG: LogTailer(log_directory / REPLAY_LOG_NAME),
         }
         self._checkpoints = checkpoints
         self._clock = clock
@@ -318,6 +329,9 @@ class OvernightWatch:
             if name == SUPERVISOR_LOG:
                 for line in self._rotation.fresh(lines):
                     self._supervisor_line(line, now, send)
+            elif name == REPLAY_LOG:
+                for line in lines:
+                    self._replay_line(line, now, send)
             else:
                 for line in lines:
                     self._recorder_line(line, now, send)
@@ -342,6 +356,20 @@ class OvernightWatch:
             return
         logger.info("overnight watch: forwarded %s %s", kind, name)
         send(f"{text} · {clock_text(at, now)}")
+
+    def _replay_line(self, line: str, now: datetime, send: Send) -> None:
+        """A size tripwire of the nightly size writer: once per token per ET date."""
+        sized = size_tripwire(line)
+        if sized is None:
+            return
+        token, text = sized
+        key = REPLAY_SIZE_TRIPWIRE_KEY.format(token=token)
+        day = et_day(now).isoformat()
+        if self._memory.get(key) == day:
+            return
+        self._memory[key] = day
+        logger.warning("overnight watch: size tripwire %s from the replay log, forwarded", token)
+        send(text)
 
     def _recorder_line(self, line: str, now: datetime, send: Send) -> None:
         if ibkr_session_problem(line, include_connection_lost=False) != "competing_login":
@@ -499,6 +527,7 @@ __all__ = [
     "OUTAGE_BEFORE_KEY",
     "OUTAGE_PAGED_KEY",
     "OUTAGE_SINCE_KEY",
+    "REPLAY_SIZE_TRIPWIRE_KEY",
     "TOOK_OVER_KEY",
     "LeadCheck",
     "NotifierOutage",

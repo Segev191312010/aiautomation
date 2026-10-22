@@ -401,6 +401,13 @@ def session_identity_multiplier(
     return require_size_multiplier(size)
 
 
+# The nightly size writer skipped one identity's night (a store refusal, a
+# verdict it may not write, a fence it could not write): one CRITICAL, its
+# sizes stay as they are, the other identities are written (P3-E fix 1). The
+# token lives here, with the other size tokens, for the phone's tripwire list.
+SIZE_WRITER_IDENTITY_SKIPPED = "size_writer_identity_skipped"
+
+
 class SizeNotInForce(RuntimeError):
     """``size_in_force`` found no size for the identity and session: ``token`` says why.
 
@@ -482,6 +489,7 @@ __all__ = [
     "SIZE_EVENT_WRITTEN_MID_SESSION",
     "SIZE_LADDER",
     "SIZE_READ_BEFORE_SESSION_START",
+    "SIZE_WRITER_IDENTITY_SKIPPED",
     "SizeEvent",
     "SizeNotInForce",
     "SizeStoreUnreadable",
