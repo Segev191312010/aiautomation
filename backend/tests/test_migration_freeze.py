@@ -48,6 +48,10 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     # Not yet applied in production: v7c's owner-buy stop (owner decision D5,
     # 2026-10-18), applied by the L-v7c `deploy apply --expect-migration 17`.
     17: ("manual-entry-stop", "3819025e3c91b79e401587ecc0fdd327b6b14136999f204eedc81133ac6fe735"),
+    # Not yet applied in production: the identity size store (owner decision D2,
+    # plan P3-C), applied by the L-sizes `deploy apply --expect-migration 18`
+    # after v7c's migration 17 is live.
+    18: ("identity-size-store", "bfa4bca8d87816a6a093453f4c24e24c34e642f79fce8698e186d6141de5643c"),
 }
 
 

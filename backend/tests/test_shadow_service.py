@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import logging
 import os
+from pathlib import Path
 import signal
 from types import SimpleNamespace
 from uuid import uuid4
@@ -256,9 +257,27 @@ def _production_universe(strategy_name: str) -> str:
     return {**STRATEGY_UNIVERSES, **MANAGED_STRATEGY_UNIVERSES}.get(strategy_name, "scanner")
 
 
-async def _pipeline_keywords(monkeypatch, strategy_name: str) -> tuple[dict[str, object], str]:
-    """Run ``run_shadow_session`` on fakes; the ``ShadowPipeline`` keywords and the spec name."""
+async def _size_store(tmp_path, monkeypatch) -> Path:
+    """A database at this code's schema (the size store, migration 18, included) as cfg.DB_PATH."""
+    from config import cfg
+    from db.core import init_db
+
+    database = tmp_path / "sizes.db"
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    await init_db()
+    return database
+
+
+async def _pipeline_keywords(
+    monkeypatch, strategy_name: str, *, at: datetime | None = None
+) -> tuple[dict[str, object], str]:
+    """Run ``run_shadow_session`` on fakes; the ``ShadowPipeline`` keywords and the spec name.
+
+    ``at`` (default 09:00 ET on TUESDAY) is the clock; the fake sleep moves it
+    forward, so the session's own wait for its connect slot is real.
+    """
     captured: dict[str, object] = {}
+    clock = {"now": et(TUESDAY, 9, 0) if at is None else at}
 
     class FakeActor:
         connected = True
@@ -314,8 +333,8 @@ async def _pipeline_keywords(monkeypatch, strategy_name: str) -> tuple[dict[str,
         captured["pipeline"] = kwargs
         return object()
 
-    async def no_sleep(_seconds: float) -> None:
-        return None
+    async def sleep(seconds: float) -> None:
+        clock["now"] += timedelta(seconds=seconds)
 
     usage = SimpleNamespace(usage=SimpleNamespace(calls=0, cost_usd=Decimal("0")))
     monkeypatch.setattr(shadow_service, "ensure_strategy", strategy)
@@ -335,8 +354,8 @@ async def _pipeline_keywords(monkeypatch, strategy_name: str) -> tuple[dict[str,
         config=runtime_config(),
         owner_id="demo",
         session=market_session(TUESDAY),
-        clock=lambda: et(TUESDAY, 9, 0),
-        sleep=no_sleep,
+        clock=lambda: clock["now"],
+        sleep=sleep,
         strategy_name=strategy_name,
         universe=_production_universe(strategy_name),
     )
@@ -346,14 +365,19 @@ async def _pipeline_keywords(monkeypatch, strategy_name: str) -> tuple[dict[str,
 
 
 @pytest.mark.parametrize("strategy_name", sorted(shadow_service.STRATEGIES))
-async def test_every_session_builds_its_pipeline_with_its_identity_size_factor(monkeypatch, strategy_name):
+async def test_every_session_builds_its_pipeline_with_its_identity_size_factor(
+    tmp_path, monkeypatch, strategy_name
+):
     """The first hop of the production path: run_shadow_session -> ShadowPipeline.
 
     A sendable key gets its own row of the size table (ORB_V2 0.25, VWAP_PB_V2 and
     GAP_GO_V2 0.5, MOMO_HOD_V2 1); every shadow key gets exactly Decimal("1").
+    Since P3-C the factor is the session-start read of the size store, which holds
+    no size event here: each identity's baseline.
     """
     from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
 
+    await _size_store(tmp_path, monkeypatch)
     keywords, spec_name = await _pipeline_keywords(monkeypatch, strategy_name)
 
     assert "identity_multiplier" in keywords, "the session dropped the identity size factor"

@@ -18,6 +18,7 @@ import socket
 import subprocess
 from typing import TYPE_CHECKING, Protocol
 
+from config import cfg
 from trading.contracts import RiskPolicy, ShadowRuntimeConfig
 from trading.intelligence.anthropic_transport import (
     AnthropicMessagesTransport,
@@ -96,7 +97,8 @@ from trading.scheduler.sessions import (
     market_session,
     next_market_session,
 )
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, identity_multiplier
+from trading.risk import identity_sizing
+from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, session_identity_multiplier
 from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 
 if TYPE_CHECKING:
@@ -187,14 +189,21 @@ def registry_problems(
     multipliers: Mapping[str, Decimal] = IDENTITY_SIZE_MULTIPLIER,
     strategies: Mapping[str, tuple[object, Callable[[], object], object]] = STRATEGIES,
     sendable_keys: frozenset[str] = SENDABLE_KEYS,
+    ceilings: Mapping[str, Mapping[str, Decimal]] | None = None,
+    account_mode: str | None = None,
 ) -> list[str]:
-    """Every way the registry, the sendable tuple and the size table disagree.
+    """Every way the registry, the sendable tuple, the size table and the ceiling disagree.
 
     Empty when: spec names are unique; exactly the ``sendable_keys`` carry a
     sendable name; every sendable name has a size row and every size row is a
-    sendable name; every sendable name is registered. Each problem is one
-    token without spaces, so a ``LAUNCH_REFUSED ... reason=<token>`` line
-    reaches the phone intact. The supervisor refuses to launch on any of them.
+    sendable name; every sendable name is registered; the account mode has a
+    ceiling row (``identity_sizing.IDENTITY_SIZE_CEILING``, read at call time
+    unless ``ceilings``/``account_mode`` are given) naming exactly the
+    sendable names, none above x1, and no baseline above its ceiling. Each
+    problem is one token without spaces, so a ``LAUNCH_REFUSED ...
+    reason=<token>`` line reaches the phone intact. The supervisor refuses to
+    launch on any of them. (The session-start size read fails closed on the
+    same disagreements; this refuses them before anything starts.)
     """
     names = registered_spec_names(strategies)
     problems: list[str] = []
@@ -216,6 +225,22 @@ def registry_problems(
     for name in multipliers:
         if name not in sendable:
             problems.append(f"size_multiplier_not_sendable={name}")
+    mode = identity_sizing.CURRENT_ACCOUNT_MODE if account_mode is None else account_mode
+    table = identity_sizing.IDENTITY_SIZE_CEILING if ceilings is None else ceilings
+    ceiling_row = table.get(mode)
+    if ceiling_row is None:
+        problems.append(f"{identity_sizing.ACCOUNT_MODE_WITHOUT_CEILING}={mode}")
+        return problems
+    for name in sendable:
+        if name not in ceiling_row:
+            problems.append(f"{identity_sizing.SENDABLE_WITHOUT_CEILING}={name}")
+    for name, ceiling in ceiling_row.items():
+        if name not in sendable:
+            problems.append(f"ceiling_not_sendable={name}")
+        if ceiling > 1:
+            problems.append(f"ceiling_above_one={name}")
+        if name in multipliers and multipliers[name] > ceiling:
+            problems.append(f"size_multiplier_above_ceiling={name}")
     return problems
 
 
@@ -559,9 +584,6 @@ async def run_shadow_session(
     system_prompt = review_prompt_for(prompt_id, strategy_kind=evaluator.strategy_kind)
     spec = spec_factory()
     strategy = await ensure_strategy(owner_id=owner_id, spec=spec)
-    # The identity's fixed size factor, from the catalogue name this run
-    # registers; None (a sendable name with no row) blocks every setup.
-    size_factor = identity_multiplier(spec.name, sendable=is_sendable_identity(spec.name))
     policy = RiskPolicy()
     run_id = f"shadow-{strategy.strategy_id[:8]}-{session.session_date.isoformat()}"
     if run_label:
@@ -672,6 +694,19 @@ async def run_shadow_session(
     entry_gate = controller.entry_gate(risk_off_gate) if controller is not None else risk_off_gate
     connect_at = session.scanner_at if universe == "scanner" else window_start
     await _sleep_until(connect_at - CONNECT_LEAD, clock=clock, sleep=sleep)
+    # The size this run trades with, for the catalogue name it registers: read
+    # once from the size store, after the wait (so never before the session's
+    # start, when a step down written tonight could still be missed), and
+    # handed to the pipeline unchanged; a restart reads it again, never a
+    # remembered value. None (no baseline row or ceiling, above the ceiling,
+    # an unreadable store or migration 18 pending) blocks every setup.
+    size_factor = session_identity_multiplier(
+        spec.name,
+        sendable=is_sendable_identity(spec.name),
+        session_date=session.session_date,
+        database=cfg.DB_PATH,
+        now=clock(),
+    )
     await actor.connect()
     try:
         preflight = await actor.preflight(required_data_lines=config.max_candidates)

@@ -354,9 +354,9 @@ async def test_manager_routes_on_a_fresh_ledger_show_the_switch_off_and_nothing_
         "session_date": TODAY,
         "switch": {"state": "off", "since": None, "source": None, "reason": None},
         "latch": None,
-        # Rewritten explicitly for v7c (not weakened): migration 17 (manual-entry-stop, owner
-        # decision D5) is now the code's newest, so a fresh ledger is current at v17.
-        "migrations": {"applied_version": 17, "code_version": 17, "current": True},
+        # Rewritten explicitly for P3-C (not weakened): migration 18 (identity-size-store, owner
+        # decision D2) is now the code's newest, so a fresh ledger is current at v18.
+        "migrations": {"applied_version": 18, "code_version": 18, "current": True},
         "plans": {"attempts": 0, "valid": 0, "in_force": None},
         "spend": {
             "spend_date": TODAY, "purpose": "plan", "calls": 0, "spent_usd": "0",

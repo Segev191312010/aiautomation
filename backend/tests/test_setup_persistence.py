@@ -234,9 +234,21 @@ class _Reviewer:
 
 
 async def _replay_momo_session(
-    database: Path, monkeypatch, **pipeline_options: Any
+    database: Path,
+    monkeypatch,
+    *,
+    runner: RepositoryBackedShadowRunner | None = None,
+    reviewer: _Reviewer | None = None,
+    clock: dict[str, datetime] | None = None,
+    **pipeline_options: Any,
 ) -> tuple[dict[str, Decision], _Reviewer]:
-    """The 2026-10-12 MOMO_HOD_V2 day, polled like the session runner does."""
+    """The 2026-10-12 MOMO_HOD_V2 day, polled like the session runner does.
+
+    ``runner`` drives a runner the production composition root built
+    (``shadow_service.run_shadow_session``) instead of this helper's own; it
+    comes with the ``reviewer`` its pipeline asks and the ``clock`` dict its
+    clock reads, which the replay moves forward poll by poll.
+    """
     from config import cfg
     from db.core import get_db
 
@@ -293,14 +305,18 @@ async def _replay_momo_session(
     candidates = {
         symbol: replay.candidate(scanner.id, rank) for rank, (symbol, replay) in enumerate(replays.items(), 1)
     }
-    reviewer = _Reviewer()
-    clock = {"now": _et(SESSION, 10, 0, 5)}
-    runner = RepositoryBackedShadowRunner(
-        pipeline=ShadowPipeline(proposal_provider=reviewer, strategy=MomoStrategy(), **pipeline_options),
-        clock=lambda: clock["now"],
-        lease_ttl=timedelta(hours=6),
-        lease_renew_interval=timedelta(hours=1),
-    )
+    if runner is None:
+        reviewer = _Reviewer()
+        clock = {"now": _et(SESSION, 10, 0, 5)}
+        runner = RepositoryBackedShadowRunner(
+            pipeline=ShadowPipeline(proposal_provider=reviewer, strategy=MomoStrategy(), **pipeline_options),
+            clock=lambda: clock["now"],
+            lease_ttl=timedelta(hours=6),
+            lease_renew_interval=timedelta(hours=1),
+        )
+    else:
+        assert reviewer is not None and clock is not None and not pipeline_options
+        clock["now"] = _et(SESSION, 10, 0, 5)
     portfolio = PortfolioSnapshot(observed_at=clock["now"], net_liquidation="665000")
 
     def item(symbol: str, now: datetime, *, quoted: bool = False) -> CandidateInput:

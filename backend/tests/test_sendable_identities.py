@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from decimal import Decimal
 import hashlib
 import json
 import logging
@@ -28,7 +29,7 @@ from trading.operations.shadow_service import (
     registry_problems,
 )
 from trading.orchestration.session_runner import ensure_strategy, momo_strategy_spec, orb_strategy_spec
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+from trading.risk.identity_sizing import IDENTITY_SIZE_CEILING, IDENTITY_SIZE_MULTIPLIER
 from trading.sendable_identities import (
     API_RESERVED_NAME_PREFIXES,
     RESERVED_STRATEGY_NAME,
@@ -230,14 +231,36 @@ def test_registry_problems_catch_every_disagreement():
     assert registry_problems(multipliers={**IDENTITY_SIZE_MULTIPLIER, "ORB_V9": 1}) == [
         "size_multiplier_not_sendable=ORB_V9"
     ]
-    # A sendable name the registry does not build.
+    # A sendable name the registry does not build. Rewritten explicitly for P3-C (not
+    # weakened): the ceiling row is given with the same names as the sendable tuple, so
+    # the one disagreement left is the registry's (the ceiling refusals have their own test).
+    with_v9 = {**IDENTITY_SIZE_CEILING["paper"], "ORB_V9": Decimal("1")}
     assert registry_problems(
-        sendable=(*SENDABLE_IDENTITIES, "ORB_V9"), multipliers={**IDENTITY_SIZE_MULTIPLIER, "ORB_V9": 1}
+        sendable=(*SENDABLE_IDENTITIES, "ORB_V9"), multipliers={**IDENTITY_SIZE_MULTIPLIER, "ORB_V9": 1},
+        ceilings={"paper": with_v9},
     ) == ["sendable_not_registered=ORB_V9"]
     # A sendable key whose name is not sendable (the tuple shrank without the registry).
-    assert sorted(registry_problems(sendable=(), multipliers={})) == sorted(
+    assert sorted(registry_problems(sendable=(), multipliers={}, ceilings={"paper": {}})) == sorted(
         f"sendable_key_without_sendable_name={key}:{STRATEGIES[key][1]().name}" for key in SENDABLE_KEYS
     )
+
+
+def test_registry_problems_catch_every_ceiling_disagreement():
+    """P3-C (owner decision D3): every sendable name has a PAPER ceiling, none above x1,
+    no baseline above its ceiling, and no ceiling for a name nobody may send."""
+    paper = dict(IDENTITY_SIZE_CEILING["paper"])
+    assert registry_problems(ceilings={"paper": paper}) == []
+    without_orb = {name: value for name, value in paper.items() if name != "ORB_V2"}
+    assert registry_problems(ceilings={"paper": without_orb}) == ["sendable_without_ceiling=ORB_V2"]
+    assert registry_problems(ceilings={"paper": {**paper, "ORB_V2": Decimal("2")}}) == ["ceiling_above_one=ORB_V2"]
+    assert registry_problems(ceilings={"paper": {**paper, "ORB_V9": Decimal("1")}}) == ["ceiling_not_sendable=ORB_V9"]
+    assert registry_problems(ceilings={"paper": {**paper, "MOMO_HOD_V2": Decimal("0.5")}}) == [
+        "size_multiplier_above_ceiling=MOMO_HOD_V2"
+    ]
+    # An account mode without a row: one refusal, nothing launches.
+    assert registry_problems(account_mode="live") == ["account_mode_without_ceiling=live"]
+    assert registry_problems(ceilings={}) == ["account_mode_without_ceiling=paper"]
+    assert all(" " not in problem for problem in registry_problems(ceilings={"paper": {}}))
 
 
 def test_momo_hod_v2_canonical_spec_hash_is_pinned():

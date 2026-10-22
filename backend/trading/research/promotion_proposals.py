@@ -75,7 +75,7 @@ from trading.research.size_history import (
     read_decision_refs,
     read_size_steps,
 )
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, SIZE_LADDER
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.decision_sizing import SizingIndex, read_decision_sizing, sizing_directory
 from trading.storage.migrations import SCHEMA_READ_TIMEOUT_SECONDS
@@ -86,7 +86,8 @@ MIN_TRADES_PER_IDENTITY = 30
 MIN_SESSIONS = 20
 MAX_SLIPPAGE_R_PER_TRADE = Decimal("0.1")
 MAX_UNEXPLAINED_INCIDENTS = 0
-SIZE_LADDER: tuple[Decimal, ...] = (Decimal("0.25"), Decimal("0.5"), Decimal("1"))
+# SIZE_LADDER (0.25 -> 0.5 -> 1) is imported from trading.risk.identity_sizing,
+# its single implementation, which the size store's CHECKs mirror (P3-C).
 MIN_SESSIONS_SINCE_STEP = 10
 PROBATION_SESSIONS = 5
 DEMOTION_MIN_TRADES = 10

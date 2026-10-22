@@ -48,6 +48,7 @@ from trading.storage.manual_orders_schema import (
     MANUAL_ENTRY_STOP_SCHEMA,
     MANUAL_ORDERS_SCHEMA,
 )
+from trading.storage.size_schema import SIZE_STORE_MIGRATION, SIZE_STORE_SCHEMA
 
 
 MigrationApply = Callable[[aiosqlite.Connection], Awaitable[None]]
@@ -296,6 +297,10 @@ async def _manual_entry_stop(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANUAL_ENTRY_STOP_SCHEMA[1:])
 
 
+async def _identity_size_store(db: aiosqlite.Connection) -> None:
+    await _execute_all(db, SIZE_STORE_SCHEMA)
+
+
 async def _manager_setups_ledger(db: aiosqlite.Connection) -> None:
     await _execute_all(db, MANAGER_SETUPS_SCHEMA)
 
@@ -451,6 +456,14 @@ MIGRATIONS = (
     Migration(
         MANUAL_ENTRY_STOP_MIGRATION, "manual-entry-stop", "v1-manual-entry-stop-20261021",
         _manual_entry_stop, MANUAL_ENTRY_STOP_SCHEMA,
+    ),
+    # P3-C (owner decision D2): identity sizes live in the database and change
+    # only at a session start. Size proposals, their decisions, the size
+    # events and the nightly evaluations; the shadow child reads the events
+    # once at its session start (trading.risk.identity_sizing).
+    Migration(
+        SIZE_STORE_MIGRATION, "identity-size-store", "v1-identity-size-store-20261022",
+        _identity_size_store, SIZE_STORE_SCHEMA,
     ),
 )
 
