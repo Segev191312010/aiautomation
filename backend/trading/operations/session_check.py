@@ -45,7 +45,8 @@ Seven rules, each PASS, WARN or FAIL with its evidence lines:
    stopped is a FAIL;
 7. day risk budget (bridge v7c, owner decisions D1 and D5): every accepted
    risk-increasing order, a bot SENT or an owner buy's MANUAL SENT, is
-   matched to the ``v7c_budget_ok`` line the bridge logs right before it,
+   matched to the ``v7c_budget_ok`` line its own bridge process logs right
+   before it (a line never vouches across a restart),
    whose realized + open + new total must stay within 3 % of its net
    liquidation (one cent of the bridge's rounding allowed). A malformed budget
    line, a total above 3 %, a process that logged another cap or slippage
@@ -1459,14 +1460,22 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
                                                                                 STOP_SLIPPAGE_FACTOR):
                 failures.append(f"the bridge ran a day risk budget of {found.group('pct')}% (stop slippage factor"
                                 f" {found.group('factor')}), the approved is {approved}: {line.evidence()}")
-    pending: dict[tuple[str, ...], list[BudgetCheck]] = {}
+    # N18g-LOW-1: a budget line vouches only for an order of its own bridge process. The bridge
+    # checks the budget immediately before it stores and places an order, on its loop, so an order
+    # sent by a later process (after a restart) is preceded by that process's own line; a line
+    # left by a process that stopped before its SENT never carries over. A process starts at a
+    # supervisor banner or a ``bridge sha256=`` line (a new run of the section) and connects once
+    # (``PAPER bridge … connected``); either one starts a new process here.
+    pending: dict[tuple[tuple[int, int], tuple[str, ...]], list[BudgetCheck]] = {}
+    connects: Counter[int] = Counter()
+    process = (-1, 0)
     verified: list[tuple[str, BudgetCheck]] = []
     unverified: list[str] = []
     missing: list[str] = []
     refused: Counter[str] = Counter()
 
     def accepted(key: tuple[str, ...], name: str, line: LogLine) -> None:
-        checks = pending.get(key)
+        checks = pending.get((process, key))
         if checks:
             verified.append((name, checks.pop(0)))
         elif line.run in budget_runs:
@@ -1479,13 +1488,16 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
 
     for line in context.section.lines():
         kind, text = line.kind, line.text
+        if kind == "INFO" and _CONNECTED.match(text):
+            connects[line.run] += 1
+        process = (line.run, connects[line.run])
         if kind == "INFO" and _BUDGET_OK_START.match(text):
             check = parse_budget_ok(line)
             if isinstance(check, str):
                 failures.append(check)
                 continue
             failures += check.problems
-            pending.setdefault(check.key, []).append(check)
+            pending.setdefault((process, check.key), []).append(check)
         elif kind == "SENT":
             sent = _SENT.match(text)
             if sent is not None:  # an unreadable SENT is rule 2's failure

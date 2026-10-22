@@ -238,6 +238,29 @@ def test_no_outcome_rows_are_counted_never_as_zero_r(week: dict[str, Any]) -> No
     assert blocked_text([]) == "V7C no v7c data (no refused order)"
 
 
+def test_a_filled_outcome_without_its_r_reads_no_outcome(week: dict[str, Any],
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """N18g I-1 (mutant Q07): the schema refuses a filled outcome without its R (CHECK (filled = 1) =
+    (r_multiple IS NOT NULL)), so only a reader could hand one over; such a row has no outcome, and its
+    JSON says so, never "filled"."""
+    from trading.research import promotion_proposals
+
+    real = promotion_proposals.read_shadow_outcomes
+
+    def without_r(database: Any, decision_ids: Any, **kwargs: Any) -> dict[str, Any]:
+        found = real(database, decision_ids, **kwargs)
+        assert found[D_FILLED] == promotion_proposals.ShadowOutcome(filled=True, gross_r=Decimal("1.4000"))
+        return {**found, D_FILLED: promotion_proposals.ShadowOutcome(filled=True, gross_r=None)}
+
+    monkeypatch.setattr(promotion_proposals, "read_shadow_outcomes", without_r)
+    payload = _report(week).payload()
+
+    [row] = [item for item in payload["blocked_orders"] if item["decision_id"] == D_FILLED]
+    assert (row["outcome"], row["would_have_r"], row["token"]) == ("no_outcome", None, "v7c_day_risk_budget")
+    assert payload["blocked"]["tonight"]["bot"] == {"blocked": 3, "with_outcome": 1, "not_filled": 1,
+                                                    "no_outcome": 2, "would_have_r": "0.0000"}
+
+
 def test_the_source_tag_is_the_order_ref_prefix() -> None:
     from trading.execution import manual_orders as mo
 

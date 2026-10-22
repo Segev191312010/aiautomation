@@ -706,6 +706,68 @@ async def test_rule_day_risk_budget_pages(tmp_path: Path, monkeypatch: pytest.Mo
     assert rule(report, 7).summary.startswith("1 problem(s); first: the bridge's budget tripwire fired:")
 
 
+def _restart_before_sent(day: Day, symbol: str, identity: str, *, sha: bool = True,
+                         rechecked: str | None = None) -> None:
+    """A new bridge process between a SENT's budget line and the SENT (the first one stopped after its
+    check): its sha line (a new run) unless ``sha`` is False, its connect and budget-rule lines, and
+    ``rechecked``, the new process's own budget line for that entry, when it logged one."""
+    log = day.logs / "bridge.log"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    budget = next(index for index, text in enumerate(lines) if f"v7c_budget_ok {symbol} ({identity})" in text)
+    sent = next(index for index, text in enumerate(lines) if f" SENT {symbol} ({identity})" in text)
+    assert budget < sent
+    clock = lines[sent].split(" ET")[0]
+    restart = [
+        *([_line(clock, "INFO", f"bridge sha256={BRIDGE_SHA}")] if sha else []),
+        _line(clock, "INFO", f"PAPER bridge v7c connected (all accounts paper). Managing brackets for {DAY}"
+              " until 15:55 ET."),
+        _line(clock, "INFO", pb.budget_line()),
+        *([_line(clock, "INFO", rechecked)] if rechecked is not None else []),
+    ]
+    lines[sent:sent] = restart
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("boundary", ["new-run", "second-connect"])
+async def test_rule_day_risk_budget_never_pairs_a_sent_with_an_earlier_process_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """N18g-LOW-1 (probe Q1): a budget line logged by a process that stopped before its SENT never
+    vouches for a later process's SENT; the later SENT without a line of its own FAILs."""
+    day = await build_day(tmp_path, monkeypatch)
+    single = check(day)  # the normal single-process day still passes
+    assert rule(single, 7).status == sc.PASS and "1 bridge process(es)" in single.inputs[0]
+    _restart_before_sent(day, "AAA", "MOMO_HOD_V2", sha=boundary == "new-run")
+    report = check(day)
+    result = rule(report, 7)
+
+    # A sha line starts a new run of the section; a second connect inside one run is a new process too.
+    assert f"{2 if boundary == 'new-run' else 1} bridge process(es)" in report.inputs[0]
+    assert result.status == sc.FAIL, result.summary
+    assert result.summary.startswith("1 problem(s); first: MOMO_HOD_V2 AAA (orders 16-18) sent without its"
+                                     " v7c_budget_ok line, by a process that enforces the day risk budget"), \
+        result.summary
+    stale = [detail for detail in result.details if detail.startswith("budget checked, no order followed")]
+    assert len(stale) == 1 and "v7c_budget_ok AAA (MOMO_HOD_V2)" in stale[0]
+
+
+async def test_rule_day_risk_budget_pairs_a_restarted_process_with_its_own_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart that checks again (the bridge's only path: budget_check right before placeOrder) passes:
+    the new process's line verifies its SENT; the first process's line is listed, never paired."""
+    day = await build_day(tmp_path, monkeypatch)
+    again = budget_ok_line("AAA", "MOMO_HOD_V2", realized=Decimal("0"), open_risk=Decimal("0"),
+                           new=Decimal("150.00"), net_liq=NET_LIQ)
+    _restart_before_sent(day, "AAA", "MOMO_HOD_V2", rechecked=again)
+    result = rule(check(day), 7)
+
+    assert result.status == sc.PASS, result.summary
+    assert result.summary.startswith("4 accepted entries (4 bot, 0 manual) within 3% of net liquidation")
+    assert "MOMO_HOD_V2 AAA (orders 16-18): 0.15% of net liquidation 100000.00" in "\n".join(result.details)
+    assert sum(detail.startswith("budget checked, no order followed") for detail in result.details) == 1
+
+
 def _logline(text: str) -> sc.LogLine:
     return sc.LogLine("bridge.log", 7, 0, time(10, 0), "INFO", text)
 
