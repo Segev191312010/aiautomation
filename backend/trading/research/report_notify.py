@@ -12,9 +12,13 @@ important first, because one Telegram message is cut at its end:
 2. window research: the replay's swept windows and its trades by signal
    hour, plus the live tracked setups by hour;
 3. live R: every real PAPER bracket in R after commissions;
-4. phase-3 readiness: managed MOMO (shadow) against MOMO_HOD_V2 on the same
+4. v7c: the orders bridge v7c refused tonight and this week, bot and manual,
+   with what they would have done in R, the stop slippage per identity and
+   P&L by source (``trading/research/v7c_report.py``); a night without that
+   data says "no v7c data", never nothing;
+5. phase-3 readiness: managed MOMO (shadow) against MOMO_HOD_V2 on the same
    setups, and the do-no-harm verdict (``trading/research/overlay.py``);
-5. the replay's own per-strategy summary.
+6. the replay's own per-strategy summary.
 
 After a successful replay the plain-text summary goes to the pinned owner
 chat as ONE message:
@@ -395,6 +399,13 @@ def live_r_lines(evidence: NightlyEvidence) -> list[str]:
     ]
 
 
+def v7c_lines(evidence: NightlyEvidence) -> list[str]:
+    """Refused orders (tonight, this week), stop slippage and P&L by source; never empty."""
+    from trading.research.v7c_report import report_lines
+
+    return report_lines(evidence.v7c)
+
+
 def phase3_lines(evidence: NightlyEvidence) -> list[str]:
     """Phase-3 readiness: managed MOMO against MOMO_HOD_V2 on the same setups."""
     from trading.research.overlay import readiness_lines
@@ -403,7 +414,7 @@ def phase3_lines(evidence: NightlyEvidence) -> list[str]:
 
 
 def evidence_text(evidence: NightlyEvidence) -> str:
-    """The evidence, window research, live R and phase-3 sections as one plain text.
+    """The evidence, window research, live R, v7c and phase-3 sections as one plain text.
 
     The phase-3 section is appended after the others (absent when the
     evidence carries no scorecard), so the earlier sections never change.
@@ -415,6 +426,7 @@ def evidence_text(evidence: NightlyEvidence) -> str:
         "\n".join(first),
         "\n".join(window_research_lines(evidence)),
         "\n".join(live_r_lines(evidence)),
+        "\n".join(v7c_lines(evidence)),
     ]
     phase3 = phase3_lines(evidence)
     if phase3:
@@ -470,6 +482,7 @@ __all__ = [
     "notify_summary",
     "phase3_lines",
     "summary_message",
+    "v7c_lines",
     "weekly_state_file",
     "weekly_summary_due",
     "window_research_lines",

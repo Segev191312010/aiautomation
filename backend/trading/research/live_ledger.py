@@ -42,7 +42,8 @@ logger = logging.getLogger("autotrader.shadow.research")
 BRIDGE_STATE_DIRECTORY = "bridge"
 # The bridge's STATE_SCHEMA family; the fields read here exist since v2.
 STATE_SCHEMA_PREFIX = "paper-bridge-state."
-_STATE_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.json$")
+# One session's state file name; ``read_submitted`` reads it.
+STATE_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.json$")
 _MAX_STATE_BYTES = 2 * 1024 * 1024
 _R_QUANTUM = Decimal("0.0001")
 _ZERO = Decimal("0")
@@ -216,6 +217,27 @@ def _read_document(path: Path) -> dict[str, Any]:
     return document
 
 
+def read_submitted(path: Path) -> tuple[date, dict[str, Any]]:
+    """One session file (named ``STATE_FILE``): its session date and its ``submitted`` map.
+
+    The same checks for every reader of the bridge's state (this ledger, the v7c
+    report): a regular file under the size limit, the bridge's schema, its own
+    session. Raises ``ValueError`` (or ``OSError``, ``UnicodeDecodeError``) when
+    the file cannot be trusted.
+    """
+    match = STATE_FILE.match(path.name)
+    if match is None:
+        raise ValueError("not a session state file name")
+    session_date = date.fromisoformat(match.group(1))
+    document = _read_document(path)
+    if document.get("session_date", session_date.isoformat()) != session_date.isoformat():
+        raise ValueError("holds another session")
+    submitted = document.get("submitted", {})
+    if not isinstance(submitted, dict):
+        raise ValueError("no submitted map")
+    return session_date, submitted
+
+
 def _trade(
     session_date: date, decision_id: str, item: Mapping[str, Any], *, cost_model: CostModel
 ) -> LiveTrade:
@@ -271,17 +293,10 @@ def read_live_ledger(
     unreadable: list[str] = []
     brackets: list[LiveBracket] = []
     for path in sorted(folder.iterdir()):
-        match = _STATE_FILE.match(path.name)
-        if match is None:
+        if STATE_FILE.match(path.name) is None:
             continue
         try:
-            session_date = date.fromisoformat(match.group(1))
-            document = _read_document(path)
-            if document.get("session_date", session_date.isoformat()) != session_date.isoformat():
-                raise ValueError("holds another session")
-            submitted = document.get("submitted", {})
-            if not isinstance(submitted, dict):
-                raise ValueError("no submitted map")
+            session_date, submitted = read_submitted(path)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             logger.warning("bridge state %s not read: %s", path.name, exc)
             unreadable.append(path.name)
@@ -365,6 +380,7 @@ def ledger_lines(ledger: LiveLedger, *, week_start: date | None = None) -> list[
 
 __all__ = [
     "BRIDGE_STATE_DIRECTORY",
+    "STATE_FILE",
     "STATE_SCHEMA_PREFIX",
     "LiveBracket",
     "LiveLedger",
@@ -373,4 +389,5 @@ __all__ = [
     "bridge_state_directory",
     "ledger_lines",
     "read_live_ledger",
+    "read_submitted",
 ]

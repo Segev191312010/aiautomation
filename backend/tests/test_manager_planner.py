@@ -670,6 +670,39 @@ def test_the_managers_lines_reach_shadow_log_with_timestamps(tmp_path):
     assert re.search(stamp + r" ERROR autotrader\.shadow\.manager\.planner plan 20261013-0920-1 failed", text)
 
 
+def test_the_context_recognises_the_v7c_skip_tokens():
+    """P3-B3: bridge v7c starts every refusal with its token, and the token decides. The account's daily
+    loss stop holds the plan for the day; a day-risk-budget refusal frees again when a stop is raised or
+    a position closes, so it never does. A pre-v7c reason is still read by its phrase."""
+    from tests.test_paper_bridge import pb
+    from trading.manager.context import holds_the_day
+
+    would_have = " — would have sent BUY 100 @ 50.00 | stop 49.50 | target 51.00"
+    loss = pb.Bridge.daily_loss_problem(Decimal("13300"), Decimal("665000"))  # the bridge's own text
+    budget = ("v7c_day_risk_budget: realized 0.00 + open 19930.00 + new 50.00 = 19980.00 (3.00%) > 3% of"
+              f" 665000.00 (source=bot){would_have}")
+    unprotected = (f"v7c_unprotected_position: AAPL short 10 sh — every risk-increasing order is refused;"
+                   f" {pb.UNPROTECTED_ADVICE.format(symbol='AAPL')} (source=bot){would_have}")
+    wrong_thread = f"v7c_wrong_thread: checked off the bridge loop — refused (source=bot){would_have}"
+    assert holds_the_day(loss) and holds_the_day(f"{loss} (source=bot)")
+    # The token alone decides: a reworded daily-loss text still holds the day, and a budget refusal that
+    # quotes the daily-loss phrase never does.
+    assert holds_the_day("daily_loss_limit: account realized loss 13300.00 >= 2% of net liquidation 665000.00")
+    assert not holds_the_day("v7c_day_risk_budget: not a daily loss limit reached, only the budget")
+    for reason in (budget, unprotected, wrong_thread, "shadow-only strategy", "identity_stopped:ORB_V2", "", None):
+        assert not holds_the_day(reason), reason
+    assert holds_the_day("daily loss limit reached")  # a pre-v7c bridge's reason
+    trades = (
+        {"symbol": "AAA", "status": "skipped", "skipped": True, "strategy_name": "ORB_V2", "skip_reason": budget},
+        {"symbol": "BBB", "status": "skipped", "skipped": True, "strategy_name": "MOMO_HOD_V2",
+         "skip_reason": unprotected},
+    )
+    assert bridge_summary(trades, None)["day_stop"] is False
+    reworded = {"symbol": "CCC", "status": "skipped", "skipped": True, "strategy_name": "GAP_GO_V2",
+                "skip_reason": "daily_loss_limit: account realized loss 13300.00 >= 2%"}
+    assert bridge_summary((*trades, reworded), None)["day_stop"] is True
+
+
 def test_only_the_managed_identitys_brackets_occupy_its_slots():
     trades = (
         {"symbol": "AAA", "status": "open", "strategy_name": "MOMO_HOD_V2", "realized_pnl": "0"},

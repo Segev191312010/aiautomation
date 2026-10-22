@@ -95,6 +95,11 @@ class Spec:
     fences: tuple[tuple[str, int, str, str], ...] = ()
     data_name: str = "data"
     skips: tuple[tuple[str, str, str], ...] = SHADOW_SKIPS
+    # Bridge v7c logs its day risk budget at connect and a v7c_budget_ok line right before each SENT;
+    # an older bridge (v7b) logs neither. budget_lines=False drops the v7c_budget_ok lines alone.
+    version: str = "v7c"
+    budget_lines: bool = True
+    budget_open: tuple[tuple[str, str], ...] = ()  # (symbol, open risk) logged instead of the replayed one
 
 
 def _clock(text: str, seconds: int = 0) -> str:
@@ -115,14 +120,17 @@ def _four(value: str) -> str:
     return str(Decimal(value).quantize(Decimal("0.0001")))
 
 
-def _bridge_header(day: date, clock: str, net_liq: str | None, *, connected: bool = True) -> list[str]:
+def _bridge_header(day: date, clock: str, net_liq: str | None, *, connected: bool = True,
+                   version: str = "v7c") -> list[str]:
     lines = [_line(clock, "INFO", f"bridge sha256={BRIDGE_SHA}")]
     if not connected:
         return lines
     lines += [
-        _line(clock, "INFO", f"PAPER bridge v7b connected (all accounts paper). Managing brackets for {day} until 15:55 ET."),
+        _line(clock, "INFO", f"PAPER bridge {version} connected (all accounts paper). Managing brackets for {day}"
+              " until 15:55 ET."),
         *(_line(clock, "INFO", text) for text in pb.caps_lines()),
         _line(clock, "INFO", "fenced identities = none"),
+        *([_line(clock, "INFO", pb.budget_line())] if version == "v7c" else []),
         _line(clock, "INFO", f"state /home/test/.local/share/autotrader-v1/bridge/{day}.json: 0 brackets, 0 active"),
     ]
     if net_liq is not None:
@@ -135,10 +143,36 @@ def _banner(day: date, at: datetime) -> str:
             f" /repo/backend/scripts_local/paper_bridge.py --date {day}")
 
 
+def _risk(trade: Trade) -> Decimal:
+    return trade.qty * (Decimal(trade.entry) - Decimal(trade.stop))
+
+
+def budget_ok_line(symbol: str, label: str, *, realized: Decimal, open_risk: Decimal, new: Decimal, net_liq: str,
+                   source: str = "bot") -> str:
+    """The bridge's v7c_budget_ok text, built from its own Budget (process_decision / ManualDesk.buy;
+    test_paper_bridge's test_v7c_budget_lines_parse_in_session_check feeds the real lines to the checker)."""
+    budget = pb.Budget(realized_loss=realized, open_risk=open_risk, new_risk=new, net_liq=Decimal(net_liq))
+    return (f"{pb.V7C_BUDGET_OK} {symbol} ({label}): {budget.text()} <= {pb.DAY_RISK_BUDGET_PCT}% of"
+            f" {pb.money(budget.net_liq)} (source={source})")
+
+
+def _budget_ok(spec: Spec, trade: Trade) -> str:
+    """The trade's budget line at its send: the risk of the brackets still open then, and the realized loss."""
+    sent = time.fromisoformat(trade.sent)
+    earlier = [other for other in spec.trades if time.fromisoformat(other.sent) < sent]
+    open_risk = sum((_risk(other) for other in earlier if time.fromisoformat(other.closed) > sent), Decimal("0"))
+    realized = sum((other.pnl for other in earlier if time.fromisoformat(other.closed) <= sent), Decimal("0"))
+    open_risk = Decimal(dict(spec.budget_open).get(trade.symbol, open_risk))
+    return budget_ok_line(trade.symbol, trade.identity, realized=max(Decimal("0"), -realized), open_risk=open_risk,
+                          new=_risk(trade), net_liq=spec.net_liq)
+
+
 def _events(spec: Spec) -> list[tuple[str, str, str]]:
     events: list[tuple[str, str, str]] = []
     for index, trade in enumerate(spec.trades):
         parent = 10 + 3 * index
+        if spec.version == "v7c" and spec.budget_lines:
+            events.append((trade.sent, "INFO", _budget_ok(spec, trade)))  # stable sort: right before its SENT
         events += [
             (trade.sent, "SENT", f"{trade.symbol} ({trade.identity}): BUY {trade.qty} @ {trade.entry} | stop"
              f" {trade.stop} | target {trade.target} (orders {parent}-{parent + 2})"),
@@ -178,7 +212,7 @@ def _write_logs(logs: Path, spec: Spec) -> None:
         start = datetime(2026, 10, 19, 13, 25, tzinfo=timezone.utc)
         today += [
             _banner(DAY, start),
-            *_bridge_header(DAY, "09:25:00", None),
+            *_bridge_header(DAY, "09:25:00", None, version=spec.version),
             _line("09:25:10", "CRITICAL", f"net liquidation unavailable for {FAKE_ACCOUNT} — new entries blocked;"
                   " open brackets are still managed"),
             _line("09:25:20", "CRITICAL", "bridge error ReconciliationError: TWS did not finish reporting open"
@@ -190,7 +224,7 @@ def _write_logs(logs: Path, spec: Spec) -> None:
         supervisor_day += [f"{start.isoformat()} CHILD_START bridge pid=200",
                            f"{(start + timedelta(seconds=21)).isoformat()} CHILD_EXIT bridge code=75 restart_in=15"]
     start = datetime(2026, 10, 19, 13, 26, tzinfo=timezone.utc)
-    today += [_banner(DAY, start), *_bridge_header(DAY, "09:26:00", spec.net_liq)]
+    today += [_banner(DAY, start), *_bridge_header(DAY, "09:26:00", spec.net_liq, version=spec.version)]
     today += [_line(clock, kind, text) for clock, kind, text in _events(spec)]
     realized = sum((trade.pnl for trade in spec.trades), Decimal("0"))
     today += [_line("15:55:00", "INFO", f"session end: realized P&L {realized}"),
@@ -350,7 +384,7 @@ def rule(report: sc.SessionReport, number: int) -> sc.RuleResult:
     return next(item for item in report.rules if item.number == number)
 
 
-ALL_PASS_BUT_SIZE = {1: sc.PASS, 2: sc.PASS, 3: sc.PASS, 4: sc.WARN, 5: sc.PASS, 6: sc.PASS}
+ALL_PASS_BUT_SIZE = {1: sc.PASS, 2: sc.PASS, 3: sc.PASS, 4: sc.WARN, 5: sc.PASS, 6: sc.PASS, 7: sc.PASS}
 
 
 # --- the clean day ----------------------------------------------------------------------
@@ -576,6 +610,131 @@ async def test_an_identity_fenced_during_the_day_is_flagged(tmp_path: Path, monk
     assert report.exit_code == sc.EXIT_PASSED
 
 
+# --- rule 7: the day risk budget (v7c) -------------------------------------------------------------
+
+# An owner buy as bridge v7c places it (ManualDesk.buy: the budget line, then the buy with its stop),
+# an owner buy and a bot entry the budget refused (the bridge's own texts, test_paper_bridge).
+MANUAL_BUDGET = ("10:10:00", "INFO", budget_ok_line("AAPL", "manual #abc123", realized=Decimal("0"),
+                                                    open_risk=Decimal("337.50"), new=Decimal("50.10"),
+                                                    net_liq=NET_LIQ, source="manual"))
+MANUAL_BUY = ("10:10:00", "MANUAL", "SENT BUY 10 AAPL MKT #abc123 (order 55) with its stop 185 GTC (order 56)")
+MANUAL_REFUSED = ("10:12:00", "MANUAL", "REJECTED BUY 10 TSLA MKT #def456: v7c_day_risk_budget: realized 0.00 + open"
+                  " 2990.00 + new 50.10 = 3040.10 (3.04%) > 3% of 100000.00 (source=manual). Nothing sent."
+                  " (v7c_day_risk_budget)")
+BOT_REFUSED = ("10:15:00", "SKIP", "ZZZ (MOMO_HOD_V2): v7c_day_risk_budget: realized 0.00 + open 2990.00 + new 50.00"
+               " = 3040.00 (3.04%) > 3% of 100000.00 (source=bot) — would have sent BUY 100 @ 50.00 | stop 49.50 |"
+               " target 51.00")
+OWNER_DAY = (MANUAL_BUDGET, MANUAL_BUY, MANUAL_REFUSED, BOT_REFUSED)
+
+
+def _edit_log(day: Day, old: str, new: str) -> None:
+    log = day.logs / "bridge.log"
+    text = log.read_text(encoding="utf-8")
+    assert text.count(old) == 1, old
+    log.write_text(text.replace(old, new), encoding="utf-8")
+
+
+@pytest.mark.parametrize("case", ["pass", "over-3pct", "malformed", "no-lines-v7c", "no-lines-pre-v7c",
+                                  "nothing-sent-pre-v7c", "other-cap"])
+async def test_rule_day_risk_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    spec = {
+        "pass": Spec(extra=OWNER_DAY),
+        "over-3pct": Spec(budget_open=(("BBB", "2970.00"),)),  # ORB: 2970.00 + 37.50 = 3007.50
+        "malformed": Spec(),
+        "no-lines-v7c": Spec(budget_lines=False, extra=(MANUAL_BUY,)),
+        "no-lines-pre-v7c": Spec(version="v7b"),
+        "nothing-sent-pre-v7c": Spec(version="v7b", trades=(), flat=True),
+        "other-cap": Spec(),
+    }[case]
+    day = await build_day(tmp_path, monkeypatch, spec)
+    if case == "malformed":
+        _edit_log(day, "AAA (MOMO_HOD_V2): realized", "AAA (MOMO_HOD_V2): realised")
+    if case == "other-cap":
+        _edit_log(day, "INFO day risk budget 3% of net liquidation", "INFO day risk budget 30% of net liquidation")
+    report = check(day)
+    result = rule(report, 7)
+    text = "\n".join([result.summary, *result.details])
+
+    assert result.title == "day risk budget"
+    if case == "pass":
+        assert statuses(report) == ALL_PASS_BUT_SIZE, report.render()
+        assert result.summary.startswith(
+            "5 accepted entries (4 bot, 1 manual) within 3% of net liquidation, highest 0.39% (owner buy #abc123"
+            " (order 55)); refused: bot v7c_day_risk_budget x1, manual v7c_day_risk_budget x1"), result.summary
+        assert "ORB_V2 BBB (orders 13-15): 0.19% of net liquidation 100000.00: bridge.log:" in text
+        assert report.exit_code == sc.EXIT_PASSED
+    elif case == "over-3pct":
+        assert result.status == sc.FAIL and report.exit_code == sc.EXIT_FAILED
+        assert ("accepted at a day risk of 3007.50 = 3.01% of net liquidation 100000.00, above 3%"
+                in result.summary), result.summary
+    elif case == "malformed":
+        assert result.status == sc.FAIL
+        assert result.summary.startswith("2 problem(s); first: malformed v7c_budget_ok line: bridge.log:")
+        # Its SENT is not verified by any other line: a v7c process sent it without a readable one.
+        assert "MOMO_HOD_V2 AAA (orders 16-18) sent without its v7c_budget_ok line" in text
+    elif case == "no-lines-v7c":
+        assert result.status == sc.FAIL
+        assert "5 problem(s); first: GAP_GO_V2 DDD (orders 10-12) sent without its v7c_budget_ok line" in \
+            result.summary
+        assert "owner buy #abc123 (order 55) sent without its v7c_budget_ok line" in text
+    elif case == "no-lines-pre-v7c":
+        assert result.status == sc.WARN, report.render()
+        assert result.summary.startswith(
+            "day_risk_budget_unverified: 4 of 4 accepted entries without a v7c_budget_ok line"), result.summary
+        assert report.exit_code == sc.EXIT_PASSED
+    elif case == "nothing-sent-pre-v7c":
+        assert (result.status, result.summary) == (sc.PASS, "no risk-increasing order sent; refused: none")
+    else:
+        assert result.status == sc.FAIL
+        assert ("the bridge ran a day risk budget of 30% (stop slippage factor 1.0), the approved is 3% (stop"
+                " slippage factor 1.0)") in result.summary
+
+
+async def test_rule_day_risk_budget_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    over = ("12:00:00", "CRITICAL", "v7c_budget_over: realized 2000.00 + open 1100.00 + new 0.00 = 3100.00 (3.10%)"
+            " > 3% of 100000.00 — no new entries; never flattened")
+    widened = ("12:01:00", "CRITICAL", "v7c_stop_widened CCC intent 9.90 now 9.50 — counted at 9.50 in the day risk"
+               " budget; never flattened")
+    report = check(await build_day(tmp_path, monkeypatch, Spec(extra=(over, widened))))
+    assert (rule(report, 7).status, report.exit_code) == (sc.WARN, sc.EXIT_PASSED), report.render()
+    assert rule(report, 7).summary.startswith("2 flag(s); first: v7c_budget_over page: bridge.log:")
+
+    broken = ("12:02:00", "CRITICAL", "v7c_budget_invariant_broken: open risk grew by 90.00 with CCC (VWAP_PB_V2),"
+              " more than its own 75.00 (0.00 -> 90.00) — check TWS")
+    report = check(await build_day(tmp_path / "broken", monkeypatch, Spec(extra=(over, broken))))
+    assert rule(report, 7).status == sc.FAIL
+    assert rule(report, 7).summary.startswith("1 problem(s); first: the bridge's budget tripwire fired:")
+
+
+def _logline(text: str) -> sc.LogLine:
+    return sc.LogLine("bridge.log", 7, 0, time(10, 0), "INFO", text)
+
+
+@pytest.mark.parametrize(("total", "problem"), [
+    ("3000.00", False), ("3000.01", False), ("3000.02", True),  # one cent of the bridge's rounding, no more
+])
+def test_a_budget_line_at_the_cap_passes_and_one_cent_past_its_rounding_fails(total: str, problem: bool) -> None:
+    new = Decimal(total) - Decimal("2000.00")
+    check_ = sc.parse_budget_ok(_logline(budget_ok_line("AAA", "ORB_V2", realized=Decimal("0"),
+                                                        open_risk=Decimal("2000.00"), new=new, net_liq=NET_LIQ)))
+    assert isinstance(check_, sc.BudgetCheck)
+    assert check_.key == ("bot", "AAA", "ORB_V2") and check_.total == Decimal(total)
+    assert bool(check_.problems) is problem
+    manual = sc.parse_budget_ok(_logline(budget_ok_line("BF B", "manual #a3f9c2", realized=Decimal("1.00"),
+                                                       open_risk=Decimal("2.00"), new=Decimal("3.00"),
+                                                       net_liq=NET_LIQ, source="manual")))
+    assert isinstance(manual, sc.BudgetCheck) and manual.key == ("manual", "a3f9c2") and not manual.problems
+    for broken in (
+        budget_ok_line("AAA", "manual #a3f9c2", realized=Decimal("0"), open_risk=Decimal("0"), new=Decimal("1"),
+                       net_liq=NET_LIQ),  # a manual label with source=bot
+        "v7c_budget_ok AAA (ORB_V2): realized 0.00 + open 0.00 + new 1.00 = 9.00 (0.01%) <= 3% of 100000.00"
+        " (source=bot)",  # parts that do not sum to the total
+        "v7c_budget_ok AAA (ORB_V2): realized -5.00 + open 0.00 + new 1.00 = -4.00 (0.00%) <= 3% of 100000.00"
+        " (source=bot)",  # a negative amount
+    ):
+        assert str(sc.parse_budget_ok(_logline(broken))).startswith("malformed v7c_budget_ok line")
+
+
 # --- masking, read-only access, missing inputs, pins -----------------------------------------------------
 
 
@@ -703,6 +862,9 @@ def test_the_checker_mirrors_the_pinned_bridge() -> None:
         pb.LAST_ENTRY_BEFORE_CLOSE, pb.FLATTEN_BEFORE_CLOSE)
     assert (sc.MAX_DAILY_LOSS_PCT, sc.MAX_ORDER_NOTIONAL_PCT, sc.MAX_ORDER_RISK_PCT) == (
         pb.MAX_DAILY_LOSS_PCT, pb.MAX_ORDER_NOTIONAL_PCT, pb.MAX_ORDER_RISK_PCT)
+    # Rule 7 (v7c): the cap and the factor the checker approves are the pinned bridge's.
+    assert (sc.DAY_RISK_BUDGET_PCT, sc.STOP_SLIPPAGE_FACTOR) == (pb.DAY_RISK_BUDGET_PCT, pb.STOP_SLIPPAGE_FACTOR)
+    assert sc._BUDGET_RULE.match(pb.budget_line()) is not None
 
 
 async def test_the_checker_reads_decisions_exactly_as_the_bridge(

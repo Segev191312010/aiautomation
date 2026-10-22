@@ -20,7 +20,12 @@ the evidence for the paper promotion rule, in this order:
    owner 2026-10-17) nothing is written: the identity is recorded as
    ``would_fence`` and logged ``sentinel would fence <ID>: replay mismatch
    <n> decisions``;
-5. the window research sweep, unless it would start after
+5. the v7c report (``trading.research.v7c_report``, read-only): the orders
+   bridge v7c refused, bot and manual, with what they would have done in R,
+   the stop slippage per identity against the bridge's factor, and P&L by
+   source; recorded in ``evidence.json["v7c"]``, and a report that could not
+   be built says so there and in its lines;
+6. the window research sweep, unless it would start after
    ``SWEEP_LATEST_START`` inside the replay window: the supervisor stops the
    child at 18:30, and the weekly message must not be cut off with it.
 
@@ -74,6 +79,7 @@ from trading.research.paper_promotion import (
 )
 from trading.research.promotion_proposals import PromotionProposals, collect_proposals
 from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
+from trading.research.v7c_report import NOT_COLLECTED, V7CReport, collect_v7c_report, failed_report
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
 from trading.scheduler.sessions import market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
@@ -300,6 +306,8 @@ class NightlyEvidence:
     # The promoter's proposals (propose mode) and each sendable identity's size steps.
     proposals: PromotionProposals | None = None
     parity: DecisionParity = field(default_factory=_not_compared)
+    # Refused orders, stop slippage and P&L by source (bridge v7c); None: not collected.
+    v7c: V7CReport | None = None
 
 
 def week_start(day: date) -> date:
@@ -393,6 +401,17 @@ def collect_evidence(
     except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("overlay scorecard failed")
         phase3 = OverlayScorecard(start=None, end=as_of, readable=False, note=_failed(exc))
+    try:
+        v7c = collect_v7c_report(
+            database=environment.database,
+            bridge_directory=environment.bridge_directory,
+            ledger=live_r,
+            as_of=as_of,
+            week_start=week_start(as_of),
+        )
+    except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
+        logger.exception("v7c report failed")
+        v7c = failed_report(as_of, _failed(exc))
     allowed, note = sweep_allowed(environment.clock())
     windows: tuple[FamilyResearch, ...] = ()
     if allowed:
@@ -414,6 +433,7 @@ def collect_evidence(
         phase3=phase3,
         proposals=proposals,
         parity=parity,
+        v7c=v7c,
     )
 
 
@@ -445,6 +465,7 @@ def write_evidence(
             "phase3": None if evidence.phase3 is None else evidence.phase3.payload(),
             "size_steps": None if evidence.proposals is None else evidence.proposals.size_steps.payload(),
             "decision_parity": evidence.parity.payload(),
+            "v7c": (evidence.v7c or failed_report(as_of, NOT_COLLECTED)).payload(),
         },
         "windows.json": {
             "schema": "autotrader-v1/research-windows",

@@ -112,6 +112,18 @@ def night(tmp_path, monkeypatch) -> dict[str, Any]:
     return {"root": root, "database": database, "bridge": bridge, "sent": sent}
 
 
+# The v7c section of the night (P3-B3): no refusal, MONDAY's MOMO stop exit exactly at its stop (1x),
+# TUESDAY's KO flatten +18.00 and the week's three brackets, each two orders at IBKR Pro's $1 minimum.
+V7C_NIGHT = [
+    "V7C day risk budget (refused risk-increasing orders; would-have R from the signal tracker)",
+    "  2026-10-13: V7C no v7c data (no refused order)",
+    "  this week: V7C no v7c data (no refused order)",
+    "  STOP SLIPPAGE MOMO_HOD_V2 p90 1.00x (n=1) <= 1.0",
+    "  P&L by source 2026-10-13: bot +16.00 net (1 closed, gross +18.00) · manual unknown (not recorded)",
+    "  P&L by source this week: bot +186.00 net (3 closed, gross +192.00) · manual unknown (not recorded)",
+]
+
+
 def _environment(night: dict[str, Any], moment: datetime) -> NightlyEnvironment:
     return NightlyEnvironment(database=night["database"], bridge_directory=night["bridge"], clock=lambda: moment)
 
@@ -146,8 +158,10 @@ def test_a_full_replay_runs_the_evidence_and_leads_the_weekly_summary_with_it(ni
         "  MOMO_HOD_V2: 3 trades, net +1.44R (gross +1.60R, costs 0.16R), +0.48R/trade, 2/3 won",
         "  this week: 3 trades, net +1.44R",
     ]
-    # Section 4 is the phase-3 readiness block (tests/test_overlay.py); the replay follows it.
-    assert sections[4][0] == "Research replay 2026-10-12..2026-10-12: 1 sessions, 2 symbols"
+    # Section 4 is v7c (P3-B3): nothing refused, the stop exit at its stop, P&L by source; section 5 the
+    # phase-3 readiness block (tests/test_overlay.py); the replay follows them.
+    assert sections[3] == V7C_NIGHT
+    assert sections[5][0] == "Research replay 2026-10-12..2026-10-12: 1 sessions, 2 symbols"
     assert summary in capsys.readouterr().out
 
     directory = night["root"] / "reports" / "2026-10-12"
@@ -163,6 +177,19 @@ def test_a_full_replay_runs_the_evidence_and_leads_the_weekly_summary_with_it(ni
     assert evidence_report["live_hours"] == {
         "ORB_V1": [{"hour": 9, "trades": 1, "total_r": "-1.2223"}, {"hour": 10, "trades": 1, "total_r": "1.9375"}]
     }
+    v7c = evidence_report["v7c"]
+    assert (v7c["readable"], v7c["report"], v7c["as_of"], v7c["week_start"]) == (
+        True, "v7c-report-v1", "2026-10-13", "2026-10-12")
+    assert v7c["blocked"]["week"] == {
+        source: {"blocked": 0, "with_outcome": 0, "not_filled": 0, "no_outcome": 0, "would_have_r": None}
+        for source in ("bot", "manual")
+    }
+    assert v7c["stop_slippage"]["identities"] == {"MOMO_HOD_V2": {
+        "n": 1, "median": "1.0000", "p90": "1.0000", "max": "1.0000", "excluded": 0, "flag": None}}
+    assert v7c["pnl_by_source"]["week"] == {
+        "bot": {"trades": 3, "gross": "192.00", "commissions": "6.00", "net": "186.00"}, "manual": None}
+    assert (v7c["manual_ledger"], v7c["lines"]) == ("read", V7C_NIGHT)
+    assert "\n".join(V7C_NIGHT) in (directory / "evidence.txt").read_text()
     windows_report = json.loads((directory / "windows.json").read_text())
     assert [item["family"] for item in windows_report["families"]] == ["orb", "vwap_pb", "momo_hod", "gap_go"]
     assert json.loads((directory / "live-r.json").read_text())["sessions"] == ["2026-10-12", "2026-10-13"]
@@ -198,8 +225,12 @@ def test_a_failing_evidence_step_is_named_and_the_rest_still_counts(night, monke
     def broken_sweep(_store: Any) -> None:
         raise ValueError("bad bar")
 
+    def broken_v7c(**_kwargs: Any) -> None:
+        raise RuntimeError("database is locked")
+
     monkeypatch.setattr(nightly, "track_outcomes", broken)
     monkeypatch.setattr(nightly, "sweep_all", broken_sweep)
+    monkeypatch.setattr(nightly, "collect_v7c_report", broken_v7c)
 
     assert run_replay_cli([], notify="weekly", environment=_environment(night, _et(TUESDAY, 17, 40))) == 0
 
@@ -211,6 +242,9 @@ def test_a_failing_evidence_step_is_named_and_the_rest_still_counts(night, monke
     evidence_report = json.loads((directory / "evidence.json").read_text())
     assert evidence_report["tracker"]["reason"] == "failed_runtimeerror"
     assert len(evidence_report["promotion"]) == 7
+    # A failed v7c report is named, never a silent omission.
+    assert "  V7C no v7c data: report unreadable (failed_runtimeerror)" in summary.splitlines()
+    assert (evidence_report["v7c"]["readable"], evidence_report["v7c"]["note"]) == (False, "failed_runtimeerror")
 
 
 def test_an_explicit_strategy_list_replays_only(night):

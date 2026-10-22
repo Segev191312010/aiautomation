@@ -35,6 +35,7 @@ from trading.manager.constants import (
     REGIMES,
 )
 from trading.manager.plan import GateStates
+from trading.research.v7c_report import DAILY_LOSS_LIMIT, block_token
 from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
 
 logger = logging.getLogger("autotrader.shadow.manager.context")
@@ -46,6 +47,8 @@ MANAGED_IDENTITY = "MOMO_HOD_V2"
 # v7a); a test loads the bridge to keep the two equal.
 BRIDGE_MAX_OPEN = 3
 BRIDGE_ACTIVE_STATUSES = frozenset({"pending", "sent", "open", "needs_attention"})
+# A pre-v7c bridge's daily-loss skip_reason, read by its phrase; bridge v7c
+# starts every refusal with its token instead (``holds_the_day``).
 DAILY_LOSS_SKIP = "daily loss limit reached"
 MARKET_CONTEXT_MAX_AGE = timedelta(minutes=5)
 _ROW_METRICS = ("last", "change_pct", "gap_pct", "rvol", "pct_from_high", "dollar_volume")
@@ -293,6 +296,22 @@ def _is_managed_identity(trade: Mapping[str, Any]) -> bool:
     return name == MANAGED_IDENTITY or not name
 
 
+def holds_the_day(skip_reason: object) -> bool:
+    """Whether a skipped bracket's reason is the account's daily loss stop, which holds for the day.
+
+    Bridge v7c starts every refusal with its token, and the token decides:
+    ``daily_loss_limit`` is the daily loss stop; a day-risk-budget token
+    (``v7c_day_risk_budget``, ``v7c_unprotected_position``, ``v7c_wrong_thread``)
+    is not, because the budget frees again when a stop is raised or a position
+    closes, so it never holds the plan's strategies off for the day. A reason
+    without a token is a pre-v7c bridge's, read by its phrase.
+    """
+    token = block_token(skip_reason)
+    if token is not None:
+        return token == DAILY_LOSS_LIMIT
+    return DAILY_LOSS_SKIP in str(skip_reason or "").lower()
+
+
 def bridge_summary(trades: Sequence[Mapping[str, Any]], problem: str | None) -> dict[str, object]:
     """Realized P&L, open slots and whether the day's loss stop has fired."""
     if problem:
@@ -303,7 +322,7 @@ def bridge_summary(trades: Sequence[Mapping[str, Any]], problem: str | None) -> 
     for trade in trades:
         status = str(trade.get("status") or "")
         if status == "skipped" or trade.get("skipped") is True:
-            if DAILY_LOSS_SKIP in str(trade.get("skip_reason") or "").lower():
+            if holds_the_day(trade.get("skip_reason")):
                 day_stop = True
             continue
         try:
@@ -521,6 +540,7 @@ __all__ = [
     "ContextPack",
     "bridge_summary",
     "build_context",
+    "holds_the_day",
     "rank_candidates",
     "replay_stats",
 ]
