@@ -214,13 +214,17 @@ class ShadowPipeline:
         identity_multiplier: Decimal | None = NO_SCALING,
         sizing_recorder: SizingRecorder = record_decision_sizing,
     ) -> None:
-        """``identity_multiplier`` is the sendable identity's fixed size factor
-        (``trading.risk.identity_sizing``), a Decimal in (0, 1]; ``None`` means a
-        sendable identity with no row, and every setup is then blocked with
-        ``identity_sizing_missing`` (never sized at 1 by default).
+        """``identity_multiplier`` is the sendable identity's size for this
+        session, a Decimal in (0, 1]: read once at the session's start from the
+        size store, else the reviewed baseline
+        (``trading.risk.identity_sizing.session_identity_multiplier``), and handed
+        in unchanged. ``None`` means the identity has no size this session (no
+        baseline row, no ceiling, an unreadable store), and every setup is then
+        blocked with ``identity_sizing_missing`` (never sized at 1 by default).
 
         ``sizing_recorder`` keeps every decision's effective multiplier
-        (identity factor x managed factor) beside the decision, never in it:
+        (identity factor x managed factor) and its realism (quantity, bar
+        volume, spread: sidecar version 2) beside the decision, never in it:
         the decision payload is fingerprinted content."""
         if not isinstance(strategy, StrategyEvaluator):
             raise TypeError("strategy must implement StrategyEvaluator")
@@ -305,7 +309,7 @@ class ShadowPipeline:
             return
         self._identity_missing_reported = True
         logger.critical(
-            "%s: %s has no fixed size multiplier; every setup of this run is blocked (setup %s)",
+            "%s: %s has no size for this session; every setup of this run is blocked (setup %s)",
             IDENTITY_SIZING_MISSING,
             strategy.spec.name,
             setup.fingerprint(),
@@ -408,7 +412,7 @@ class ShadowPipeline:
                 outcome=outcome,
             )
             await self._record(decision, strategy.owner_id)
-            await self._record_sizing(decision=decision, strategy=strategy, managed_factor=NO_SCALING)
+            await self._record_sizing(decision=decision, strategy=strategy, managed_factor=NO_SCALING, item=item)
             return Assessment(decision=decision)
 
         result = self._strategy.evaluate(
@@ -560,7 +564,7 @@ class ShadowPipeline:
             portfolio=portfolio,
             multiplier=multiplier,
         )
-        await self._record_sizing(decision=decision, strategy=strategy, managed_factor=multiplier)
+        await self._record_sizing(decision=decision, strategy=strategy, managed_factor=multiplier, item=item)
         return Assessment(decision=decision)
 
     async def _managed_multiplier(self, *, setup: RuleSetup, review: AIReview) -> Decimal:
@@ -642,14 +646,22 @@ class ShadowPipeline:
         await self._decision_recorder(decision=decision, owner_id=owner_id)
 
     async def _record_sizing(
-        self, *, decision: Decision, strategy: StrategyRecord, managed_factor: Decimal
+        self,
+        *,
+        decision: Decision,
+        strategy: StrategyRecord,
+        managed_factor: Decimal,
+        item: CandidateInput | None = None,
     ) -> None:
         """Keep the decision's effective multiplier beside it; a failure is logged, never raised.
 
         ``managed_factor`` is the factor this decision was sized with: the
         overlay's answer for a PROPOSE review (0 skips the setup), else 1.
         The identity factor is this pipeline's own; ``None`` (a sendable
-        identity with no row) is recorded as no multiplier at all.
+        identity with no size this session) is recorded as no multiplier at
+        all. ``item`` is the input the decision was assessed from: its bars and
+        quote give the sidecar's realism fields (none for a candidate whose data
+        never arrived). The decision is only read, never changed.
 
         The write is bounded by ``SIZING_RECORD_DEADLINE_S`` (N15a MEDIUM-1): a
         stalled sidecar must never hold up the next candidate. After a timeout
@@ -670,6 +682,8 @@ class ShadowPipeline:
                 sendable=is_sendable_identity(name),
                 identity_factor=self._identity_multiplier,
                 managed_factor=managed_factor,
+                bars=() if item is None else item.bars,
+                quote=None if item is None else item.quote,
             )
             async with asyncio.timeout(sidecar.SIZING_RECORD_DEADLINE_S):
                 await self._sizing_recorder(row)

@@ -13,6 +13,7 @@ import inspect
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -372,3 +373,136 @@ def test_r_is_quantity_free_except_where_the_commission_minimum_binds():
     assert tiny.gross_r == full.gross_r and tiny.cost_r > full.cost_r
     # A simulated setup has no quantity at all: its cost in R takes none.
     assert "shares" not in inspect.signature(DEFAULT_COST_MODEL.cost_r).parameters
+
+
+# --- P3-F: runs at or after the size store's install read the store -------------------------------
+
+ET = timezone(timedelta(hours=-4))  # America/New_York in October 2026 (EDT)
+# Migration 18 applied on Friday 2026-10-16 at 18:30 ET, after that session.
+STORE_INSTALLED = datetime(2026, 10, 16, 22, 30, tzinfo=timezone.utc)
+BEFORE = (date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16))
+AFTER = (date(2026, 10, 19), date(2026, 10, 20), date(2026, 10, 21), date(2026, 10, 22))
+V7B_SIZED_HEAD = "5d0eb1ca947a45bfa1a30ab836850df70a1bf12e"  # listed: the v7b table applied
+STORE_ERA_SHA = "e" * 40  # a commit after the commit table: only the store can size its runs
+
+
+async def _seed_runs(database: Path, monkeypatch, runs, *, store: bool = True) -> dict[tuple[str, date], str]:
+    """One shadow run and one rule-rejected decision per (name, day, sha), on a database whose
+    size store was installed at STORE_INSTALLED (or that has none, at migration 17)."""
+    from hashlib import sha256
+
+    from config import cfg
+    from db.core import init_db
+    from tests.fakes.legacy_strategies import insert_legacy_shadow_strategy
+    from trading.contracts import (
+        Candidate, Decision, DecisionOutcome, EngineMode, FixedUniverse, RuleCondition, Run, ScannerRun,
+        StrategySpec, fingerprint_payload,
+    )
+    from trading.data import CandidateRepository, RunRepository, ScannerRunRepository
+    from trading.storage import migrations as schema_migrations
+    from trading.storage.repository import record_decision
+
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    with monkeypatch.context() as patch:
+        patch.setattr(schema_migrations, "_now", lambda: STORE_INSTALLED.isoformat())
+        if not store:
+            patch.setattr(schema_migrations, "MIGRATIONS",
+                          tuple(item for item in schema_migrations.MIGRATIONS if item.version < 18))
+        await init_db()
+    strategies: dict[str, str] = {}
+    decisions: dict[tuple[str, date], str] = {}
+    for number, (name, day, sha) in enumerate(runs):
+        if name not in strategies:
+            spec = StrategySpec(name=name, universe=FixedUniverse(symbols=("AAPL",)),
+                                conditions=(RuleCondition(feature="rvol", operator="gte", value="1.5"),),
+                                rationale=f"{name} size-history fixture.")
+            strategies[name] = (await insert_legacy_shadow_strategy(spec=spec, owner_id="demo")).strategy_id
+        run_id = f"run-{name}-{day}"
+        await RunRepository().save(Run(
+            id=run_id, owner_id="demo", source_sha=sha, strategy_id=strategies[name], strategy_version=1,
+            policy_fingerprints={"risk": RiskPolicy().fingerprint()}, session_date=day, mode=EngineMode.SHADOW,
+        ))
+        parameters = {"scan_code": "HOT_BY_VOLUME", "limit": 50}
+        started = datetime.combine(day, datetime.min.time(), tzinfo=ET) + timedelta(hours=9)
+        await ScannerRunRepository().save(ScannerRun(
+            id=f"{run_id}-scan", run_id=run_id, parameters=parameters,
+            parameters_fingerprint=fingerprint_payload(parameters), status="completed", started_at=started,
+        ))
+        candidate = Candidate(id=f"{run_id}-AAA", scanner_run_id=f"{run_id}-scan", con_id=1000 + number,
+                              symbol="AAA", primary_exchange="NASDAQ", rank=1, admission_status="admitted")
+        await CandidateRepository().save(candidate)
+        decision_id = f"decision-{name}-{day}"
+        await record_decision(decision=Decision(
+            id=decision_id, run_id=run_id, candidate_id=candidate.id, strategy_id=strategies[name],
+            strategy_version=1, decision_key=sha256(decision_id.encode()).hexdigest(),
+            outcome=DecisionOutcome.RULE_REJECTED, created_at=started + timedelta(hours=1),
+        ), owner_id="demo")
+        decisions[(name, day)] = decision_id
+    return decisions
+
+
+async def test_size_history_uses_events_after_install(tmp_path, monkeypatch):
+    """Through the production readers (read_size_steps, read_decision_refs) on a real database: runs
+    before the size store's install keep the commit table; runs at or after it take the size the
+    store had in force at their session's start (a step-down effective 10-21; a step-up written
+    during the 10-22 session is not in force that day); an unreadable store names no size for
+    them (never the baseline), and a database without the store sizes every run by its commit."""
+    from tests.test_size_store import SizeLedger
+    from trading.research.size_history import SIZE_STORE, read_decision_refs, read_size_steps
+
+    runs = [("VWAP_PB_V2", day, V7B_SIZED_HEAD) for day in BEFORE]
+    runs += [("VWAP_PB_V2", day, STORE_ERA_SHA) for day in AFTER] + [("ORB_V1", AFTER[0], STORE_ERA_SHA)]
+    database = tmp_path / "autotrader.db"
+    ids = await _seed_runs(database, monkeypatch, runs)
+    ledger = SizeLedger(database)
+    ledger.step("VWAP_PB_V2", "0.5", "0.25", effective=AFTER[2], at=datetime(2026, 10, 20, 20, 0, tzinfo=ET))
+    ledger.step("VWAP_PB_V2", "0.25", "0.5", effective=AFTER[3], at=datetime(2026, 10, 22, 9, 0, tzinfo=ET))
+
+    steps = read_size_steps(database, SizingIndex(), current={"VWAP_PB_V2": Decimal("0.25")})
+    history = steps.histories["VWAP_PB_V2"]
+    table = f"{DERIVED}:{V7B_SIZED.label}"
+    assert [(item.session_date, item.factor, item.sendable, item.source) for item in history.sessions] == [
+        *((day, Decimal("0.5"), True, table) for day in BEFORE),
+        (AFTER[0], Decimal("0.5"), True, SIZE_STORE),  # the baseline: no event in force yet
+        (AFTER[1], Decimal("0.5"), True, SIZE_STORE),
+        (AFTER[2], Decimal("0.25"), True, SIZE_STORE),  # the step-down, effective 10-21
+        (AFTER[3], Decimal("0.25"), True, SIZE_STORE),  # the step-up was written after 10-22 began
+    ]
+    assert [(event.session_date, event.kind, event.before, event.after, event.source) for event in history.events] == [
+        (BEFORE[0], BECAME_SENDABLE, None, Decimal("0.5"), table),
+        (AFTER[2], SIZE_STEP, Decimal("0.5"), Decimal("0.25"), SIZE_STORE),
+    ]
+    assert history.sessions_since_last_step(Decimal("0.25")) == 2 and history.unknown_sources == ()
+
+    refs = read_decision_refs(database, decision_ids=ids.values())
+    multipliers = {key: effective_multiplier_for(refs[decision_id]) for key, decision_id in ids.items()}
+    before = multipliers[("VWAP_PB_V2", BEFORE[1])]
+    assert (before.source, before.table_version, before.value) == (DERIVED, V7B_SIZED.label, Decimal("0.5"))
+    stepped = multipliers[("VWAP_PB_V2", AFTER[2])]
+    assert (stepped.source, stepped.value, stepped.identity_factor, stepped.sendable) == (
+        SIZE_STORE, Decimal("0.25"), Decimal("0.25"), True,
+    )
+    assert stepped.note == "size event 1, step_down effective 2026-10-21"
+    assert multipliers[("VWAP_PB_V2", AFTER[3])].value == Decimal("0.25")
+    assert multipliers[("VWAP_PB_V2", AFTER[0])].note == "baseline: no size event in force"
+    shadow = multipliers[("ORB_V1", AFTER[0])]
+    assert (shadow.source, shadow.value, shadow.sendable) == (SIZE_STORE, Decimal("1"), False)
+
+    # An unreadable store: the store-era runs name no size (never the 0.5 baseline); earlier runs keep the table.
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE autotrader_schema_migrations SET checksum = ? WHERE version = 18", ("0" * 64,))
+    history = read_size_steps(database, SizingIndex(), current={"VWAP_PB_V2": Decimal("0.25")}).histories["VWAP_PB_V2"]
+    assert history.unknown_sessions == AFTER
+    assert [item.factor for item in history.sessions[: len(BEFORE)]] == [Decimal("0.5")] * len(BEFORE)
+    [reason] = history.unknown_sources
+    assert reason.startswith("identity_size_store_unreadable: schema_checksum_mismatch")
+    refs = read_decision_refs(database, decision_ids=ids.values())
+    unread = effective_multiplier_for(refs[ids[("VWAP_PB_V2", AFTER[0])]])
+    assert (unread.source, unread.value, unread.identity_factor) == (UNKNOWN, None, None)
+    assert effective_multiplier_for(refs[ids[("VWAP_PB_V2", BEFORE[0])]]).value == Decimal("0.5")
+
+    # No size store in the database (migration 17): every run is sized by its commit, as before P3-C.
+    plain = tmp_path / "v17.db"
+    await _seed_runs(plain, monkeypatch, runs, store=False)
+    history = read_size_steps(plain, SizingIndex(), current={"VWAP_PB_V2": Decimal("0.25")}).histories["VWAP_PB_V2"]
+    assert history.unknown_sessions == AFTER and history.unknown_sources == (STORE_ERA_SHA[:12],)

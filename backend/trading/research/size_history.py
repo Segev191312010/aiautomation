@@ -1,7 +1,8 @@
 """Each decision's effective size multiplier, and each identity's size steps (T-8).
 
-A size step (an owner-approved change of an identity's row in
-``trading.risk.identity_sizing``) never restarts an identity's evidence: the
+A size step (a change of an identity's size: a row of the reviewed baseline in
+``trading.risk.identity_sizing`` before the size store, an event of the size
+store from its install on) never restarts an identity's evidence: the
 evidence identity (``paper_promotion.code_identity``) holds the rules, the
 entry window and the risk policy, not the multiplier, and every statistic the
 promotion rule reads is in R, which the quantity cancels out of. What a step
@@ -12,13 +13,24 @@ Where the multiplier comes from, per decision (``effective_multiplier_for``):
 ``recorded``
     the decision-sizing sidecar the pipeline writes beside the database
     (``trading.storage.decision_sizing``), from T-8 on;
+``derived_from_size_store``
+    for a run at or after the size store's install (migration 18's
+    ``applied_at`` is at or before the session's start) without a sidecar
+    line: the size the store had in force for that identity and session, by
+    the read the strategy child makes at the session's start (the latest
+    event effective on or before the session and written before its start,
+    else the baseline; never above the ceiling). A store that cannot be read,
+    an event chain that does not start at the baseline, or a size above the
+    ceiling names no size: ``unknown``, never the baseline;
 ``derived_from_source_sha``
-    for a decision recorded before the sidecar existed: its run's
-    ``source_sha`` looked up in the committed table of commits
-    (``trading.research.source_commits``), never in git at runtime;
+    for a decision recorded before the sidecar existed, in a run before the
+    size store's install: its run's ``source_sha`` looked up in the committed
+    table of commits (``trading.research.source_commits``), never in git at
+    runtime;
 ``unknown``
-    a commit the table does not list (or a run without a usable sha). It is
-    named in the evidence and never guessed.
+    a commit the table does not list (or a run without a usable sha), or a
+    store-era run whose size the store cannot name. It is named in the
+    evidence and never guessed.
 
 What production applied before T-8 is not what the constants said. Before
 v7b only MOMO_HOD_V2 sent orders, at x1, and every other name was sized at the
@@ -38,8 +50,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from contextlib import closing
-from dataclasses import dataclass, field
-from datetime import date
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import re
@@ -48,10 +60,16 @@ from types import MappingProxyType
 from urllib.parse import quote
 
 from trading.research.source_commits import PRE_V7B_COMMITS, V7B_COMMITS, V7B_SIZED_COMMITS
+from trading.risk import identity_sizing
+from trading.risk.engine import IDENTITY_SIZING_MISSING
+from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
+from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 from trading.storage.decision_sizing import DecisionSizing, SizingIndex
 from trading.storage.migrations import SCHEMA_READ_TIMEOUT_SECONDS
+from trading.storage.size_schema import SIZE_STORE_MIGRATION
 
 RECORDED = "recorded"
+SIZE_STORE = "derived_from_size_store"
 DERIVED = "derived_from_source_sha"
 UNKNOWN = "unknown"
 
@@ -169,6 +187,10 @@ class DecisionRef:
     review: str | None = None
     # day_step x setup_step of the decision's managed row, when it has one.
     managed_steps: Decimal | None = None
+    # What the size store had in force for the run's identity and session, when
+    # the run is at or after the store's install (``SizeStoreView.size_for``);
+    # None for an earlier run: the commit table decides.
+    store: StoreSize | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +242,31 @@ def effective_multiplier_for(
             source=RECORDED,
             note="" if row.identity_factor is not None else "identity_sizing_missing",
         )
+    managed = (
+        decision.managed_steps
+        if decision.review == "PROPOSE" and decision.managed_steps is not None
+        else _ONE
+    )
+    store = decision.store
+    if store is not None:
+        # A run at or after the size store's install: its size is the store's, never the commit's.
+        if store.factor is None:
+            return EffectiveMultiplier(
+                value=None,
+                identity_factor=None,
+                managed_factor=None,
+                sendable=store.sendable,
+                source=UNKNOWN,
+                note=store.source,
+            )
+        return EffectiveMultiplier(
+            value=store.factor * managed,
+            identity_factor=store.factor,
+            managed_factor=managed,
+            sendable=store.sendable,
+            source=SIZE_STORE,
+            note=store.source,
+        )
     lookup = table_version_for(decision.source_sha)
     if lookup.version is None:
         return EffectiveMultiplier(
@@ -231,11 +278,6 @@ def effective_multiplier_for(
             note=f"source {lookup.commit or decision.source_sha!r} is not in the commit table",
         )
     identity, sendable = lookup.version.factor(decision.strategy_name)
-    managed = (
-        decision.managed_steps
-        if decision.review == "PROPOSE" and decision.managed_steps is not None
-        else _ONE
-    )
     return EffectiveMultiplier(
         value=identity * managed,
         identity_factor=identity,
@@ -256,6 +298,8 @@ class RunRef:
     session_date: date
     strategy_name: str
     source_sha: str
+    # As ``DecisionRef.store``: set for a run at or after the size store's install.
+    store: StoreSize | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +311,8 @@ class RunFactor:
 
 
 def run_factor(run: RunRef, records: Sequence[DecisionSizing] = ()) -> RunFactor:
-    """The identity factor a run sized with: its recorded decisions, else its commit."""
+    """The identity factor a run sized with: its recorded decisions, else (a run at or
+    after the size store's install) the store's size in force, else its commit."""
     if records:
         known = {(row.identity_factor, row.sendable) for row in records}
         if len(known) != 1:
@@ -276,6 +321,10 @@ def run_factor(run: RunRef, records: Sequence[DecisionSizing] = ()) -> RunFactor
         if factor is None:
             return RunFactor(None, sendable, UNKNOWN, "identity_sizing_missing")
         return RunFactor(factor, sendable, RECORDED)
+    if run.store is not None:
+        if run.store.factor is None:
+            return RunFactor(None, run.store.sendable, UNKNOWN, run.store.source)
+        return RunFactor(run.store.factor, run.store.sendable, SIZE_STORE)
     lookup = table_version_for(run.source_sha)
     if lookup.version is None:
         return RunFactor(None, None, UNKNOWN, lookup.commit or str(run.source_sha))
@@ -405,6 +454,178 @@ def identity_size_history(identity: str, runs: Sequence[RunRef], index: SizingIn
     )
 
 
+# --- the size store (migration 18), read-only -----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StoreSize:
+    """The size the store had in force for one identity at one session.
+
+    ``factor`` is ``None`` when the store names no size: it cannot be read, its
+    event chain does not start at the baseline, the size is above the ceiling,
+    or a sendable name has no baseline or ceiling. The strategy child blocks
+    every setup in each of these cases; research then says ``unknown``, never
+    the baseline. ``ignored`` lists the events effective by the session but
+    written after its start: the child ignored them, so they are not in force.
+    """
+
+    factor: Decimal | None
+    sendable: bool
+    source: str
+    ignored: tuple[int, ...] = ()
+    # The event whose size is in force; None when it is the baseline (or no size).
+    event_id: int | None = None
+
+
+# A name that is not sendable never reads the store: x1, as the child sizes it.
+_SHADOW_ONLY = StoreSize(_ONE, False, "shadow-only: unscaled")
+
+
+def session_start(session_date: date) -> datetime | None:
+    """The session's start, the moment the child's read is for (the supervisor's
+    first child start, 07:55 ET); ``None`` on a day with no XNYS session.
+
+    Imported on use, as ``identity_sizing`` does: the operations package plans
+    the day, and research loads this module without it.
+    """
+    session = market_session(session_date)
+    if session is None:
+        return None
+    from trading.operations.db_admin import trading_day
+
+    return trading_day(session).starts_at
+
+
+def size_in_force_from_events(
+    events: Sequence[identity_sizing.SizeEvent],
+    *,
+    identity: str,
+    session_date: date,
+    starts_at: datetime,
+) -> StoreSize:
+    """The size ``identity`` had in force at ``session_date``, from its store events.
+
+    The rule of ``identity_sizing.session_identity_multiplier``, the one read a
+    strategy child makes at the session's start, without its logging: the event
+    chain must start at the reviewed baseline; the latest event effective on or
+    before the session and written before ``starts_at`` is in force, else the
+    baseline; the result is never above the account mode's ceiling. (One shared
+    implementation: it folds into ``identity_sizing``'s public size-in-force read
+    when that lands.)
+    """
+    mode = identity_sizing.CURRENT_ACCOUNT_MODE
+    baseline = identity_sizing.IDENTITY_SIZE_MULTIPLIER.get(identity)
+    if baseline is None:
+        return StoreSize(None, True, f"{IDENTITY_SIZING_MISSING}: {identity} has no baseline row")
+    ceiling = identity_sizing.IDENTITY_SIZE_CEILING.get(mode, MappingProxyType({})).get(identity)
+    if ceiling is None:
+        detail = f"the {mode} ceiling row does not name it"
+        return StoreSize(None, True, f"{identity_sizing.SENDABLE_WITHOUT_CEILING}: {detail}")
+    problem = identity_sizing._chain_problem(events, baseline)  # the read's own chain rule
+    if problem is not None:
+        return StoreSize(None, True, f"{identity_sizing.SIZE_EVENT_CHAIN_BROKEN}: {problem}")
+    size, source, ignored, in_force = baseline, "baseline: no size event in force", [], None
+    for event in events:
+        if not event.effective_session <= session_date:
+            continue  # it takes effect at a later session
+        if event.created_at >= starts_at:
+            ignored.append(event.event_id)  # written after the session's start: the child ignored it
+            continue
+        size, in_force = event.to_mult, event.event_id
+        source = f"size event {event.event_id}, {event.kind} effective {event.effective_session.isoformat()}"
+    if size > ceiling:
+        return StoreSize(
+            None, True, f"{identity_sizing.IDENTITY_SIZE_ABOVE_CEILING}: x{_plain(size)} is above the {mode}"
+            f" ceiling x{_plain(ceiling)}", tuple(ignored),
+        )
+    return StoreSize(size, True, source, tuple(ignored), in_force)
+
+
+@dataclass(frozen=True, slots=True)
+class SizeStoreView:
+    """The size store as one research read sees it: when it was installed, and each
+    sendable identity's events (or why they could not be read)."""
+
+    # Migration 18's applied_at; None when the database has no size store.
+    installed_at: datetime | None = None
+    events: Mapping[str, tuple[identity_sizing.SizeEvent, ...]] = field(default_factory=dict)
+    unreadable: Mapping[str, str] = field(default_factory=dict)
+    # The install time itself could not be read: no run can be placed before it.
+    problem: str = ""
+
+    def size_for(self, name: str, session_date: date) -> StoreSize | None:
+        """The size in force for a run of ``name`` at ``session_date``; ``None`` for a
+        run before the store's install (or without a store): the commit table decides.
+
+        A run whose session starts at or after the install read the store at its
+        start: a name that is not sendable is x1 and reads nothing.
+        """
+        sendable = is_sendable_identity(name)
+        if self.problem:
+            # Without the install time no run can be placed before it: a sendable
+            # name has no size anywhere; a shadow name is x1 in every era.
+            return StoreSize(None, True, self.problem) if sendable else _SHADOW_ONLY
+        if self.installed_at is None:
+            return None
+        starts_at = session_start(session_date)
+        if starts_at is None:
+            if session_date < self.installed_at.astimezone(MARKET_TIMEZONE).date():
+                return None
+            return StoreSize(None, sendable, "not an XNYS session: it has no start to read the store at")
+        if starts_at < self.installed_at:
+            return None  # the session ran before the size store existed
+        if not sendable:
+            return _SHADOW_ONLY
+        if name in self.unreadable:
+            return StoreSize(None, True, self.unreadable[name])
+        return size_in_force_from_events(
+            self.events.get(name, ()), identity=name, session_date=session_date, starts_at=starts_at
+        )
+
+
+_INSTALLED = "SELECT applied_at FROM autotrader_schema_migrations WHERE version = ?"
+
+
+def read_size_store(database: str | Path) -> SizeStoreView:
+    """The size store of ``database``, read-only (``mode=ro``); failures are named, never raised.
+
+    Migration 18 missing from the ledger is a database before the store (every
+    run reads by its commit). Its events are read with the child's own reader
+    (``identity_sizing.read_size_events``); an identity whose events cannot be
+    read names no size for any run at or after the install.
+    """
+    path = Path(database).expanduser()
+    try:
+        with closing(_connect(path)) as db:
+            row = db.execute(_INSTALLED, (SIZE_STORE_MIGRATION,)).fetchone()
+    except sqlite3.Error as exc:
+        return SizeStoreView(
+            problem=f"{identity_sizing.IDENTITY_SIZE_STORE_UNREADABLE}: the migration ledger is unreadable"
+            f" ({type(exc).__name__}: {exc})"
+        )
+    if row is None:
+        return SizeStoreView()
+    try:
+        installed_at = datetime.fromisoformat(str(row[0]))
+        if installed_at.tzinfo is None or installed_at.utcoffset() is None:
+            raise ValueError("not timezone-aware")
+    except ValueError as exc:
+        return SizeStoreView(
+            problem=f"{identity_sizing.IDENTITY_SIZE_STORE_UNREADABLE}: migration {SIZE_STORE_MIGRATION}'s"
+            f" applied_at {row[0]!r} is not a timestamp ({exc})"
+        )
+    events: dict[str, tuple[identity_sizing.SizeEvent, ...]] = {}
+    unreadable: dict[str, str] = {}
+    for name in SENDABLE_IDENTITIES:
+        try:
+            events[name] = identity_sizing.read_size_events(
+                path, identity=name, account_mode=identity_sizing.CURRENT_ACCOUNT_MODE
+            )
+        except identity_sizing.SizeStoreUnreadable as exc:
+            unreadable[name] = f"{identity_sizing.IDENTITY_SIZE_STORE_UNREADABLE}: {exc}"
+    return SizeStoreView(installed_at=installed_at, events=events, unreadable=unreadable)
+
+
 # --- reading the ledger (read-only) ---------------------------------------------------
 
 _RUNS = """
@@ -455,7 +676,14 @@ def read_run_refs(database: str | Path, *, names: Collection[str]) -> tuple[RunR
             except ValueError:
                 continue
             refs.append(RunRef(str(run_id), day, str(name).strip(), str(source_sha)))
-    return tuple(refs)
+    if not refs:
+        return ()
+    store = read_size_store(path)
+    return tuple(
+        RunRef(ref.run_id, ref.session_date, ref.strategy_name, ref.source_sha,
+               store=store.size_for(ref.strategy_name, ref.session_date))
+        for ref in refs
+    )
 
 
 def read_decision_refs(database: str | Path, *, decision_ids: Collection[str]) -> dict[str, DecisionRef]:
@@ -493,7 +721,12 @@ def read_decision_refs(database: str | Path, *, decision_ids: Collection[str]) -
                     review=None if review is None else str(review),
                     managed_steps=steps.get(str(decision_id)),
                 )
-    return refs
+    if not refs:
+        return refs
+    store = read_size_store(path)
+    return {
+        key: replace(ref, store=store.size_for(ref.strategy_name, ref.session_date)) for key, ref in refs.items()
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,8 +742,9 @@ class SizeSteps:
     def payload(self) -> dict[str, object]:
         return {
             "basis": (
-                "identity factor per session: the decision-sizing sidecar, else the run's"
-                " source_sha in the committed commit table; a size step never restarts evidence"
+                "identity factor per session: the decision-sizing sidecar, else for a run at or after"
+                " the size store's install the store's size in force, else the run's source_sha in the"
+                " committed commit table; a size step never restarts evidence"
             ),
             "readable": self.readable,
             "note": self.note,
@@ -546,6 +780,7 @@ __all__ = [
     "PRE_V7B",
     "RECORDED",
     "SIZE_STEP",
+    "SIZE_STORE",
     "TABLE_VERSIONS",
     "UNKNOWN",
     "V7B_FACTOR_DROPPED",
@@ -560,13 +795,18 @@ __all__ = [
     "SizeEvent",
     "SizeSession",
     "SizeSteps",
+    "SizeStoreView",
     "SourceLookup",
+    "StoreSize",
     "TableVersion",
     "effective_multiplier_for",
     "identity_size_history",
     "read_decision_refs",
     "read_run_refs",
     "read_size_steps",
+    "read_size_store",
     "run_factor",
+    "session_start",
+    "size_in_force_from_events",
     "table_version_for",
 ]

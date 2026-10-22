@@ -415,7 +415,12 @@ async def test_recorded_inputs_make_the_size_check_exact(tmp_path: Path, monkeyp
     report = check(await build_day(tmp_path, monkeypatch, Spec(recorded_inputs=True)))
 
     assert set(statuses(report).values()) == {sc.PASS}, report.render()
-    assert rule(report, 4).summary == "4 SENT = floor(policy quantity x identity row) from recorded inputs"
+    # Rewritten for P3-F (explicit, not weakened): the reference is the size in force read from the
+    # size store, which is the identity row here (the session started before the store's install).
+    assert rule(report, 4).summary == "4 SENT = floor(policy quantity x size in force) from recorded inputs"
+    assert ("ORB_V2 BBB (orders 13-15): 75 sh = SENT = intent = state; floor(policy 300 x x0.25) = 75 at the"
+            " recorded net liquidation 100000.00; size in force x0.25 (baseline row: the session started"
+            " before the size store's install") in "\n".join(rule(report, 4).details)
     assert ("ORB_V2 BBB (orders 13-15): 75 sh = SENT = intent = state; floor(policy 300 x x0.25) = 75 at the"
             " recorded net liquidation 100000.00") in "\n".join(rule(report, 4).details)
     assert report.render().startswith("Session check 2026-10-19: PASS, exit 0")
@@ -470,6 +475,152 @@ async def test_a_sent_that_differs_from_its_decision_fails_the_size_rule(
     failures = "\n".join(rule(report, 4).details)
     assert "SENT 76 sh, the state 75" in failures
     assert "SENT 76 @ 50.00/49.50/51.00, its decision's intent 75 @ 50.00/49.50/51.00" in failures
+
+
+# --- rule 4: the size in force comes from the size store (P3-F) -------------------------------------
+
+# The size store's install (migration 18 applied) on Friday 2026-10-16 at 18:30 ET, after that
+# session; the nightly writer's step-downs are written that night, before the Monday session (DAY).
+STORE_INSTALLED = datetime(2026, 10, 16, 22, 30, tzinfo=timezone.utc)
+FRIDAY_NIGHT = datetime(2026, 10, 16, 20, 0, tzinfo=sc.NY)
+
+
+async def build_store_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spec: Spec | None = None, *,
+                          installed: datetime = STORE_INSTALLED, store: bool = True) -> Day:
+    """``build_day`` on a database whose size store was installed at ``installed``, or (``store=False``)
+    a database at migration 17: the store not installed at all."""
+    from trading.storage import migrations as schema_migrations
+
+    with monkeypatch.context() as patch:
+        patch.setattr(schema_migrations, "_now", lambda: installed.isoformat())
+        if not store:
+            patch.setattr(schema_migrations, "MIGRATIONS",
+                          tuple(item for item in schema_migrations.MIGRATIONS if item.version < 18))
+        return await build_day(tmp_path, monkeypatch, spec)
+
+
+def _size_ledger(day: Day):
+    from tests.test_size_store import SizeLedger  # the store's own test writer (the P3-D/P3-E writers' SQL)
+
+    return SizeLedger(day.db)
+
+
+def _size_details(report: sc.SessionReport) -> str:
+    return "\n".join(rule(report, 4).details)
+
+
+@pytest.mark.parametrize("recorded", [False, True], ids=["inputs-not-recorded", "inputs-recorded"])
+async def test_session_check_size_matches_store_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: bool
+) -> None:
+    """MOMO_HOD_V2 stepped down x1 -> x0.5 effective DAY (written the Friday night before): a SENT at
+    the old x1 size FAILs; the same day sent at the stepped-down size is sized right."""
+    old = await build_store_day(tmp_path / "old", monkeypatch, Spec(recorded_inputs=recorded))
+    _size_ledger(old).step("MOMO_HOD_V2", "1", "0.5", effective=DAY, at=FRIDAY_NIGHT)
+    report = check(old)
+
+    assert statuses(report) == {**ALL_PASS_BUT_SIZE, 4: sc.FAIL}, report.render()
+    assert report.exit_code == sc.EXIT_FAILED
+    summary = rule(report, 4).summary
+    if recorded:
+        assert ("MOMO_HOD_V2 AAA (orders 16-18): 750 sh, but floor(policy 750 x x0.5) = 375 at the recorded net"
+                " liquidation 100000.00") in summary
+    else:
+        assert ("MOMO_HOD_V2 AAA (orders 16-18): 750 sh is above its x0.5 size in force: at most 412 sh even at"
+                " net liquidation 110000.00 (logged +10%); about x1.00 of the policy size 750 at 100000.00") in summary
+    assert "MOMO_HOD_V2 x0.5 (size event 1, step_down effective 2026-10-19)" in "\n".join(report.inputs)
+
+    stepped = replace(MOMO, qty=375)  # floor(750 x 0.5)
+    new = await build_store_day(tmp_path / "new", monkeypatch,
+                                Spec(trades=(GAP, ORB, stepped, VWAP), recorded_inputs=recorded))
+    _size_ledger(new).step("MOMO_HOD_V2", "1", "0.5", effective=DAY, at=FRIDAY_NIGHT)
+    report = check(new)
+
+    assert statuses(report) == ({**ALL_PASS_BUT_SIZE, 4: sc.PASS} if recorded else ALL_PASS_BUT_SIZE), report.render()
+    assert ("MOMO_HOD_V2 AAA (orders 16-18): 375 sh = SENT = intent = state"
+            + ("; floor(policy 750 x x0.5) = 375 at the recorded net liquidation 100000.00" if recorded else "")
+            ) in _size_details(report)
+    assert "size in force x0.5 (size event 1, step_down effective 2026-10-19)" in _size_details(report)
+    # The other identities kept their rows: no event of theirs is in force.
+    assert "size in force x0.25 (baseline: no size event in force)" in _size_details(report)
+
+
+@pytest.mark.parametrize("case", ["store without events", "event for the next session", "no size store"])
+async def test_session_check_size_baseline_without_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """No size event in force on DAY: every identity's size is its baseline row, and the clean day
+    passes. The store may have no events, or only one that takes effect at the next session
+    (Tuesday); a database at migration 17 has no store at all (its children read none)."""
+    day = await build_store_day(tmp_path, monkeypatch, Spec(recorded_inputs=True), store=case != "no size store")
+    if case == "event for the next session":
+        _size_ledger(day).step("MOMO_HOD_V2", "1", "0.5", effective=date(2026, 10, 20), at=FRIDAY_NIGHT)
+    report = check(day)
+
+    assert set(statuses(report).values()) == {sc.PASS}, report.render()
+    assert rule(report, 4).summary == "4 SENT = floor(policy quantity x size in force) from recorded inputs"
+    source = ("baseline row: no size store in this database (migration 18 not applied)" if case == "no size store"
+              else "baseline: no size event in force")
+    for name, factor in (("GAP_GO_V2", "0.5"), ("ORB_V2", "0.25"), ("MOMO_HOD_V2", "1"), ("VWAP_PB_V2", "0.5")):
+        assert f"{name} x{factor} ({source})" in "\n".join(report.inputs), name
+    assert ("MOMO_HOD_V2 AAA (orders 16-18): 750 sh = SENT = intent = state; floor(policy 750 x x1) = 750 at the"
+            f" recorded net liquidation 100000.00; size in force x1 ({source})") in _size_details(report)
+
+
+@pytest.mark.parametrize("damage", ["checksum", "events table", "ledger timestamp"])
+async def test_session_check_store_unreadable_is_not_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """A store the checker cannot read names no size: the size rule never passes (and never falls
+    back to the baseline rows); a quantity above the paper ceiling still FAILs."""
+    def damaged(day: Day) -> Day:
+        with closing(sqlite3.connect(day.db)) as db, db:
+            if damage == "checksum":
+                db.execute("UPDATE autotrader_schema_migrations SET checksum = ? WHERE version = 18", ("0" * 64,))
+            elif damage == "events table":
+                db.execute("DROP TABLE autotrader_size_events")
+            else:
+                db.execute("UPDATE autotrader_schema_migrations SET applied_at = 'soon' WHERE version = 18")
+        return day
+
+    report = check(damaged(await build_store_day(tmp_path / "clean", monkeypatch, Spec(recorded_inputs=True))))
+
+    assert statuses(report) == ALL_PASS_BUT_SIZE, report.render()  # WARN, never PASS
+    assert report.exit_code == sc.EXIT_PASSED
+    summary = rule(report, 4).summary
+    assert summary.startswith(f"{sc.SIZE_IN_FORCE_UNKNOWN}: the size store names no size for 4 of 4 SENT, each held"
+                              " only to the paper ceiling (never a PASS); first: GAP_GO_V2 DDD (orders 10-12):"
+                              f" {sc.SIZE_IN_FORCE_UNKNOWN} (identity_size_store_unreadable: "), summary
+    details = _size_details(report)
+    assert "size in force unknown (identity_size_store_unreadable: " in details
+    assert "baseline" not in details and "row" not in summary  # never sized against the baseline rows
+    assert "ORB_V2 BBB (orders 13-15): 75 sh = SENT = intent = state; floor(policy 300 x x1) = 300 at the" in details
+    assert "MOMO_HOD_V2 unknown (identity_size_store_unreadable: " in "\n".join(report.inputs)
+
+    over = replace(MOMO, qty=760)  # above floor(750 x the x1 ceiling)
+    report = check(damaged(await build_store_day(tmp_path / "over", monkeypatch,
+                                                 Spec(trades=(GAP, ORB, over, VWAP), recorded_inputs=True))))
+    assert rule(report, 4).status == sc.FAIL, report.render()
+    assert ("MOMO_HOD_V2 AAA (orders 16-18): 760 sh is above its x1 paper ceiling: floor(policy 750 x x1) = 750 at"
+            " the recorded net liquidation 100000.00") in rule(report, 4).summary
+
+
+async def test_session_check_mid_session_event_is_not_in_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An event effective DAY but written during DAY's session (10:00 ET) was ignored by the child:
+    the size stays the row, and the rule flags the event (WARN), never sizes by it."""
+    day = await build_store_day(tmp_path, monkeypatch, Spec(recorded_inputs=True))
+    _size_ledger(day).step("MOMO_HOD_V2", "1", "0.5", effective=DAY, at=datetime(2026, 10, 19, 9, 0, tzinfo=sc.NY))
+    report = check(day)
+
+    assert statuses(report) == ALL_PASS_BUT_SIZE, report.render()
+    assert rule(report, 4).summary == (
+        "1 flag(s); first: size_event_written_mid_session: MOMO_HOD_V2 size event(s) 1 written after the session's"
+        " start: not in force this session (its child ignored them)"
+    )
+    assert "MOMO_HOD_V2 AAA (orders 16-18): 750 sh = SENT = intent = state; floor(policy 750 x x1) = 750" in \
+        _size_details(report)
 
 
 # --- rule 3: caps ---------------------------------------------------------------------------

@@ -2,11 +2,23 @@
 
 ``size_multiplier_effective = identity factor x managed factor`` is the factor
 the risk engine applied to the policy quantity for one decision: the
-identity's fixed factor (``trading.risk.identity_sizing``; 1 for a shadow
-name) times the AI day manager's narrowing for that setup (1 when the
+identity's size for the session (``trading.risk.identity_sizing``: read once
+at the session's start from the size store, else the reviewed baseline; 1 for
+a shadow name) times the AI day manager's narrowing for that setup (1 when the
 pipeline is unmanaged, when the review did not PROPOSE, or when no setup
-formed). A sendable identity without a sizing row has no factor (``None``):
-its decisions are blocked with ``identity_sizing_missing``.
+formed). A sendable identity with no size for the session (no baseline row, no
+ceiling, an unreadable size store) has no factor (``None``): its decisions are
+blocked with ``identity_sizing_missing``.
+
+Version 2 (P3-F, owner decision D3) adds the decision's realism, read from the
+same inputs the pipeline assessed (``CandidateInput.bars`` and ``.quote``):
+the trade intent's ``quantity``, the ``bar_volume`` of the newest completed
+bar, ``size_pct_of_bar_volume`` (quantity / bar volume x 100) and the quote's
+``spread_bps``, with two flags at pinned thresholds (open item O4):
+``size_above_bar_volume_pct`` (above ``SIZE_ABOVE_BAR_VOLUME_PCT`` = 1 %) and
+``spread_above_bps`` (above ``SPREAD_ABOVE_BPS`` = 50 bps). A field the inputs
+do not give (no intent, no bar, no quote) is ``None``, never guessed. Readers
+accept version 1 lines (no realism fields) and version 2 lines.
 
 Why a sidecar and not a field of the decision: a decision's stored payload is
 fingerprinted content. The golden decisions (``tests/test_setup_persistence.py``)
@@ -19,17 +31,19 @@ after the decision is recorded, to ``<database stem>-decision-sizing/<run>.jsonl
 next to the database whose decisions it annotates, keyed by decision id.
 
 The record is evidence only. Nothing reads it back into a decision, an order
-or an authority; a failed write is logged by the pipeline and never blocks or
-alters a decision. Decisions recorded before the sidecar existed derive their
-multiplier from their run's ``source_sha`` (``trading.research.size_history``).
+or an authority, and no gate reads a realism flag; a failed write is logged by
+the pipeline and never blocks or alters a decision. Decisions recorded before
+the sidecar existed derive their multiplier from their run's ``source_sha``, or,
+for a run at or after the size store's install, from the store's events
+(``trading.research.size_history``).
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from functools import partial
 from hashlib import sha256
 import json
@@ -40,11 +54,23 @@ import stat
 import threading
 from typing import Any, TypeVar
 
-from trading.contracts import Decision
+from trading.contracts import CompletedBar, Decision, QuoteSnapshot
 from trading.operations.paths import FILE_MODE, ensure_private_directory
 
 SIZING_SCHEMA = "autotrader-v1/decision-sizing"
-SIZING_VERSION = 1
+# Version 2 (P3-F) adds the realism fields; a reader accepts every version
+# listed here, and a line of any other version is not evidence.
+SIZING_VERSION = 2
+SIZING_READ_VERSIONS = frozenset({1, 2})
+# Realism flags (owner decision D3, defaults O4 of the P2/P3 plan), pinned by a
+# test: evidence for the nightly reports, never a gate.
+SIZE_ABOVE_BAR_VOLUME_PCT = Decimal("1")  # the order is more than 1 % of its bar's volume
+SPREAD_ABOVE_BPS = Decimal("50")  # the quote's spread is wider than 50 basis points
+_PCT_QUANTUM = Decimal("0.0001")
+_BPS_QUANTUM = Decimal("0.01")
+_REALISM_FIELDS = ("quantity", "bar_volume", "spread_bps")
+# Derived keys a v2 line must agree with, recomputed from its own fields.
+_DERIVED_V2 = ("size_pct_of_bar_volume", "size_above_bar_volume_pct", "spread_above_bps")
 SIZING_DIRECTORY_SUFFIX = "-decision-sizing"
 SIZING_FILE_SUFFIX = ".jsonl"
 # A run's file holds one short line per decision; anything larger is not ours.
@@ -86,9 +112,38 @@ def _factor(value: object, name: str, *, optional: bool = False) -> Decimal | No
     return result
 
 
+def _measure(value: object, name: str) -> Decimal | None:
+    """A non-negative finite Decimal (a volume, a spread), or None when not recorded."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} is not a decimal")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{name} is not a decimal") from exc
+    if not result.is_finite() or result < _ZERO:
+        raise ValueError(f"{name} must be a finite decimal >= 0")
+    return result
+
+
+def _quantity(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("quantity must be a positive whole number of shares")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class DecisionSizing:
-    """One decision's size factors, exactly as the pipeline applied them."""
+    """One decision's size factors, exactly as the pipeline applied them, and its realism.
+
+    ``quantity`` (the trade intent's shares), ``bar_volume`` (the newest
+    completed bar's volume, in shares) and ``spread_bps`` (the quote's spread,
+    in basis points of its midpoint) are version 2 fields; a version 1 record
+    has none of them.
+    """
 
     decision_id: str
     run_id: str
@@ -101,6 +156,10 @@ class DecisionSizing:
     identity_factor: Decimal | None
     managed_factor: Decimal
     decided_at: datetime
+    quantity: int | None = None
+    bar_volume: Decimal | None = None
+    spread_bps: Decimal | None = None
+    version: int = SIZING_VERSION
 
     def __post_init__(self) -> None:
         for name in ("decision_id", "run_id", "candidate_id", "strategy_id", "strategy_name", "outcome"):
@@ -112,6 +171,13 @@ class DecisionSizing:
         _factor(self.managed_factor, "managed_factor")
         if self.decided_at.tzinfo is None or self.decided_at.utcoffset() is None:
             raise ValueError("decided_at must be timezone-aware")
+        if type(self.version) is not int or self.version not in SIZING_READ_VERSIONS:
+            raise ValueError(f"decision-sizing version {self.version!r} is not one this code reads")
+        if self.version < 2 and any(getattr(self, name) is not None for name in _REALISM_FIELDS):
+            raise ValueError("a version 1 record has no realism fields")
+        _quantity(self.quantity)
+        _measure(self.bar_volume, "bar_volume")
+        _measure(self.spread_bps, "spread_bps")
 
     @property
     def size_multiplier_effective(self) -> Decimal | None:
@@ -120,11 +186,37 @@ class DecisionSizing:
             return None
         return self.identity_factor * self.managed_factor
 
+    @property
+    def size_pct_of_bar_volume(self) -> Decimal | None:
+        """The order's shares as a percentage of its bar's volume (shares / volume x 100).
+
+        ``None`` without an intent, without a bar, or on a bar with no volume.
+        """
+        if self.quantity is None or self.bar_volume is None or self.bar_volume == _ZERO:
+            return None
+        return (Decimal(self.quantity) * 100 / self.bar_volume).quantize(_PCT_QUANTUM, rounding=ROUND_HALF_EVEN)
+
+    @property
+    def size_above_bar_volume_pct(self) -> bool | None:
+        """More than ``SIZE_ABOVE_BAR_VOLUME_PCT`` of the bar's volume; any order is, on a bar with
+        no volume at all. ``None`` without an intent or a bar."""
+        if self.quantity is None or self.bar_volume is None:
+            return None
+        share = self.size_pct_of_bar_volume
+        return True if share is None else share > SIZE_ABOVE_BAR_VOLUME_PCT
+
+    @property
+    def spread_above_bps(self) -> bool | None:
+        """A spread wider than ``SPREAD_ABOVE_BPS``; ``None`` without a quote."""
+        if self.spread_bps is None:
+            return None
+        return self.spread_bps > SPREAD_ABOVE_BPS
+
     def payload(self) -> dict[str, object]:
         effective = self.size_multiplier_effective
-        return {
+        record: dict[str, object] = {
             "schema": SIZING_SCHEMA,
-            "version": SIZING_VERSION,
+            "version": self.version,
             "decision_id": self.decision_id,
             "run_id": self.run_id,
             "candidate_id": self.candidate_id,
@@ -138,12 +230,33 @@ class DecisionSizing:
             "size_multiplier_effective": None if effective is None else _plain(effective),
             "decided_at": self.decided_at.isoformat(),
         }
+        if self.version >= 2:
+            share = self.size_pct_of_bar_volume
+            record |= {
+                "quantity": self.quantity,
+                "bar_volume": None if self.bar_volume is None else _plain(self.bar_volume),
+                "size_pct_of_bar_volume": None if share is None else _plain(share),
+                "size_above_bar_volume_pct": self.size_above_bar_volume_pct,
+                "spread_bps": None if self.spread_bps is None else _plain(self.spread_bps),
+                "spread_above_bps": self.spread_above_bps,
+            }
+        return record
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> DecisionSizing:
-        """The record a line holds; a line that is not exactly one raises ``ValueError``."""
-        if payload.get("schema") != SIZING_SCHEMA or payload.get("version") != SIZING_VERSION:
-            raise ValueError("not a decision-sizing record of this version")
+        """The record a line holds; a line that is not exactly one raises ``ValueError``.
+
+        Version 1 lines (factors only) and version 2 lines (factors and realism)
+        are read; any other version, or a bool or float where the version should
+        be, is not evidence.
+        """
+        line_version = payload.get("version")
+        if (
+            payload.get("schema") != SIZING_SCHEMA
+            or type(line_version) is not int
+            or line_version not in SIZING_READ_VERSIONS
+        ):
+            raise ValueError("not a decision-sizing record of a version this code reads")
         version = payload.get("strategy_version")
         if isinstance(version, bool) or not isinstance(version, int) or version < 1:
             raise ValueError("strategy_version must be a positive integer")
@@ -166,11 +279,26 @@ class DecisionSizing:
             identity_factor=_factor(payload.get("identity_factor"), "identity_factor", optional=True),
             managed_factor=_factor(payload.get("managed_factor"), "managed_factor"),  # type: ignore[arg-type]
             decided_at=decided_at,
+            version=line_version,
+            **(
+                {
+                    "quantity": _quantity(payload.get("quantity")),
+                    "bar_volume": _measure(payload.get("bar_volume"), "bar_volume"),
+                    "spread_bps": _measure(payload.get("spread_bps"), "spread_bps"),
+                }
+                if line_version >= 2
+                else {}
+            ),
         )
-        # The stored product must be the product of the stored factors: a line
-        # that disagrees with itself is not evidence.
-        if record.payload()["size_multiplier_effective"] != payload.get("size_multiplier_effective"):
+        # The stored product must be the product of the stored factors, and a v2
+        # line's share of volume and flags what its own fields give: a line that
+        # disagrees with itself is not evidence.
+        mine = record.payload()
+        if mine["size_multiplier_effective"] != payload.get("size_multiplier_effective"):
             raise ValueError("size_multiplier_effective is not identity x managed")
+        for key in _DERIVED_V2 if line_version >= 2 else ():
+            if mine[key] != payload.get(key) or type(mine[key]) is not type(payload.get(key)):
+                raise ValueError(f"{key} is not what the record's own fields give")
         return record
 
 
@@ -181,7 +309,16 @@ def decision_sizing(
     sendable: bool,
     identity_factor: Decimal | None,
     managed_factor: Decimal,
+    bars: Sequence[CompletedBar] = (),
+    quote: QuoteSnapshot | None = None,
 ) -> DecisionSizing:
+    """The sidecar record of ``decision``: its factors and the realism of its inputs.
+
+    ``bars`` and ``quote`` are the inputs the pipeline assessed
+    (``CandidateInput.bars`` and ``.quote``); the decision itself is only read.
+    """
+    intent = decision.risk.intent if decision.risk is not None else None
+    newest = max(bars, key=lambda bar: bar.interval_end_utc) if bars else None
     return DecisionSizing(
         decision_id=decision.id,
         run_id=decision.run_id,
@@ -194,6 +331,10 @@ def decision_sizing(
         identity_factor=identity_factor,
         managed_factor=managed_factor,
         decided_at=decision.created_at,
+        quantity=None if intent is None else intent.quantity,
+        bar_volume=None if newest is None else newest.volume,
+        # One implementation of the spread: the quote's own (ask - bid) / midpoint x 10000.
+        spread_bps=None if quote is None else quote.spread_bps.quantize(_BPS_QUANTUM, rounding=ROUND_HALF_EVEN),
     )
 
 
@@ -356,11 +497,14 @@ def read_decision_sizing(directory: Path) -> SizingIndex:
 
 __all__ = [
     "MAX_SIZING_FILE_BYTES",
+    "SIZE_ABOVE_BAR_VOLUME_PCT",
     "SIZING_DIRECTORY_SUFFIX",
+    "SIZING_READ_VERSIONS",
     "SIZING_RECORD_DEADLINE_S",
     "SIZING_SCHEMA",
     "SIZING_SIDECAR_DISABLED",
     "SIZING_VERSION",
+    "SPREAD_ABOVE_BPS",
     "DecisionSizing",
     "SizingFileRefused",
     "SizingIndex",
