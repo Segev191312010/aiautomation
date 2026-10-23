@@ -58,6 +58,13 @@ would fence <ID>: <trigger>`` and returns ``WOULD_FENCE``, and the phone gets
 day (its own memory key). Live (True), every row, reason and text is as it was
 before the switch existed.
 
+No-limit PAPER test L-T1 (owner, 2026-10-23; ``trading.risk.no_limit_test``):
+for the test window the switch is False again (the Sentinel logs and pages
+"would stop", it writes no row) and its caps mirror follows the bridge's
+uncapped table (every identity ``None``: the daily-loss trigger is the
+uncapped ``UNCAPPED_LOSS_R`` for all four). An import tripwire refuses either
+value while it disagrees with the mode; ``deploy undo`` restores v7c's.
+
 A Sentinel that cannot see is loud, and never fences: inside the bridge's own
 window (09:25 ET to 5 minutes before the close) an unreadable state file, no
 state file 5 minutes into the window, or no update (state file or heartbeat)
@@ -106,6 +113,7 @@ from typing import Any, Protocol
 
 from trading.research.live_ledger import STATE_SCHEMA_PREFIX, LiveLedger, LiveTrade, read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
+from trading.risk.no_limit_test import NO_LIMIT_TEST, NO_LIMIT_TEST_LABEL
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import FenceRow, KeepRow
 
@@ -130,8 +138,10 @@ WATCH_FROM = time(9, 25)
 WATCH_UNTIL_BEFORE_CLOSE = timedelta(minutes=5)
 # max_entries_per_day per sendable identity, as the pinned bridge's IDENTITY_CAPS
 # has them (a test loads the bridge and pins the two equal; None = uncapped).
+# No-limit test L-T1: the bridge's rows are uncapped (Caps(None, None, offset)),
+# so every row here is None (v7c's were MOMO None, ORB 1, VWAP 2, GAP 1).
 MAX_ENTRIES_PER_DAY: Mapping[str, int | None] = MappingProxyType(
-    {"MOMO_HOD_V2": None, "ORB_V2": 1, "VWAP_PB_V2": 2, "GAP_GO_V2": 1}
+    {"MOMO_HOD_V2": None, "ORB_V2": None, "VWAP_PB_V2": None, "GAP_GO_V2": None}
 )
 # A sendable identity without a row above (a test refuses that) is held to the
 # tightest capped limit: risk-reducing, never wider.
@@ -144,7 +154,19 @@ MAX_STATE_BYTES = 5 * 1024 * 1024
 # instead). It went live in P1-B.4, on the owner's decision after reviewing the
 # 🔎 WOULD_FENCE lines: True writes the ``paper:<IDENTITY>`` stop row. It changes
 # only through a reviewed one-line change of this constant, never otherwise.
-SENTINEL_FENCES_LIVE = True
+# No-limit test L-T1 (owner, 2026-10-23): False again for the test window, the
+# Sentinel logs only ("Sentinel (logs only)", plan v2 item 2); deploy undo
+# restores v7c's True.
+SENTINEL_FENCES_LIVE = False
+
+# Mode on: log-only and uncapped; mode off: live with v7c's caps. A half-on build
+# (one of the two values left behind) cannot start.
+_UNCAPPED = all(entries is None for entries in MAX_ENTRIES_PER_DAY.values())
+if not ((not SENTINEL_FENCES_LIVE and _UNCAPPED) if NO_LIMIT_TEST else (SENTINEL_FENCES_LIVE and not _UNCAPPED)):
+    raise RuntimeError(
+        f"no-limit test {NO_LIMIT_TEST_LABEL} is {'on' if NO_LIMIT_TEST else 'off'} but the Sentinel is"
+        f" {'live' if SENTINEL_FENCES_LIVE else 'log-only'} with caps {dict(MAX_ENTRIES_PER_DAY)}"
+    )
 
 REASON_PREFIX = "sentinel: "
 DAILY_LOSS = "daily loss"

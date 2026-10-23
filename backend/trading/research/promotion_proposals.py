@@ -76,6 +76,7 @@ from trading.research.size_history import (
     read_size_steps,
 )
 from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+from trading.risk.no_limit_test import NO_LIMIT_TEST, NO_LIMIT_TEST_LABEL
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.decision_sizing import SizingIndex, read_decision_sizing, sizing_directory
 from trading.storage.migrations import SCHEMA_READ_TIMEOUT_SECONDS
@@ -94,7 +95,13 @@ DEMOTION_MIN_TRADES = 10
 # step above current sizes. True since the bridge v7c change (plan P3-B1), in the
 # same commit that pins that bridge: a tripwire test ties it to the pinned bridge's
 # DAY_RISK_BUDGET_PCT, so it can never be True for a bridge without the budget.
-OPEN_RISK_TERM_DEPLOYED = True
+# No-limit test L-T1 (owner, 2026-10-23): the bridge computes and logs the 3 %
+# budget but never blocks on it, so the term is not enforced and the gate is
+# False (the tie test adds "and not the bridge's NO_LIMIT_TEST").
+OPEN_RISK_TERM_DEPLOYED = False
+if NO_LIMIT_TEST and OPEN_RISK_TERM_DEPLOYED:
+    # The budget is not enforced under the test: no size-up may be proposed.
+    raise RuntimeError(f"no-limit test {NO_LIMIT_TEST_LABEL} is on but the open-risk gate is open")
 
 # Statuses and named tokens.
 PROPOSED = "proposed"

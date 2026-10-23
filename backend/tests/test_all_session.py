@@ -470,10 +470,11 @@ def test_v2_reviews_use_prompts_written_for_their_rules_and_the_per_run_budget()
     assert "between 09:35 and 15:30 ET (12:30 on a half day)" in GAP_REVIEW_V2
     # gap-review-v1 states the V1 window, which would contradict a V2 setup.
     assert "between 09:35 and 10:30 ET" in REVIEW_PROMPTS["gap-review-v1"]
-    # The review keeps its per-run limits, 20 calls and $5, pinned by the
-    # runtime config every strategy run reads (no per-strategy override).
-    assert ShadowRuntimeConfig.model_fields["max_ai_calls"].default == 20
-    assert ShadowRuntimeConfig.model_fields["max_ai_cost_usd"].default == Decimal("5")
+    # The review keeps its per-run limits, pinned by the runtime config every
+    # strategy run reads (no per-strategy override). Rewritten for the no-limit test
+    # L-T1 (explicit, not weakened): 100 calls and $25 per run (owner, 2026-10-23).
+    assert ShadowRuntimeConfig.model_fields["max_ai_calls"].default == 100
+    assert ShadowRuntimeConfig.model_fields["max_ai_cost_usd"].default == Decimal("25")
 
 
 def test_v2_runs_record_their_rules_and_window_apart_and_v1_runs_are_unchanged():
@@ -647,7 +648,9 @@ async def test_each_v2_session_gets_its_universe_and_bars_like_its_v1(monkeypatc
     assert (captured["runner"]["bars_fetcher"] is not None) is gap_bars
     assert (captured["run"]["candidate_refresh"] is not None) is dynamic
     assert captured["prompt"] == REVIEW_PROMPTS[STRATEGIES[key][2]]
-    assert (captured["limits"].max_calls, captured["limits"].max_cost_usd) == (20, Decimal("5"))
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): every run's AI cap is
+    # 100 calls / $25 (owner, 2026-10-23; it was 20 / $5), from the runtime config.
+    assert (captured["limits"].max_calls, captured["limits"].max_cost_usd) == (100, Decimal("25"))
     candidate_source = captured["run"]["candidate_source"]
     if source is None:
         assert candidate_source is None  # ORB keeps its 09:45 IBKR scan

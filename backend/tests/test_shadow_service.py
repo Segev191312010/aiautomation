@@ -345,14 +345,23 @@ async def _pipeline_keywords(monkeypatch, strategy_name: str) -> tuple[dict[str,
     return keywords, str(captured["spec_name"])
 
 
+@pytest.mark.parametrize("table", ["shipped", "v7c"])
 @pytest.mark.parametrize("strategy_name", sorted(shadow_service.STRATEGIES))
-async def test_every_session_builds_its_pipeline_with_its_identity_size_factor(monkeypatch, strategy_name):
+async def test_every_session_builds_its_pipeline_with_its_identity_size_factor(monkeypatch, strategy_name, table):
     """The first hop of the production path: run_shadow_session -> ShadowPipeline.
 
-    A sendable key gets its own row of the size table (ORB_V2 0.25, VWAP_PB_V2 and
+    A sendable key gets its own row of the size table (v7c: ORB_V2 0.25, VWAP_PB_V2 and
     GAP_GO_V2 0.5, MOMO_HOD_V2 1); every shadow key gets exactly Decimal("1").
+
+    Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped table is
+    x1 for every row, so a session that sizes everything x1 would pass with it alone;
+    the same path also runs with v7c's table installed, whose rows below 1 catch that.
     """
-    from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+    from trading.risk import identity_sizing
+
+    if table == "v7c":
+        monkeypatch.setattr(identity_sizing, "IDENTITY_SIZE_MULTIPLIER", identity_sizing.V7C_SIZE_MULTIPLIER)
+    rows = identity_sizing.IDENTITY_SIZE_MULTIPLIER
 
     keywords, spec_name = await _pipeline_keywords(monkeypatch, strategy_name)
 
@@ -360,22 +369,24 @@ async def test_every_session_builds_its_pipeline_with_its_identity_size_factor(m
     factor = keywords["identity_multiplier"]
     assert type(factor) is Decimal
     if strategy_name in shadow_service.SENDABLE_KEYS:
-        assert factor == IDENTITY_SIZE_MULTIPLIER[spec_name]
+        assert factor == rows[spec_name]
     else:
-        assert spec_name not in IDENTITY_SIZE_MULTIPLIER
+        assert spec_name not in rows
         assert factor == Decimal("1")
 
 
 def test_the_factor_check_covers_every_sendable_key_and_a_shadow_key():
-    from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+    from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, V7C_SIZE_MULTIPLIER
 
     keys = set(shadow_service.STRATEGIES)
     assert shadow_service.SENDABLE_KEYS <= keys
     assert keys - shadow_service.SENDABLE_KEYS  # at least one shadow key is checked for x1
     rows = {shadow_service.STRATEGIES[key][1]().name for key in shadow_service.SENDABLE_KEYS}
-    assert rows == set(IDENTITY_SIZE_MULTIPLIER)
+    assert rows == set(IDENTITY_SIZE_MULTIPLIER) == set(V7C_SIZE_MULTIPLIER)
     # At least one sendable row is below 1, so a session that sizes everything x1 is caught.
-    assert min(IDENTITY_SIZE_MULTIPLIER.values()) < Decimal("1")
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped table is x1
+    # throughout; the factor check also runs on v7c's table, which has rows below 1.
+    assert min(V7C_SIZE_MULTIPLIER.values()) < Decimal("1")
 
 
 async def test_a_sendable_session_without_a_size_row_passes_none_never_one(monkeypatch):

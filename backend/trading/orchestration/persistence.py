@@ -30,6 +30,7 @@ from trading.data import (
 from trading.orchestration.pipeline import (
     Assessment,
     CandidateInput,
+    Evaluation,
     ShadowPipeline,
     entry_cutoff_utc,
 )
@@ -550,6 +551,9 @@ class ShadowRunSession:
         self._candidate_repository = candidate_repository
         self._dynamic = dynamic
         self._rank_cap_logged = False
+        # Candidates evaluated to a decision that is not recorded yet (their
+        # review may be in flight): never evaluated again until concluded.
+        self._deciding: set[str] = set()
 
     @property
     def dynamic(self) -> bool:
@@ -657,14 +661,37 @@ class ShadowRunSession:
         portfolio: PortfolioSnapshot,
         now: datetime | None = None,
     ) -> Assessment:
+        """``evaluate``, ``review`` and ``conclude`` in a row (one candidate, serially)."""
+        evaluation = await self.evaluate(item, portfolio=portfolio, now=now)
+        return await self.conclude(await self.review(evaluation))
+
+    async def evaluate(
+        self,
+        item: CandidateInput,
+        *,
+        portfolio: PortfolioSnapshot,
+        now: datetime | None = None,
+    ) -> Evaluation:
+        """The strategy's verdict on one materialized candidate; records nothing.
+
+        An evaluation that will record a decision marks its candidate as being
+        decided until ``conclude`` (or ``release``): evaluating it again before
+        then is refused, so concurrent reviews can never create two decisions
+        for one candidate (the decisions table's ``candidate_id UNIQUE`` is the
+        last line, not the first).
+        """
         candidate = self._candidates.get(item.candidate.id)
         if candidate is None or candidate != item.candidate:
             raise ShadowPersistenceConflictError(
                 "assessed candidate is not part of the materialized scanner run"
             )
+        if candidate.id in self._deciding:
+            raise ShadowPersistenceConflictError(
+                f"candidate {candidate.id} is already being decided"
+            )
         observed = _utc(now or self._clock())
         await self._heartbeat.require(now=observed)
-        assessment = await self._pipeline.assess_one(
+        evaluation = await self._pipeline.evaluate(
             run_id=self.run.id,
             strategy=self._strategy,
             item=item,
@@ -675,10 +702,34 @@ class ShadowRunSession:
             now=observed,
             prior=self._decisions.get(candidate.id),
         )
+        if evaluation.decides:
+            self._deciding.add(candidate.id)
+        return evaluation
+
+    async def review(self, evaluation: Evaluation) -> Evaluation:
+        """The AI review of the evaluation's setup; records nothing."""
+        return await self._pipeline.review(evaluation)
+
+    async def conclude(self, evaluation: Evaluation) -> Assessment:
+        """Make and record the evaluation's decision (exactly one per candidate)."""
+        candidate_id = evaluation.candidate_id
+        try:
+            if evaluation.decides and candidate_id in self._decisions:
+                raise ShadowPersistenceConflictError(
+                    f"candidate {candidate_id} already has a decision"
+                )
+            assessment = await self._pipeline.conclude(evaluation)
+        finally:
+            self.release(evaluation)
         if assessment.decision is not None:
-            self._decisions[candidate.id] = assessment.decision
+            self._decisions[candidate_id] = assessment.decision
             await self._complete_if_done()
         return assessment
+
+    def release(self, evaluation: Evaluation) -> None:
+        """Forget an evaluation that will not be concluded (its poll was abandoned)."""
+        if evaluation.decides:
+            self._deciding.discard(evaluation.candidate_id)
 
     async def finalize(
         self,

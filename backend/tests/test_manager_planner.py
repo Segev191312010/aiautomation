@@ -358,9 +358,12 @@ async def test_the_context_pack_reads_only_the_database_and_carries_no_headlines
     assert pack.offered == {4931, 76792991, 265598, 272093}
     assert 8314 in pack.known and 8314 not in pack.offered
     assert pack.gates.kill_switch and pack.gates.day_stop and pack.gates.risk_off
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the bridge has no
+    # MOMO position cap in the test, so there is no slot count (None); slots_used still counts.
+    assert BRIDGE_MAX_OPEN is None
     assert pack.bridge == {
         "available": True, "realized_pnl_usd": "-325.09", "active": ["TSLA"],
-        "slots_used": 1, "slots_free": BRIDGE_MAX_OPEN - 1, "day_stop": True,
+        "slots_used": 1, "slots_free": None, "day_stop": True,
     }
     payload = pack.payload()
     assert set(payload) == {
@@ -444,12 +447,15 @@ async def _none():
     return None
 
 
-def test_the_bridge_slot_count_is_the_pinned_bridges():
+def test_the_bridge_slot_count_is_the_pinned_bridges(monkeypatch):
     from pathlib import Path
     import re
 
     import importlib.util
     import sys
+
+    from tests.no_limit_support import T1_BRIDGE_CAPS, V7C_MANAGER_MAX_OPEN, pinned_bridge_mode
+    from trading.manager import context as manager_context
 
     # The manager narrows MOMO_HOD_V2, so its slot count is that identity's own
     # position cap in the pinned bridge (bridge v7a: IDENTITY_CAPS), not the
@@ -459,7 +465,20 @@ def test_the_bridge_slot_count_is_the_pinned_bridges():
     bridge = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = bridge
     spec.loader.exec_module(bridge)
-    assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped cap is
+    # None, the bridge's T1 MOMO row (Caps(None, None, 60m)). Until builder B's T1-2
+    # bridge is merged the pinned bridge is v7c's (3): the shipped value is then checked
+    # against the T1 table B ships and v7c's against the v7c bridge; after, the bridge's.
+    if pinned_bridge_mode(bridge) is None:
+        assert BRIDGE_MAX_OPEN == T1_BRIDGE_CAPS["MOMO_HOD_V2"][0]
+        assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == V7C_MANAGER_MAX_OPEN
+    else:
+        assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
+    assert BRIDGE_MAX_OPEN is None
+    # The cap, when there is one (v7c's), still becomes the free-slot count.
+    monkeypatch.setattr(manager_context, "BRIDGE_MAX_OPEN", V7C_MANAGER_MAX_OPEN)
+    one_open = ({"symbol": "AAA", "status": "open", "strategy_name": "MOMO_HOD_V2", "realized_pnl": "0"},)
+    assert bridge_summary(one_open, None)["slots_free"] == V7C_MANAGER_MAX_OPEN - 1
     assert re.search(r"^MAX_OPEN\s*=", (path.read_text(encoding="utf-8")), re.MULTILINE) is None
     assert bridge_summary((), "bridge state unreadable (OSError)") == {
         "available": False, "problem": "bridge state unreadable (OSError)",
@@ -713,6 +732,8 @@ def test_only_the_managed_identitys_brackets_occupy_its_slots():
     )
     summary = bridge_summary(trades, None)
     assert summary["active"] == ["AAA", "DDD"]  # ORB_V2's working entry is not MOMO's slot
-    assert summary["slots_used"] == 2 and summary["slots_free"] == BRIDGE_MAX_OPEN - 2
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): no MOMO cap, no
+    # free-slot count; the slots used are counted exactly as before.
+    assert summary["slots_used"] == 2 and summary["slots_free"] is None
     assert summary["realized_pnl_usd"] == "-12.5"  # the loss is account-wide
     assert summary["day_stop"] is True

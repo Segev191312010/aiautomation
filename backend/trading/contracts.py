@@ -92,8 +92,12 @@ class ShadowRuntimeConfig(BaseModel):
     commission_policy_id: str = Field(min_length=1, max_length=128)
     commission_policy_version: int = Field(ge=1)
     max_candidates: Literal[20] = 20
-    max_ai_calls: Literal[20] = 20
-    max_ai_cost_usd: Decimal = Decimal("5")
+    # The AI review cap per strategy run: 100 calls / $25 for the no-limit PAPER
+    # test L-T1 (owner, 2026-10-23; it was 20 / $5). trading.risk.no_limit_test
+    # refuses to import while these disagree with its mode, and settings.py
+    # builds the same values (a test loads a config through it).
+    max_ai_calls: Literal[100] = 100
+    max_ai_cost_usd: Decimal = Decimal("25")
 
     @field_validator(
         "paper_account_id",
@@ -113,8 +117,8 @@ class ShadowRuntimeConfig(BaseModel):
     @field_validator("max_ai_cost_usd")
     @classmethod
     def validate_ai_cost_limit(cls, value: Decimal) -> Decimal:
-        if not value.is_finite() or value != Decimal("5"):
-            raise ValueError("shadow AI session cost limit must be exactly 5 USD")
+        if not value.is_finite() or value != Decimal("25"):
+            raise ValueError("shadow AI session cost limit must be exactly 25 USD")
         return value
 
     @model_validator(mode="after")
@@ -1075,7 +1079,11 @@ class RiskPolicy(BaseModel):
 
     id: str = "moderate-pilot"
     version: int = Field(default=1, ge=1)
-    max_open_positions: int = Field(default=3, ge=1, le=3)
+    # The default stays 3 (its fingerprint, and every earlier run's evidence
+    # identity, unchanged). The bound is 50 = persistence.MAX_CANDIDATE_RANK, the
+    # most candidates one run holds, so the no-limit test policy
+    # (trading.risk.no_limit_test, max 50) is valid and can never bind a run.
+    max_open_positions: int = Field(default=3, ge=1, le=50)
     max_risk_per_trade_pct: Decimal = Field(default=Decimal("0.5"), gt=0, le=Decimal("0.5"))
     max_daily_loss_pct: Decimal = Field(default=Decimal("2"), gt=0, le=Decimal("2"))
     max_position_notional_pct: Decimal = Field(default=Decimal("15"), gt=0, le=Decimal("20"))

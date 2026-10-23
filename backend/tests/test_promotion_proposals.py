@@ -114,7 +114,10 @@ def test_the_rule_its_ladder_and_the_v7c_gate_are_pinned():
     # Owner decision 2026-10-15: no step above current sizes before v7c is deployed.
     # Rewritten for v7c (explicit, not weakened): the gate ships True with the pinned v7c bridge, and
     # test_the_open_risk_gate_follows_the_pinned_bridge ties it to that bridge's budget constant.
-    assert OPEN_RISK_TERM_DEPLOYED is True
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the bridge computes and logs
+    # the 3 % budget but never blocks on it, so the term is not enforced and the gate ships False;
+    # the tie test adds "and not the bridge's NO_LIMIT_TEST".
+    assert OPEN_RISK_TERM_DEPLOYED is False
 
 
 def test_eligible_evidence_is_held_while_the_open_risk_term_is_not_deployed():
@@ -362,7 +365,11 @@ async def test_the_promoter_reads_the_ledger_the_sidecar_and_the_bridge_and_writ
     assert proposals.lines()[-4] == "MOMO_HOD_V2 ×1: probation 1/5; at the ×1 ceiling"
 
 
-def test_the_nightly_job_writes_proposals_and_the_weekly_text_carries_them(night):  # noqa: F811
+def test_the_nightly_job_writes_proposals_and_the_weekly_text_carries_them(night, monkeypatch):  # noqa: F811
+    # With v7c's sizes, as this test was written: the no-limit test L-T1 ships every identity
+    # at x1 (each then at the x1 ceiling); the weekly text's lines for the fractional rungs are
+    # what deploy undo restores. The shipped T1 sizes are pinned in test_no_limit_test_mode.
+    monkeypatch.setattr(promoter, "IDENTITY_SIZE_MULTIPLIER", identity_sizing.V7C_SIZE_MULTIPLIER)
     assert run_replay_cli([], notify="weekly", environment=_environment(night, _et(TUESDAY, 17, 40))) == 0
     (summary,) = night["sent"]
     evidence = summary.split("\n\n")[0].splitlines()
@@ -381,8 +388,9 @@ def test_the_nightly_job_writes_proposals_and_the_weekly_text_carries_them(night
     directory = night["root"] / "reports" / "2026-10-12"
     document = json.loads((directory / "proposals.json").read_text())
     # Rewritten for v7c (explicit, not weakened): the document reports the shipped gate, True since v7c.
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped gate is False.
     assert (document["mode"], document["open_risk_term_deployed"], document["rule"]) == (
-        "propose", True, "promotion-proposals-v1",
+        "propose", False, "promotion-proposals-v1",
     )
     assert [item["status"] for item in document["identities"]] == [
         "at_ceiling", "not_eligible", "not_eligible", "not_eligible",
@@ -554,4 +562,15 @@ def test_the_open_risk_gate_follows_the_pinned_bridge():
         spec.loader.exec_module(bridge)
     finally:
         sys.modules.pop(spec.name, None)
-    assert promoter.OPEN_RISK_TERM_DEPLOYED is (bridge.DAY_RISK_BUDGET_PCT == Decimal("3"))
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the gate is open only for a
+    # bridge that has the 3 % budget AND enforces it, i.e. is not in the no-limit test. Builder B's
+    # T1-2 bridge carries its own NO_LIMIT_TEST; until it is merged the pinned bridge is v7c's, which
+    # has none, and the upstream switch stands in for it (only that v7c bridge may lack it).
+    from tests.no_limit_support import pinned_bridge_mode
+    from trading.risk.no_limit_test import NO_LIMIT_TEST
+
+    mode = pinned_bridge_mode(bridge)
+    if mode is None:
+        mode = NO_LIMIT_TEST
+    assert mode is NO_LIMIT_TEST  # the bridge and the upstream switch agree
+    assert promoter.OPEN_RISK_TERM_DEPLOYED is (bridge.DAY_RISK_BUDGET_PCT == Decimal("3") and not mode)

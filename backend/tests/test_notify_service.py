@@ -3934,6 +3934,11 @@ async def test_the_sentinel_fences_from_the_notifier_once_and_a_restart_keeps_it
 
     # The live auto-fence (P1-B.4's switch, shipped True since P1-B.4), pinned on explicitly.
     monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
+    # With v7c's caps mirror (ORB_V2 at 1.25 R): the no-limit test L-T1 ships the
+    # Sentinel log-only and uncapped; this protects the live path deploy undo restores.
+    from tests.no_limit_support import V7C_SENTINEL_MAX_ENTRIES_PER_DAY
+
+    monkeypatch.setattr(sentinel, "MAX_ENTRIES_PER_DAY", V7C_SENTINEL_MAX_ENTRIES_PER_DAY)
     paths = await _notify_day(tmp_path, monkeypatch)
     _write_bridge_state(paths, {
         "orb": _bracket("ABC", "closed", strategy="orb", strategy_name="ORB_V2", entry="50.00",
@@ -3975,7 +3980,13 @@ async def test_log_only_the_notifier_sends_one_would_fence_line_and_writes_no_fe
     from trading.operations import notify_service, sentinel
 
     # P1-B.4 (owner): the Sentinel ships live, so log-only is set explicitly here.
+    # (No-limit test L-T1 ships it log-only anyway; the pin stays explicit.)
     monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", False)
+    # With v7c's caps mirror (ORB_V2 at 1.25 R), as this test was written; the shipped
+    # T1 mirror (uncapped, 2 R) is driven by test_sentinel's shipped-T1 test.
+    from tests.no_limit_support import V7C_SENTINEL_MAX_ENTRIES_PER_DAY
+
+    monkeypatch.setattr(sentinel, "MAX_ENTRIES_PER_DAY", V7C_SENTINEL_MAX_ENTRIES_PER_DAY)
     caplog.set_level(logging.INFO, logger="autotrader.shadow")
     paths = await _notify_day(tmp_path, monkeypatch)
     _write_bridge_state(paths, {

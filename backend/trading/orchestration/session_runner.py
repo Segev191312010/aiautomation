@@ -35,6 +35,7 @@ from trading.contracts import (
     StrategyState,
     fingerprint_payload,
 )
+from trading.intelligence.review_provider import REVIEW_POOL_SIZE
 from trading.market.ibkr_boundary import (
     DEFAULT_SCANNER_REQUEST,
     MARKET_DATA_FAULTS,
@@ -43,7 +44,7 @@ from trading.market.ibkr_boundary import (
     ScannerSnapshot,
 )
 from trading.orchestration.persistence import RepositoryBackedShadowRunner, ShadowRunSession
-from trading.orchestration.pipeline import CandidateInput
+from trading.orchestration.pipeline import Assessment, CandidateInput, Evaluation
 from trading.risk.portfolio import portfolio_from_account
 from trading.rules.orb import qualify_candidate
 from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
@@ -321,6 +322,68 @@ async def ensure_orb_strategy(*, owner_id: str) -> StrategyRecord:
     """Return the owner's ORB_V1 strategy, creating and promoting it to SHADOW."""
     return await ensure_strategy(owner_id=owner_id, spec=orb_strategy_spec())
 
+
+class OrderedDecisions:
+    """One poll's decisions: AI reviews concurrently, decisions in candidate order.
+
+    Owner, 2026-10-23 (plan v2 item 3b): the reviews of one poll run at once,
+    at most ``pool_size`` in flight (``REVIEW_POOL_SIZE``), each still one
+    PROPOSE/ABSTAIN per candidate. Each decision is then made and recorded only
+    after the decision of the candidate before it in the poll, so the recorded
+    order (``created_at``, which the bridge sends in) is the order a serial
+    poll records, and each approval's 15 s expiry starts when its decision is
+    made, never when its review started. A decision whose predecessor failed is
+    never made: the first failure ends the poll, as it ends a serial one.
+    """
+
+    def __init__(self, shadow: ShadowRunSession, *, pool_size: int) -> None:
+        if isinstance(pool_size, bool) or not isinstance(pool_size, int) or not 1 <= pool_size <= REVIEW_POOL_SIZE:
+            raise ValueError(f"the review pool holds 1 to {REVIEW_POOL_SIZE} reviews")
+        self._shadow = shadow
+        self._slots = asyncio.Semaphore(pool_size)
+        self._tasks: list[asyncio.Task[Assessment]] = []
+
+    def submit(self, evaluation: Evaluation, *, symbol: str | None = None) -> None:
+        """Decide ``evaluation`` after every decision submitted before it (a wait: nothing)."""
+        if not evaluation.decides:
+            return
+        previous = self._tasks[-1] if self._tasks else None
+        self._tasks.append(asyncio.create_task(self._decide(evaluation, previous, symbol)))
+
+    async def _decide(
+        self, evaluation: Evaluation, previous: asyncio.Task[Assessment] | None, symbol: str | None
+    ) -> Assessment:
+        try:
+            if evaluation.needs_review:
+                async with self._slots:
+                    evaluation = await self._shadow.review(evaluation)
+            if previous is not None:
+                # Shielded: this decision waits for its predecessor's, and a
+                # cancel of this one never cancels the one before it.
+                await asyncio.shield(previous)
+        except BaseException:
+            self._shadow.release(evaluation)
+            raise
+        assessment = await self._shadow.conclude(evaluation)
+        if symbol is not None and assessment.decision is not None:
+            logger.info("%s decided: %s", symbol, assessment.decision.outcome.value)
+        return assessment
+
+    async def drain(self) -> None:
+        """Wait for every decision of the poll; the first failure cancels the rest."""
+        try:
+            await asyncio.gather(*self._tasks)
+        except BaseException:
+            await self.abandon()
+            raise
+
+    async def abandon(self) -> None:
+        """Cancel every decision not yet made and wait until each has stopped."""
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
 class ShadowSessionRunner:
     """One trading day of real-data shadow decisions."""
 
@@ -340,6 +403,7 @@ class ShadowSessionRunner:
         bars_fetcher: BarsFetcher | None = None,
         contract_loader: ContractLoader | None = None,
         candidate_filter: CandidateFilter | None = None,
+        review_pool_size: int = REVIEW_POOL_SIZE,
     ) -> None:
         """``poll_schedule`` places every poll inside its bar (a required
         choice: children sharing symbols must not poll together).
@@ -349,9 +413,15 @@ class ShadowSessionRunner:
         loaded contract (a refresh, or a resumed run) still quote on their tick
         grid. ``candidate_filter`` skips candidates for a poll (they stay
         pending); a filter that raises admits every candidate, so a broken
-        filter can only fall back to the unfiltered run."""
+        filter can only fall back to the unfiltered run. ``review_pool_size``
+        bounds the AI reviews of one poll in flight at once (``OrderedDecisions``)."""
         if not isinstance(poll_schedule, PollSchedule):
             raise TypeError("poll_schedule must be a PollSchedule")
+        if isinstance(review_pool_size, bool) or not isinstance(review_pool_size, int) or not (
+            1 <= review_pool_size <= REVIEW_POOL_SIZE
+        ):
+            raise ValueError(f"review_pool_size must be 1 to {REVIEW_POOL_SIZE}")
+        self._review_pool_size = review_pool_size
         self._poll_schedule = poll_schedule
         self._market = market
         self._read_account = read_account
@@ -539,6 +609,38 @@ class ShadowSessionRunner:
             report.record_data_error(ACCOUNT_UNAVAILABLE)
             return
         eligible = shadow.candidates
+        # Data is fetched one candidate after another, as before; each review
+        # runs in the pool while the next candidate's data is fetched, and the
+        # decisions are made and recorded in this loop's order.
+        decisions = OrderedDecisions(shadow, pool_size=self._review_pool_size)
+        try:
+            await self._poll_candidates(
+                shadow=shadow,
+                session_date=session_date,
+                latest=latest,
+                liquidity=liquidity,
+                report=report,
+                portfolio=portfolio,
+                eligible=eligible,
+                decisions=decisions,
+            )
+        except BaseException:
+            await decisions.abandon()
+            raise
+        await decisions.drain()
+
+    async def _poll_candidates(
+        self,
+        *,
+        shadow: ShadowRunSession,
+        session_date: date,
+        latest: dict[str, CandidateInput],
+        liquidity: dict[int, LiquidityProfile],
+        report: SessionReport,
+        portfolio: PortfolioSnapshot,
+        eligible: tuple[Candidate, ...],
+        decisions: OrderedDecisions,
+    ) -> None:
         for candidate in shadow.pending():
             if not self._admitted(candidate, eligible):
                 continue
@@ -565,16 +667,18 @@ class ShadowSessionRunner:
                 average_dollar_volume=profile.average_dollar_volume,
             ):
                 # Price/liquidity rejection is decided before any bar request.
-                await shadow.assess(
-                    CandidateInput(
-                        candidate=candidate,
-                        bars=(),
-                        quote=None,
-                        reference_price=profile.reference_price,
-                        average_dollar_volume=profile.average_dollar_volume,
-                    ),
-                    portfolio=portfolio,
-                    now=self._now(),
+                decisions.submit(
+                    await shadow.evaluate(
+                        CandidateInput(
+                            candidate=candidate,
+                            bars=(),
+                            quote=None,
+                            reference_price=profile.reference_price,
+                            average_dollar_volume=profile.average_dollar_volume,
+                        ),
+                        portfolio=portfolio,
+                        now=self._now(),
+                    )
                 )
                 continue
             try:
@@ -598,8 +702,9 @@ class ShadowSessionRunner:
                 average_dollar_volume=profile.average_dollar_volume,
             )
             latest[candidate.id] = item
-            assessment = await shadow.assess(item, portfolio=portfolio, now=self._now())
-            if not assessment.needs_quote:
+            evaluation = await shadow.evaluate(item, portfolio=portfolio, now=self._now())
+            if not evaluation.needs_quote:
+                decisions.submit(evaluation)
                 continue
             try:
                 if self._contract_loader is not None:
@@ -619,11 +724,10 @@ class ShadowSessionRunner:
                 reference_price=profile.reference_price,
                 average_dollar_volume=profile.average_dollar_volume,
             )
-            outcome = await shadow.assess(quoted, portfolio=portfolio, now=self._now())
-            if outcome.decision is not None:
-                logger.info(
-                    "%s decided: %s", candidate.symbol, outcome.decision.outcome.value
-                )
+            decisions.submit(
+                await shadow.evaluate(quoted, portfolio=portfolio, now=self._now()),
+                symbol=candidate.symbol,
+            )
 
     def _admitted(self, candidate: Candidate, eligible: tuple[Candidate, ...]) -> bool:
         """The candidate filter's answer; no filter, or a failing one, admits."""
@@ -832,6 +936,7 @@ __all__ = [
     "CandidateRefresh",
     "ContractLoader",
     "EntryGate",
+    "OrderedDecisions",
     "PollSchedule",
     "SessionAborted",
     "SessionReport",

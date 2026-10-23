@@ -1,4 +1,26 @@
-"""Bounded AI review provider with no order or broker authority."""
+"""Bounded AI review provider with no order or broker authority.
+
+Reviews of one strategy run may run concurrently (owner, 2026-10-23, plan v2
+item 3b: the session runner keeps at most ``REVIEW_POOL_SIZE`` in flight).
+The run's cap is counted atomically across them:
+
+* a call is reserved under the provider's lock before it starts: the call
+  count and the in-flight count rise in one step, so ``max_calls`` is never
+  exceeded, however many reviews arrive at once;
+* each call in flight holds ``call_cost_reserve_usd`` of the budget until its
+  real cost replaces it, in one synchronous step (no await between them): a
+  call starts only while the spent cost plus every reservation, its own
+  included, stays within ``max_cost_usd``. The cap is never exceeded unless a
+  single call costs more than its reservation; such a call is logged, its
+  cost is counted, and a review that took the total over the cap is an
+  ABSTAIN (``budget_exceeded``), exactly as before;
+* every call's cost is added exactly once, and its reservation is released
+  exactly once, also when the review is cancelled;
+* a timeout, a 429 (the SDK's ``RateLimitError``) or any other provider error
+  is an ABSTAIN with no cost, never a retry and never rules-only approval.
+
+Nothing here orders or sizes; the AI only proposes or abstains.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -43,11 +65,22 @@ class AIReviewTransport(Protocol):
         """Return an untrusted structured review for the immutable setup."""
 
 
+# At most this many AI reviews of one strategy run are in flight at once (owner,
+# 2026-10-23, plan v2 item 3b; the session runner's pool).
+REVIEW_POOL_SIZE = 4
+# The budget one call holds while in flight. Above the dearest review the
+# transport can bill: at most 4096 output tokens at the fallback ceiling's
+# $50/M ($0.20) plus the prompt and setup at its $10/M input (well under
+# $0.10 at the live ~5k tokens); live reviews cost about $0.02-0.05.
+REVIEW_CALL_COST_RESERVE_USD = Decimal("0.50")
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewSessionLimits:
     timeout_seconds: float = 10.0
     max_calls: int = 20
     max_cost_usd: Decimal = Decimal("5")
+    call_cost_reserve_usd: Decimal = REVIEW_CALL_COST_RESERVE_USD
 
     def __post_init__(self) -> None:
         if self.timeout_seconds <= 0:
@@ -56,6 +89,8 @@ class ReviewSessionLimits:
             raise ValueError("max_calls must be positive")
         if not self.max_cost_usd.is_finite() or self.max_cost_usd < 0:
             raise ValueError("max_cost_usd must be finite and non-negative")
+        if not self.call_cost_reserve_usd.is_finite() or self.call_cost_reserve_usd < 0:
+            raise ValueError("call_cost_reserve_usd must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +147,8 @@ class StructuredAIReviewProvider:
         self._limits = limits or ReviewSessionLimits()
         self._calls = 0
         self._cost_usd = Decimal("0")
+        # Calls reserved and not yet settled (each holds call_cost_reserve_usd).
+        self._in_flight = 0
         self._lock = asyncio.Lock()
         self._session_id = session_id
         self._persistence = persistence
@@ -126,38 +163,41 @@ class StructuredAIReviewProvider:
     def usage(self) -> ReviewSessionUsage:
         return ReviewSessionUsage(calls=self._calls, cost_usd=self._cost_usd)
 
-    async def propose_trade(self, *, setup: RuleSetup) -> AIReview:
-        """Review a setup; failures abstain and never become rules-only approval."""
-        async with self._lock:
-            await self._load_usage(setup)
-            if self._calls >= self._limits.max_calls:
-                review = self._blocked_review(setup=setup, reason="call_limit_exhausted")
-                await self._persist_review(setup=setup, review=review, response=None)
-                return review
-            if self._cost_usd >= self._limits.max_cost_usd:
-                review = self._blocked_review(setup=setup, reason="budget_exhausted")
-                await self._persist_review(setup=setup, review=review, response=None)
-                return review
+    @property
+    def in_flight(self) -> int:
+        """Calls reserved and not yet settled."""
+        return self._in_flight
 
-            self._calls += 1
-            await self._persist_usage(setup)
+    async def propose_trade(self, *, setup: RuleSetup) -> AIReview:
+        """Review a setup; failures abstain and never become rules-only approval.
+
+        Safe to call concurrently: the cap is reserved atomically before the
+        call and settled after it (see the module docstring).
+        """
+        refused = await self._reserve(setup)
+        if refused is not None:
+            review = self._blocked_review(setup=setup, reason=refused)
+            await self._persist_review(setup=setup, review=review, response=None)
+            return review
+        settled = False
+        try:
             started = time.monotonic()
             try:
-                response = await asyncio.wait_for(
-                    self._transport.complete(
+                # asyncio.timeout, not wait_for: on Python 3.11 wait_for can drop
+                # a cancel that lands as the call finishes (LEARNED.md).
+                async with asyncio.timeout(self._limits.timeout_seconds):
+                    response = await self._transport.complete(
                         setup=setup,
                         model_id=self._model_id,
                         prompt_version=self._prompt_version,
-                    ),
-                    timeout=self._limits.timeout_seconds,
-                )
-            except asyncio.TimeoutError:
+                    )
+            except TimeoutError:
                 logger.warning("AI review timed out")
                 review = self._blocked_review(setup=setup, reason="provider_timeout")
                 await self._persist_review(setup=setup, review=review, response=None)
                 return review
-            except Exception:
-                logger.warning("AI review provider unavailable")
+            except Exception as exc:  # noqa: BLE001 - a 429 under load included: ABSTAIN, no retry
+                logger.warning("AI review provider unavailable (%s)", type(exc).__name__)
                 review = self._blocked_review(setup=setup, reason="provider_unavailable")
                 await self._persist_review(setup=setup, review=review, response=None)
                 return review
@@ -172,9 +212,19 @@ class StructuredAIReviewProvider:
                 )
                 await self._persist_review(setup=setup, review=review, response=None)
                 return review
+            # The call's real cost replaces its reservation in one synchronous
+            # step: counted exactly once, never lost to a cancellation below.
             self._cost_usd += cost
-            await self._persist_usage(setup)
-            if self._cost_usd > self._limits.max_cost_usd:
+            self._in_flight -= 1
+            settled = True
+            over_budget = self._cost_usd > self._limits.max_cost_usd
+            if cost > self._limits.call_cost_reserve_usd:
+                logger.warning(
+                    "AI review cost %s is above its reservation %s", cost, self._limits.call_cost_reserve_usd
+                )
+            async with self._lock:
+                await self._persist_usage(setup)
+            if over_budget:
                 review = self._blocked_review(
                     setup=setup,
                     reason="budget_exceeded",
@@ -223,6 +273,34 @@ class StructuredAIReviewProvider:
                 return review
             await self._persist_review(setup=setup, review=review, response=response)
             return review
+        finally:
+            if not settled:
+                # No cost known (timeout, error, cancellation): the reservation
+                # is released, synchronously, exactly once.
+                self._in_flight -= 1
+
+    async def _reserve(self, setup: RuleSetup) -> str | None:
+        """Reserve one call atomically; the refusal reason when the cap is reached."""
+        async with self._lock:
+            await self._load_usage(setup)
+            if self._calls >= self._limits.max_calls:
+                return "call_limit_exhausted"
+            reserved = (self._in_flight + 1) * self._limits.call_cost_reserve_usd
+            if self._cost_usd >= self._limits.max_cost_usd or (
+                self._cost_usd + reserved > self._limits.max_cost_usd
+            ):
+                return "budget_exhausted"
+            # Check and reservation are one step under the lock: no other review
+            # can pass the check between them.
+            self._calls += 1
+            self._in_flight += 1
+            try:
+                await self._persist_usage(setup)
+            except BaseException:
+                # The call stays counted (as before); its reservation is released.
+                self._in_flight -= 1
+                raise
+            return None
 
     async def _load_usage(self, setup: RuleSetup) -> None:
         if self._session_id is not None and setup.run_id != self._session_id:
@@ -335,6 +413,8 @@ class StructuredAIReviewProvider:
 
 
 __all__ = [
+    "REVIEW_CALL_COST_RESERVE_USD",
+    "REVIEW_POOL_SIZE",
     "AIReviewPersistencePort",
     "AIReviewTransport",
     "AITransportResponse",

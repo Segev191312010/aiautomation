@@ -6,11 +6,12 @@ from trading.orchestration.persistence import (
     ShadowPersistenceConflictError,
     ShadowRunSession,
 )
-from trading.orchestration.pipeline import Assessment, CandidateInput, ShadowPipeline
+from trading.orchestration.pipeline import Assessment, CandidateInput, Evaluation, ShadowPipeline
 
 __all__ = [
     "Assessment",
     "CandidateInput",
+    "Evaluation",
     "RepositoryBackedShadowRunner",
     "ShadowLeaseUnavailableError",
     "ShadowPersistenceConflictError",

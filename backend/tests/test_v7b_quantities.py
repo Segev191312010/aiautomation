@@ -26,19 +26,29 @@ import pytest
 
 from trading.contracts import AIReview, PortfolioSnapshot, RiskPolicy, RuleSetup
 from trading.risk.engine import SIZE_SCALED_TO_ZERO, scaled_quantity, size_and_evaluate_trade
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+from trading.risk.identity_sizing import (
+    IDENTITY_SIZE_MULTIPLIER,
+    NO_LIMIT_TEST_SIZE_MULTIPLIER,
+    V7C_SIZE_MULTIPLIER,
+)
 from trading.sendable_identities import SENDABLE_IDENTITIES
 
 FIXTURE = Path(__file__).parent / "fixtures" / "v7b_recorded_accepted_decisions.json"
 BRIDGE_PATH = Path(__file__).resolve().parents[1] / "scripts_local" / "paper_bridge.py"
 
 # The owner's tables (plan rev 3): multiplier, max positions, max entries/day, last entry offset.
+# The multipliers are v7c's (V7C_SIZE_MULTIPLIER, what deploy undo restores).
 OWNER_TABLE = {
     "MOMO_HOD_V2": (Decimal("1"), 3, None, timedelta(minutes=60)),
     "ORB_V2": (Decimal("0.25"), 1, 1, timedelta(minutes=30)),
     "VWAP_PB_V2": (Decimal("0.5"), 1, 2, timedelta(minutes=30)),
     "GAP_GO_V2": (Decimal("0.5"), 1, 1, timedelta(minutes=30)),
 }
+# The no-limit PAPER test L-T1 (owner, 2026-10-23): the Step 0 rule's sizes, x1 until
+# Step 0 shows an identity with n >= 30 sent trades and mean R <= 0 (it keeps its v7c row).
+T1_MULTIPLIERS = {name: Decimal("1") for name in OWNER_TABLE}
+# Both tables run through the golden: v7c's keeps the quarter-size zero branch covered.
+TABLES = {"v7c": V7C_SIZE_MULTIPLIER, "t1": NO_LIMIT_TEST_SIZE_MULTIPLIER}
 # Recorded quantities that floor to zero at each multiplier (none: every recorded
 # intent was thousands of shares). Pinned so a fixture change is visible.
 SCALED_TO_ZERO_COUNTS = {"MOMO_HOD_V2": 0, "ORB_V2": 0, "VWAP_PB_V2": 0, "GAP_GO_V2": 0}
@@ -68,8 +78,15 @@ def test_the_shipped_tables_are_the_owners_tables() -> None:
     assert tuple(SENDABLE_IDENTITIES) == ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")
     assert set(SENDABLE_IDENTITIES) == set(OWNER_TABLE) == set(IDENTITY_SIZE_MULTIPLIER) == set(bridge.IDENTITY_CAPS)
     assert bridge.SENDABLE_STRATEGY_NAMES == frozenset(SENDABLE_IDENTITIES)
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the owner's v7c
+    # multipliers stay pinned in V7C_SIZE_MULTIPLIER, and the shipped table is the
+    # test's, row for row.
+    assert IDENTITY_SIZE_MULTIPLIER is NO_LIMIT_TEST_SIZE_MULTIPLIER
+    assert dict(IDENTITY_SIZE_MULTIPLIER) == T1_MULTIPLIERS
     for name, (multiplier, positions, entries, offset) in OWNER_TABLE.items():
-        assert IDENTITY_SIZE_MULTIPLIER[name] == multiplier, name
+        assert V7C_SIZE_MULTIPLIER[name] == multiplier, name
+        # Bridge-dependent (builder B's T1-2 changes these rows to Caps(None, None, offset),
+        # global_max_open() to None and BRIDGE_VERSION to "v7c-t1"; the merge rewrites them).
         caps = bridge.IDENTITY_CAPS[name]
         assert (caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close) == (
             positions, entries, offset
@@ -80,9 +97,10 @@ def test_the_shipped_tables_are_the_owners_tables() -> None:
     assert bridge.BRIDGE_VERSION == "v7c"
 
 
+@pytest.mark.parametrize("table", sorted(TABLES))
 @pytest.mark.parametrize("identity", sorted(OWNER_TABLE))
-def test_every_recorded_quantity_scales_to_floor_of_quantity_times_the_multiplier(identity: str) -> None:
-    multiplier = IDENTITY_SIZE_MULTIPLIER[identity]
+def test_every_recorded_quantity_scales_to_floor_of_quantity_times_the_multiplier(identity: str, table: str) -> None:
+    multiplier = TABLES[table][identity]
     zero = 0
     for row in _rows():
         recorded = int(row["quantity"])  # type: ignore[arg-type]
@@ -116,10 +134,11 @@ def _review(setup: RuleSetup) -> AIReview:
     )
 
 
+@pytest.mark.parametrize("table", sorted(TABLES))
 @pytest.mark.parametrize("identity", sorted(OWNER_TABLE))
-def test_the_engine_reproduces_each_recorded_quantity_then_scales_it(identity: str) -> None:
+def test_the_engine_reproduces_each_recorded_quantity_then_scales_it(identity: str, table: str) -> None:
     """End to end: a portfolio sized so the base policy allows exactly the recorded quantity."""
-    multiplier = IDENTITY_SIZE_MULTIPLIER[identity]
+    multiplier = TABLES[table][identity]
     policy = RiskPolicy()
     now = NOW
     # One synthetic high-priced, wide-stop setup where the base policy allows three shares:

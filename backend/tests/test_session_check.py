@@ -45,6 +45,17 @@ def _load_bridge() -> ModuleType:
 pb = _load_bridge()
 
 
+@pytest.fixture(autouse=True)
+def v7c_sizes(monkeypatch) -> None:
+    """Every day here was sized under v7c's identity table (GAP x0.5, ORB x0.25, MOMO x1,
+    VWAP x0.5; see the Trade fixtures). The no-limit PAPER test L-T1 ships x1 for every
+    identity, so rule 4 reads v7c's table for these days; rule 4 under the test's sizes
+    and policy is session_check's own T1-3 change."""
+    from trading.risk.identity_sizing import V7C_SIZE_MULTIPLIER
+
+    monkeypatch.setattr(sc, "IDENTITY_SIZE_MULTIPLIER", V7C_SIZE_MULTIPLIER)
+
+
 @dataclass(frozen=True)
 class Trade:
     identity: str

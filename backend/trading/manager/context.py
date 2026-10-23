@@ -36,6 +36,7 @@ from trading.manager.constants import (
 )
 from trading.manager.plan import GateStates
 from trading.research.v7c_report import DAILY_LOSS_LIMIT, block_token
+from trading.risk.no_limit_test import NO_LIMIT_TEST, NO_LIMIT_TEST_LABEL
 from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession
 
 logger = logging.getLogger("autotrader.shadow.manager.context")
@@ -44,8 +45,16 @@ logger = logging.getLogger("autotrader.shadow.manager.context")
 # sendable identities (bridge v7b) have their own caps and never count here.
 MANAGED_IDENTITY = "MOMO_HOD_V2"
 # MANAGED_IDENTITY's position cap in the pinned bridge (IDENTITY_CAPS, bridge
-# v7a); a test loads the bridge to keep the two equal.
-BRIDGE_MAX_OPEN = 3
+# v7a); a test loads the bridge to keep the two equal. None: no cap. The
+# no-limit test L-T1 uncaps the bridge's rows, so there is no slot count to
+# report (``slots_free`` None); v7c's was 3.
+BRIDGE_MAX_OPEN: int | None = None
+if NO_LIMIT_TEST is not (BRIDGE_MAX_OPEN is None):
+    # A half-on build (a slot cap under the test, or none without it) cannot start.
+    raise RuntimeError(
+        f"no-limit test {NO_LIMIT_TEST_LABEL} is {'on' if NO_LIMIT_TEST else 'off'} but the manager's"
+        f" slot cap is {BRIDGE_MAX_OPEN}"
+    )
 BRIDGE_ACTIVE_STATUSES = frozenset({"pending", "sent", "open", "needs_attention"})
 # A pre-v7c bridge's daily-loss skip_reason, read by its phrase; bridge v7c
 # starts every refusal with its token instead (``holds_the_day``).
@@ -338,7 +347,7 @@ def bridge_summary(trades: Sequence[Mapping[str, Any]], problem: str | None) -> 
         "realized_pnl_usd": str(realized),
         "active": sorted(active),
         "slots_used": len(active),
-        "slots_free": max(0, BRIDGE_MAX_OPEN - len(active)),
+        "slots_free": None if BRIDGE_MAX_OPEN is None else max(0, BRIDGE_MAX_OPEN - len(active)),
         "day_stop": day_stop,
     }
 

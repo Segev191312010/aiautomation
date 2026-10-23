@@ -35,18 +35,33 @@ from trading.risk.engine import (
     policy_quantity,
     size_and_evaluate_trade,
 )
-from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, identity_multiplier
+from trading.risk.identity_sizing import (
+    IDENTITY_SIZE_MULTIPLIER,
+    NO_LIMIT_TEST_SIZE_MULTIPLIER,
+    V7C_SIZE_MULTIPLIER,
+    identity_multiplier,
+)
 from trading.rules.momo import MomoStrategy
 from trading.sendable_identities import SENDABLE_IDENTITIES
 
 NOW = datetime(2026, 10, 15, 14, 30, tzinfo=timezone.utc)
-# The owner's sizing table (test oracle): identity -> multiplier. v7a ships the
-# MOMO row; v7b adds the other three with exactly these values.
+# The owner's v7c sizing table (test oracle): identity -> multiplier. v7a ships the
+# MOMO row; v7b adds the other three with exactly these values. It is what deploy
+# undo restores and what the Step 0 rule keeps for a losing identity.
 SIZING_TABLE = {
     "MOMO_HOD_V2": Decimal("1"),
     "VWAP_PB_V2": Decimal("0.5"),
     "GAP_GO_V2": Decimal("0.5"),
     "ORB_V2": Decimal("0.25"),
+}
+# The no-limit PAPER test L-T1's table (owner, 2026-10-23, Step 0 rule D2): x1 for
+# every identity until Step 0 (Sat 2026-10-24) shows one with n >= 30 sent trades and
+# mean R <= 0, which keeps its SIZING_TABLE row. This oracle changes with that row.
+T1_SIZING_TABLE = {
+    "MOMO_HOD_V2": Decimal("1"),
+    "VWAP_PB_V2": Decimal("1"),
+    "GAP_GO_V2": Decimal("1"),
+    "ORB_V2": Decimal("1"),
 }
 BASE_RISK_PCT = Decimal("0.5")
 BASE_NOTIONAL_PCT = Decimal("15")
@@ -86,14 +101,23 @@ FIXTURES = (
 def test_the_shipped_table_is_decimal_frozen_and_exactly_the_sendable_set():
     assert set(IDENTITY_SIZE_MULTIPLIER) == set(SENDABLE_IDENTITIES)
     assert IDENTITY_SIZE_MULTIPLIER["MOMO_HOD_V2"] == Decimal("1")
-    for name, value in IDENTITY_SIZE_MULTIPLIER.items():
-        assert type(value) is Decimal and Decimal("0") < value <= Decimal("1"), name
-        assert SIZING_TABLE[name] == value  # the oracle and the shipped row agree
-    with pytest.raises(TypeError):
-        IDENTITY_SIZE_MULTIPLIER["MOMO_HOD_V2"] = Decimal("2")  # type: ignore[index]
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped table is
+    # the test's (T1_SIZING_TABLE), and the v7c rows stay pinned to their oracle, so a
+    # row left at its v7c value, or a v7c row changed, fails here.
+    assert IDENTITY_SIZE_MULTIPLIER is NO_LIMIT_TEST_SIZE_MULTIPLIER
+    for table, oracle in ((IDENTITY_SIZE_MULTIPLIER, T1_SIZING_TABLE), (V7C_SIZE_MULTIPLIER, SIZING_TABLE)):
+        assert set(table) == set(SENDABLE_IDENTITIES)
+        for name, value in table.items():
+            assert type(value) is Decimal and Decimal("0") < value <= Decimal("1"), name
+            assert oracle[name] == value  # the oracle and the shipped row agree
+        with pytest.raises(TypeError):
+            table["MOMO_HOD_V2"] = Decimal("2")  # type: ignore[index]
 
 
-@pytest.mark.parametrize(("identity", "multiplier"), sorted(SIZING_TABLE.items()))
+# Both tables: the v7c rows keep the fractional and the scaled-to-zero branches covered.
+@pytest.mark.parametrize(
+    ("identity", "multiplier"), sorted({*SIZING_TABLE.items(), *T1_SIZING_TABLE.items()})
+)
 @pytest.mark.parametrize(("net_liq", "entry", "stop", "target"), FIXTURES)
 def test_quantity_is_floor_of_policy_quantity_times_multiplier(identity, multiplier, net_liq, entry, stop, target):
     setup = _setup(entry, stop, target)
@@ -125,9 +149,11 @@ def test_identity_multiplier_contract():
     assert identity_multiplier("anything", sendable=False) == Decimal("1")
     assert identity_multiplier("MOMO_HOD_V2", sendable=True) == Decimal("1")
     assert identity_multiplier(" MOMO_HOD_V2 ", sendable=True) == Decimal("1")
-    assert identity_multiplier("ORB_V2", sendable=True) == Decimal("0.25")
-    assert identity_multiplier("VWAP_PB_V2", sendable=True) == Decimal("0.5")
-    assert identity_multiplier("GAP_GO_V2", sendable=True) == Decimal("0.5")
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped rows are
+    # the Step 0 table's (x1 until Step 0 says otherwise; ORB_V2 orders 4x, VWAP/GAP 2x v7c's).
+    assert identity_multiplier("ORB_V2", sendable=True) == T1_SIZING_TABLE["ORB_V2"] == Decimal("1")
+    assert identity_multiplier("VWAP_PB_V2", sendable=True) == T1_SIZING_TABLE["VWAP_PB_V2"] == Decimal("1")
+    assert identity_multiplier("GAP_GO_V2", sendable=True) == T1_SIZING_TABLE["GAP_GO_V2"] == Decimal("1")
     # Fail closed: a sendable name without a row is None, never 1.
     assert identity_multiplier("ORB_V9", sendable=True) is None
     assert type(identity_multiplier("ORB_V9", sendable=False)) is Decimal

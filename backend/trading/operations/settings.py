@@ -65,8 +65,10 @@ def load_shadow_runtime_config(
                 "tws_host": "127.0.0.1",
                 "tws_port": 7497,
                 "max_candidates": 20,
-                "max_ai_calls": 20,
-                "max_ai_cost_usd": Decimal("5"),
+                # The no-limit PAPER test's AI cap per strategy run (100 / $25);
+                # the contract accepts exactly these (Literal), never a setting.
+                "max_ai_calls": 100,
+                "max_ai_cost_usd": Decimal("25"),
             },
             strict=True,
         )
