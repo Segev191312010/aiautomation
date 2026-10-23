@@ -64,12 +64,7 @@ from trading.research.live_ledger import read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import FenceRow, SQLitePaperKillStore
-from tests.no_limit_support import (
-    T1_BRIDGE_CAPS,
-    V7C_SENTINEL_MAX_ENTRIES_PER_DAY,
-    bridge_caps,
-    pinned_bridge_mode,
-)
+from tests.no_limit_support import V7C_SENTINEL_MAX_ENTRIES_PER_DAY, bridge_caps
 from tests.test_runtime_fence import FENCE_DAMAGE, break_fence_table
 
 FRIDAY = date(2026, 10, 9)
@@ -226,19 +221,18 @@ def test_the_thresholds_are_the_owner_accepted_defaults_and_the_bridges_caps(mon
     assert LOSING_STREAK == 4  # owner, 2026-10-17 (was 3)
     assert (BLIND_AFTER, BLIND_REPEAT) == (timedelta(minutes=5), timedelta(minutes=30))
     # One caps row per sendable identity, equal to the pinned bridge's own table.
-    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped mirror
-    # (MAX_ENTRIES_PER_DAY as imported, before the autouse pin) is the bridge's T1 table,
-    # every row None. Until builder B's T1-2 bridge is merged, the pinned bridge is v7c's:
-    # the mirror is then checked against the T1 table B ships, and v7c's mirror against
-    # the v7c bridge. After the merge, both against the bridge itself.
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened; A and B merged): the shipped
+    # mirror (MAX_ENTRIES_PER_DAY as imported, before the autouse pin) is the shipped bridge's
+    # table, every row None while its NO_LIMIT_TEST is set; v7c's mirror (pinned below and by
+    # the autouse fixture: deploy undo restores it) is the reviewed v7c rows (V7C_CAPS).
     assert set(MAX_ENTRIES_PER_DAY) == set(SENDABLE_IDENTITIES)
-    bridge_entries = {name: row[1] for name, row in bridge_caps(bridge).items()}
-    if pinned_bridge_mode(bridge) is None:
-        assert dict(MAX_ENTRIES_PER_DAY) == {name: row[1] for name, row in T1_BRIDGE_CAPS.items()}
-        assert dict(V7C_SENTINEL_MAX_ENTRIES_PER_DAY) == bridge_entries
-    else:
-        assert dict(MAX_ENTRIES_PER_DAY) == bridge_entries
+    from tests.test_paper_bridge import V7C_CAPS
+
+    assert (bridge.NO_LIMIT_TEST, bridge.BRIDGE_VERSION) == (True, "v7c-t1")
+    assert dict(MAX_ENTRIES_PER_DAY) == {name: row[1] for name, row in bridge_caps(bridge).items()}
     assert all(entries is None for entries in MAX_ENTRIES_PER_DAY.values())
+    assert dict(V7C_SENTINEL_MAX_ENTRIES_PER_DAY) == {
+        name: caps.max_entries_per_day for name, caps in V7C_CAPS.items()}
     # v7c's capped limits (pinned by the autouse fixture: deploy undo restores them).
     assert {name: loss_limit(name) for name in SENDABLE_IDENTITIES} == {
         "ORB_V2": (Decimal("1.25"), False),

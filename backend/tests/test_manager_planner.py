@@ -454,7 +454,7 @@ def test_the_bridge_slot_count_is_the_pinned_bridges(monkeypatch):
     import importlib.util
     import sys
 
-    from tests.no_limit_support import T1_BRIDGE_CAPS, V7C_MANAGER_MAX_OPEN, pinned_bridge_mode
+    from tests.no_limit_support import V7C_MANAGER_MAX_OPEN
     from trading.manager import context as manager_context
 
     # The manager narrows MOMO_HOD_V2, so its slot count is that identity's own
@@ -465,17 +465,16 @@ def test_the_bridge_slot_count_is_the_pinned_bridges(monkeypatch):
     bridge = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = bridge
     spec.loader.exec_module(bridge)
-    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped cap is
-    # None, the bridge's T1 MOMO row (Caps(None, None, 60m)). Until builder B's T1-2
-    # bridge is merged the pinned bridge is v7c's (3): the shipped value is then checked
-    # against the T1 table B ships and v7c's against the v7c bridge; after, the bridge's.
-    if pinned_bridge_mode(bridge) is None:
-        assert BRIDGE_MAX_OPEN == T1_BRIDGE_CAPS["MOMO_HOD_V2"][0]
-        assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == V7C_MANAGER_MAX_OPEN
-    else:
-        assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
+    # No-limit test L-T1, A and B merged: the manager's slot count mirrors the shipped bridge's
+    # MOMO_HOD_V2 row, which has no position cap (None) while the bridge's NO_LIMIT_TEST is set.
+    # v7c's row (3, test_paper_bridge.V7C_CAPS, what deploy undo restores) still becomes the
+    # free-slot count when there is a cap.
+    from tests.test_paper_bridge import V7C_CAPS
+
+    assert (bridge.NO_LIMIT_TEST, bridge.BRIDGE_VERSION) == (True, "v7c-t1")
+    assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
     assert BRIDGE_MAX_OPEN is None
-    # The cap, when there is one (v7c's), still becomes the free-slot count.
+    assert V7C_CAPS["MOMO_HOD_V2"].max_positions == V7C_MANAGER_MAX_OPEN
     monkeypatch.setattr(manager_context, "BRIDGE_MAX_OPEN", V7C_MANAGER_MAX_OPEN)
     one_open = ({"symbol": "AAA", "status": "open", "strategy_name": "MOMO_HOD_V2", "realized_pnl": "0"},)
     assert bridge_summary(one_open, None)["slots_free"] == V7C_MANAGER_MAX_OPEN - 1

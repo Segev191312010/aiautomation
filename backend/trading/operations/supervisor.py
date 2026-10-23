@@ -238,7 +238,7 @@ _BRIDGE_EVENT_CLOCK = re.compile(r"^\d{2}:\d{2}:\d{2} ET  (?=[A-Z]+ )")
 # refused (exit 78, phone alert) instead of sending orders unattended. Change
 # this only in the commit that records that review in
 # docs/PAPER_EXECUTION_STATUS.md; a test pins it to the file.
-REVIEWED_BRIDGE_SHA256 = "b40fa40b4acda4d75115c59a1c391e7b639b4dd1d1329381b07b3c6c966df8e4"
+REVIEWED_BRIDGE_SHA256 = "c03f25d668cc1e5b47b7196fd535923c0af17ef7bd24e110cf29c19e101a3969"
 # The backend files the bridge imports lazily (its session calendar, config
 # and the manual-order ledger; tests/test_bridge_imports.py lists the
 # statements), by path under backend/. They decide the bridge's close and

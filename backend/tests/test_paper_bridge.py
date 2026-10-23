@@ -25,7 +25,7 @@ import stat
 import sys
 import threading
 import time
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -148,6 +148,14 @@ class FakeBroker(pb.BrokerState):
         # placeOrder; with delay_echoes the reports wait for deliver_echoes().
         self.delay_echoes = False
         self.delayed_echoes: list[Callable[[], None]] = []
+        # v7c-t1: what reqAccountSummary answers for the account-values request (7004), and every
+        # account-summary request and cancel the bridge sent.
+        self.account_values_reply: dict[str, str] = {
+            "NetLiquidation": "665000.00", "AvailableFunds": "600000.00", "BuyingPower": "2400000.00",
+            "ExcessLiquidity": "600000.00", "Cushion": "0.902", "GrossPositionValue": "65000.00",
+        }
+        self.summary_requests: list[tuple[int, str]] = []
+        self.summary_cancels: list[int] = []
 
     def connect(self, host: str, port: int, client_id: int) -> None:
         assert (host, port, client_id) == ("127.0.0.1", 7497, CLIENT_ID)
@@ -171,11 +179,17 @@ class FakeBroker(pb.BrokerState):
         self.connected = False
 
     def reqAccountSummary(self, request_id: int, group: str, tags: str) -> None:
+        self.summary_requests.append((request_id, tags))
+        if request_id == pb.ACCOUNT_VALUES_REQUEST_ID:  # v7c-t1: the logged-only account values
+            for tag, value in self.account_values_reply.items():
+                self.accountSummary(request_id, ACCOUNT, tag, value, "USD")
+            self.accountSummaryEnd(request_id)
+            return
         self.accountSummary(request_id, ACCOUNT, "NetLiquidation", "665000.00", "USD")
         self.accountSummaryEnd(request_id)
 
     def cancelAccountSummary(self, request_id: int) -> None:
-        return None
+        self.summary_cancels.append(request_id)
 
     def reqPnL(self, request_id: int, account: str, model_code: str) -> None:
         self.pnl_requests.append((request_id, account, model_code))  # v7c: a test answers through pnl()
@@ -338,6 +352,27 @@ def events(capsys: pytest.CaptureFixture[str]) -> list[tuple[str, str]]:
         assert match["kind"] in pb.EVENT_KINDS, line
         parsed.append((match["kind"], match["text"]))
     return parsed
+
+
+# ---- v7c-t1: the reviewed v7c limits, kept under test ------------------------------------------
+#
+# The shipped bridge runs the no-limit PAPER test L-T1 (NO_LIMIT_TEST = True: no caps, the -2 % stop
+# and the 3 % budget measured for bot entries). The v7c refusal paths stay in the file behind the
+# switch, so every v7c refusal test runs under ``v7c_limits``: the switch off and the reviewed v7c
+# caps rows (bridge v7c, b40fa40b...), frozen here. tests/test_paper_bridge_t1.py covers the test mode.
+V7C_CAPS = MappingProxyType({
+    "MOMO_HOD_V2": pb.Caps(3, None, timedelta(minutes=60)),
+    "ORB_V2": pb.Caps(1, 1, timedelta(minutes=30)),
+    "VWAP_PB_V2": pb.Caps(1, 2, timedelta(minutes=30)),
+    "GAP_GO_V2": pb.Caps(1, 1, timedelta(minutes=30)),
+})
+
+
+@pytest.fixture
+def v7c_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pb, "NO_LIMIT_TEST", False)
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", V7C_CAPS)
+    assert pb.caps_problem() is None and pb.global_max_open() == 6 and pb.mode_line() is None
 
 
 # ---- ledger fixtures -------------------------------------------------------------
@@ -556,7 +591,7 @@ def test_fills_never_decrease_and_missing_executions_never_divide_by_zero(tmp_pa
 # ---- reconciliation -------------------------------------------------------------------------
 
 
-def test_startup_reconciliation_flags_brackets_ibkr_does_not_report(
+def test_startup_reconciliation_flags_brackets_ibkr_does_not_report(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The slot mechanism under the v5 global cap of 3 (v7b's shipped sum is 6).
@@ -869,7 +904,8 @@ def test_tws_disconnect_exits_75_for_a_supervised_restart(
     assert any(kind == "CRITICAL" and text.startswith("TWS connection lost") for kind, text in out)
     assert ("INFO", "bridge stopped (exit 75)") in out
     # Rewritten for v7c (explicit, not weakened): the connect line names the bridge version, now v7c.
-    assert any(kind == "INFO" and text.startswith("PAPER bridge v7c connected") for kind, text in out)
+    # Rewritten for v7c-t1 (explicit, not weakened): the no-limit test's bridge is v7c-t1.
+    assert any(kind == "INFO" and text.startswith("PAPER bridge v7c-t1 connected") for kind, text in out)
     assert bridge_env.state_file.exists()
 
 
@@ -1287,7 +1323,7 @@ def test_m2_a_resize_is_redone_when_the_fill_count_or_the_position_changes(
             " — re-checked while the position updates") in out
 
 
-def test_m2_dead_exit_legs_are_critical_and_never_reported_as_resized(
+def test_m2_dead_exit_legs_are_critical_and_never_reported_as_resized(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     held = bracket("held", "HELD", status="open", parent=10, filled=40, parent_cancel_requested=True)
@@ -1309,7 +1345,7 @@ def test_m2_dead_exit_legs_are_critical_and_never_reported_as_resized(
     ]
 
 
-def test_m2_an_open_position_without_a_live_stop_is_critical_once(
+def test_m2_an_open_position_without_a_live_stop_is_critical_once(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     held = bracket("held", "HELD", status="open", parent=30, filled=100)
@@ -1349,7 +1385,7 @@ def test_m3_oversized_orders_are_refused(
 
 
 @pytest.mark.parametrize(("ghost_filled", "sent"), [(100, False), (0, True)])
-def test_m4_unreconciled_brackets_that_may_hold_shares_count_toward_max_open(
+def test_m4_unreconciled_brackets_that_may_hold_shares_count_toward_max_open(v7c_limits: None,
     tmp_path: Path, ghost_filled: int, sent: bool
 ) -> None:
     ghost = bracket("g", "GHST", status="needs_attention", parent=20, filled=ghost_filled)
@@ -1416,7 +1452,7 @@ def test_l3_a_parent_cancel_lost_while_disconnected_is_resent_after_a_restart(
     assert ("CANCEL", "entry WORK: not filled in 10 min (filled 0/100)") in out
 
 
-def test_l4_unmanaged_live_orders_block_their_symbol_and_take_a_slot(
+def test_l4_unmanaged_live_orders_block_their_symbol_and_take_a_slot(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The slot mechanism under the v5 global cap of 3 (v7b's shipped sum is 6).
@@ -2779,7 +2815,7 @@ def test_l1_the_state_is_saved_before_any_entry_order_leaves(tmp_path: Path) -> 
     assert all(state["d1"]["status"] == "sent" and state["d1"]["parent"] == 100 for state in saved_at_send)
 
 
-def test_l1_the_daily_loss_stop_blocks_new_entries(tmp_path: Path) -> None:
+def test_l1_the_daily_loss_stop_blocks_new_entries(v7c_limits: None, tmp_path: Path) -> None:
     loss = bracket("lost", "LOST", status="closed", parent=60, filled=100, exit_filled=100, realized_pnl="-13300.00")
     bridge = make_bridge(tmp_path, connected_broker(bid=Decimal("50.10")), brackets={"lost": loss},
                          decisions=(decision_row("d1", "AAPL"),))
@@ -3388,6 +3424,22 @@ V7B_CAPS_LINES = [
     "caps ORB_V2 positions=1 entries/day=1 last_entry=close-30m",
     "caps VWAP_PB_V2 positions=1 entries/day=2 last_entry=close-30m",
 ]
+# v7c-t1: the no-limit test's connect and --preflight lines (the v7c ones above hold under v7c_limits).
+T1_CAPS_LINES = [
+    "sendable identities = GAP_GO_V2, MOMO_HOD_V2, ORB_V2, VWAP_PB_V2",
+    "caps GAP_GO_V2 positions=none entries/day=none last_entry=close-30m",
+    "caps MOMO_HOD_V2 positions=none entries/day=none last_entry=close-60m",
+    "caps ORB_V2 positions=none entries/day=none last_entry=close-30m",
+    "caps VWAP_PB_V2 positions=none entries/day=none last_entry=close-30m",
+]
+T1_BUDGET_LINE = ("day risk budget 3% of net liquidation, account level (realized loss + open risk to current stops"
+                  " + new risk, measured and logged, never blocks bot entries (no-limit test L-T1), owner buys still"
+                  " refused over it; stop slippage factor 1.0)")
+T1_MODE_LINE = ("t1_mode no-limit PAPER test L-T1 on: no position, entries/day or account-wide caps; the -2% daily"
+                " loss stop and the 3% risk budget are measured and logged, never block bot entries (owner buys keep"
+                " both); robot stops repair themselves (60s, then close at market); guards: 20 entries per identity"
+                " per 60s, 3 broker rejections halt an identity for the day, 3 entries per symbol per day, duplicates"
+                " within 5s, no entry outside the session")
 
 
 def _bracket_named(name: str, decision_id: str = "d") -> Any:
@@ -3424,6 +3476,25 @@ def test_v7a_every_sendable_name_has_a_caps_row_and_nothing_else_does(monkeypatc
     assert pb.SENDABLE_STRATEGY_NAMES == frozenset(pb.IDENTITY_CAPS) == {
         "MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"
     }
+    # Rewritten for v7c-t1 (explicit, not weakened): the no-limit test's rows carry no position or entries/day
+    # cap and keep the owner's last-entry offsets; there is no account-wide cap. The v7c table is V7C_CAPS
+    # (test_v7a_the_v7c_caps_rows_under_v7c_limits keeps its assertions).
+    assert pb.IDENTITY_CAPS["MOMO_HOD_V2"] == pb.Caps(None, None, timedelta(minutes=60))
+    assert pb.IDENTITY_CAPS["ORB_V2"] == pb.Caps(None, None, timedelta(minutes=30))
+    assert pb.IDENTITY_CAPS["VWAP_PB_V2"] == pb.Caps(None, None, timedelta(minutes=30))
+    assert pb.IDENTITY_CAPS["GAP_GO_V2"] == pb.Caps(None, None, timedelta(minutes=30))
+    assert pb.global_max_open() is None
+    assert pb.caps_problem() is None
+    assert pb.caps_lines() == T1_CAPS_LINES
+    shipped = dict(pb.IDENTITY_CAPS)
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {})
+    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: GAP_GO_V2, MOMO_HOD_V2, ORB_V2, VWAP_PB_V2"
+    assert pb.global_max_open() is None
+    monkeypatch.setattr(pb, "IDENTITY_CAPS", {**shipped, "SOMEDAY_V2": pb.Caps(None, None, timedelta(minutes=30))})
+    assert pb.caps_problem() == "PREFLIGHT_REFUSED caps: SOMEDAY_V2"
+
+
+def test_v7a_the_v7c_caps_rows_under_v7c_limits(v7c_limits: None, monkeypatch: pytest.MonkeyPatch) -> None:
     # The owner's caps table (plan rev 3): MOMO as before; one position each for the three.
     assert pb.IDENTITY_CAPS["MOMO_HOD_V2"] == pb.Caps(3, None, timedelta(minutes=60))
     assert pb.IDENTITY_CAPS["ORB_V2"] == pb.Caps(1, 1, timedelta(minutes=30))
@@ -3497,11 +3568,14 @@ def test_v7a_the_connect_line_names_the_sendable_set_its_caps_and_the_fences(
     out = events(capsys)
     # Rewritten for v7c (explicit, not weakened): the version is v7c and the day risk budget line follows
     # the fence line (the dry run's `day risk budget 3%` check reads the same line from --preflight).
-    start = out.index(next(item for item in out if item[1].startswith("PAPER bridge v7c connected")))
-    assert out[start + 1:start + 8] == [
-        *(("INFO", line) for line in V7B_CAPS_LINES),
+    # Rewritten for v7c-t1 (explicit, not weakened): v7c-t1, its caps lines (none), its budget line and the
+    # no-limit test's mode line, which never repeats the budget text.
+    start = out.index(next(item for item in out if item[1].startswith("PAPER bridge v7c-t1 connected")))
+    assert out[start + 1:start + 9] == [
+        *(("INFO", line) for line in T1_CAPS_LINES),
         ("INFO", "fenced identities = none"),
-        ("INFO", V7C_BUDGET_LINE),
+        ("INFO", T1_BUDGET_LINE),
+        ("INFO", T1_MODE_LINE),
     ]
 
     _fence_row(pb.DB, "MOMO_HOD_V2", 1)
@@ -3512,7 +3586,7 @@ def test_v7a_the_connect_line_names_the_sendable_set_its_caps_and_the_fences(
     assert ("CRITICAL", "fenced identities = MOMO_HOD_V2") in events(capsys)
 
 
-def test_v7a_the_identity_position_cap_is_checked_before_the_global_one(
+def test_v7a_the_identity_position_cap_is_checked_before_the_global_one(v7c_limits: None,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # MOMO may hold one; a second row lifts the global cap to 6, so only the identity cap can block.
@@ -3616,10 +3690,13 @@ def test_v7a_preflight_prints_the_identity_lines_without_connecting(
     assert pb.main(["--preflight"]) == pb.EXIT_OK
     out = events(capsys)
     # Rewritten for v7c (explicit, not weakened): --preflight also prints the day risk budget line, exactly once.
+    # Rewritten for v7c-t1 (explicit, not weakened): the caps lines say none, the budget line says it is measured
+    # for bot entries, and the mode line follows it.
     assert out[1:] == [
-        *(("INFO", line) for line in V7B_CAPS_LINES),
+        *(("INFO", line) for line in T1_CAPS_LINES),
         ("INFO", "fenced identities = none"),
-        ("INFO", V7C_BUDGET_LINE),
+        ("INFO", T1_BUDGET_LINE),
+        ("INFO", T1_MODE_LINE),
     ]
     assert pb.main(["--preflight", "--date", "2026-10-13"]) == pb.EXIT_OK
     assert not bridge_env.state_file.exists()
@@ -3769,7 +3846,8 @@ WOULD_HAVE = " — would have sent BUY 100 @ 50.00 | stop 49.50 | target 51.00"
 
 def test_v7c_constants_pinned() -> None:
     # Owner decision D1 (2026-10-18): 3 % account level, factor pinned, the -2 % block unchanged (O14).
-    assert pb.BRIDGE_VERSION == "v7c"
+    # Rewritten for v7c-t1 (explicit): the version is v7c-t1; every v7c constant below is unchanged.
+    assert pb.BRIDGE_VERSION == "v7c-t1"
     assert pb.DAY_RISK_BUDGET_PCT == Decimal("3") and pb.STOP_SLIPPAGE_FACTOR == Decimal("1.0")
     assert pb.MAX_DAILY_LOSS_PCT == Decimal("2") and pb.MAX_ORDER_RISK_PCT == Decimal("1")
     assert pb.BUDGET_PAGE_STEP_PCT == Decimal("0.5")
@@ -3836,7 +3914,7 @@ def test_v7c_within_budget_sent_with_budget_line(tmp_path: Path, capsys: pytest.
     assert not critical(out)
 
 
-def test_v7c_over_budget_skipped_with_token_and_numbers(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_v7c_over_budget_skipped_with_token_and_numbers(v7c_limits: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     bridge, broker, _ = v7c_world(tmp_path, held=9965, decisions=(decision_row("d1", "AAPL"),))  # open 19,930
     capsys.readouterr()
     bridge.tick()
@@ -3848,7 +3926,7 @@ def test_v7c_over_budget_skipped_with_token_and_numbers(tmp_path: Path, capsys: 
     assert ("SKIP", f"AAPL (MOMO_HOD_V2): {reason}") in events(capsys)
 
 
-def test_v7c_realized_gains_never_fund_risk(tmp_path: Path) -> None:
+def test_v7c_realized_gains_never_fund_risk(v7c_limits: None, tmp_path: Path) -> None:
     won = bracket("won", "WON", status="closed", parent=60, filled=100, exit_filled=100, realized_pnl="5000.00")
     bridge, broker, _ = v7c_world(tmp_path, held=9965, decisions=(decision_row("d1", "AAPL"),))
     bridge.brackets["won"] = won
@@ -3858,7 +3936,7 @@ def test_v7c_realized_gains_never_fund_risk(tmp_path: Path) -> None:
     assert broker.placed == [] and v7c_skip(bridge, "d1").startswith("v7c_day_risk_budget: realized 0.00 + open")
 
 
-def test_v7c_unfilled_entry_counts_limit_minus_stop(tmp_path: Path) -> None:
+def test_v7c_unfilled_entry_counts_limit_minus_stop(v7c_limits: None, tmp_path: Path) -> None:
     sent = bracket("sent", "SENT", status="sent", parent=30, qty=9965)  # nothing filled, the entry works
     sent.stop = "48.00"
     broker = connected_broker(bid=Decimal("50.10"), live_orders={30: "Submitted", 31: "Submitted", 32: "PreSubmitted"},
@@ -3887,7 +3965,7 @@ def test_v7c_partial_fill_held_at_avg_pending_at_limit(tmp_path: Path) -> None:
     assert risk.unprotected == ()
 
 
-def test_v7c_stop_moved_up_in_tws_frees_budget(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_v7c_stop_moved_up_in_tws_frees_budget(v7c_limits: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     clock = Clock(DECIDED + timedelta(seconds=5))
     bridge, broker, _ = v7c_world(tmp_path, held=9965, clock=clock, decisions=(decision_row("d1", "AAPL"),))
     broker.own_in_all_open_orders = True  # TWS reports this client's orders to reqAllOpenOrders too
@@ -3947,7 +4025,7 @@ def test_v7c_no_echo_uses_intent_stop_logs_unconfirmed(tmp_path: Path, capsys: p
     ]  # INFO, once
 
 
-def test_v7c_dead_stop_blocks_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_v7c_dead_stop_blocks_entries(v7c_limits: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
     row_id = queue_manual("/buy 10 TSLA stop 185", message_id=1)
     item = bracket("open", "OPEN", status="open", parent=30, filled=100)
@@ -3968,7 +4046,7 @@ def test_v7c_dead_stop_blocks_entries(tmp_path: Path, monkeypatch: pytest.Monkey
     assert broker.placed == []
 
 
-def test_v7c_unprotected_foreign_position_blocks_bot_and_manual(
+def test_v7c_unprotected_foreign_position_blocks_bot_and_manual(v7c_limits: None,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
@@ -4005,7 +4083,7 @@ def test_v7c_unprotected_foreign_position_blocks_bot_and_manual(
     assert bridge.account_open_risk().total == Decimal("550")  # 100 x (50.00 avgCost - 45) + the new 50
 
 
-def test_v7c_unprotected_page_text_never_promises_a_day_stop_unblocks(
+def test_v7c_unprotected_page_text_never_promises_a_day_stop_unblocks(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Telegram /stop orders are DAY orders: a page saying "/stop SYM PRICE unblocks" would unblock until the close.
@@ -4025,7 +4103,7 @@ def test_v7c_unprotected_page_text_never_promises_a_day_stop_unblocks(
     assert "add /stop" not in source and "/stop SYM PRICE to unblock" not in source
 
 
-def test_v7c_two_decisions_one_tick_second_skipped(tmp_path: Path) -> None:
+def test_v7c_two_decisions_one_tick_second_skipped(v7c_limits: None, tmp_path: Path) -> None:
     decisions = (decision_row("d1", "AAPL"), decision_row("d2", "MSFT", con_id=4932))
     bridge, broker, _ = v7c_world(tmp_path, held=9950, decisions=decisions)  # open 19,900: room for one 50.00
     bridge.tick()
@@ -4051,7 +4129,7 @@ def test_v7c_reservation_is_counted_before_the_order_leaves(tmp_path: Path) -> N
     assert seen == [(True, Decimal("19850"))]  # 19,800 + its own 50: reserved before placeOrder
 
 
-def test_v7c_check_after_quote_wait(tmp_path: Path) -> None:
+def test_v7c_check_after_quote_wait(v7c_limits: None, tmp_path: Path) -> None:
     bridge, broker, _ = v7c_world(tmp_path, held=9900, decisions=(decision_row("d1", "AAPL"),))  # 19,850 fits
     original = broker.reqMktData
 
@@ -4111,7 +4189,7 @@ def test_v7c_invariant_tripwire_fires_when_open_risk_grows_more_than_the_order(
             " its own 50.00 (0.00 -> 120.00) — check TWS") in events(capsys)
 
 
-def test_v7c_daily_loss_2pct_account_level_blocks_manual_buy(
+def test_v7c_daily_loss_2pct_account_level_blocks_manual_buy(v7c_limits: None,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = manual_ledger(tmp_path, monkeypatch)
@@ -4143,7 +4221,8 @@ def test_v7c_exits_never_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     broker = connected_broker(bid=Decimal("189.99"), ask=Decimal("190.01"), positions={AAPL_ID: 100}, contracts=STOCK)
     bridge = desk_bridge(tmp_path, broker, ledger, clock=Clock(MANUAL_T0 + timedelta(seconds=2)))
     broker.pnl(pb.PNL_REQUEST_ID, -20000.0, 0.0, -20000.0)
-    assert bridge.budget_problem(Decimal("1")).startswith("daily_loss_limit")
+    # Rewritten for v7c-t1 (explicit): an owner buy is still refused past -2 % (D8); a bot entry is measured only.
+    assert bridge.budget_problem(Decimal("1"), source="manual").startswith("daily_loss_limit")
     bridge.tick()
 
     [(_, sent)] = broker.placed
@@ -4179,7 +4258,8 @@ def test_v7c_bot_exits_closeall_and_cancels_never_blocked(
     assert ("autotrader:MOMO_HOD_V2:held", "LMT") in [(sent.orderRef, sent.orderType) for _, sent in broker.placed]
     assert broker.cancelled == [sell_order]
     assert manual_row(close_all).status == "sent"  # it started closing the bot's bracket; no v7c refusal
-    assert bridge.budget_problem(Decimal("1")).startswith("daily_loss_limit")  # still blocked for new risk
+    # Rewritten for v7c-t1 (explicit): owner buys stay blocked for new risk past -2 % (D8).
+    assert bridge.budget_problem(Decimal("1"), source="manual").startswith("daily_loss_limit")
 
 
 def test_v7c_manual_buy_without_stop_refused_by_parser_and_db_trigger(
@@ -4543,7 +4623,7 @@ def test_v7c_avg_cost_stored_from_positions() -> None:
     assert next(iter(state.execs.values())).basis == Decimal("187.25")  # stamped as it arrives
 
 
-def test_v7c_tws_stop_seen_through_all_open_orders(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_v7c_tws_stop_seen_through_all_open_orders(v7c_limits: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     clock = Clock(DECIDED + timedelta(seconds=5))
     broker = connected_broker(bid=Decimal("50.10"), positions={AAPL_ID: 100}, contracts=STOCK)
     broker.position(ACCOUNT, STOCK[AAPL_ID], 100.0, 52.5)  # IBKR's avgCost, commissions included
@@ -4635,7 +4715,7 @@ def test_v7c_pnl_source_reqpnl_then_computed_fallback(
     assert not [line for line in out if ACCOUNT in line]  # the account id is never logged
 
 
-def test_v7c_over_budget_pages_once_per_half_percent_step(
+def test_v7c_over_budget_pages_once_per_half_percent_step(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     clock = Clock(DECIDED + timedelta(seconds=5))
@@ -4746,16 +4826,37 @@ def test_v7c_a_close_the_freed_stop_would_not_help_cancels_nothing(
 def test_v7c_connect_and_preflight_line(bridge_env: SimpleNamespace, capsys: pytest.CaptureFixture[str]) -> None:
     from trading.operations.deploy_apply import BUDGET_TEXT
 
-    assert pb.budget_line() == V7C_BUDGET_LINE
-    assert V7C_BUDGET_LINE.startswith(BUDGET_TEXT)  # deploy apply's dry_run_budget check reads this prefix
+    # Rewritten for v7c-t1 (explicit, not weakened): the shipped line is the no-limit test's, still starting with
+    # BUDGET_TEXT and printed exactly once; the mode line never contains BUDGET_TEXT.
+    assert pb.budget_line() == T1_BUDGET_LINE
+    assert T1_BUDGET_LINE.startswith(BUDGET_TEXT)  # deploy apply's dry_run_budget check reads this prefix
+    assert BUDGET_TEXT not in T1_MODE_LINE
     bridge_env.install(None, Clock(ny(10, 0)))  # --preflight never connects
     assert pb.main(["--preflight"]) == pb.EXIT_OK
-    assert [text for _, text in events(capsys) if BUDGET_TEXT in text] == [V7C_BUDGET_LINE]  # exactly once
+    out = events(capsys)
+    assert [text for _, text in out if BUDGET_TEXT in text] == [T1_BUDGET_LINE]  # exactly once
+    assert ("INFO", T1_MODE_LINE) in out
     broker = FakeBroker()
     broker.disconnect_after = 2
     bridge_env.install(broker, Clock(ny(10, 0)))
     assert pb.main(["--date", "2026-10-13"]) == pb.EXIT_RESTART
-    assert [text for _, text in events(capsys) if BUDGET_TEXT in text] == [V7C_BUDGET_LINE]
+    out = events(capsys)
+    assert [text for _, text in out if BUDGET_TEXT in text] == [T1_BUDGET_LINE]
+    assert ("INFO", T1_MODE_LINE) in out
+
+
+def test_v7c_connect_and_preflight_line_under_v7c_limits(
+    v7c_limits: None, bridge_env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from trading.operations.deploy_apply import BUDGET_TEXT
+
+    assert pb.budget_line() == V7C_BUDGET_LINE
+    bridge_env.install(None, Clock(ny(10, 0)))
+    assert pb.main(["--preflight"]) == pb.EXIT_OK
+    out = events(capsys)
+    assert out[1:] == [*(("INFO", line) for line in V7B_CAPS_LINES), ("INFO", "fenced identities = none"),
+                       ("INFO", V7C_BUDGET_LINE)]  # no mode line with the switch off
+    assert [text for _, text in out if BUDGET_TEXT in text] == [V7C_BUDGET_LINE]
 
 
 def test_v7c_manual_buy_is_reserved_before_it_leaves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5303,7 +5404,8 @@ def test_fix1_n04_an_own_stop_also_in_the_all_clients_book_covers_once(tmp_path:
 def test_fix1_n05_a_short_position_is_unprotected(tmp_path: Path) -> None:
     bridge, _ = _covered_world(tmp_path, held=-50)
     assert bridge.account_open_risk().unprotected == (("AAPL", "short 50 sh"),)
-    assert bridge.budget_problem(Decimal("50")).startswith("v7c_unprotected_position: AAPL short 50 sh")
+    # Rewritten for v7c-t1 (explicit): a foreign short refuses owner buys; for a bot entry it is measured (D7).
+    assert bridge.budget_problem(Decimal("50"), source="manual").startswith("v7c_unprotected_position: AAPL short 50 sh")
 
 
 @pytest.mark.parametrize("avg_cost", [0.0, sys.float_info.max])  # 9.81 sends UNSET as 1.8e308
@@ -5380,7 +5482,7 @@ def test_fix1_low1_a_filled_owner_buy_stays_in_the_budget_until_its_position_upd
     assert bridge.manual.settling == {}
 
 
-def test_fix1_low2_a_quiet_reqpnl_loss_still_blocks_after_120s(
+def test_fix1_low2_a_quiet_reqpnl_loss_still_blocks_after_120s(v7c_limits: None,
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # N18 probe P4: e63a599 dropped IBKR's -14,000 (2.1 %) once it was 121 s old and sent a MOMO entry.
@@ -5425,7 +5527,7 @@ def test_fix1_low3_unfilled_bot_shares_never_hide_owner_shares(tmp_path: Path) -
     assert risk.total == Decimal("1050.00")  # + the bracket: 40 held and 60 unfilled x (50.00 - 49.50)
 
 
-def test_fix1_low4_a_second_unprotected_episode_pages_again(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_fix1_low4_a_second_unprotected_episode_pages_again(v7c_limits: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # N18 probe P6: e63a599 paged the first episode only.
     clock = Clock(DECIDED)
     broker = connected_broker(positions={AAPL_ID: 100}, contracts=STOCK)

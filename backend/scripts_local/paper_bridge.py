@@ -1,8 +1,9 @@
-"""TEMPORARY supervised PAPER bridge v7c (owner request 2026-10-12; v5 = C1.1 hardening + GO fixes;
+"""TEMPORARY supervised PAPER bridge v7c-t1 (owner request 2026-10-12; v5 = C1.1 hardening + GO fixes;
 v7a = per-identity authority: exact-match allowlist, identity fence, caps, orderRef identity;
 v7b = the four identities MOMO_HOD_V2, ORB_V2, VWAP_PB_V2, GAP_GO_V2, data rows only;
 v7c = the account-level 3 % day risk budget and owner buys that carry their stop, owner decisions
-D1 and D5 of 2026-10-18).
+D1 and D5 of 2026-10-18; v7c-t1 = the no-limit PAPER test L-T1, owner plan v2 of 2026-10-23,
+decisions D1-D9: see "No-limit PAPER test" below).
 
 Consumes accepted decisions of ONE New York session from the shadow ledger and
 manages each as an IBKR native bracket on the PAPER account until the session
@@ -66,8 +67,10 @@ Safety rules (all enforced here because the shadow pipeline sizes per run):
   Across ALL identities at most sum(max_positions) brackets plus one slot per
   symbol with a live client order the bridge does not manage; one bracket per
   symbol. A single order may not exceed 25% of net liq in notional or 1% of net
-  liq in risk (entry - stop).
-- Day risk budget (v7c, D1/D5), across the whole account: a risk-increasing
+  liq in risk (entry - stop). (The no-limit test L-T1 below lifts the position,
+  entries/day and account-wide caps and keeps everything else.)
+- Day risk budget (v7c, D1/D5; for bot entries measured only in the no-limit
+  test L-T1 below), across the whole account: a risk-increasing
   order (a bot entry or an owner buy) is sent only if today's realized loss
   (floored at zero: gains never fund risk) + the open risk to CURRENT stops +
   its own risk, risks scaled by STOP_SLIPPAGE_FACTOR, stays within
@@ -114,14 +117,58 @@ Safety rules (all enforced here because the shadow pipeline sizes per run):
   still live on a closed or cancelled bracket, or an account holding fewer
   shares than a bracket expects (the last two after a 15 s grace, because an
   OCA cancel or a position update may trail its fill). No entry is sent once a
-  stop was requested.
+  stop was requested. (In the no-limit test L-T1 the first is the stop repair.)
 - 15:45 ET flatten: each open bracket's target is repriced ONCE to a
   marketable limit on the same order ID (live bid, else the newest screener
   snapshot less a further 1%); the OCA link cancels the stop, so there is never
   a second sell order. The attempt is persisted before anything is sent, so a
   failed or interrupted flatten is never retried after a restart. 15:46, 15:50
   and 15:58 only alert (CRITICAL) about anything not flat: a second automatic
-  sell could race the owner's manual close in TWS.
+  sell could race the owner's manual close in TWS. Since v7c-t1 the flatten is
+  batched: every due bracket is marked attempted in one save, the bids of all
+  of them are requested together and waited for once, then every reprice is
+  sent, so 26 positions are repriced within seconds of 15:45, not one bid wait
+  after another.
+
+No-limit PAPER test L-T1 (NO_LIMIT_TEST, a literal in this file; plan v2 items
+3-5, owner decisions D7 and D8). With the constant set:
+- The caps rows keep only their last-entry offsets (no position or entries/day
+  cap) and there is no account-wide position cap; a half-on table (the
+  constant set and a row capped, or the reverse) refuses the import.
+- For a bot entry the -2 % daily loss stop and the 3 % day risk budget are
+  computed on every signal and logged (v7c_budget_ok, or t1_over_v7c_limits
+  with what v7c would have refused), right before the order is stored and
+  placed, and never block it. Owner buys keep every v7c refusal (D8). A
+  realized loss pages once per whole percent of net liquidation from 2 %
+  (t1_realized_loss_step), an over-budget account only logs (INFO).
+- A robot position without a working stop still refuses every bot entry and
+  every owner buy (v7c_unprotected_position) until it is repaired or flat. Its
+  stop is repaired (t1_stop_repair): a working entry is cancelled, one new SELL
+  STP GTC is sent at the leg_price rule (never looser) for the shares held,
+  joined to the target's OCA group (a live target without a known OCA group is
+  never paired with a second sell: the position is closed instead), at most
+  once; if that stop is rejected, or the position is still unprotected 60 s
+  after detection, the position is closed at market (the target repriced
+  marketable, or one SELL MKT when no exit leg works) and paged. A manual or
+  foreign position without a stop pages once per symbol per day
+  (t1_unprotected_manual) and refuses owner buys, never bot entries (D7).
+- Account values (AvailableFunds, BuyingPower, ExcessLiquidity, Cushion,
+  GrossPositionValue, NetLiquidation; request 7004) are re-read every 30 s and
+  logged (t1_account_values); they never gate an order and never replace the
+  startup net liquidation the checks use. A cushion under 10 % pages.
+- An entry IBKR rejects is never sent again; its TWS errors are logged INFO and
+  the first rejection of an identity in a day pages once (t1_broker_rejected).
+- Every processed decision logs one t1_snapshot JSON line (time, identity,
+  symbol, side, signal and stop price, size, equity, day P&L, open positions,
+  buying power, AI verdict, the measured budget, result and fill so far).
+Malfunction guards (on in every mode, hard blocks on bot entries, each with a
+token, a SKIP line and a page on its first two trips per identity a day):
+GUARD_ORDERS_PER_STRATEGY entries per identity per GUARD_ORDER_WINDOW;
+GUARD_REJECTIONS_TO_HALT consecutive broker rejections halt the identity for
+the day (in memory, recounted from the day's state at a restart; no fence row:
+the bridge never writes the ledger); GUARD_ENTRIES_PER_SYMBOL entries per
+symbol per day; a duplicate (symbol, side and size) within
+GUARD_DUPLICATE_WINDOW; and any entry outside the XNYS session (America/New_York).
 
 Owner orders (ManualDesk, a second isolated intake that always runs after the
 flatten): every tick it writes the bridge heartbeat, follows sent rows of the
@@ -183,8 +230,8 @@ from ibapi.execution import ExecutionFilter
 from ibapi.order import Order
 from ibapi.wrapper import EWrapper
 
-BRIDGE_VERSION = "v7c"
-STATE_SCHEMA = "paper-bridge-state.v5"
+BRIDGE_VERSION = "v7c-t1"
+STATE_SCHEMA = "paper-bridge-state.v5"  # v7c-t1 adds only optional Bracket fields; older readers ignore them
 NY = ZoneInfo("America/New_York")
 DATA_DIR = Path.home() / ".local/share/autotrader-v1"
 DB = DATA_DIR / "autotrader.db"
@@ -257,8 +304,59 @@ DAILY_LOSS_LIMIT = "daily_loss_limit"
 # TWS": /close is refused while a past session's bot leg or a needs_attention
 # bracket works on the symbol (N18 LOW-5).
 UNPROTECTED_ADVICE = "close it with /close {symbol} or in TWS, or protect it with a stop that stays working (GTC)"
+# ---- no-limit PAPER test L-T1 (owner plan v2, 2026-10-23; decisions D1-D9) ----------------------------
+# A literal, never configuration: no environment variable, setting or command changes it (AGENTS.md).
+# trading/risk/no_limit_test.py holds the same constant for the rest of the system; this file never
+# imports it (the pinned bridge imports exactly the reviewed three modules) and a test ties the two.
+# deploy undo restores the reviewed v7c bridge; nothing in this file switches the test off at runtime.
+NO_LIMIT_TEST = True
+NO_LIMIT_TEST_LABEL = "L-T1"
+# Malfunction guards (plan v2 item 4): hard blocks on bot entries in every mode, one named constant each.
+GUARD_ORDERS_PER_STRATEGY = 20  # entries one identity may send within GUARD_ORDER_WINDOW (a burst of 10 passes)
+GUARD_ORDER_WINDOW = timedelta(seconds=60)
+GUARD_REJECTIONS_TO_HALT = 3  # consecutive broker rejections that halt an identity for the rest of the day
+GUARD_ENTRIES_PER_SYMBOL = 3  # entries per symbol per session, every identity together
+GUARD_DUPLICATE_WINDOW = timedelta(seconds=5)  # same symbol, side and size within this long: a double send
+# Stop auto-repair (plan v2 item 5): a robot position without a working stop is closed at market when
+# its one resubmitted stop is rejected, or when it is still unprotected this long after detection.
+STOP_REPAIR_DEADLINE = timedelta(seconds=60)
+STOP_REPAIR_CLOSE_DISCOUNT = Decimal("0.98")  # the marketable limit a repair close reprices the target to
+# An entry's TWS errors during this window are logged INFO: the loop decides whether IBKR rejected it and
+# pages a rejection once per identity per day; an error it does not explain still pages at the window's end.
+ENTRY_REJECTION_WINDOW = timedelta(seconds=30)
+# Account values (plan v2 item 3): logged on every order, never gating, never the net liquidation the
+# checks use (that is the startup NetLiquidation of SUMMARY_REQUEST_ID, read once).
+ACCOUNT_VALUE_TAGS = ("NetLiquidation", "AvailableFunds", "BuyingPower", "ExcessLiquidity", "Cushion",
+                      "GrossPositionValue")
+ACCOUNT_VALUES_REFRESH = timedelta(seconds=30)
+LOW_CUSHION = Decimal("0.10")  # IBKR's Cushion (excess liquidity / net liquidation) below this pages
+if not isinstance(NO_LIMIT_TEST, bool):  # tripwire: only the literal decides
+    raise ValueError("NO_LIMIT_TEST must be a bool literal")
+if not (GUARD_ORDERS_PER_STRATEGY >= 20 and GUARD_REJECTIONS_TO_HALT >= 1 and GUARD_ENTRIES_PER_SYMBOL >= 3
+        and timedelta(0) < GUARD_DUPLICATE_WINDOW and timedelta(0) < STOP_REPAIR_DEADLINE <= timedelta(seconds=60)):
+    raise ValueError("a malfunction guard is below the owner's floor (plan v2: >= 20 per 60 s, >= 3 per symbol,"
+                     " stop repair <= 60 s)")
+# v7c-t1 tokens: each starts its bridge.log line (and a SKIP reason); the readers match them.
+T1_MODE = "t1_mode"
+T1_OVER_V7C_LIMITS = "t1_over_v7c_limits"
+T1_SNAPSHOT = "t1_snapshot"
+T1_ACCOUNT_VALUES = "t1_account_values"
+T1_LOW_CUSHION = "t1_low_cushion"
+T1_REALIZED_LOSS_STEP = "t1_realized_loss_step"
+T1_BROKER_REJECTED = "t1_broker_rejected"
+T1_STOP_REPAIR = "t1_stop_repair"
+T1_UNPROTECTED_MANUAL = "t1_unprotected_manual"
+T1_GUARD_ORDER_RATE = "t1_guard_order_rate"
+T1_GUARD_REJECTIONS = "t1_guard_rejections"
+T1_GUARD_SYMBOL_ENTRIES = "t1_guard_symbol_entries"
+T1_GUARD_DUPLICATE = "t1_guard_duplicate"
+T1_GUARD_OUTSIDE_HOURS = "t1_guard_outside_hours"
+T1_GUARD_TOKENS = (T1_GUARD_ORDER_RATE, T1_GUARD_REJECTIONS, T1_GUARD_SYMBOL_ENTRIES, T1_GUARD_DUPLICATE,
+                   T1_GUARD_OUTSIDE_HOURS)
+GUARD_PAGES_PER_DAY = 2  # a guard pages its first two trips per identity a day ("tripped twice" is an abort rule)
 ENTRY_TTL = timedelta(minutes=10)
 # Session checkpoints relative to the XNYS close (16:00, or 13:00 on a half day).
+REGULAR_OPEN = clock_time(9, 30)
 REGULAR_CLOSE = clock_time(16, 0)
 LAST_ENTRY_BEFORE_CLOSE = timedelta(minutes=30)  # 15:30 on a full day
 FLATTEN_BEFORE_CLOSE = timedelta(minutes=15)  # 15:45
@@ -278,18 +376,21 @@ class Caps:
     """One identity's entry limits; its last entry is the session close minus the offset.
 
     A row is refused at import when it could widen anything: at least one
-    position, at least one entry per day when capped, and a last-entry offset
-    inside the session (0 < offset <= 6 h). The table is read-only: nothing at
-    runtime may add, drop or change a row (a test and --preflight pin it).
+    position when capped, at least one entry per day when capped, and a
+    last-entry offset inside the session (0 < offset <= 6 h). The table is
+    read-only: nothing at runtime may add, drop or change a row (a test and
+    --preflight pin it). None = no cap, only with NO_LIMIT_TEST (the import
+    tripwire below refuses a half-on table).
     """
 
-    max_positions: int
+    max_positions: int | None
     max_entries_per_day: int | None
     last_entry_before_close: timedelta
 
     def __post_init__(self) -> None:
-        if isinstance(self.max_positions, bool) or not isinstance(self.max_positions, int) or self.max_positions < 1:
-            raise ValueError("max_positions must be an int >= 1")
+        positions = self.max_positions
+        if positions is not None and (isinstance(positions, bool) or not isinstance(positions, int) or positions < 1):
+            raise ValueError("max_positions must be None or an int >= 1")
         entries = self.max_entries_per_day
         if entries is not None and (isinstance(entries, bool) or not isinstance(entries, int) or entries < 1):
             raise ValueError("max_entries_per_day must be None or an int >= 1")
@@ -304,16 +405,34 @@ class Caps:
 # names nobody granted. Every sendable name needs a caps row; --preflight and
 # a test refuse a mismatch, and the gate skips an uncapped name (fail closed).
 SENDABLE_STRATEGY_NAMES = frozenset({"MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"})
+# No-limit test L-T1: no position or entries/day cap, the last-entry offsets kept. The reviewed v7c rows
+# were MOMO_HOD_V2 (3, none, 60m), ORB_V2 (1, 1, 30m), VWAP_PB_V2 (1, 2, 30m), GAP_GO_V2 (1, 1, 30m);
+# deploy undo restores them with the v7c bridge.
 IDENTITY_CAPS: Mapping[str, Caps] = MappingProxyType({
-    "MOMO_HOD_V2": Caps(max_positions=3, max_entries_per_day=None,
+    "MOMO_HOD_V2": Caps(max_positions=None, max_entries_per_day=None,
                         last_entry_before_close=timedelta(minutes=60)),  # 15:00 on a full day
-    "ORB_V2": Caps(max_positions=1, max_entries_per_day=1,
+    "ORB_V2": Caps(max_positions=None, max_entries_per_day=None,
                    last_entry_before_close=timedelta(minutes=30)),  # 15:30 on a full day
-    "VWAP_PB_V2": Caps(max_positions=1, max_entries_per_day=2,
+    "VWAP_PB_V2": Caps(max_positions=None, max_entries_per_day=None,
                        last_entry_before_close=timedelta(minutes=30)),
-    "GAP_GO_V2": Caps(max_positions=1, max_entries_per_day=1,
+    "GAP_GO_V2": Caps(max_positions=None, max_entries_per_day=None,
                       last_entry_before_close=timedelta(minutes=30)),
 })
+
+
+def caps_mode_problem(caps: Mapping[str, Caps], no_limit: bool) -> str | None:
+    """A half-on build: NO_LIMIT_TEST set with a capped row, or unset with a row that has no position cap."""
+    if no_limit:
+        capped = sorted(name for name, row in caps.items()
+                        if row.max_positions is not None or row.max_entries_per_day is not None)
+        return None if not capped else f"NO_LIMIT_TEST is on but these rows keep a cap: {', '.join(capped)}"
+    uncapped = sorted(name for name, row in caps.items() if row.max_positions is None)
+    return None if not uncapped else f"NO_LIMIT_TEST is off but these rows have no position cap: {', '.join(uncapped)}"
+
+
+_HALF_ON = caps_mode_problem(IDENTITY_CAPS, NO_LIMIT_TEST)
+if _HALF_ON is not None:  # tripwire: a half-on build can never start
+    raise ValueError(f"half-on no-limit test: {_HALF_ON}")
 SHADOW_ONLY = "shadow-only strategy"
 TICK = Decimal("0.01")
 FLATTEN_DISCOUNT = Decimal("0.995")
@@ -330,6 +449,7 @@ LOOP_SECONDS = 2.0
 EXEC_REQUEST_ID = 7001
 SUMMARY_REQUEST_ID = 7002
 PNL_REQUEST_ID = 7003
+ACCOUNT_VALUES_REQUEST_ID = 7004  # v7c-t1: logged only; its NetLiquidation never feeds net_liq_by_account
 QUOTE_REQUEST_BASE = 900000
 LIVE_ORDER_STATUSES = frozenset({"ApiPending", "PendingSubmit", "PreSubmitted", "Submitted"})
 WORKING_ORDER_STATUSES = LIVE_ORDER_STATUSES | {"PendingCancel"}  # may still fill
@@ -409,31 +529,59 @@ def may_send_orders(strategy_name: str) -> bool:
     return strategy_name.strip() in SENDABLE_STRATEGY_NAMES
 
 
-def global_max_open() -> int:
-    """Brackets that may hold shares across every identity, plus unmanaged live symbols."""
-    return sum(caps.max_positions for caps in IDENTITY_CAPS.values())
+def global_max_open() -> int | None:
+    """Brackets that may hold shares across every identity, plus unmanaged live symbols; None = no cap (L-T1)."""
+    if NO_LIMIT_TEST or any(caps.max_positions is None for caps in IDENTITY_CAPS.values()):
+        return None
+    return sum(caps.max_positions or 0 for caps in IDENTITY_CAPS.values())
 
 
 def caps_problem() -> str | None:
-    """The sendable names without a caps row and the caps rows nobody may send for."""
+    """The sendable names without a caps row, the caps rows nobody may send for, and a half-on table."""
     mismatch = sorted(SENDABLE_STRATEGY_NAMES ^ set(IDENTITY_CAPS))
-    return None if not mismatch else f"PREFLIGHT_REFUSED caps: {', '.join(mismatch)}"
+    if mismatch:
+        return f"PREFLIGHT_REFUSED caps: {', '.join(mismatch)}"
+    half_on = caps_mode_problem(IDENTITY_CAPS, NO_LIMIT_TEST)
+    return None if half_on is None else f"PREFLIGHT_REFUSED caps: half-on no-limit test ({half_on})"
 
 
 def caps_lines() -> list[str]:
     """What the connect line and --preflight print: the sendable set and each caps row."""
     lines = [f"sendable identities = {', '.join(sorted(SENDABLE_STRATEGY_NAMES)) or 'none'}"]
     for name, caps in sorted(IDENTITY_CAPS.items()):
+        positions = "none" if caps.max_positions is None else str(caps.max_positions)
         entries = "none" if caps.max_entries_per_day is None else str(caps.max_entries_per_day)
         minutes = int(caps.last_entry_before_close.total_seconds() // 60)
-        lines.append(f"caps {name} positions={caps.max_positions} entries/day={entries} last_entry=close-{minutes}m")
+        lines.append(f"caps {name} positions={positions} entries/day={entries} last_entry=close-{minutes}m")
     return lines
 
 
 def budget_line() -> str:
-    """The v7c rule as the connect line, --preflight and the dry run print it (deploy apply looks for it)."""
-    return (f"day risk budget {DAY_RISK_BUDGET_PCT}% of net liquidation, account level (realized loss + open risk"
-            f" to current stops + new risk; stop slippage factor {STOP_SLIPPAGE_FACTOR})")
+    """The v7c rule as the connect line, --preflight and the dry run print it (deploy apply looks for it).
+
+    It always starts with deploy_apply.BUDGET_TEXT and ends with the stop slippage factor (the session
+    checker's rule 7 reads both); in the no-limit test the rule says it is measured only for bot entries.
+    """
+    rule = "realized loss + open risk to current stops + new risk"
+    if NO_LIMIT_TEST:
+        rule += (f", measured and logged, never blocks bot entries (no-limit test {NO_LIMIT_TEST_LABEL}),"
+                 " owner buys still refused over it")
+    return (f"day risk budget {DAY_RISK_BUDGET_PCT}% of net liquidation, account level ({rule};"
+            f" stop slippage factor {STOP_SLIPPAGE_FACTOR})")
+
+
+def mode_line() -> str | None:
+    """The no-limit test's own connect and --preflight line; it never repeats budget_line's text."""
+    if not NO_LIMIT_TEST:
+        return None
+    return (f"{T1_MODE} no-limit PAPER test {NO_LIMIT_TEST_LABEL} on: no position, entries/day or account-wide"
+            f" caps; the -{MAX_DAILY_LOSS_PCT}% daily loss stop and the {DAY_RISK_BUDGET_PCT}% risk budget are"
+            " measured and logged, never block bot entries (owner buys keep both); robot stops repair themselves"
+            f" ({int(STOP_REPAIR_DEADLINE.total_seconds())}s, then close at market); guards:"
+            f" {GUARD_ORDERS_PER_STRATEGY} entries per identity per {int(GUARD_ORDER_WINDOW.total_seconds())}s,"
+            f" {GUARD_REJECTIONS_TO_HALT} broker rejections halt an identity for the day,"
+            f" {GUARD_ENTRIES_PER_SYMBOL} entries per symbol per day, duplicates within"
+            f" {int(GUARD_DUPLICATE_WINDOW.total_seconds())}s, no entry outside the session")
 
 
 def position_risk(held: int | Decimal, avg_entry: Decimal, pending: int | Decimal, limit: Decimal, stop: Decimal,
@@ -481,9 +629,15 @@ class SessionTimes:
     verify: datetime
     stop: datetime
     final_alert: datetime
+    opens_at: datetime | None = None  # v7c-t1: the XNYS open (the outside-hours guard); None = 09:30 that day
+
+    def __post_init__(self) -> None:
+        if self.opens_at is None:
+            object.__setattr__(self, "opens_at", datetime.combine(self.closes_at.astimezone(NY).date(), REGULAR_OPEN,
+                                                                  tzinfo=NY))
 
     @classmethod
-    def closing_at(cls, closes_at: datetime) -> "SessionTimes":
+    def closing_at(cls, closes_at: datetime, opens_at: datetime | None = None) -> "SessionTimes":
         return cls(
             closes_at=closes_at,
             last_entry=closes_at - LAST_ENTRY_BEFORE_CLOSE,
@@ -492,12 +646,14 @@ class SessionTimes:
             verify=closes_at - VERIFY_BEFORE_CLOSE,
             stop=closes_at - STOP_BEFORE_CLOSE,
             final_alert=closes_at - FINAL_ALERT_BEFORE_CLOSE,
+            opens_at=opens_at,
         )
 
 
-def session_close(session_date: date) -> datetime:
-    """The XNYS close of the date (13:00 on a half day); 16:00 when the calendar is unusable."""
-    regular = datetime.combine(session_date, REGULAR_CLOSE, tzinfo=NY)
+def session_bounds(session_date: date) -> tuple[datetime, datetime]:
+    """The XNYS open and close of the date (13:00 on a half day); 09:30-16:00 when the calendar is unusable."""
+    regular = (datetime.combine(session_date, REGULAR_OPEN, tzinfo=NY),
+               datetime.combine(session_date, REGULAR_CLOSE, tzinfo=NY))
     try:
         backend_modules()
         from trading.scheduler.sessions import market_session
@@ -507,11 +663,17 @@ def session_close(session_date: date) -> datetime:
         log("CRITICAL", f"market calendar unavailable ({type(exc).__name__}: {exc}) — assuming the regular"
             " 16:00 close; on a half day act in TWS before 13:00")
         return regular
-    return regular if session is None else session.closes_at.astimezone(NY)
+    return regular if session is None else (session.opens_at.astimezone(NY), session.closes_at.astimezone(NY))
+
+
+def session_close(session_date: date) -> datetime:
+    """The XNYS close of the date (13:00 on a half day); 16:00 when the calendar is unusable."""
+    return session_bounds(session_date)[1]
 
 
 def session_times(session_date: date) -> SessionTimes:
-    return SessionTimes.closing_at(session_close(session_date))
+    opens_at, closes_at = session_bounds(session_date)
+    return SessionTimes.closing_at(closes_at, opens_at)
 
 
 @dataclass
@@ -547,6 +709,12 @@ class Bracket:
     run_id: str = ""
     attention_reason: str = ""
     setup_fingerprint: str = ""
+    # v7c-t1, optional: a state file without them loads, and an older reader drops them (BRACKET_FIELDS).
+    broker_rejection: str = ""  # "<TWS code> <message>" when IBKR rejected the entry; it is never sent again
+    stop_repair_detected: str = ""  # UTC ISO time the position was first seen without a working stop
+    stop_repair_from: int | None = None  # the dead stop leg the resubmitted stop (stop_id) replaced
+    stop_repair_outcome: str = ""  # "" | sent | repaired | closing | flatten_closing
+    market_close_id: int | None = None  # a repair close's SELL MKT, sent only when no exit leg worked
 
     @property
     def active(self) -> bool:
@@ -567,7 +735,14 @@ class Bracket:
 
     @property
     def legs(self) -> tuple[int, ...]:
-        return tuple(leg for leg in (self.parent, self.target_id, self.stop_id) if leg is not None)
+        return tuple(leg for leg in (self.parent, self.target_id, self.stop_id, self.stop_repair_from,
+                                     self.market_close_id) if leg is not None)
+
+    @property
+    def exit_legs(self) -> tuple[tuple[int | None, str], ...]:
+        """Every order that sells this bracket's shares, with the exit reason its fills carry."""
+        return ((self.target_id, "target"), (self.stop_id, "stop"), (self.stop_repair_from, "stop"),
+                (self.market_close_id, "stop_repair"))
 
 
 BRACKET_FIELDS = frozenset(Bracket.__dataclass_fields__)
@@ -669,6 +844,13 @@ class OpenRisk:
     # (symbol, shares the stops sell, shares they cover, the account's position): working stops
     # that would sell more than the shares they cover (LOW-8: a WARN, never a block)
     oversized: tuple[tuple[str, Decimal, Decimal, Decimal], ...] = ()
+    # v7c-t1 (D7): the entries of ``unprotected`` that are the robot's own brackets, as
+    # (decision id, symbol, why); the rest are manual or foreign positions.
+    robot: tuple[tuple[str, str, str], ...] = ()
+
+    @property
+    def robot_unprotected(self) -> tuple[tuple[str, str], ...]:
+        return tuple((symbol, why) for _, symbol, why in self.robot)
 
 
 @dataclass(frozen=True)
@@ -679,6 +861,8 @@ class Budget:
     open_risk: Decimal
     new_risk: Decimal
     net_liq: Decimal
+    # v7c-t1: the v7c refusals this bot entry is over, measured and logged instead (t1_over_v7c_limits)
+    over: tuple[str, ...] = ()
 
     @property
     def total(self) -> Decimal:
@@ -688,10 +872,13 @@ class Budget:
     def limit(self) -> Decimal:
         return self.net_liq * DAY_RISK_BUDGET_PCT / 100
 
+    @property
+    def percent(self) -> Decimal:
+        return (self.total / self.net_liq * 100).quantize(Decimal("0.01"))
+
     def text(self) -> str:
-        percent = (self.total / self.net_liq * 100).quantize(Decimal("0.01"))
         return (f"realized {money(self.realized_loss)} + open {money(self.open_risk)} + new {money(self.new_risk)}"
-                f" = {money(self.total)} ({percent}%)")
+                f" = {money(self.total)} ({self.percent}%)")
 
 
 @dataclass(frozen=True)
@@ -1127,6 +1314,14 @@ class BrokerState:
         # report never erases it, LOW-2), and time.monotonic() of that report; None while unset.
         self.pnl_realized: Decimal | None = None
         self.pnl_at: float | None = None
+        # v7c-t1: account values of ACCOUNT_VALUES_REQUEST_ID (account -> tag -> value), logged only; the
+        # answers counted, and time.monotonic() of the last complete one. Never net_liq_by_account.
+        self.account_values: dict[str, dict[str, Decimal | None]] = {}
+        self.account_values_answers = 0
+        self.account_values_at: float | None = None
+        # v7c-t1: the legs of an entry still in its rejection window; a TWS error on one is logged INFO and
+        # the bridge loop pages a rejection once per identity per day (ENTRY_REJECTION_WINDOW).
+        self.quiet_order_ids: set[int] = set()
 
     def nextValidId(self, order_id: int) -> None:
         with self.lock:
@@ -1296,12 +1491,21 @@ class BrokerState:
 
     def accountSummary(self, request_id: int, account: str, tag: str, value: str,
                        currency: str) -> None:
+        if request_id == ACCOUNT_VALUES_REQUEST_ID:  # v7c-t1: logged only, never the checks' net liquidation
+            with self.lock:
+                self.account_values.setdefault(str(account), {})[str(tag)] = _decimal_or_none(value)
+            return
         amount = positive_decimal(value) if tag == "NetLiquidation" else None
         if amount is not None:
             with self.lock:
                 self.net_liq_by_account[str(account)] = amount
 
     def accountSummaryEnd(self, request_id: int) -> None:
+        if request_id == ACCOUNT_VALUES_REQUEST_ID:
+            with self.lock:
+                self.account_values_answers += 1
+                self.account_values_at = time.monotonic()
+            return
         self.summary_done.set()
 
     def pnl(self, request_id: int, daily_pnl: Any, unrealized_pnl: Any, realized_pnl: Any) -> None:
@@ -1322,9 +1526,15 @@ class BrokerState:
             number = -1
         with self.lock:
             ours = request_id in self.own_order_ids
+            quiet = request_id in self.quiet_order_ids
             if ours and number not in ORDER_INFO_CODES:
                 self.order_errors[request_id] = self.order_errors.get(request_id, 0) + 1
                 self.error_details[request_id] = (number, " ".join(str(message).split()))
+        if ours and quiet and number not in ORDER_INFO_CODES:
+            # v7c-t1: an entry in its rejection window; the loop pages a rejection once per identity per
+            # day (t1_broker_rejected) and any other error at the window's end, never one page per order.
+            log("INFO", f"TWS {request_id} {code} {message} (entry order: the bridge pages it once)")
+            return
         if ours:  # a rejected order, modify or cancel of ours is never routine
             log("INFO" if number in ORDER_INFO_CODES else "CRITICAL", f"TWS {request_id} {code} {message}")
             return
@@ -1448,6 +1658,17 @@ class Bridge:
         self.oversized_since: dict[tuple[str, ...], datetime] = {}  # oversized-stop episode -> first tick seen
         self.open_orders_sent: dict[int, datetime] = {}  # open-orders request number -> when it was sent
         self.watch_failures = 0
+        # v7c-t1: the rejection window of each new entry, the rejection streaks and day halts (in memory,
+        # recounted from the day's state at startup), guard trips, and the account-values cadence.
+        self.entry_watch: dict[str, datetime] = {}  # decision id -> when its entry was placed
+        self.rejection_streak: dict[str, int] = {}  # identity -> consecutive broker rejections
+        self.rejection_paged: set[str] = set()  # identities whose first rejection today has paged
+        self.halted: dict[str, str] = {}  # identity -> why it takes no more entries today
+        self.guard_trips: dict[tuple[str, str], int] = {}  # (guard token, identity) -> refusals today
+        self.account_values_requested: datetime | None = None
+        self.account_values_logged = 0  # the account-values answer last logged
+        self.t1_watch_failures = 0
+        self.repair_cancels: set[int] = set()  # legs of repaired brackets the bridge asked IBKR to cancel
         with self.app.lock:  # rejections of restored legs must be CRITICAL too
             for bracket in brackets.values():
                 self.app.own_order_ids.update(bracket.legs)
@@ -1546,11 +1767,15 @@ class Bridge:
                 executed, _ = self.leg_fills(bracket, order_id)
                 return min(bracket.qty, max(executed, self.app.order_filled.get(order_id, 0)))
 
+            target, stop = leg(bracket.target_id), leg(bracket.stop_id)
+            # v7c-t1: a repaired bracket's dead stop leg and its repair close also sold shares; as exits no
+            # current leg owns they only shrink both legs' totals (plan_exit's unattributed exits).
+            retired = leg(bracket.stop_repair_from) + leg(bracket.market_close_id)
             return FillSnapshot(
                 parent=max(bracket.filled, leg(bracket.parent)),
-                target=leg(bracket.target_id),
-                stop=leg(bracket.stop_id),
-                recorded_exits=bracket.exit_filled,
+                target=target,
+                stop=stop,
+                recorded_exits=max(bracket.exit_filled, target + stop + retired),
                 position=self.account_position(bracket.con_id),
             )
 
@@ -1624,12 +1849,14 @@ class Bridge:
         exit_qty = 0
         exit_value = Decimal("0")
         exit_reason = bracket.exit_reason
-        for leg, reason in ((bracket.target_id, "target"), (bracket.stop_id, "stop")):
+        for leg, reason in bracket.exit_legs:  # v7c-t1: a repaired stop's dead leg and a repair close too
             quantity, price = self.leg_fills(bracket, leg)
             if quantity > 0:
                 exit_qty += quantity
                 exit_value += Decimal(quantity) * price
-                exit_reason = "flatten" if bracket.flatten_sent and reason == "target" else reason
+                if bracket.flatten_sent and reason == "target":
+                    reason = "stop_repair" if bracket.stop_repair_outcome == "closing" else "flatten"
+                exit_reason = reason
         if exit_qty > bracket.exit_filled:
             bracket.exit_filled = exit_qty
             bracket.avg_exit = str(average(exit_value, exit_qty).quantize(Decimal("0.0001")))
@@ -1653,6 +1880,7 @@ class Bridge:
                     bracket.status = "closed"
                     log("CLOSED", f"{bracket.symbol}: P&L {bracket.realized_pnl} ({bracket.exit_reason})")
                 self._cancel_working_entry(bracket, parent_status)
+                self._cancel_repair_legs(bracket)
             elif bracket.status == "closed":
                 bracket.status = "open"
                 log("CRITICAL", f"{bracket.symbol}: entry filled again after the bracket closed"
@@ -1661,7 +1889,11 @@ class Bridge:
                 bracket.status = "open"  # a fill that raced the cancel is still a position
         elif parent_status in PARENT_CANCELLED_STATUSES and bracket.status == "sent":
             bracket.status = "cancelled"
-            log("CANCELLED", f"{bracket.symbol}: entry never filled")
+            if bracket.broker_rejection or (self.entry_errors(bracket) and not bracket.parent_cancel_requested):
+                # v7c-t1: a rejected entry; watch_entries pages it once per identity per day, not per order
+                log("INFO", f"{bracket.symbol}: entry never filled — rejected by IBKR")
+            else:
+                log("CANCELLED", f"{bracket.symbol}: entry never filled")
 
     def _mark_oversold(self, bracket: Bracket) -> None:
         """Exit fills above entry fills are never "closed": the account may be short."""
@@ -1679,6 +1911,19 @@ class Bridge:
         bracket.parent_cancel_requested = True
         log("CANCEL", f"entry {bracket.symbol}: position closed while the entry was working"
             f" (filled {bracket.filled}/{bracket.qty})")
+
+    def _cancel_repair_legs(self, bracket: Bracket) -> None:
+        """v7c-t1: a repaired bracket that holds nothing keeps no sell working. Its resubmitted stop is
+        joined to the target's OCA group, so IBKR normally cancels the other leg itself; this covers a
+        stop sent without a live target and any leg IBKR still reports working. Once per leg."""
+        if bracket.stop_repair_from is None:
+            return
+        for order_id in (bracket.target_id, bracket.stop_id):
+            if order_id is None or order_id in self.repair_cancels or not self.leg_live(order_id):
+                continue
+            self.app.cancelOrder(order_id)
+            self.repair_cancels.add(order_id)
+            log("CANCEL", f"{bracket.symbol}: order {order_id} cancelled — the repaired bracket holds nothing")
 
     def _new_bracket(self, row: DecisionRow) -> Bracket:
         try:
@@ -1759,19 +2004,75 @@ class Bridge:
         symbol_problem = self.symbol_problem(bracket.symbol, bracket.con_id)
         if symbol_problem:
             return intent, symbol_problem
-        if self.positions_of(identity) >= caps.max_positions:
+        # No-limit test L-T1: a row without a cap and no account-wide cap skip these three (measured in the
+        # snapshot instead); with the v7c rows they refuse exactly as before.
+        if caps.max_positions is not None and self.positions_of(identity) >= caps.max_positions:
             return intent, f"{identity}: max {caps.max_positions} positions already active"
-        if self.slots_used() >= global_max_open():
-            return intent, f"max {global_max_open()} positions/entries already active"
+        global_cap = global_max_open()
+        if global_cap is not None and self.slots_used() >= global_cap:
+            return intent, f"max {global_cap} positions/entries already active"
         if caps.max_entries_per_day is not None and self.entries_today(identity) >= caps.max_entries_per_day:
             return intent, f"{identity}: max {caps.max_entries_per_day} entries/day already sent"
+        # v7c-t1 malfunction guards. Checked once, here: within one decision every input only relaxes as
+        # the quote wait passes (the rate and duplicate windows age, the open is crossed only into the
+        # session, the close is always behind the last-entry deadline) and only the loop writes a halt.
+        guard = self.guard_refusal(bracket)
+        if guard:
+            return intent, guard
         net_liq = self.net_liq
         if net_liq is None:
             return intent, "net liquidation unknown"
-        loss = self.daily_loss_problem(self.account_realized_loss(), net_liq)
-        if loss:
-            return intent, loss
+        if not NO_LIMIT_TEST:  # L-T1: the -2 % stop is measured for bot entries in budget_check, never refused
+            loss = self.daily_loss_problem(self.account_realized_loss(), net_liq)
+            if loss:
+                return intent, loss
         return intent, self._size_problem(bracket, net_liq)
+
+    # ---- v7c-t1 malfunction guards (plan v2 item 4; on in every mode) -------------------------------
+    def guard_problem(self, bracket: Bracket) -> tuple[str, str] | None:
+        """(token, refusal) of the first malfunction guard this bot entry trips, else None (pure)."""
+        identity = bracket.strategy_name.strip()
+        now = self.now()
+        opens_at = self.times.opens_at or datetime.combine(self.session_date, REGULAR_OPEN, tzinfo=NY)
+        if now < opens_at or now >= self.times.closes_at:
+            return T1_GUARD_OUTSIDE_HOURS, (f"{T1_GUARD_OUTSIDE_HOURS}: {now:%H:%M:%S} ET is outside the XNYS session"
+                                            f" {opens_at:%H:%M}-{self.times.closes_at:%H:%M} ET — refused")
+        if identity in self.halted:
+            return T1_GUARD_REJECTIONS, f"{T1_GUARD_REJECTIONS}: {identity} is halted for the day ({self.halted[identity]})"
+        sent = [(b, parse_time(b.sent_at)) for b in self.brackets.values() if b.parent is not None]
+        recent = sum(1 for b, at in sent if b.strategy_name.strip() == identity
+                     and (at is None or now - at < GUARD_ORDER_WINDOW))  # an unreadable time counts as recent
+        if recent >= GUARD_ORDERS_PER_STRATEGY:
+            return T1_GUARD_ORDER_RATE, (f"{T1_GUARD_ORDER_RATE}: {identity} sent {recent} entries in the last"
+                                         f" {int(GUARD_ORDER_WINDOW.total_seconds())}s (limit"
+                                         f" {GUARD_ORDERS_PER_STRATEGY}) — refused")
+        same_symbol = sum(1 for b, _ in sent if b.symbol == bracket.symbol)
+        if same_symbol >= GUARD_ENTRIES_PER_SYMBOL:
+            return T1_GUARD_SYMBOL_ENTRIES, (f"{T1_GUARD_SYMBOL_ENTRIES}: {bracket.symbol} was entered {same_symbol}"
+                                             f" times today (limit {GUARD_ENTRIES_PER_SYMBOL}) — refused")
+        for other, at in sent:
+            if (other.symbol == bracket.symbol and other.qty == bracket.qty
+                    and (at is None or now - at < GUARD_DUPLICATE_WINDOW)):
+                age = "?" if at is None else f"{(now - at).total_seconds():.1f}"
+                return T1_GUARD_DUPLICATE, (f"{T1_GUARD_DUPLICATE}: BUY {bracket.qty} {bracket.symbol} repeats order"
+                                            f" {other.parent} sent {age}s ago (window"
+                                            f" {int(GUARD_DUPLICATE_WINDOW.total_seconds())}s) — refused")
+        return None
+
+    def guard_refusal(self, bracket: Bracket) -> str | None:
+        """The guard's refusal text; its first GUARD_PAGES_PER_DAY trips per identity a day page (CRITICAL)."""
+        found = self.guard_problem(bracket)
+        if found is None:
+            return None
+        token, text = found
+        identity = bracket.strategy_name.strip()
+        if token != T1_GUARD_REJECTIONS:  # a halted identity paged once, when it halted
+            trips = self.guard_trips.get((token, identity), 0) + 1
+            self.guard_trips[(token, identity)] = trips
+            if trips <= GUARD_PAGES_PER_DAY:
+                again = "" if trips == 1 else f" (trip {trips} today: an abort rule — deploy undo tonight)"
+                log("CRITICAL", f"{token} {bracket.symbol} ({identity}): {text.split(': ', 1)[1]}{again}")
+        return text
 
     def _skip(self, bracket: Bracket, reason: str, *, with_strategy: bool = True) -> None:
         bracket.skipped, bracket.status, bracket.skip_reason = True, "skipped", reason
@@ -1788,6 +2089,14 @@ class Bridge:
                 self.process_decision(row)
 
     def process_decision(self, row: DecisionRow) -> None:
+        """One decision, start to end, then its t1_snapshot line (v7c-t1: every processed decision)."""
+        measured: list[Budget] = []
+        try:
+            self._process_decision(row, measured)
+        finally:
+            self.log_snapshot(row, measured[0] if measured else None)
+
+    def _process_decision(self, row: DecisionRow, measured: list[Budget]) -> None:
         bracket = self._new_bracket(row)
         intent: DecisionIntent | None = None
         try:
@@ -1825,16 +2134,26 @@ class Bridge:
         if identity_stopped:
             self._skip(bracket, f"identity_stopped:{identity}")
             return
+        self.request_account_values(stale_only=True)  # v7c-t1: logged on every order; never waited for
         # v7c: the budget is read last, right before the order is stored and leaves, on this loop's
-        # thread; submit() stores the bracket before placeOrder, so the next decision sees it.
+        # thread; submit() stores the bracket before placeOrder, so the next decision sees it. In the
+        # no-limit test it still refuses a robot position without a working stop; the -2 % stop and the
+        # 3 % budget are measured and logged here, before the order is stored, and never refuse.
         new_risk = Decimal(bracket.qty) * (Decimal(bracket.entry) - Decimal(bracket.stop))
         problem, budget = self.budget_check(new_risk, source="bot")
+        if budget is not None:
+            measured.append(budget)
         if problem or budget is None:
             self._skip(bracket, f"{problem or V7C_DAY_RISK_BUDGET} — would have sent BUY {bracket.qty} @"
                        f" {bracket.entry} | stop {bracket.stop} | target {bracket.target}")
             return
-        log("INFO", f"{V7C_BUDGET_OK} {bracket.symbol} ({bracket.label}): {budget.text()} <= {DAY_RISK_BUDGET_PCT}%"
-            f" of {money(budget.net_liq)} (source=bot)")
+        if budget.over:
+            log("INFO", f"{T1_OVER_V7C_LIMITS} {bracket.symbol} ({bracket.label}): {budget.text()} vs"
+                f" {DAY_RISK_BUDGET_PCT}% of {money(budget.net_liq)} — would refuse: {', '.join(budget.over)}"
+                " (source=bot)")
+        else:
+            log("INFO", f"{V7C_BUDGET_OK} {bracket.symbol} ({bracket.label}): {budget.text()} <="
+                f" {DAY_RISK_BUDGET_PCT}% of {money(budget.net_liq)} (source=bot)")
         self.submit(bracket)
         self.check_budget_invariant(budget, f"{bracket.symbol} ({bracket.label})")
 
@@ -1850,6 +2169,8 @@ class Bridge:
             parent_id = self.app.next_id
             self.app.next_id += 3
             self.app.own_order_ids.update({parent_id, parent_id + 1, parent_id + 2})
+            self.app.quiet_order_ids.update({parent_id, parent_id + 1, parent_id + 2})  # v7c-t1: rejection window
+        self.entry_watch[bracket.decision_id] = self.now()
         contract = stock(bracket.con_id, bracket.primary_exchange)
         ref = self.ref(bracket)
         parent = order("BUY", "LMT", bracket.qty, self.account, ref, lmtPrice=float(bracket.entry),
@@ -1894,8 +2215,10 @@ class Bridge:
         """
         kind = "LMT" if leg == "target" else "STP"
         price_field = "lmtPrice" if kind == "LMT" else "auxPrice"
+        # v7c-t1: a resubmitted stop was placed without a parent (its entry had filled): so is its modification.
+        parent = 0 if leg == "stop" and bracket.stop_repair_from is not None else bracket.parent
         modified = order("SELL", kind, total, self.account, self.ref(bracket), tif="GTC",
-                         parentId=bracket.parent, transmit=True, **{price_field: float(price)})
+                         parentId=parent, transmit=True, **{price_field: float(price)})
         with self.app.lock:
             cached = self.app.order_objects.get(order_id)
         if cached is None:
@@ -1907,7 +2230,7 @@ class Bridge:
         account = str(getattr(cached, "account", "") or "")
         parent_id = _whole(getattr(cached, "parentId", 0) or 0)
         if (action != "SELL" or order_type != kind or account not in {"", self.account}
-                or parent_id not in {0, bracket.parent}):
+                or parent_id not in {0, parent}):
             self.alert_once(
                 (bracket.decision_id, leg, "foreign-shape"),
                 f"{bracket.symbol}: {leg} {order_id} at IBKR is {action or '?'} {order_type or '?'}"
@@ -1916,7 +2239,7 @@ class Bridge:
             return None
         modified.ocaGroup = str(getattr(cached, "ocaGroup", "") or "")
         modified.ocaType = _whole(getattr(cached, "ocaType", 0) or 0)
-        modified.parentId = parent_id or bracket.parent
+        modified.parentId = parent_id or parent
         return modified
 
     def order_shows(self, order_id: int, total: int, price: Decimal, kind: str) -> bool:
@@ -2046,6 +2369,8 @@ class Bridge:
         status = self.app.order_status.get(order_id) if order_id is not None else None
         if status == "Filled":
             return False  # its executions are on their way
+        if NO_LIMIT_TEST and leg == "stop" and bracket.status == "open":
+            return True  # v7c-t1: repair_stop owns a robot position's dead stop and pages it (t1_stop_repair)
         if bracket.net_held > 0:
             what = "unprotected" if leg == "stop" else "without a target"
             self.alert_once(
@@ -2088,8 +2413,32 @@ class Bridge:
         if settled:  # unconfirmed, capped or blocked: re-evaluated on the next tick
             bracket.resized_qty = basis
 
-    def flatten_quote(self, bracket: Bracket, discount: Decimal) -> tuple[Decimal, str] | None:
-        bid = self.bid(bracket)
+    def bids(self, brackets: list[Bracket]) -> dict[str, Decimal]:
+        """v7c-t1: the bids of several brackets, requested together and waited for ONCE (at most
+        quote_timeout in all, not per bracket): decision id -> live bid, for those that arrived."""
+        requests: dict[str, int] = {}
+        for bracket in brackets:
+            self.quote_req += 1
+            requests[bracket.decision_id] = self.quote_req
+            self.app.reqMktData(self.quote_req, stock(bracket.con_id, bracket.primary_exchange), "", False, False, [])
+        found: dict[str, Decimal] = {}
+        deadline = time.monotonic() + self.quote_timeout
+        while requests:
+            with self.app.lock:
+                found = {decision: self.app.bids[request] for decision, request in requests.items()
+                         if request in self.app.bids}
+            if len(found) == len(requests) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        for request in requests.values():
+            self.app.cancelMktData(request)
+        return found
+
+    def flatten_quote(self, bracket: Bracket, discount: Decimal, *, prefetched: bool = False,
+                      bid: Decimal | None = None) -> tuple[Decimal, str] | None:
+        """The flatten price: the live bid (``bid`` when ``prefetched``, else one wait), else the screener."""
+        if not prefetched:
+            bid = self.bid(bracket)
         if bid is not None:
             price, source = floor_tick(bid * discount), f"bid {bid}"
         else:
@@ -2118,23 +2467,34 @@ class Bridge:
         flatten is never retried automatically (alerts only). The owner's own
         /close may try again after a failed attempt, never after a sent reprice.
         """
-        if (bracket.status != "open" or bracket.remaining <= 0 or bracket.flatten_sent
-                or (bracket.flatten_attempted and not owner_request)):
+        if not self.flatten_due(bracket, owner_request=owner_request):
             return False
         bracket.flatten_attempted = True
         self.save()
-        if not self.leg_live(bracket.target_id):
-            status = self.app.order_status.get(bracket.target_id) or "unknown"
-            if status == "Filled":  # its executions are still in flight; the 15:46 check confirms
-                log("INFO", f"{bracket.symbol}: target {bracket.target_id} already filled; awaiting executions")
-            else:
-                log("CRITICAL", f"{bracket.symbol}: target order {bracket.target_id} is not live ({status})"
-                    " — cannot flatten without a second sell; act in TWS")
+        if not self.flatten_target_live(bracket):
             return False
         quote = self.flatten_quote(bracket, discount)
-        if quote is None:
-            return False
-        price, source = quote
+        return quote is not None and self.send_flatten(bracket, *quote)
+
+    @staticmethod
+    def flatten_due(bracket: Bracket, *, owner_request: bool = False) -> bool:
+        """The once-only rule: an open bracket that holds shares, never repriced, never attempted
+        unless the owner asks again; a repair close's SELL MKT is its one close (v7c-t1)."""
+        return not (bracket.status != "open" or bracket.remaining <= 0 or bracket.flatten_sent
+                    or (bracket.flatten_attempted and not owner_request) or bracket.market_close_id is not None)
+
+    def flatten_target_live(self, bracket: Bracket) -> bool:
+        if self.leg_live(bracket.target_id):
+            return True
+        status = self.app.order_status.get(bracket.target_id) or "unknown"
+        if status == "Filled":  # its executions are still in flight; the 15:46 check confirms
+            log("INFO", f"{bracket.symbol}: target {bracket.target_id} already filled; awaiting executions")
+        else:
+            log("CRITICAL", f"{bracket.symbol}: target order {bracket.target_id} is not live ({status})"
+                " — cannot flatten without a second sell; act in TWS")
+        return False
+
+    def send_flatten(self, bracket: Bracket, price: Decimal, source: str) -> bool:
         result = self.modify_exit(bracket, "target", price=price, purpose="flatten")
         if result.outcome != "sent":
             return False
@@ -2143,9 +2503,24 @@ class Bridge:
         return True
 
     def flatten(self, discount: Decimal = FLATTEN_DISCOUNT) -> None:
-        """One attempt per bracket, ever: flatten_attempted is persisted across restarts."""
-        for bracket in list(self.brackets.values()):
-            self.flatten_bracket(bracket, discount)
+        """One attempt per bracket, ever: flatten_attempted is persisted across restarts.
+
+        v7c-t1, batched: every due bracket is marked attempted in ONE save before anything is sent,
+        their bids are requested together and waited for once, then each target is repriced (one
+        modification each, as before), so the last reprice leaves seconds after the flatten time
+        instead of one bid wait per bracket later."""
+        due = [bracket for bracket in list(self.brackets.values()) if self.flatten_due(bracket)]
+        if not due:
+            return
+        for bracket in due:
+            bracket.flatten_attempted = True
+        self.save()
+        live = [bracket for bracket in due if self.flatten_target_live(bracket)]
+        bids = self.bids(live)
+        for bracket in live:
+            quote = self.flatten_quote(bracket, discount, prefetched=True, bid=bids.get(bracket.decision_id))
+            if quote is not None:
+                self.send_flatten(bracket, *quote)
 
     # ---- alerts and health ----------------------------------------------------------------
     def alert_not_flat(self) -> bool:
@@ -2162,12 +2537,161 @@ class Bridge:
             log("FLAT", "no open engine positions")
 
     def check_protection(self, bracket: Bracket) -> None:
-        """Every tick: an open position without a live stop is CRITICAL once."""
+        """Every tick: an open position without a live stop is CRITICAL once (v7c); in the no-limit
+        test the stop repair takes it over (repair_stop)."""
+        if NO_LIMIT_TEST:
+            self.repair_stop(bracket)
+            return
         if bracket.status != "open" or bracket.net_held <= 0 or self.leg_live(bracket.stop_id):
             return
         if self.app.order_status.get(bracket.target_id) == "Filled":
             return  # the target's fill (and the OCA cancel of the stop) is still being reported
         self.report_dead_leg(bracket, "stop")
+
+    # ---- v7c-t1 stop auto-repair (plan v2 item 5; owner decision D7) ------------------------------
+    def repair_stop(self, bracket: Bracket) -> None:
+        """A robot position without a working stop: one resubmitted stop, then a close at market.
+
+        Every tick, on the loop thread. Detection is persisted (the 60 s run from it survive a
+        restart); the stop is resubmitted at most once (stop_repair_outcome is stored before the
+        order leaves); if IBKR rejects it, or the position is still unprotected STOP_REPAIR_DEADLINE
+        after detection, the position is closed at market, once. Meanwhile the position refuses
+        every bot entry and owner buy (account_open_risk lists it as the robot's own, D7). A
+        needs_attention bracket is never repaired: IBKR could not confirm it, the owner acts.
+        """
+        if bracket.status != "open" or bracket.net_held <= 0:
+            return
+        now = self.now()
+        if not self.stop_dead(bracket):
+            if bracket.stop_repair_outcome == "sent" and self.leg_live(bracket.stop_id):
+                bracket.stop_repair_outcome = "repaired"
+                self.save()
+                detected = parse_time(bracket.stop_repair_detected)
+                took = "" if detected is None else f" {(now - detected).total_seconds():.0f}s after detection"
+                log("INFO", f"{T1_STOP_REPAIR} {bracket.symbol} ({bracket.label}): repaired — stop order"
+                    f" {bracket.stop_id} works at {self.current_stop(bracket)}{took}")
+            return
+        if bracket.stop_repair_outcome in {"closing", "flatten_closing"}:
+            return  # closed once; the position-gap and not-flat alerts follow it from here
+        detected = parse_time(bracket.stop_repair_detected)
+        if detected is None:
+            detected = now
+            bracket.stop_repair_detected = now.astimezone(timezone.utc).isoformat()
+            self.save()
+        if bracket.stop_repair_from is None:  # nothing resubmitted yet: once, or the deadline closes it
+            if now - detected >= STOP_REPAIR_DEADLINE:
+                self.close_unprotected(bracket, f"still unprotected {(now - detected).total_seconds():.0f}s after"
+                                       " detection and no stop could be resubmitted")
+            else:
+                self.resubmit_stop(bracket, detected)
+            return
+        status = self.app.order_status.get(bracket.stop_id)
+        with self.app.lock:
+            errors = self.app.order_errors.get(bracket.stop_id, 0) if bracket.stop_id is not None else 0
+        rejected = status in PARENT_CANCELLED_STATUSES or (errors > 0 and status not in LIVE_ORDER_STATUSES)
+        if rejected:
+            code = self.app.error_details.get(bracket.stop_id) if bracket.stop_id is not None else None
+            why = f"the resubmitted stop {bracket.stop_id} was rejected too ({status or 'no status'}"
+            self.close_unprotected(bracket, why + (f", TWS {code[0]} {code[1]})" if code else ")"))
+        elif now - detected >= STOP_REPAIR_DEADLINE:
+            self.close_unprotected(bracket, f"still unprotected {(now - detected).total_seconds():.0f}s after"
+                                   f" detection (resubmitted stop {bracket.stop_id}: {status or 'no status'})")
+
+    def held_to_protect(self, bracket: Bracket) -> tuple[int, str]:
+        """(shares the bracket still holds at the account, problem): its fills less every exit fill, capped
+        by the account position (plan_exit's rule, with the stop leg's own fills taken as exits)."""
+        snapshot = self.fill_snapshot(bracket)
+        exits = max(snapshot.recorded_exits, snapshot.target + snapshot.stop)
+        if exits > snapshot.parent:
+            return 0, f"exit fills {exits} exceed entry fills {snapshot.parent}"
+        if snapshot.position is None:
+            return 0, "account position unknown"
+        return min(snapshot.parent - exits, max(0, int(snapshot.position))), ""
+
+    def resubmit_stop(self, bracket: Bracket, detected: datetime) -> None:
+        """The one resubmitted stop: SELL STP GTC at leg_price (never looser), for the shares held, joined
+        to the live target's OCA group so the two never both sell; stored before it leaves."""
+        dead, status = bracket.stop_id, self.app.order_status.get(bracket.stop_id) or "no status"
+        deadline = (detected + STOP_REPAIR_DEADLINE).astimezone(NY)
+        held, problem = self.held_to_protect(bracket)
+        if problem or held <= 0:  # e.g. a position update that trails the fill: asked again next tick
+            self.alert_once((bracket.decision_id, T1_STOP_REPAIR, "waiting"),
+                            f"{T1_STOP_REPAIR} {bracket.symbol} ({bracket.label}): stop order {dead} is not live"
+                            f" ({status}) and no stop can be sized yet ({problem or 'the account position shows none'}"
+                            f" of its shares) — retried every tick, closed at market at {deadline:%H:%M:%S} ET;"
+                            " entries are refused meanwhile")
+            return
+        if bracket.parent is not None and self.leg_live(bracket.parent) and not bracket.parent_cancel_requested:
+            self.app.cancelOrder(bracket.parent)  # an unprotected position must not grow
+            bracket.parent_cancel_requested = True
+            log("CANCEL", f"entry {bracket.symbol}: its stop is not live — the rest of the entry is cancelled"
+                f" (filled {bracket.filled}/{bracket.qty})")
+        price = self.leg_price(bracket, "stop")  # max(intent, the price IBKR last showed): never looser
+        oca: dict[str, Any] = {}
+        if self.leg_live(bracket.target_id):
+            with self.app.lock:
+                cached = self.app.order_objects.get(bracket.target_id) if bracket.target_id is not None else None
+            group = str(getattr(cached, "ocaGroup", "") or "") if cached is not None else ""
+            if not group:  # never two unlinked sells on the same shares: close instead
+                self.close_unprotected(bracket, f"stop order {dead} is not live ({status}) and the target's OCA"
+                                       " group is unknown, so no stop can be paired with it")
+                return
+            oca = {"ocaGroup": group, "ocaType": _whole(getattr(cached, "ocaType", 0) or 0)}
+        if price is None or price <= 0:
+            self.close_unprotected(bracket, f"stop order {dead} is not live ({status}) and has no usable price")
+            return
+        with self.app.lock:
+            if self.app.next_id is None:
+                raise RuntimeError("TWS has not provided a valid order id")
+            stop_id = self.app.next_id
+            self.app.next_id += 1
+            self.app.own_order_ids.add(stop_id)
+        bracket.stop_repair_from, bracket.stop_id, bracket.stop_repair_outcome = dead, stop_id, "sent"
+        self.save()  # before placeOrder: a restart never resubmits it
+        ticket = order("SELL", "STP", held, self.account, self.ref(bracket), auxPrice=float(price), tif="GTC",
+                       transmit=True, **oca)
+        self.app.placeOrder(stop_id, stock(bracket.con_id, bracket.primary_exchange), ticket)
+        log("CRITICAL", f"{T1_STOP_REPAIR} {bracket.symbol} ({bracket.label}): stop order {dead} is not live"
+            f" ({status}) — {held} sh unprotected; stop resubmitted once as order {stop_id} at {price}"
+            f"{' in the target OCA group' if oca else ''}; closed at market if it is not working by"
+            f" {deadline:%H:%M:%S} ET; entries are refused meanwhile")
+
+    def close_unprotected(self, bracket: Bracket, why: str) -> None:
+        """Close an unprotected robot position at market, once: its resubmitted stop is cancelled first,
+        then the target is repriced to a marketable limit; with no live exit leg, one SELL MKT."""
+        already = bracket.flatten_sent  # the 15:45 flatten or the owner's /close repriced it already
+        bracket.stop_repair_outcome = "flatten_closing" if already else "closing"
+        self.save()  # before anything leaves: never a second close after a restart
+        if (bracket.stop_repair_from is not None and bracket.stop_id is not None
+                and self.app.order_status.get(bracket.stop_id) not in DEAD_ORDER_STATUSES):
+            self.app.cancelOrder(bracket.stop_id)  # its fills could add to the close's
+            self.repair_cancels.add(bracket.stop_id)
+        if already:
+            how = "its target is already repriced to close it"
+        elif bracket.flatten_attempted:  # v7c's once-only rule: a failed flatten is never retried automatically
+            how = "nothing sent: a flatten of its target was already attempted and is never retried; act in TWS"
+        elif self.leg_live(bracket.target_id):
+            sent = self.flatten_bracket(bracket, STOP_REPAIR_CLOSE_DISCOUNT)
+            how = "target repriced to a marketable limit" if sent else "the target reprice FAILED (see above)"
+        else:
+            held, problem = self.held_to_protect(bracket)
+            if problem or held <= 0:
+                how = f"nothing sent ({problem or 'the account holds none of its shares'})"
+            else:
+                with self.app.lock:
+                    if self.app.next_id is None:
+                        raise RuntimeError("TWS has not provided a valid order id")
+                    close_id = self.app.next_id
+                    self.app.next_id += 1
+                    self.app.own_order_ids.add(close_id)
+                bracket.market_close_id = close_id
+                self.save()  # before placeOrder
+                self.app.placeOrder(close_id, stock(bracket.con_id, bracket.primary_exchange),
+                                    order("SELL", "MKT", held, self.account, self.ref(bracket), tif="DAY",
+                                          transmit=True))
+                how = f"SELL {held} MKT sent as order {close_id} (no exit leg works)"
+        log("CRITICAL", f"{T1_STOP_REPAIR} {bracket.symbol} ({bracket.label}): {why} — closing at market: {how};"
+            " entries stay refused until it is flat")
 
     def report_dangling(self, bracket: Bracket, order_id: int) -> None:
         """A live exit on a finished bracket could sell shares the bridge no longer holds."""
@@ -2336,6 +2860,7 @@ class Bridge:
         total = Decimal("0")
         lines: list[str] = []
         unprotected: list[tuple[str, str]] = []
+        robot: list[tuple[str, str, str]] = []
         oversized: list[tuple[str, Decimal, Decimal, Decimal]] = []
         claimed: dict[int, int] = {}  # conId -> shares the bot's brackets hold (the position shows only these)
         for bracket in self.brackets.values():
@@ -2355,8 +2880,9 @@ class Bridge:
             lines.append(f"{bracket.symbol} bot {held} held @ {basis} + {pending} unfilled @ {limit}, stop {stop}:"
                          f" {money(risk)}")
             if held > 0 and self.stop_dead(bracket):
-                unprotected.append((bracket.symbol, f"{held} sh of the {bracket.label} bracket, whose stop order"
-                                    f" {bracket.stop_id} is not live"))
+                why = f"{held} sh of the {bracket.label} bracket, whose stop order {bracket.stop_id} is not live"
+                unprotected.append((bracket.symbol, why))
+                robot.append((bracket.decision_id, bracket.symbol, why))  # v7c-t1 (D7): the robot's own
         entries = self.manual.pending_entries() if self.manual is not None else []
         if entry is not None:
             entries.append((entry.symbol, entry.quantity, entry.price, entry.stop))
@@ -2398,7 +2924,8 @@ class Bridge:
             risk = position_risk(other, cost, 0, low, low, factor)
             total += risk
             lines.append(f"{symbol} account {share_text(other)} held @ {cost}, stop {low}: {money(risk)}")
-        return OpenRisk(total=total, lines=tuple(lines), unprotected=tuple(unprotected), oversized=tuple(oversized))
+        return OpenRisk(total=total, lines=tuple(lines), unprotected=tuple(unprotected), oversized=tuple(oversized),
+                        robot=tuple(robot))
 
     def attention_held(self, bracket: Bracket, held: int, position: Decimal | None) -> int:
         """LOW-5: a needs_attention bracket's shares come from its own legs' fills, which no longer
@@ -2486,6 +3013,11 @@ class Bridge:
         For an owner buy (``entry``) the new risk is how much the account's open risk grows with
         it in place, at least its own: its stop may lower the stop of shares already held.
         Any doubt refuses (fail closed); the refusal text starts with its token.
+
+        No-limit test L-T1 (a bot entry only; an owner buy keeps every refusal, D8): the -2 % daily
+        loss stop, the 3 % budget and a manual or foreign position without a stop (D7) are measured
+        into ``Budget.over`` and do not refuse; the thread tripwire, an unknown net liquidation, an
+        unusable or unmeasurable risk and a robot position without a working stop still refuse.
         """
         where = f"(source={source})"
         if threading.current_thread() is not self.loop_thread:  # tripwire: never from a callback thread
@@ -2509,19 +3041,28 @@ class Bridge:
                 f" refused {where}")
             traceback.print_exc(file=sys.stderr)
             return f"{V7C_DAY_RISK_BUDGET}: open risk unreadable ({type(exc).__name__}) — refused {where}", None
+        measured_only = NO_LIMIT_TEST and source == "bot"
+        over: list[str] = []
         loss = self.daily_loss_problem(realized, net_liq)
-        if loss:
+        if loss and not measured_only:
             return f"{loss} {where}", None
-        if risk.unprotected:
-            symbol, why = risk.unprotected[0]
-            more = f" (and {len(risk.unprotected) - 1} more)" if len(risk.unprotected) > 1 else ""
+        if loss:
+            over.append(DAILY_LOSS_LIMIT)
+        blocking = risk.robot_unprotected if measured_only else risk.unprotected
+        if blocking:
+            symbol, why = blocking[0]
+            more = f" (and {len(blocking) - 1} more)" if len(blocking) > 1 else ""
             return (f"{V7C_UNPROTECTED_POSITION}: {symbol} {why}{more} — every risk-increasing order is refused;"
                     f" {UNPROTECTED_ADVICE.format(symbol=symbol)} {where}"), None
+        if risk.unprotected:  # L-T1 (D7): only manual or foreign positions lack a stop here
+            over.append(V7C_UNPROTECTED_POSITION)
         budget = Budget(realized_loss=realized, open_risk=risk.total, new_risk=added, net_liq=net_liq)
-        if budget.total > budget.limit:
+        if budget.total > budget.limit and not measured_only:
             return (f"{V7C_DAY_RISK_BUDGET}: {budget.text()} > {DAY_RISK_BUDGET_PCT}% of {money(net_liq)}"
                     f" {where}"), budget
-        return None, budget
+        if budget.total > budget.limit:
+            over.append(V7C_DAY_RISK_BUDGET)
+        return None, replace(budget, over=tuple(over))
 
     def budget_problem(self, new_risk: Decimal, *, source: str = "bot") -> str | None:
         """The refusal for an order adding ``new_risk`` (see budget_check), else None."""
@@ -2634,15 +3175,31 @@ class Bridge:
             self.stops_seen[key] = price
 
     def page_unprotected(self, risk: OpenRisk) -> None:
-        """O2/O3: page once per unprotected position that outlasts the position-update grace."""
+        """O2/O3: page once per unprotected position that outlasts the position-update grace.
+
+        No-limit test L-T1 (D7): a manual or foreign position pages once per symbol per day
+        (t1_unprotected_manual: owner buys are refused, the robot keeps trading); a robot bracket
+        that repair_stop owns (status open) is paged there, so only an unreconciled one pages here.
+        """
         now = self.now()
         current: set[tuple[str, ...]] = set()
+        robot = {(symbol, why): self.brackets.get(decision) for decision, symbol, why in risk.robot}
         for symbol, why in risk.unprotected:
             key = (V7C_UNPROTECTED_POSITION, symbol, why)
             current.add(key)
-            if now - self.unprotected_since.setdefault(key, now) >= POSITION_GAP_GRACE:
-                self.alert_once(key, f"{V7C_UNPROTECTED_POSITION} {symbol}: {why} — every risk-increasing order (bot"
-                                f" and manual) is refused; {UNPROTECTED_ADVICE.format(symbol=symbol)}")
+            if now - self.unprotected_since.setdefault(key, now) < POSITION_GAP_GRACE:
+                continue
+            if NO_LIMIT_TEST and (symbol, why) not in robot:
+                self.alert_once((T1_UNPROTECTED_MANUAL, symbol),  # never discarded: once per symbol per day
+                                f"{T1_UNPROTECTED_MANUAL} {symbol}: {why} — owner buys are refused until it has a"
+                                f" working stop; the robot keeps trading (no-limit test {NO_LIMIT_TEST_LABEL}, D7);"
+                                f" {UNPROTECTED_ADVICE.format(symbol=symbol)}")
+                continue
+            owner = robot.get((symbol, why))
+            if NO_LIMIT_TEST and owner is not None and owner.status == "open":
+                continue  # repair_stop pages it (t1_stop_repair)
+            self.alert_once(key, f"{V7C_UNPROTECTED_POSITION} {symbol}: {why} — every risk-increasing order (bot"
+                            f" and manual) is refused; {UNPROTECTED_ADVICE.format(symbol=symbol)}")
         for key in [key for key in self.unprotected_since if key not in current]:
             del self.unprotected_since[key]
             self.alerted.discard(key)  # LOW-4: the episode is over; the next one pages again
@@ -2739,9 +3296,30 @@ class Bridge:
                         net_liq=net_liq)
         if budget.total > budget.limit:
             step = int(budget.total / net_liq * 100 / BUDGET_PAGE_STEP_PCT)
-            self.alert_once((V7C_BUDGET_OVER, str(step)),
-                            f"{V7C_BUDGET_OVER}: {budget.text()} > {DAY_RISK_BUDGET_PCT}% of {money(net_liq)} —"
-                            " no new entries; never flattened")
+            if NO_LIMIT_TEST:  # L-T1: measured, never blocks a bot entry, so never a page (no flood)
+                self.alert_once((V7C_BUDGET_OVER, str(step)),
+                                f"{V7C_BUDGET_OVER}: {budget.text()} > {DAY_RISK_BUDGET_PCT}% of {money(net_liq)} —"
+                                f" measured only: bot entries continue (no-limit test {NO_LIMIT_TEST_LABEL}), owner"
+                                " buys are refused; never flattened", kind="INFO")
+            else:
+                self.alert_once((V7C_BUDGET_OVER, str(step)),
+                                f"{V7C_BUDGET_OVER}: {budget.text()} > {DAY_RISK_BUDGET_PCT}% of {money(net_liq)} —"
+                                " no new entries; never flattened")
+        if NO_LIMIT_TEST:
+            self.page_loss_step(budget.realized_loss, net_liq)
+
+    def page_loss_step(self, loss: Decimal, net_liq: Decimal) -> None:
+        """L-T1: the account's realized loss pages once per whole percent of net liquidation from
+        MAX_DAILY_LOSS_PCT on (2 %, 3 %, 4 %, ...); bot entries continue, owner buys are refused."""
+        percent = loss / net_liq * 100
+        if percent < MAX_DAILY_LOSS_PCT:
+            return
+        step = int(percent)  # whole percent reached: 2.0-2.99 -> 2
+        self.alert_once((T1_REALIZED_LOSS_STEP, str(step)),
+                        f"{T1_REALIZED_LOSS_STEP} {step}%: the account's realized loss today is {money(loss)}"
+                        f" ({percent.quantize(Decimal('0.01'))}% of net liquidation {money(net_liq)}) — bot entries"
+                        f" continue (no-limit test {NO_LIMIT_TEST_LABEL}); owner buys are refused past"
+                        f" -{MAX_DAILY_LOSS_PCT}%; nothing is flattened")
 
     def run_budget_watch(self) -> None:
         """The watch fails alone, CRITICAL once per streak; entries stay safe (budget_check reads afresh)."""
@@ -2757,6 +3335,246 @@ class Bridge:
         if self.watch_failures:
             log("INFO", f"v7c budget watch recovered after {self.watch_failures} failed ticks")
             self.watch_failures = 0
+
+    # ---- v7c-t1 broker rejections (no retry, one page per identity per day, the day halt) ------------
+    def entry_errors(self, bracket: Bracket) -> dict[int, tuple[int, str]]:
+        """TWS errors (not notices) on the entry's three orders: order id -> (code, message)."""
+        legs = [leg for leg in (bracket.parent, bracket.target_id, bracket.stop_id) if leg is not None]
+        with self.app.lock:
+            return {leg: self.app.error_details[leg] for leg in legs
+                    if self.app.order_errors.get(leg, 0) > 0 and leg in self.app.error_details}
+
+    def watch_entries(self) -> None:
+        """Every tick: classify each new entry inside its ENTRY_REJECTION_WINDOW. An entry IBKR rejected
+        (a TWS error, no fill, the parent reported dead, or never reported in the window) is never sent
+        again; any of its legs still working is cancelled. IBKR taking it (a fill, or the parent working
+        at the window's end) ends the identity's rejection streak; an error that is not a rejection, or an
+        entry IBKR never acknowledged, pages once the window ends."""
+        now = self.now()
+        for decision_id, since in list(self.entry_watch.items()):
+            bracket = self.brackets.get(decision_id)
+            if bracket is None or bracket.parent is None:
+                self.end_entry_watch(decision_id, bracket)
+                continue
+            if bracket.broker_rejection:  # paged or logged once; IBKR's answers to its cleanup stay quiet
+                if now - since >= ENTRY_REJECTION_WINDOW:
+                    self.end_entry_watch(decision_id, bracket)
+                continue
+            errors = self.entry_errors(bracket)
+            with self.app.lock:
+                statuses = {leg: self.app.order_status.get(leg) for leg in
+                            (bracket.parent, bracket.target_id, bracket.stop_id) if leg is not None}
+                filled = (bracket.filled > 0 or "Filled" in statuses.values()
+                          or self.app.order_filled.get(bracket.parent, 0) > 0)
+            parent_status = statuses.get(bracket.parent)
+            ended = now - since >= ENTRY_REJECTION_WINDOW
+            # Rejected: an error, no fill, and IBKR reports the entry dead (or never reported it in the window);
+            # a warning on an entry IBKR still works is not a rejection (it pages when the window ends).
+            if errors and not filled and (parent_status in PARENT_CANCELLED_STATUSES
+                                          or (parent_status is None and ended)):
+                self.entry_rejected(bracket, errors)
+                continue
+            if not filled and not ended:
+                continue
+            identity = bracket.strategy_name.strip()
+            if errors:
+                code, message = errors[min(errors)]
+                self.alert_once((decision_id, "entry-errors"),
+                                f"{bracket.symbol} ({bracket.label}): TWS {code} {message} on its entry orders"
+                                f" {sorted(errors)} — the entry {'filled' if filled else 'still works'}; check TWS")
+            if filled or parent_status in WORKING_ORDER_STATUSES:
+                self.rejection_streak[identity] = 0  # IBKR took it: the streak of rejections is over
+            else:
+                self.alert_once((decision_id, "entry-unacknowledged"),
+                                f"{bracket.symbol} ({bracket.label}): IBKR has not acknowledged entry order"
+                                f" {bracket.parent} in {int(ENTRY_REJECTION_WINDOW.total_seconds())}s — check TWS")
+            self.end_entry_watch(decision_id, bracket)
+
+    def end_entry_watch(self, decision_id: str, bracket: Bracket | None) -> None:
+        self.entry_watch.pop(decision_id, None)
+        if bracket is not None:
+            with self.app.lock:  # errors on these orders are CRITICAL again (modifies, cancels)
+                self.app.quiet_order_ids.difference_update(bracket.legs)
+
+    def entry_rejected(self, bracket: Bracket, errors: dict[int, tuple[int, str]]) -> None:
+        """No retry (the decision is never processed again); the first rejection of an identity in a
+        day pages, later ones log; GUARD_REJECTIONS_TO_HALT in a row halt the identity for the day."""
+        identity = bracket.strategy_name.strip()
+        code, message = errors[min(errors)]
+        bracket.broker_rejection = f"{code} {message}"
+        for leg in (bracket.parent, bracket.target_id, bracket.stop_id):
+            if leg is not None and self.leg_live(leg):
+                self.app.cancelOrder(leg)  # the bracket is cancelled whole: nothing of it keeps working
+        bracket.parent_cancel_requested = True  # never cancelled again by the entry TTL
+        if bracket.status == "sent":
+            bracket.status = "cancelled"
+        self.save()
+        streak = self.rejection_streak.get(identity, 0) + 1
+        self.rejection_streak[identity] = streak
+        first = identity not in self.rejection_paged
+        self.rejection_paged.add(identity)
+        log("CRITICAL" if first else "INFO",
+            f"{T1_BROKER_REJECTED} {bracket.symbol} ({identity}): IBKR rejected the entry (TWS {code} {message}) —"
+            f" not sent again; {streak} in a row for {identity} (halts at {GUARD_REJECTIONS_TO_HALT})"
+            + ("; later rejections today are logged, not paged" if first else ""))
+        if streak >= GUARD_REJECTIONS_TO_HALT and identity not in self.halted:
+            self.halt_identity(identity, f"{streak} broker rejections in a row, the last TWS {code} {message}")
+
+    def halt_identity(self, identity: str, why: str, *, page: bool = True) -> None:
+        """The malfunction guard's day halt: in memory only (the bridge never writes the ledger), and
+        recounted from the day's state at a restart (recount_rejections), so it lasts the session."""
+        self.halted[identity] = why
+        log("CRITICAL" if page else "INFO",
+            f"{T1_GUARD_REJECTIONS} {identity}: {why} — no new {identity} entries for the rest of"
+            f" {self.session_date}; other identities keep trading; its open brackets are still managed")
+
+    def recount_rejections(self) -> None:
+        """Startup: the rejection streaks and day halts of today's brackets, in the order they were sent."""
+        sent = sorted((b for b in self.brackets.values() if b.parent is not None),
+                      key=lambda b: (b.sent_at, b.parent or 0))
+        for bracket in sent:
+            identity = bracket.strategy_name.strip()
+            if bracket.broker_rejection:
+                self.rejection_streak[identity] = self.rejection_streak.get(identity, 0) + 1
+                self.rejection_paged.add(identity)
+            else:
+                self.rejection_streak[identity] = 0
+        for identity, streak in sorted(self.rejection_streak.items()):
+            if streak >= GUARD_REJECTIONS_TO_HALT:
+                self.halt_identity(identity, f"{streak} broker rejections in a row before this restart", page=False)
+
+    # ---- v7c-t1 account values (logged on every order; never gating, never the checks' net liquidation) --
+    def request_account_values(self, *, stale_only: bool = False) -> None:
+        """(Re)subscribe the account values; ``stale_only``: only when the last answer is older than the
+        refresh cadence and no request left in the last 5 s. Never waits: nothing waits on these."""
+        now = self.now()
+        with self.app.lock:
+            answered = self.app.account_values_at
+        if stale_only:
+            fresh = answered is not None and time.monotonic() - answered < ACCOUNT_VALUES_REFRESH.total_seconds()
+            recent = (self.account_values_requested is not None
+                      and now - self.account_values_requested < timedelta(seconds=5))
+            if fresh or recent:
+                return
+        if self.account_values_requested is not None:
+            self.app.cancelAccountSummary(ACCOUNT_VALUES_REQUEST_ID)  # one subscription at a time
+        self.account_values_requested = now
+        self.app.reqAccountSummary(ACCOUNT_VALUES_REQUEST_ID, "All", ",".join(ACCOUNT_VALUE_TAGS))
+
+    def account_values_now(self) -> tuple[dict[str, Decimal | None], float | None]:
+        """The configured account's last reported values (every tag, None when unreported) and their age."""
+        with self.app.lock:
+            values = dict(self.app.account_values.get(self.account, {}))
+            answered = self.app.account_values_at
+        age = None if answered is None else round(time.monotonic() - answered, 1)
+        return {tag: values.get(tag) for tag in ACCOUNT_VALUE_TAGS}, age
+
+    def watch_account_values(self) -> None:
+        """Every tick: re-read on the cadence, log each new answer once, page a low cushion per step."""
+        if self.account_values_requested is None or self.now() - self.account_values_requested >= ACCOUNT_VALUES_REFRESH:
+            self.request_account_values()
+        with self.app.lock:
+            answers = self.app.account_values_answers
+        if answers == self.account_values_logged:
+            return
+        self.account_values_logged = answers
+        values, _ = self.account_values_now()
+        log("INFO", f"{T1_ACCOUNT_VALUES} " + " ".join(
+            f"{tag}={'?' if value is None else value}" for tag, value in values.items()))
+        cushion = values.get("Cushion")
+        if cushion is not None and cushion < LOW_CUSHION:
+            step = max(0, int(cushion * 100))  # whole percent: 9.x % -> 9
+            self.alert_once((T1_LOW_CUSHION, str(step)),
+                            f"{T1_LOW_CUSHION}: cushion {(cushion * 100).quantize(Decimal('0.1'))}% <"
+                            f" {int(LOW_CUSHION * 100)}% (excess liquidity {values.get('ExcessLiquidity')}, net"
+                            f" liquidation {values.get('NetLiquidation')}) — IBKR may liquidate positions; entries"
+                            " are not blocked by it (logged only)")
+
+    def run_t1_watch(self) -> None:
+        """The v7c-t1 watches fail alone, CRITICAL once per streak; order management never waits on them."""
+        try:
+            self.watch_entries()
+            self.watch_account_values()
+        except Exception as exc:
+            self.t1_watch_failures += 1
+            if self.t1_watch_failures == 1:
+                log("CRITICAL", f"v7c-t1 watch failed ({type(exc).__name__}: {exc}) — rejection and account-value"
+                    " watches paused until it recovers; every entry is still checked")
+                traceback.print_exc(file=sys.stderr)
+            return
+        if self.t1_watch_failures:
+            log("INFO", f"v7c-t1 watch recovered after {self.t1_watch_failures} failed ticks")
+            self.t1_watch_failures = 0
+
+    # ---- v7c-t1 per-signal snapshot (plan v2 "What gets measured") -----------------------------
+    def log_snapshot(self, row: DecisionRow, budget: Budget | None) -> None:
+        """One t1_snapshot JSON line per processed decision; it never fails the decision."""
+        try:
+            fields = self.snapshot_fields(row, budget)
+        except Exception as exc:  # the measurement must never cost an order or crash the intake
+            self.alert_once(("t1_snapshot", "failed"), f"{T1_SNAPSHOT} failed ({type(exc).__name__}: {exc}) — the"
+                            " replay misses these decisions; orders are unaffected")
+            traceback.print_exc(file=sys.stderr)
+            return
+        log("INFO", f"{T1_SNAPSHOT} {json.dumps(fields, sort_keys=True, separators=(',', ':'), default=str)}")
+
+    def snapshot_fields(self, row: DecisionRow, budget: Budget | None) -> dict[str, Any]:
+        bracket = self.brackets.get(row.decision_id)
+        identity = row.strategy_name.strip()
+        values, age = self.account_values_now()
+        try:
+            payload = json.loads(row.payload_json)
+        except (TypeError, ValueError):
+            payload = None
+        review = payload.get("ai_review") if isinstance(payload, dict) else None
+        review = review if isinstance(review, dict) else {}
+        rationale = review.get("rationale")
+        net_liq = self.net_liq
+        holders = [b for b in self.brackets.values() if self.holds_or_may_hold(b)]
+        by_identity: dict[str, int] = {}
+        for item in holders:
+            by_identity[item.strategy_name.strip()] = by_identity.get(item.strategy_name.strip(), 0) + 1
+        realized_loss = budget.realized_loss if budget is not None else None
+        sent_at = parse_time(bracket.sent_at) if bracket is not None else None
+        decided = parse_time(row.created_at)
+        latency = (None if sent_at is None or decided is None
+                   else int((sent_at - decided).total_seconds() * 1000))
+        sent = bracket is not None and bracket.parent is not None
+        return {
+            "mode": NO_LIMIT_TEST_LABEL if NO_LIMIT_TEST else "v7c",
+            "time": self.now().isoformat(timespec="milliseconds"),
+            "decision_id": row.decision_id,
+            "decided_at": row.created_at,
+            "strategy": identity,
+            "symbol": row.symbol,
+            "side": "BUY",
+            "signal_price": bracket.entry if bracket is not None and bracket.qty > 0 else None,
+            "stop_price": bracket.stop if bracket is not None and bracket.qty > 0 else None,
+            "target_price": bracket.target if bracket is not None and bracket.qty > 0 else None,
+            "size": bracket.qty if bracket is not None and bracket.qty > 0 else None,
+            "equity": None if net_liq is None else money(net_liq),
+            "day_pnl": {"bot_realized": money(self.realized_pnl()),
+                        "account_realized_loss": None if realized_loss is None else money(realized_loss)},
+            "open_positions": {"total": len(holders), "by_strategy": dict(sorted(by_identity.items()))},
+            "entries_today": {"strategy": self.entries_today(identity),
+                              "symbol": sum(1 for b in self.brackets.values()
+                                            if b.symbol == row.symbol and b.parent is not None)},
+            "buying_power": None if values.get("BuyingPower") is None else str(values["BuyingPower"]),
+            "account_values": {**{tag: None if value is None else str(value) for tag, value in values.items()},
+                               "age_s": age},
+            "budget": None if budget is None else {
+                "realized_loss": money(budget.realized_loss), "open_risk": money(budget.open_risk),
+                "new_risk": money(budget.new_risk), "total": money(budget.total), "percent": str(budget.percent),
+                "limit_percent": str(DAY_RISK_BUDGET_PCT), "would_refuse": list(budget.over)},
+            "ai": {"verdict": review.get("decision"),
+                   "reason": rationale[:300] if isinstance(rationale, str) else None,
+                   "confidence": None if review.get("confidence") is None else str(review.get("confidence"))},
+            "result": "sent" if sent else ("skipped" if bracket is not None else "not_processed"),
+            "reason": (bracket.skip_reason or None) if bracket is not None else None,
+            "orders": list(bracket.legs[:3]) if sent and bracket is not None else None,
+            "fill": None if bracket is None else {"filled": bracket.filled, "avg_entry": bracket.avg_entry},
+            "latency_ms": latency,
+        }
 
     # ---- loop -----------------------------------------------------------------------------
     def close_out(self) -> None:
@@ -2797,10 +3615,11 @@ class Bridge:
             self.resize_children(bracket)
         self.close_out()
         for bracket in list(self.brackets.values()):
-            self.check_protection(bracket)
+            self.check_protection(bracket)  # v7c-t1: the stop repair
             self.check_account_position(bracket)
             self.check_dangling_exits(bracket)
         self.run_budget_watch()  # after management, so it can never delay a cancel, resize or flatten
+        self.run_t1_watch()  # v7c-t1: rejections (and the day halt) before this tick's intake; account values
         for source, step in self.intakes:
             self.run_intake(source, step)
 
@@ -2892,7 +3711,8 @@ class Bridge:
         if self.net_liq is not None:
             # Without a value the subscription stays open; entries unblock when it arrives.
             self.app.cancelAccountSummary(SUMMARY_REQUEST_ID)
-            log("INFO", f"net liquidation {self.net_liq}; daily loss stop {MAX_DAILY_LOSS_PCT}%")
+            measured = f" (bot entries: measured only, no-limit test {NO_LIMIT_TEST_LABEL})" if NO_LIMIT_TEST else ""
+            log("INFO", f"net liquidation {self.net_liq}; daily loss stop {MAX_DAILY_LOSS_PCT}%{measured}")
         else:
             log("CRITICAL", f"net liquidation unavailable for {self.account} — new entries blocked;"
                 " open brackets are still managed")
@@ -2903,6 +3723,7 @@ class Bridge:
         self.app.reqMarketDataType(1)
         self.reconcile()
         self.reserve_order_ids()
+        self.recount_rejections()  # v7c-t1: a day halt outlives a restart (from the day's own state)
         self.save()
         if self.manual is not None:
             try:
@@ -3671,7 +4492,7 @@ class ManualDesk:
         """Order id -> conId of every sell this client sent: the bots' exit legs and the owner's sells."""
         contracts = dict(self.sell_orders)
         for bracket in self.bridge.brackets.values():
-            for leg in (bracket.target_id, bracket.stop_id):
+            for leg, _ in bracket.exit_legs:  # v7c-t1: a repaired stop's dead leg and a repair close sell too
                 if leg is not None and bracket.con_id > 0:
                     contracts[leg] = bracket.con_id
         return contracts
@@ -4512,6 +5333,9 @@ def preflight() -> int:
         log("CRITICAL", f"PREFLIGHT_REFUSED fences unreadable ({type(exc).__name__}: {exc})")
         return EXIT_REFUSED
     log("INFO", budget_line())  # deploy apply requires exactly one such line in the dry run
+    mode = mode_line()
+    if mode is not None:
+        log("INFO", mode)  # never contains budget_line's text: the dry run still has exactly one
     problem = caps_problem()
     if problem:
         log("CRITICAL", problem)
@@ -4604,6 +5428,9 @@ def _connected_session(
     except Exception as exc:
         log("CRITICAL", f"identity fences unreadable ({type(exc).__name__}: {exc}) — every entry will be skipped")
     log("INFO", budget_line())
+    mode = mode_line()
+    if mode is not None:
+        log("INFO", mode)
     bridge = Bridge(app, account, session_date=session_date, store=store, brackets=brackets, db=DB,
                     clock=now_ny, stop_event=STOP, times=times)
     desk = manual_desk(bridge)

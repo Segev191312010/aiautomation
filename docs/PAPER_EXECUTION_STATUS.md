@@ -200,6 +200,33 @@ Order sources:
   v7b.2 items above). v7b deploys only with this fix, v7b.2 and a GO re-read
   naming the deployed head.
 
+- 2026-10-23/24: bridge v7c-t1, the no-limit PAPER test L-T1 (owner plan v2 of
+  2026-10-23, items 3-5; decisions D7, D8), sha256
+  c03f25d668cc1e5b47b7196fd535923c0af17ef7bd24e110cf29c19e101a3969 — **status: built, awaiting the independent
+  execution-safety review N21; not deployable before its GO naming the head.**
+  On top of bridge v7c (b40fa40b…). The literal `NO_LIMIT_TEST = True` (never
+  configuration; an import tripwire refuses a half-on table) lifts the
+  per-identity position and entries/day caps and the account-wide cap (the
+  last-entry offsets stay); for bot entries the -2 % daily loss stop and the
+  3 % day risk budget are computed on every signal and logged
+  (`v7c_budget_ok`, or `t1_over_v7c_limits` with the v7c refusals it would
+  have made) right before the order is stored and placed, and never refuse it;
+  owner buys keep every v7c refusal (D8). A robot position without a working
+  stop still refuses every entry and owner buy; its stop is resubmitted once
+  (never looser, joined to the target's OCA group), and if that is rejected or
+  the position is still unprotected 60 s after detection it is closed at
+  market (`t1_stop_repair`). A manual or foreign position without a stop pages
+  once per symbol per day and no longer blocks bot entries (D7). Six
+  malfunction guards (20 entries per identity per 60 s; 3 consecutive broker
+  rejections halt an identity for the day, in memory and recounted from the
+  day's state; 3 entries per symbol per day; a duplicate within 5 s; any entry
+  outside the XNYS session); an IBKR rejection is never retried and pages once
+  per identity per day; account values (request 7004) are logged, never
+  gating and never the net liquidation the checks use; one `t1_snapshot` line
+  per decision; the 15:45 close-out waits for all bids once. State schema
+  unchanged (v5; five optional Bracket fields); lazy imports unchanged (imports
+  pin 7b1df1d4824e). `deploy undo` restores the reviewed v7c bridge.
+
 ## Still to do
 
 - Supervised first live runs: the first owner order through the bridge (the
