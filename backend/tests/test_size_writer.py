@@ -400,16 +400,37 @@ def test_demotion_event_effective_next_session(database, sizing_log):
     assert [event[:3] for event in events_of(database, "MOMO_HOD_V2")] == [("1", "0.5", "2026-10-26")]
 
 
-def test_a_refused_step_down_leaves_no_row_of_its_night(database):
-    """Proposal, decision and event are one transaction: when the store refuses the
-    event (an approval already moved the next session), nothing of the night stays."""
+def test_a_refused_step_down_leaves_no_row_of_its_night(database, monkeypatch):
+    """Proposal, decision and event are one transaction: when the step down is refused
+    (an approval already moved the next session), nothing of the night stays."""
     ledger = SizeLedger(database)
     ledger.step("VWAP_PB_V2", "0.5", "1", effective=TUESDAY, at=et(MONDAY, 12))  # an owner-approved step up
     before = counts(database)
 
+    # The database's own trigger is the backstop: with the writer's chain check off, it
+    # refuses the event, and the transaction leaves nothing.
+    real = size_writer._chain_after_step_down
+    monkeypatch.setattr(size_writer, "_chain_after_step_down", lambda *_args, **_kwargs: None)
+    backstop = run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing")
+    assert backstop.failed == {"VWAP_PB_V2": size_schema.SIZE_EVENT_NOT_AFTER_PREVIOUS}
+    # Nothing of VWAP's night stays: its proposal and decision rolled back with the event.
+    assert [row["kind"] for row in proposals_of(database, "VWAP_PB_V2")] == ["step_up"]  # the ledger's own only
+    assert rows(database, "SELECT count(*) FROM autotrader_size_evaluations WHERE identity = 'VWAP_PB_V2'") == [(0,)]
+    assert counts(database)["autotrader_size_events"] == before["autotrader_size_events"]
+    assert counts(database)["autotrader_size_decisions"] == before["autotrader_size_decisions"]
+    monkeypatch.setattr(size_writer, "_chain_after_step_down", real)
+    for name in ("ORB_V2", "GAP_GO_V2", "MOMO_HOD_V2"):  # the backstop night evaluated the others: start over
+        assert rows(database, "SELECT count(*) FROM autotrader_size_evaluations WHERE identity = ?", (name,)) == [(1,)]
+    other = migrate_database(database.parent / "refused.db")
+    SizeLedger(other).step("VWAP_PB_V2", "0.5", "1", effective=TUESDAY, at=et(MONDAY, 12))
+    database = other
+    before = counts(database)
+
     result = run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing", ORB_V2="strong")
 
-    assert result.failed == {"VWAP_PB_V2": size_schema.SIZE_EVENT_NOT_AFTER_PREVIOUS}
+    # Changed by design in fix 3 (N19b-ES LOW-1): the writer's own read-rule check refuses
+    # first (both steps would take effect at Tuesday's start), before the database's trigger.
+    assert result.failed == {"VWAP_PB_V2": size_writer.STEP_DOWN_BREAKS_CHAIN}
     assert [row["kind"] for row in proposals_of(database, "VWAP_PB_V2")] == ["step_up"]  # the ledger's own only
     assert rows(database, "SELECT count(*) FROM autotrader_size_evaluations WHERE identity = 'VWAP_PB_V2'") == [(0,)]
     assert size_in_force(database, "VWAP_PB_V2", TUESDAY) == Decimal("1")
@@ -798,6 +819,85 @@ def test_one_identity_never_blocks_the_others(tmp_path, database, writer_log, mo
     # The skipped identity is written the next night, once its trouble is gone.
     monkeypatch.setattr(size_writer, "_nights_since_last_step", real)
     assert "VWAP_PB_V2" in run_night(other, et(TUESDAY, 17, 40), VWAP_PB_V2="losing").evaluated
+
+
+# --- fix 3 (N19b-ES): the writer checks the history it leaves; its own guards tested alone ----
+
+
+def test_a_step_down_sharing_a_session_start_with_an_earlier_event_is_never_written(database, writer_log):
+    """N19b-ES LOW-1 (reproduced): an event written mid-session for its own day (a defect upstream)
+    takes effect at the next start. Tonight's step down for that very start passes every database
+    rule, yet would leave two steps at one start, a chain the read refuses for every later session
+    (the identity blocked for good). The writer runs the one read rule on its history plus the new
+    event first: nothing is written, one CRITICAL size token, retried next night."""
+    SizeLedger(database).step("MOMO_HOD_V2", "1", "0.5", effective=MONDAY, at=et(MONDAY, 10, 30))
+    assert size_in_force(database, "MOMO_HOD_V2", MONDAY) == Decimal("1")  # ignored on Monday, as designed
+    assert size_in_force(database, "MOMO_HOD_V2", TUESDAY) == Decimal("0.5")  # its start is Tuesday's
+    before = counts(database)
+    losing = momo({**BAD, MONDAY: ["-1"] * DEMOTION_MIN_NEW_TRADES})
+
+    monday = run_night(database, et(MONDAY, 17, 40), MOMO_HOD_V2=losing)
+
+    assert monday.failed == {"MOMO_HOD_V2": size_writer.STEP_DOWN_BREAKS_CHAIN}
+    # No proposal, decision, event or evaluation of MOMO's night (the others' nights are written).
+    assert counts(database) == {**before, "autotrader_size_evaluations": 3}
+    assert rows(database, "SELECT count(*) FROM autotrader_size_evaluations WHERE identity = 'MOMO_HOD_V2'") == [(0,)]
+    assert writer_criticals(writer_log) == [identity_sizing.SIZE_WRITER_IDENTITY_SKIPPED]
+    [critical] = [record.getMessage() for record in writer_log.records if record.levelno == logging.CRITICAL]
+    assert critical.startswith(
+        "size_writer_identity_skipped: MOMO_HOD_V2 skipped by the nightly size writer (step_down_would_break_chain:"
+        " size_event_chain_broken: event 2 takes effect at the 2026-10-20 session start, not after event 1's"
+    ), critical
+    # MOMO still has its size at every later session: the store is not broken.
+    for day in (TUESDAY, WEDNESDAY, date(2026, 11, 2)):
+        assert size_in_force(database, "MOMO_HOD_V2", day) == Decimal("0.5"), day
+    # The next night the step down takes effect at Wednesday's start, after the first event's.
+    tuesday = run_night(database, et(TUESDAY, 17, 40), MOMO_HOD_V2=losing)
+    assert tuesday.failed == {} and [change.kind for change in tuesday.changes] == ["step_down"]
+    assert [event[:3] for event in events_of(database, "MOMO_HOD_V2")] == [
+        ("1", "0.5", "2026-10-19"), ("0.5", "0.25", "2026-10-21"),
+    ]
+    assert [size_in_force(database, "MOMO_HOD_V2", day) for day in (TUESDAY, WEDNESDAY)] == [
+        Decimal("0.5"), Decimal("0.25"),
+    ]
+
+
+def test_the_per_identity_clock_check_refuses_a_night_that_crossed_the_margin(database, writer_log, monkeypatch):
+    """N19b-ES LOW-2 (W2): the night's own check passed in the evening, then the clock crossed the
+    margin before an identity's transaction (a slow night): no identity's row is written."""
+    plan = plan_night(et(MONDAY, 17, 40))
+    proposals = verdicts(database, plan, VWAP_PB_V2="losing", GAP_GO_V2="strong")
+    readings = iter([et(MONDAY, 17, 40)])  # the global check's one reading
+    late = start(TUESDAY) - WRITE_MARGIN  # every later reading: inside the margin
+    monkeypatch.setattr(size_writer, "_utc_now", lambda: next(readings, late))
+
+    result = write_night(database=database, proposals=proposals, plan=plan, fence_store=None)
+
+    assert result.status == "written" and result.evaluated == () and result.changes == ()
+    assert result.failed == {name: size_writer.SESSION_STARTED for name in SENDABLE_IDENTITIES}
+    assert set(counts(database).values()) == {0}
+    assert writer_criticals(writer_log) == [identity_sizing.SIZE_WRITER_IDENTITY_SKIPPED] * len(SENDABLE_IDENTITIES)
+
+
+def test_a_demotion_that_skips_a_rung_is_refused_by_the_writer_itself(database):
+    """N19b-ES LOW-2 (W10): a demotion two rungs down (a forged verdict) is the writer's own refusal,
+    proposal_not_one_rung, before any transaction; the database's CHECKs stay the backstop."""
+    from dataclasses import replace
+
+    plan = plan_night(et(MONDAY, 17, 40))
+    proposals = verdicts(database, plan, MOMO_HOD_V2="losing")
+    honest = next(item for item in proposals.identities if item.identity == "MOMO_HOD_V2")
+    assert (honest.status, honest.current, honest.proposed) == (DEMOTION_PROPOSED, Decimal("1"), Decimal("0.5"))
+    forged = replace(proposals, identities=tuple(
+        replace(item, proposed=Decimal("0.25")) if item is honest else item for item in proposals.identities
+    ))
+
+    with writer_clock_at(et(MONDAY, 17, 40)):
+        result = write_night(database=database, proposals=forged, plan=plan, fence_store=None)
+
+    assert result.failed == {"MOMO_HOD_V2": size_writer.PROPOSAL_NOT_ONE_RUNG}
+    assert "MOMO_HOD_V2" not in result.evaluated and sorted(result.evaluated) == ["GAP_GO_V2", "ORB_V2", "VWAP_PB_V2"]
+    assert events_of(database, "MOMO_HOD_V2") == [] and proposals_of(database, "MOMO_HOD_V2") == []
 
 
 def test_the_nightly_job_judges_and_writes_every_identity_it_can_read(night, monkeypatch):

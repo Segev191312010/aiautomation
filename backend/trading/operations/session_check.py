@@ -1403,16 +1403,30 @@ def _rule_size(context: _Context) -> RuleResult:
              " after the session's start: not in force this session (its child ignored them)"
              for name in sent if (size := context.sizes.get(name)) is not None and size.ignored]
     entries = len(context.timeline.entries)
+    # A sendable identity the store names no size for: its child, reading the
+    # same, blocks every setup (identity_sizing_missing), so a day without a
+    # SENT is no evidence of a clean day: never a PASS, SENT or not (N19b-OPS LOW-1).
+    blind = sorted(name for name, size in context.sizes.items() if size.factor is None)
+    blind_line = (
+        f"{SIZE_IN_FORCE_UNKNOWN}: the size store names no size for {', '.join(blind)} (a child reading it"
+        " blocks every setup, identity_sizing_missing), never a PASS; first: "
+        + context.sizes[blind[0]].source
+        if blind else ""
+    )
     if failures:
         return RuleResult(4, "size", FAIL, f"{len(failures)} problem(s); first: {failures[0]}",
-                          failures + unknown + flags + unchecked + details)
+                          failures + unknown + ([blind_line] if blind else []) + flags + unchecked + details)
     if not entries:
+        if blind:
+            return RuleResult(4, "size", WARN, f"no SENT; {blind_line}", [blind_line, *details])
         return RuleResult(4, "size", PASS, "no SENT: nothing was sized", details)
     if unknown:
         return RuleResult(4, "size", WARN,
                           f"{SIZE_IN_FORCE_UNKNOWN}: the size store names no size for {len(unknown)} of {entries}"
                           f" SENT, each held only to the {CURRENT_ACCOUNT_MODE} ceiling (never a PASS); first:"
                           f" {unknown[0]}", unknown + flags + unchecked + details)
+    if blind:
+        return RuleResult(4, "size", WARN, blind_line, [blind_line, *flags, *unchecked, *details])
     if flags:
         return RuleResult(4, "size", WARN, f"{len(flags)} flag(s); first: {flags[0]}", flags + unchecked + details)
     if exact < entries:

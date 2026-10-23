@@ -489,6 +489,13 @@ class Candidate(BaseModel):
         return self
 
 
+# ibapi 9.81 reports US-stock volume in round lots of 100 shares (verified
+# 2026-10-12 by the TWS probe: AAPL daily bars returned ~500k against ~50M
+# shares actually traded). ``CompletedBar.volume`` carries that raw unit; a
+# figure in shares multiplies by this, the one constant for it.
+TWS_VOLUME_LOT_SHARES = Decimal("100")
+
+
 class CompletedBar(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

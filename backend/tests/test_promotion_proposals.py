@@ -287,11 +287,15 @@ def test_the_text_section_lists_proposals_first_then_every_identity(monkeypatch)
     assert proposals.lines() == [
         # Rewritten for P3-E (explicit, not weakened): D2 makes a step down automatic, so the header
         # no longer says "nothing changes until the owner approves"; the line itself is still pinned.
-        "Promotion proposals (promotion-proposals-v1, propose mode: a step up waits for the owner's approval;"
-        " a step down applies by itself at the next session)",
+        # Rewritten again in fix 3 (N19b-OPS LOW-6b, c): before P3-D no approval path exists, so the
+        # header says a size up cannot happen; a demotion line says the writer may hold it.
+        "Promotion proposals (promotion-proposals-v1, propose mode: a size up needs the owner's phone approval,"
+        " which is not built yet (P3-D), so no size goes up; a step down applies by itself at the next session"
+        " unless the size writer holds it)",
         "HELD ORB_V2: eligible for ×0.5 but v7c (open-risk term) is not deployed",
         "DEMOTION PROPOSAL VWAP_PB_V2: ×0.5 → ×0.25; 24 trades, expectancy -0.40R (upper bound -0.40R),"
-        " slippage 0.03R/trade, sessions 12",
+        " slippage 0.03R/trade, sessions 12; the nightly size writer applies it at the next session unless it"
+        " waits for new trades or the owner's resume (evidence.json sizes)",
         "MOMO_HOD_V2 ×1: probation 5/5; at the ×1 ceiling",
         "ORB_V2 ×0.25: probation 5/5; held (v7c)",
         "VWAP_PB_V2 ×0.5: probation 5/5; demotion proposed",
@@ -301,7 +305,22 @@ def test_the_text_section_lists_proposals_first_then_every_identity(monkeypatch)
     assert (payload["schema"], payload["mode"], payload["open_risk_term_deployed"]) == (
         "autotrader-v1/promotion-proposals", "propose", False,
     )
-    assert payload["grants"].startswith("nothing: a proposal changes no constant, database row or fence")
+    assert payload["grants"] == (
+        "nothing: a proposal changes no constant, database row or fence; the nightly size writer records it:"
+        " a size up needs the owner's phone approval, which is not built yet (P3-D), so no size goes up;"
+        " a demotion: the nightly size writer applies it at the next session unless it waits for new trades"
+        " or the owner's resume (evidence.json sizes)"
+    )
+    assert "approval;" not in payload["grants"] and "waits for the owner" not in " ".join(proposals.lines())
+    # Once phone approval exists (P3-D hands it in through the nightly job), the texts say so.
+    live = replace(proposals, approval_live=True)
+    assert live.lines()[0].startswith(
+        "Promotion proposals (promotion-proposals-v1, propose mode: a size up waits for the owner's phone approval;"
+    )
+    assert "a size up waits for the owner's phone approval; a demotion:" in live.payload(
+        generated_at=datetime(2026, 11, 20, 23, 0, tzinfo=timezone.utc)
+    )["grants"]
+    assert live.lines()[1:] == proposals.lines()[1:]
     assert [item["identity"] for item in payload["identities"]] == ["MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2"]
     assert payload["lines"] == proposals.lines()
     json.dumps(payload)  # plain JSON
@@ -370,9 +389,11 @@ def test_the_nightly_job_writes_proposals_and_the_weekly_text_carries_them(night
     (summary,) = night["sent"]
     evidence = summary.split("\n\n")[0].splitlines()
     header = evidence.index(
-        # Rewritten for P3-E (explicit, not weakened): the D2 header, see the text-section test.
-        "Promotion proposals (promotion-proposals-v1, propose mode: a step up waits for the owner's approval;"
-        " a step down applies by itself at the next session)"
+        # Rewritten for P3-E (explicit, not weakened): the D2 header, see the text-section test; again in
+        # fix 3: the nightly job hands in size_notify.PHONE_APPROVAL_LIVE (False until P3-D).
+        "Promotion proposals (promotion-proposals-v1, propose mode: a size up needs the owner's phone approval,"
+        " which is not built yet (P3-D), so no size goes up; a step down applies by itself at the next session"
+        " unless the size writer holds it)"
     )
     assert evidence[header + 1 :] == [
         "MOMO_HOD_V2 ×1: probation 2/5; at the ×1 ceiling",

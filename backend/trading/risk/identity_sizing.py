@@ -232,6 +232,16 @@ def read_size_events(
     return tuple(_event(row) for row in rows)
 
 
+def read_size_events_from(
+    db: sqlite3.Connection, *, identity: str, account_mode: str
+) -> tuple[SizeEvent, ...]:
+    """``read_size_events`` on a connection the caller already holds: the nightly
+    writer reads, inside its own transaction, exactly the history it is about to
+    extend (N19b-ES LOW-1). Raises ``SizeStoreUnreadable`` on a row that does not
+    parse; the caller has already checked the store."""
+    return tuple(_event(row) for row in db.execute(_EVENTS, (identity, account_mode)).fetchall())
+
+
 def _require_size_store(db: sqlite3.Connection) -> None:
     """Migration 18 is applied, and it is this code's migration 18 (O13: a
     pending migration is an unreadable store, never the baseline)."""
@@ -517,6 +527,10 @@ def session_identity_multiplier(
 # sizes stay as they are, the other identities are written (P3-E fix 1). The
 # token lives here, with the other size tokens, for the phone's tripwire list.
 SIZE_WRITER_IDENTITY_SKIPPED = "size_writer_identity_skipped"
+# The whole night's writer failed (the store busy, a permission, an unexpected
+# raise outside the per-identity guard): one CRITICAL, no size changed, paged
+# like the others (N19b-OPS LOW-3).
+SIZE_WRITER_NIGHT_FAILED = "size_writer_night_failed"
 
 
 class SizeNotInForce(RuntimeError):
@@ -574,12 +588,14 @@ __all__ = [
     "SIZE_LADDER",
     "SIZE_READ_BEFORE_SESSION_START",
     "SIZE_WRITER_IDENTITY_SKIPPED",
+    "SIZE_WRITER_NIGHT_FAILED",
     "SizeEvent",
     "SizeNotInForce",
     "SizeReading",
     "SizeStoreUnreadable",
     "identity_multiplier",
     "read_size_events",
+    "read_size_events_from",
     "session_identity_multiplier",
     "size_from_events",
     "size_in_force",

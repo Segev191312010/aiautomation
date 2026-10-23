@@ -13,7 +13,8 @@ blocked with ``identity_sizing_missing``.
 Version 2 (P3-F, owner decision D3) adds the decision's realism, read from the
 same inputs the pipeline assessed (``CandidateInput.bars`` and ``.quote``):
 the trade intent's ``quantity``, the ``bar_volume`` of the newest completed
-bar, ``size_pct_of_bar_volume`` (quantity / bar volume x 100) and the quote's
+5-minute bar (raw TWS round lots, as ``CompletedBar.volume`` carries them),
+``size_pct_of_bar_volume`` (quantity / (bar volume x 100 shares a lot) x 100) and the quote's
 ``spread_bps``, with two flags at pinned thresholds (open item O4):
 ``size_above_bar_volume_pct`` (above ``SIZE_ABOVE_BAR_VOLUME_PCT`` = 1 %) and
 ``spread_above_bps`` (above ``SPREAD_ABOVE_BPS`` = 50 bps). A field the inputs
@@ -54,7 +55,7 @@ import stat
 import threading
 from typing import Any, TypeVar
 
-from trading.contracts import CompletedBar, Decision, QuoteSnapshot
+from trading.contracts import TWS_VOLUME_LOT_SHARES, CompletedBar, Decision, QuoteSnapshot
 from trading.operations.paths import FILE_MODE, ensure_private_directory
 
 SIZING_SCHEMA = "autotrader-v1/decision-sizing"
@@ -140,7 +141,7 @@ class DecisionSizing:
     """One decision's size factors, exactly as the pipeline applied them, and its realism.
 
     ``quantity`` (the trade intent's shares), ``bar_volume`` (the newest
-    completed bar's volume, in shares) and ``spread_bps`` (the quote's spread,
+    completed bar's volume, raw TWS round lots of 100 shares) and ``spread_bps`` (the quote's spread,
     in basis points of its midpoint) are version 2 fields; a version 1 record
     has none of them.
     """
@@ -188,13 +189,19 @@ class DecisionSizing:
 
     @property
     def size_pct_of_bar_volume(self) -> Decimal | None:
-        """The order's shares as a percentage of its bar's volume (shares / volume x 100).
+        """The order's shares as a percentage of its bar's volume in shares.
 
-        ``None`` without an intent, without a bar, or on a bar with no volume.
+        ``bar_volume`` is the newest 5-minute bar's raw TWS volume, in round lots
+        (``CompletedBar.volume``); here, and only here, it becomes shares
+        (x ``TWS_VOLUME_LOT_SHARES``) before the division, for the record's own
+        payload and for a reader re-deriving a stored line alike (N19b-OPS
+        MEDIUM-1: shares over lots read 100x too high). ``None`` without an
+        intent, without a bar, or on a bar with no volume.
         """
         if self.quantity is None or self.bar_volume is None or self.bar_volume == _ZERO:
             return None
-        return (Decimal(self.quantity) * 100 / self.bar_volume).quantize(_PCT_QUANTUM, rounding=ROUND_HALF_EVEN)
+        shares = self.bar_volume * TWS_VOLUME_LOT_SHARES
+        return (Decimal(self.quantity) * 100 / shares).quantize(_PCT_QUANTUM, rounding=ROUND_HALF_EVEN)
 
     @property
     def size_above_bar_volume_pct(self) -> bool | None:

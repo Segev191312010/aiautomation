@@ -37,7 +37,7 @@ from tests.test_setup_persistence import (
 )
 from trading.contracts import Decision, PortfolioSnapshot, RiskPolicy
 from trading.orchestration.pipeline import SIZING_RECORD_FAILED, ShadowPipeline
-from trading.rules.momo import MomoStrategy
+from trading.rules.momo import MomoConfig, MomoStrategy
 from trading.storage import decision_sizing as sidecar
 from trading.storage.decision_sizing import (
     SIZING_SIDECAR_DISABLED,
@@ -669,6 +669,42 @@ def test_realism_thresholds_pinned():
     assert type(sidecar.SPREAD_ABOVE_BPS) is Decimal and sidecar.SPREAD_ABOVE_BPS == Decimal("50")
 
 
+def test_the_share_of_volume_counts_shares_in_the_fixtures_unit():
+    """N19b-OPS MEDIUM-1: ``CompletedBar.volume`` is the raw TWS unit, round lots of 100 shares (the
+    golden fixture's own ``volume_unit``: fixtures copy the real feed). The sidecar turns it into shares
+    with the one verified constant, the one MOMO's own evidence and the shadow service use."""
+    from trading.contracts import TWS_VOLUME_LOT_SHARES
+    from trading.operations import shadow_service
+
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "momo" / "bf_b_2026-10-12.json").read_text())
+    assert fixture["volume_unit"].startswith("raw TWS API units (round lots of 100 shares)")
+    assert TWS_VOLUME_LOT_SHARES == Decimal("100")
+    assert shadow_service.IBKR_API_VOLUME_MULTIPLIER is TWS_VOLUME_LOT_SHARES
+    assert sidecar.TWS_VOLUME_LOT_SHARES is TWS_VOLUME_LOT_SHARES
+    assert MomoConfig().volume_multiplier == TWS_VOLUME_LOT_SHARES  # MOMO's rvol, from the same unit
+    # One share on a bar of one lot (100 shares) is 1 %; the stored volume stays in lots.
+    one = _row(quantity=1, bar_volume=Decimal("1"))
+    assert (one.size_pct_of_bar_volume, one.payload()["bar_volume"]) == (Decimal("1"), "1")
+
+
+def test_the_realism_flags_are_evidence_only():
+    """No production module but the sidecar's own reads a realism figure or flag: they block nothing."""
+    names = ("size_above_bar_volume_pct", "spread_above_bps", "size_pct_of_bar_volume",
+             "SIZE_ABOVE_BAR_VOLUME_PCT", "SPREAD_ABOVE_BPS")
+    backend = Path(__file__).resolve().parents[1]
+    own = Path(sidecar.__file__).resolve()
+    sources = [*backend.glob("*.py")] + [
+        path for root in ("trading", "routers", "db", "scripts_local") for path in (backend / root).rglob("*.py")
+    ]
+    assert own in {path.resolve() for path in sources}
+    readers = sorted(
+        str(path.relative_to(backend))
+        for path in sources
+        if path.resolve() != own and any(name in path.read_text(encoding="utf-8") for name in names)
+    )
+    assert readers == []
+
+
 @pytest.mark.anyio
 async def test_sidecar_v2_fields_and_flags():
     """The production pipeline records each decision's quantity, the newest bar's volume, the size
@@ -681,16 +717,28 @@ async def test_sidecar_v2_fields_and_flags():
     bars, quote = BF_B.bars_until(now), BF_B.quote(now)
     volume = max(bars, key=lambda bar: bar.interval_end_utc).volume
     assert (row.version, row.quantity, row.bar_volume) == (2, decision.risk.intent.quantity, volume)
-    assert (row.quantity, volume) == (1863, Decimal("3098"))  # floor(3726 x 0.5) shares on a 3098-share bar
-    assert row.size_pct_of_bar_volume == Decimal("60.1356")  # 1863 / 3098 x 100
+    # floor(3726 x 0.5) shares on a bar of 3098 round lots (the fixture's volume_unit), 309,800 shares.
+    # Changed by design in fix 3 (N19b-OPS MEDIUM-1): the share was shares over lots, 60.1356 (100x
+    # too high, flagged on nearly every trade); it is now shares over shares.
+    assert (row.quantity, volume) == (1863, Decimal("3098"))
+    assert row.size_pct_of_bar_volume == Decimal("0.6014")  # 1863 / 309800 x 100
     assert row.spread_bps == _bps(quote.bid, quote.ask) == Decimal("3.74")  # 26.76 / 26.77
-    assert (row.size_above_bar_volume_pct, row.spread_above_bps) == (True, False)
+    assert (row.size_above_bar_volume_pct, row.spread_above_bps) == (False, False)  # x0.5: under 1 %
     payload = row.payload()
     assert payload["version"] == 2
     assert {key: payload[key] for key in ("quantity", *REALISM_KEYS)} == {
-        "quantity": 1863, "bar_volume": "3098", "size_pct_of_bar_volume": "60.1356",
-        "size_above_bar_volume_pct": True, "spread_bps": "3.74", "spread_above_bps": False,
+        "quantity": 1863, "bar_volume": "3098", "size_pct_of_bar_volume": "0.6014",
+        "size_above_bar_volume_pct": False, "spread_bps": "3.74", "spread_above_bps": False,
     }
+    # The same trade at x1 (3726 shares) is 1.2027 % of the bar: flagged.
+    # The flag is evidence only: the flagged decision is still accepted at its full quantity.
+    full_capture = _Capture()
+    full = (await _assess(_pipeline(full_capture, identity_multiplier=Decimal("1")))).decision
+    assert full is not None and full.risk is not None and full.risk.intent is not None
+    assert (full.outcome.value, full.risk.intent.quantity) == ("shadow_accepted", BF_B_POLICY_QTY)
+    [whole] = full_capture.rows
+    assert (whole.quantity, whole.bar_volume) == (BF_B_POLICY_QTY, volume)
+    assert (whole.size_pct_of_bar_volume, whole.size_above_bar_volume_pct) == (Decimal("1.2027"), True)
 
     # No trade intent (after the cutoff, no quote): no quantity and no share of volume; the bar's
     # volume is still recorded. A candidate whose data never arrived: no realism at all.
@@ -712,12 +760,13 @@ async def test_sidecar_v2_fields_and_flags():
     assert [getattr(blocked_row, key) for key in ("quantity", *REALISM_KEYS)] == [None] * 6
 
     # The flags at their thresholds: exactly 1 % of the bar or 50 bps is not above; one step past is.
-    assert _row(quantity=100, bar_volume=Decimal("10000")).size_pct_of_bar_volume == Decimal("1")
-    assert _row(quantity=100, bar_volume=Decimal("10000")).size_above_bar_volume_pct is False
-    assert _row(quantity=101, bar_volume=Decimal("10000")).size_pct_of_bar_volume == Decimal("1.01")
-    assert _row(quantity=101, bar_volume=Decimal("10000")).size_above_bar_volume_pct is True
-    assert _row(quantity=3, bar_volume=Decimal("400")).size_pct_of_bar_volume == Decimal("0.75")
-    assert _row(quantity=3, bar_volume=Decimal("400")).size_above_bar_volume_pct is False
+    # bar_volume is in round lots: 100 lots are 10,000 shares, 4 lots 400 shares.
+    assert _row(quantity=100, bar_volume=Decimal("100")).size_pct_of_bar_volume == Decimal("1")
+    assert _row(quantity=100, bar_volume=Decimal("100")).size_above_bar_volume_pct is False
+    assert _row(quantity=101, bar_volume=Decimal("100")).size_pct_of_bar_volume == Decimal("1.01")
+    assert _row(quantity=101, bar_volume=Decimal("100")).size_above_bar_volume_pct is True
+    assert _row(quantity=3, bar_volume=Decimal("4")).size_pct_of_bar_volume == Decimal("0.75")
+    assert _row(quantity=3, bar_volume=Decimal("4")).size_above_bar_volume_pct is False
     assert _row(spread_bps=Decimal("50")).spread_above_bps is False
     assert _row(spread_bps=Decimal("50.01")).spread_above_bps is True
     assert _row(spread_bps=Decimal("12.5")).spread_above_bps is False
@@ -747,7 +796,8 @@ def test_sidecar_reads_v1_and_v2(tmp_path):
         "sendable": True, "outcome": "shadow_accepted", "identity_factor": "0.25", "managed_factor": "1",
         "size_multiplier_effective": "0.25", "decided_at": "2026-10-19T14:00:00+00:00",
     }
-    v2 = replace(_row(quantity=750, bar_volume=Decimal("50000"), spread_bps=Decimal("8.5")), decision_id="decision-v2")
+    # 750 shares on 500 round lots (50,000 shares): 1.5 %, flagged.
+    v2 = replace(_row(quantity=750, bar_volume=Decimal("500"), spread_bps=Decimal("8.5")), decision_id="decision-v2")
     v2_line = v2.payload()
     assert (v2_line["size_pct_of_bar_volume"], v2_line["size_above_bar_volume_pct"]) == ("1.5", True)
     (directory / "run-1.jsonl").write_text(json.dumps(v1_line) + "\n" + json.dumps(v2_line) + "\n")

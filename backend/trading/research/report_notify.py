@@ -304,9 +304,12 @@ async def deliver_size_batch(
 ) -> str:
     """The night's size changes as ONE silent message, each proposal id once.
 
-    The items are read back from the size store (so a replay restarted after
-    a failed send still delivers), minus every id the delivery record already
-    has; the record is written only once Telegram accepted the whole message.
+    The items are read back from the size store: tonight's, and every item of
+    the last ``size_notify.RESEND_NIGHTS`` nights that never reached the phone
+    (the replay child runs once a night, so a failed send goes out with the
+    next night's batch, N19b-OPS MEDIUM-2), minus every id the delivery record
+    already has; the record is written only once Telegram accepted the whole
+    message.
     """
     from trading.operations import size_notify
 

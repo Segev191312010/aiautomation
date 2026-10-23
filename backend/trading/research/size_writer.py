@@ -96,7 +96,10 @@ from trading.risk.identity_sizing import (
     IDENTITY_SIZE_CEILING,
     SIZE_LADDER,
     SIZE_WRITER_IDENTITY_SKIPPED,
+    SizeEvent,
     SizeNotInForce,
+    read_size_events_from,
+    size_from_events,
     size_in_force,
 )
 from trading.scheduler.sessions import next_market_session
@@ -148,6 +151,10 @@ DEMOTION_WAITING = "demotion_waiting_new_evidence"
 
 # The writer refuses a night whose session starts this soon by its own clock.
 SESSION_STARTED = "session_started"
+# A step down whose event would leave a history the one read rule refuses
+# (size_from_events), e.g. two steps at one session start (N19b-ES LOW-1):
+# nothing of the identity's night is written, retried next night.
+STEP_DOWN_BREAKS_CHAIN = "step_down_would_break_chain"
 
 # Every statement the writer writes with, each a plain INSERT written out
 # literally (no helper builds SQL; a test pins the tables equal to size_schema's
@@ -543,6 +550,38 @@ def _session_started(plan: NightPlan, stamp: datetime) -> bool:
     return stamp + WRITE_MARGIN >= plan.starts_at
 
 
+def _chain_after_step_down(
+    db: sqlite3.Connection, *, identity: str, origin: str, target: str, plan: NightPlan, stamp: datetime
+) -> str | None:
+    """Why the step down's event would leave a history the session read refuses,
+    or would not be the size in force at ``plan.session``; else None.
+
+    The database compares effective dates; the read rule places each event at
+    the session start it takes effect at. An earlier event written after its
+    own session's start takes effect at the next start, the one this step down
+    is for: two steps at one start, and the identity reads no size at any later
+    session (N19b-ES LOW-1). So the writer reads its own history inside its
+    transaction and runs the one read rule (``size_from_events``) on it plus the
+    event it is about to insert.
+    """
+    events = read_size_events_from(db, identity=identity, account_mode=CURRENT_ACCOUNT_MODE)
+    candidate = SizeEvent(
+        event_id=max((event.event_id for event in events), default=0) + 1,
+        identity=identity,
+        from_mult=Decimal(origin),
+        to_mult=Decimal(target),
+        effective_session=plan.session,
+        kind=STEP_DOWN,
+        created_at=stamp,
+    )
+    reading = size_from_events(identity, (*events, candidate), session_date=plan.session, starts_at=plan.starts_at)
+    if reading.size is None:
+        return f"{reading.token}: {reading.detail}"
+    if reading.event_id != candidate.event_id:
+        return f"it would not be in force at the {plan.session.isoformat()} session ({reading.detail})"
+    return None
+
+
 def _write_identity(
     db: sqlite3.Connection,
     item: IdentityProposal,
@@ -584,6 +623,13 @@ def _write_identity(
             change = SizeChange(name, pid, PROPOSAL, current, target)
         elif item.status == DEMOTION_PROPOSED and item.proposed is not None:
             target = _rung_text(item.proposed)
+            broken = _chain_after_step_down(
+                db, identity=name, origin=current, target=target, plan=plan, stamp=stamp
+            )
+            if broken is not None:
+                db.execute("ROLLBACK")
+                _skip(tally, name, STEP_DOWN_BREAKS_CHAIN, detail=broken)
+                return
             pid = _insert_proposal(
                 db, item=item, kind=STEP_DOWN, origin=current, target=target, nights=nights,
                 deadline=None, night=plan.night, stamp=stamp,
@@ -766,6 +812,7 @@ __all__ = [
     "NOT_WRITTEN",
     "OWNER_RESUME_HOLDS",
     "SESSION_STARTED",
+    "STEP_DOWN_BREAKS_CHAIN",
     "PROPOSAL",
     "STEP_DOWN_CHANGE",
     "WRITER_ACTOR",

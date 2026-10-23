@@ -73,9 +73,10 @@
      question 1): a strategy child's CRITICAL size line (``SIZE_TRIPWIRES``:
      the session-start size read's refusals, an event written mid-session,
      the pipeline's ``identity_sizing_missing`` block), with normal sound,
-     each token once per session date (``size_tripwire:<token>`` in the
-     per-date state), so the owner hears on the day that an identity trades
-     no setups, never only in a log.
+     each (token, identity) once per session date
+     (``size_tripwire:<token>:<identity>`` in the per-date state), so the
+     owner hears on the day which identities trade no setups, never only in
+     a log.
 
 It reads the database, the logs and the bridge state files, and writes one
 kind of row: the Sentinel's ``paper:<IDENTITY>`` fence, stop-only. Nothing
@@ -190,6 +191,7 @@ from trading.risk.identity_sizing import (
     SIZE_EVENT_WRITTEN_MID_SESSION,
     SIZE_READ_BEFORE_SESSION_START,
     SIZE_WRITER_IDENTITY_SKIPPED,
+    SIZE_WRITER_NIGHT_FAILED,
 )
 from trading.research.live_ledger import bridge_state_directory
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
@@ -334,9 +336,11 @@ TRIPWIRE_ALERT_INTERVAL = timedelta(minutes=30)
 # session-start read's CRITICAL tokens (trading.risk.identity_sizing), the
 # event it ignored as written mid-session, and the pipeline's block of every
 # setup of a run without a size; and the nightly size writer skipping one
-# identity (P3-E fix 1). Forwarded with normal sound, each token once per
-# date: here from the strategy children's logs, by the Telegram child's
-# overnight watch from the replay child's log.
+# identity (P3-E fix 1) or failing for the whole night (fix 3). Forwarded
+# each (token, identity) once per date: here from the strategy children's
+# logs with normal sound; at night by the Telegram child's overnight watch
+# from the replay child's log, silent (nothing to do before the session,
+# whose start read pages again with sound if the problem lasts).
 SIZE_TRIPWIRES = (
     IDENTITY_SIZE_STORE_UNREADABLE,
     IDENTITY_SIZE_ABOVE_CEILING,
@@ -347,14 +351,22 @@ SIZE_TRIPWIRES = (
     SENDABLE_WITHOUT_CEILING,
     IDENTITY_SIZING_MISSING,
     SIZE_WRITER_IDENTITY_SKIPPED,
+    SIZE_WRITER_NIGHT_FAILED,
 )
 # Only the CRITICAL line itself (``<time> CRITICAL <logger> <token>: ...``),
 # never a decision line that merely names the block as its risk code, and
 # never a line of the stack the CRITICAL carries.
+# Every size CRITICAL names its identity right after the token
+# (``<token>: <IDENTITY> ...``); the night writer's whole-night failure names
+# none. Pages are de-duplicated per (token, identity): two identities blocked
+# for one reason are two pages, each once (N19b-OPS LOW-2).
 _SIZE_TRIPWIRE = re.compile(
     r"\bCRITICAL\b.*?\b(?P<token>" + "|".join(re.escape(token) for token in SIZE_TRIPWIRES) + r"):"
+    r"(?: (?P<identity>[A-Z][A-Z0-9_]{0,63})\b)?"
 )
-SIZE_TRIPWIRE_KEY = "size_tripwire:{token}"
+SIZE_TRIPWIRE_KEY = "size_tripwire:{token}:{identity}"
+# The key part of a line that names no identity.
+ALL_IDENTITIES = "*"
 # A plan lookup that fails in the managed child never shows in the plans table
 # (the notifier's own outage alert reads that), so it is forwarded from the log.
 _FALLBACK_PLAN_ERROR = re.compile(r"manager_fallback_neutral: plan_error\b")
@@ -908,13 +920,15 @@ def manager_tripwire(line: str) -> tuple[str, str] | None:
     return token, f"🚨 AI day manager tripwire: {token}\n{_clip(line.strip(), 300)}"
 
 
-def size_tripwire(line: str) -> tuple[str, str] | None:
-    """``(token, phone text)`` for a strategy child's CRITICAL size line, else None."""
+def size_tripwire(line: str) -> tuple[str, str, str] | None:
+    """``(token, identity, phone text)`` for a CRITICAL size line, else None;
+    the identity is ``ALL_IDENTITIES`` for a line that names none."""
     match = _SIZE_TRIPWIRE.search(line)
     if match is None:
         return None
     token = match.group("token")
-    return token, f"🚨 Size tripwire: {token}\n{_clip(line.strip(), 300)}"
+    identity = match.group("identity") or ALL_IDENTITIES
+    return token, identity, f"🚨 Size tripwire: {token}\n{_clip(line.strip(), 300)}"
 
 
 def child_exit_code(line: str) -> int | None:
@@ -2841,9 +2855,10 @@ class _NotifierSession:
         elif problem and self._alert_allowed("ibkr_session"):
             self._send_alert(f"ibkr_session:{problem}", ibkr_alert_text(problem, source))
 
-    def _size_tripwire(self, token: str, text: str) -> None:
-        """Once per token and session date, normal sound; a lost delivery is retried."""
-        key = SIZE_TRIPWIRE_KEY.format(token=token)
+    def _size_tripwire(self, token: str, identity: str, text: str) -> None:
+        """Once per (token, identity) and session date, normal sound: a problem that
+        lasts pages again at the next session's start read. A lost delivery is retried."""
+        key = SIZE_TRIPWIRE_KEY.format(token=token, identity=identity)
         if key in self._state.delivered or key in self._in_flight:
             return
         logger.warning("size tripwire %s: forwarded to the phone", token)

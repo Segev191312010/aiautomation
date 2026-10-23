@@ -40,9 +40,12 @@ schedule); this module probes, reads the logs and sends:
     Its sends go through the assistant's one Telegram sender, the silent flag
     included;
   * ``replay.log`` at any hour: the nightly size writer's CRITICAL size lines
-    (``notify_service.SIZE_TRIPWIRES``: an identity it skipped, fail-closed),
-    with normal sound, each token once per ET date (the notifier, which
-    forwards the same tokens from the strategy logs, is not running then).
+    (``notify_service.SIZE_TRIPWIRES``: an identity it skipped, or the whole
+    night's writer failing; fail-closed, every size stays as it is), silent
+    (``quiet``: nothing to do before the session, N19b-OPS LOW-7; the
+    session-start read pages again with sound if the problem lasts), each
+    (token, identity) once per ET date (the notifier, which forwards the same
+    tokens from the strategy logs, is not running then).
 
 A stop is never lost. ``TelegramAssistant.stop`` cancels this task and waits
 for it; Python 3.11's ``asyncio.wait_for`` runs its awaitable in a task of its
@@ -109,8 +112,9 @@ RECORDER_LOG = "recorder"
 RECORDER_LOG_NAME = "recorder.log"
 REPLAY_LOG = "replay"
 REPLAY_LOG_NAME = "replay.log"
-# Memory key per size token: the ET date its replay-log line last reached the phone.
-REPLAY_SIZE_TRIPWIRE_KEY = "replay_size_tripwire:{token}"
+# Memory key per size token and identity: the ET date its replay-log line last
+# reached the phone (N19b-OPS LOW-2: two identities, two pages, each once).
+REPLAY_SIZE_TRIPWIRE_KEY = "replay_size_tripwire:{token}:{identity}"
 # The loop's resolution: log lines, the competing-login re-page and the
 # hysteresis's clean-stretch close are seen within this long.
 WATCH_TICK_SECONDS = 30.0
@@ -225,6 +229,7 @@ class OvernightWatch:
         memory: MutableMapping[str, str] | None = None,
         notifier_outage: NotifierOutage | None = None,
         proposals: ProposalWatch | None = None,
+        quiet: Send | None = None,
     ) -> None:
         self._tailers = {
             SUPERVISOR_LOG: LogTailer(log_directory / SUPERVISOR_LOG_NAME),
@@ -240,6 +245,9 @@ class OvernightWatch:
         self._memory: MutableMapping[str, str] = {} if memory is None else memory
         self._notifier_outage = notifier_outage
         self._proposals = proposals
+        # The silent sender for night pages (the replay log's size tripwires);
+        # without one they go out on the watch's own sender.
+        self._quiet = quiet
         self._rotation = RotationCarried()
         self.port = PortWatch()
         self.competing = CompetingLoginWatch()
@@ -358,18 +366,21 @@ class OvernightWatch:
         send(f"{text} · {clock_text(at, now)}")
 
     def _replay_line(self, line: str, now: datetime, send: Send) -> None:
-        """A size tripwire of the nightly size writer: once per token per ET date."""
+        """A size tripwire of the nightly size writer: once per (token, identity)
+        per ET date, silent (it asks nothing of the owner at night)."""
         sized = size_tripwire(line)
         if sized is None:
             return
-        token, text = sized
-        key = REPLAY_SIZE_TRIPWIRE_KEY.format(token=token)
+        token, identity, text = sized
+        key = REPLAY_SIZE_TRIPWIRE_KEY.format(token=token, identity=identity)
         day = et_day(now).isoformat()
         if self._memory.get(key) == day:
             return
         self._memory[key] = day
-        logger.warning("overnight watch: size tripwire %s from the replay log, forwarded", token)
-        send(text)
+        logger.warning(
+            "overnight watch: size tripwire %s (%s) from the replay log, forwarded silent", token, identity
+        )
+        (self._quiet or send)(text)
 
     def _recorder_line(self, line: str, now: datetime, send: Send) -> None:
         if ibkr_session_problem(line, include_connection_lost=False) != "competing_login":

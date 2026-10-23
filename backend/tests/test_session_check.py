@@ -605,6 +605,53 @@ async def test_session_check_store_unreadable_is_not_baseline(
             " the recorded net liquidation 100000.00") in rule(report, 4).summary
 
 
+@pytest.mark.parametrize("damage", ["checksum", "events table"])
+async def test_session_check_store_unreadable_without_a_sent_is_a_warn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """N19b-OPS LOW-1 (probe F): an unreadable store blocks every sendable setup, so the day has no
+    SENT; rule 4 is still a WARN naming every identity without a size, never a PASS."""
+    day = await build_store_day(tmp_path, monkeypatch, Spec(trades=(), recorded_inputs=True))
+    with closing(sqlite3.connect(day.db)) as db, db:
+        if damage == "checksum":
+            db.execute("UPDATE autotrader_schema_migrations SET checksum = ? WHERE version = 18", ("0" * 64,))
+        else:
+            db.execute("DROP TABLE autotrader_size_events")
+    report = check(day)
+
+    assert statuses(report) == ALL_PASS_BUT_SIZE, report.render()
+    summary = rule(report, 4).summary
+    assert summary.startswith(
+        f"no SENT; {sc.SIZE_IN_FORCE_UNKNOWN}: the size store names no size for GAP_GO_V2, MOMO_HOD_V2, ORB_V2,"
+        " VWAP_PB_V2 (a child reading it blocks every setup, identity_sizing_missing), never a PASS; first:"
+        " identity_size_store_unreadable: "
+    ), summary
+    assert report.exit_code == sc.EXIT_PASSED  # a WARN, as with a SENT (the phone had the 09:23 page)
+
+    # A readable store and no SENT: still a plain PASS.
+    clean = check(await build_store_day(tmp_path / "clean", monkeypatch, Spec(trades=(), recorded_inputs=True)))
+    assert rule(clean, 4).status == sc.PASS and rule(clean, 4).summary == "no SENT: nothing was sized"
+
+
+async def test_session_check_an_identity_without_a_size_is_a_warn_beside_clean_sents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N19b-OPS LOW-1: ORB_V2's history does not start at its baseline, so its child blocked every
+    setup and sent nothing; the other three SENT exactly. Rule 4 still WARNs, naming ORB_V2."""
+    day = await build_store_day(tmp_path, monkeypatch, Spec(trades=(GAP, MOMO, VWAP), recorded_inputs=True))
+    _size_ledger(day).step("ORB_V2", "0.5", "0.25", effective=DAY, at=FRIDAY_NIGHT)
+    report = check(day)
+
+    assert statuses(report) == ALL_PASS_BUT_SIZE, report.render()
+    summary = rule(report, 4).summary
+    assert summary.startswith(
+        f"{sc.SIZE_IN_FORCE_UNKNOWN}: the size store names no size for ORB_V2 (a child reading it blocks every"
+        " setup, identity_sizing_missing), never a PASS; first: size_event_chain_broken: "
+    ), summary
+    details = _size_details(report)
+    assert "MOMO_HOD_V2 AAA (orders " in details and "750 sh = SENT = intent = state" in details
+
+
 async def test_session_check_mid_session_event_is_not_in_force(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

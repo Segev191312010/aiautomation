@@ -19,7 +19,7 @@ import subprocess
 from typing import TYPE_CHECKING, Protocol
 
 from config import cfg
-from trading.contracts import RiskPolicy, ShadowRuntimeConfig
+from trading.contracts import TWS_VOLUME_LOT_SHARES, RiskPolicy, ShadowRuntimeConfig
 from trading.intelligence.anthropic_transport import (
     AnthropicMessagesTransport,
     MarketContextProvider,
@@ -109,10 +109,9 @@ logger = logging.getLogger("autotrader.shadow.service")
 
 # Connect early enough to finish the handshake and preflight before the scan.
 CONNECT_LEAD = timedelta(minutes=5)
-# ibapi 9.81 reports US-stock volume in round lots of 100 shares. Verified
-# 2026-10-12 by the TWS probe: AAPL daily bars returned ~500k against ~50M
-# shares actually traded.
-IBKR_API_VOLUME_MULTIPLIER = Decimal("100")
+# ibapi 9.81 reports US-stock volume in round lots of 100 shares (verified
+# 2026-10-12 by the TWS probe; the constant lives beside CompletedBar).
+IBKR_API_VOLUME_MULTIPLIER = TWS_VOLUME_LOT_SHARES
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 Clock = Callable[[], datetime]

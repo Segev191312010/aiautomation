@@ -428,6 +428,20 @@ def evaluate_identity(evidence: IdentityEvidence, *, open_risk_term_deployed: bo
 # --- the report --------------------------------------------------------------------
 
 
+# What the texts say happens next (N19b-OPS LOW-6): nothing implies an
+# approval path before phone approval exists (plan P3-D), and a demotion is
+# applied by the nightly size writer only when it does not wait (new trades
+# since the last step, the owner's resume of a fence).
+DEMOTION_APPLIES = (
+    "the nightly size writer applies it at the next session unless it waits for new trades"
+    " or the owner's resume (evidence.json sizes)"
+)
+STEP_UP_WAITS = "a size up waits for the owner's phone approval"
+STEP_UP_NOT_BUILT = (
+    "a size up needs the owner's phone approval, which is not built yet (P3-D), so no size goes up"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class PromotionProposals:
     as_of: date
@@ -435,17 +449,28 @@ class PromotionProposals:
     size_steps: SizeSteps = field(default_factory=SizeSteps)
     readable: bool = True
     note: str = ""
+    # Whether phone approval exists (``size_notify.PHONE_APPROVAL_LIVE``, handed
+    # in by the nightly job: this module imports no operations code).
+    approval_live: bool = False
+
+    def _step_up_text(self) -> str:
+        return STEP_UP_WAITS if self.approval_live else STEP_UP_NOT_BUILT
 
     def lines(self) -> list[str]:
         """The weekly summary's lines: proposals first, then each identity's standing."""
         lines = [
-            f"Promotion proposals ({RULE_VERSION}, propose mode: a step up waits for the owner's approval;"
-            " a step down applies by itself at the next session)"
+            f"Promotion proposals ({RULE_VERSION}, propose mode: {self._step_up_text()};"
+            " a step down applies by itself at the next session unless the size writer holds it)"
         ]
         if not self.readable:
             lines.append(f"not evaluated: {self.note}")
             return lines
-        lines += [line for item in self.identities if (line := item.proposal_line())]
+        for item in self.identities:
+            line = item.proposal_line()
+            if line is None:
+                continue
+            # The weekly text never says a demotion applied: the writer may hold it (N19b-OPS LOW-6c).
+            lines.append(f"{line}; {DEMOTION_APPLIES}" if item.status == DEMOTION_PROPOSED else line)
         lines += [item.status_line() for item in self.identities]
         return lines
 
@@ -459,8 +484,8 @@ class PromotionProposals:
             "as_of": self.as_of.isoformat(),
             "grants": (
                 "nothing: a proposal changes no constant, database row or fence;"
-                " the nightly size writer records it: a step up waits for the owner's phone approval,"
-                " a step down applies by itself at the next session"
+                f" the nightly size writer records it: {self._step_up_text()};"
+                f" a demotion: {DEMOTION_APPLIES}"
             ),
             "open_risk_term_deployed": OPEN_RISK_TERM_DEPLOYED,
             "readable": self.readable,
@@ -714,6 +739,7 @@ def _slip(value: Decimal | None) -> str:
 
 __all__ = [
     "AT_CEILING",
+    "DEMOTION_APPLIES",
     "DEMOTION_MIN_TRADES",
     "DEMOTION_PROPOSED",
     "FENCE_TABLE",
@@ -734,6 +760,8 @@ __all__ = [
     "PROPOSED",
     "RULE_VERSION",
     "SIZE_LADDER",
+    "STEP_UP_NOT_BUILT",
+    "STEP_UP_WAITS",
     "IdentityEvidence",
     "IdentityProposal",
     "PromotionProposals",

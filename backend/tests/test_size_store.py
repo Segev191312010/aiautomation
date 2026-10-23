@@ -1364,6 +1364,20 @@ _FOREIGN_WORDS = {
     NIGHTLY_WRITER: frozenset({"approved", "rejected", "owner_telegram"}),
     APPROVAL_WRITER: frozenset({"auto_applied", "fenced", "would_fence"}),
 }
+# Fragments of those words, for a writer that splits one across names the
+# fold cannot follow (``A = "appro"; A + "ved"``; N19b-ES LOW-3).
+_FOREIGN_FRAGMENTS = {
+    NIGHTLY_WRITER: ("appro", "owner_tel", "reject"),
+    APPROVAL_WRITER: ("auto_appl", "would_fen"),
+}
+# A statement on the events table a writer may hold: a SELECT, or an INSERT the
+# rights check reads (its table written out). Anything else naming the table
+# (a bare name to build a statement from) is refused (N19b-ES LOW-3).
+_EVENTS_TABLE_TEXT = re.compile(r"size_events", re.IGNORECASE)
+_READABLE_EVENTS_STATEMENT = re.compile(
+    r"^(?:SELECT\b|INSERT\s+INTO\s+autotrader_size_events\b)", re.IGNORECASE
+)
+_RUNTIME_TABLE_INSERT = re.compile(r"\b(?:INSERT|REPLACE)\b(?:\s+OR\s+\w+)?\s+INTO\s+[^\w\s]", re.IGNORECASE)
 _FOREIGN_CONSTANTS = {
     NIGHTLY_WRITER: frozenset({"OWNER_TELEGRAM_ACTOR", "STEP_UP_DECISIONS"}),
     APPROVAL_WRITER: frozenset({"STEP_DOWN_DECISIONS", "SHADOW_ONLY_DECISIONS"}),
@@ -1417,15 +1431,54 @@ def _constant(node: ast.AST) -> object:
 _UNKNOWN = object()
 
 
+# The ``str`` methods ``_fold`` evaluates on a folded base with literal
+# arguments (N19b-ES LOW-3: ``"appro".strip() + "ved"`` is ``approved``).
+_STR_METHODS = frozenset({
+    "capitalize", "casefold", "center", "expandtabs", "ljust", "lower", "lstrip", "removeprefix", "removesuffix",
+    "replace", "rjust", "rstrip", "strip", "swapcase", "title", "upper", "zfill",
+})
+
+
 def _fold(node: ast.AST) -> str | None:
     """A string expression's text, as far as the source fixes it ("{}" for the rest).
 
-    Constants, f-strings, ``+``, ``%`` formatting, ``.format`` and ``.join``:
-    the ways a statement's table name can be split across literals (N19a
-    LOW-4: ``"INSERT INTO autotrader_%s" % "size_events"`` folds whole).
+    Constants, f-strings, ``+``, ``*`` by a literal count, ``%`` formatting,
+    ``.format``, ``.join``, ``str()``, a literal index or slice and the plain
+    ``str`` methods (``_STR_METHODS``) with literal arguments: the ways a
+    statement, a table name or a decision word can be split across literals
+    (N19a LOW-4: ``"INSERT INTO autotrader_%s" % "size_events"`` folds whole;
+    N19b-ES LOW-3: ``"appro".strip() + "ved"`` folds to ``approved``).
     """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        for text_node, count_node in ((node.left, node.right), (node.right, node.left)):
+            text, count = _fold(text_node), _constant(count_node)
+            if text is not None and isinstance(count, int) and not isinstance(count, bool) and 0 <= count <= 64:
+                return text * count
+        return None
+    if isinstance(node, ast.Subscript):
+        base = _fold(node.value)
+        if base is None:
+            return None
+        index = node.slice
+        if isinstance(index, ast.Slice):
+            bounds = [None if part is None else _constant(part) for part in (index.lower, index.upper, index.step)]
+            if all(part is None or (isinstance(part, int) and not isinstance(part, bool)) for part in bounds):
+                try:
+                    return base[slice(*bounds)]
+                except ValueError:
+                    return base
+            return base
+        position = _constant(index)
+        if isinstance(position, int) and not isinstance(position, bool):
+            try:
+                return base[position]
+            except IndexError:
+                return base
+        return base
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "str" and len(node.args) == 1:
+        return _fold(node.args[0])
     if isinstance(node, ast.JoinedStr):
         return "".join(part.value if isinstance(part, ast.Constant) else "{}" for part in node.values)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -1459,6 +1512,16 @@ def _fold(node: ast.AST) -> str | None:
             items = node.args[0]
             if isinstance(items, (ast.List, ast.Tuple)):
                 return base.join("{}" if (part := _fold(item)) is None else part for item in items.elts)
+        if base is not None and node.func.attr in _STR_METHODS:
+            arguments = [_constant(item) for item in node.args]
+            if not node.keywords and _UNKNOWN not in arguments:
+                try:
+                    folded = getattr(base, node.func.attr)(*arguments)
+                except (TypeError, ValueError):
+                    folded = None
+                if isinstance(folded, str):
+                    return folded
+            return base  # arguments not fixed by the source: the literal itself, unchanged
     return None
 
 
@@ -1559,6 +1622,14 @@ def _beyond_rights(texts: list[str], identifiers: set[str], relative: str) -> li
     for word in sorted(_FOREIGN_WORDS[relative]):
         if any(text == word or f"'{word}'" in text for text in texts):
             found.append(f"holds {word!r}, the other writer's word")
+    for fragment in _FOREIGN_FRAGMENTS[relative]:
+        if any(fragment in text.lower() for text in texts):
+            found.append(f"holds {fragment!r}, a piece of the other writer's words")
+    for text in texts:
+        if _RUNTIME_TABLE_INSERT.search(text):
+            found.append(f"an INSERT whose table is not written out: {text[:80]!r}")
+        if _EVENTS_TABLE_TEXT.search(text) and not _READABLE_EVENTS_STATEMENT.match(text):
+            found.append(f"names the events table outside a SELECT or its own INSERT: {text[:80]!r}")
     for name in sorted(_FOREIGN_CONSTANTS[relative] & identifiers):
         found.append(f"names {name}, the other writer's constant")
     return found
@@ -1663,10 +1734,45 @@ WRITER = "trading/research/size_writer.py"
          "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, 'rejected')\"\n", False),
         (APPROVAL_WRITER,
          "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, 'expired')\"\n", True),
+        # Fix 3 (N19b-ES LOW-3): method calls on literals fold before matching; S1 is the reviewer's mutant.
+        (WRITER, 'def _rogue(db, pid):\n    db.execute(_DECISION, (pid, "appro".strip() + "ved",'
+                 ' "owner".strip() + "_telegram", "2026-10-20T00:00:00+00:00"))\n', True),  # S1
+        (WRITER, 'X = "APPROVED".lower()\n', True),
+        (WRITER, 'A = "appro"\nX = A + "ved"\n', True),  # a split the fold cannot follow: the fragment
+        (WRITER, 'T = "autotrader_size_events".strip()\nX = "INSERT INTO " + T + " (kind) VALUES (\'step_up\')"\n', True),
+        (WRITER, "from trading.storage.size_schema import SIZE_EVENTS_TABLE\n"
+                 "X = f\"INSERT INTO {SIZE_EVENTS_TABLE} (identity, kind) VALUES (?, 'step_down')\"\n", True),
+        (WRITER, 'X = "SELECT to_mult FROM autotrader_size_events WHERE identity = ?"\n', False),
+        (WRITER, 'T = "autotrader_size_events".strip()\n', True),  # a bare name to build a statement from
+        (ROGUE, 'X = "INSERT INTO autotrader_size_" + "EVENTS".lower() + " VALUES (?)"\n', True),
+        (ROGUE, 'X = "INSERT INTO autotrader_size_events_x"[:34] + " VALUES (?)"\n', True),
+        (ROGUE, 'X = "insert into autotrader_size_events values (?)".upper()\n', True),
+        (APPROVAL_WRITER, 'X = "auto_" + "APPLIED".lower()\n', True),
     ],
 )
 def test_the_writer_scan_finds_every_shape_of_insert(relative, source, flagged):
     assert bool(size_store_violations(source, relative)) is flagged, size_store_violations(source, relative)
+
+
+def test_the_fold_reads_method_calls_on_literals():
+    """N19b-ES LOW-3: the fold evaluates what the source fixes, so a word or a table name split
+    across literals and plain ``str`` methods is matched whole."""
+    cases = {
+        '"appro".strip() + "ved"': "approved",
+        '"OWNER".lower() + "_telegram"': "owner_telegram",
+        '"autotrader_size_events  ".rstrip()': "autotrader_size_events",
+        '"xstep_up"[1:]': "step_up",
+        '"approved"[0]': "a",
+        '"ab" * 2': "abab",
+        'str("approved")': "approved",
+        '"x".replace("x", "approved")': "approved",
+        '"approved".strip(chars)': "approved",  # an argument the source does not fix: the literal itself
+        '"{}".format(name).upper()': "{}",
+        'f"{table}".strip()': "{}",
+    }
+    for source, expected in cases.items():
+        assert _fold(ast.parse(source, mode="eval").body) == expected, source
+    assert _fold(ast.parse("name.strip()", mode="eval").body) is None
 
 
 def test_the_import_scan_resolves_relative_imports():

@@ -68,6 +68,7 @@ import json
 import logging
 from pathlib import Path
 
+from trading.operations import size_notify
 from trading.operations.paths import atomic_private_write
 from trading.operations.sentinel import (
     FENCED,
@@ -92,6 +93,7 @@ from trading.research.replay import FILL_MODEL_ID, ReplayResult, SkippedStrategy
 from trading.research.size_writer import NightPlan, SizeNight, not_written, plan_night, sizes_in_force, write_night
 from trading.research.v7c_report import NOT_COLLECTED, V7CReport, collect_v7c_report, failed_report
 from trading.research.windows import FamilyResearch, research_payload, sweep_all
+from trading.risk.identity_sizing import SIZE_WRITER_NIGHT_FAILED
 from trading.scheduler.sessions import market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
 
@@ -444,6 +446,8 @@ def collect_evidence(
     except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
         logger.exception("promotion proposals failed")
         proposals = PromotionProposals(as_of=as_of, readable=False, note=getattr(exc, "token", _failed(exc)))
+    # The weekly text says plainly whether a size up can be approved yet (LOW-6).
+    proposals = replace(proposals, approval_live=size_notify.PHONE_APPROVAL_LIVE)
     sizes = _write_sizes(environment, proposals, plan)
     try:
         # Every managed session so far: phase 3 is a cumulative question.
@@ -504,7 +508,16 @@ def _write_sizes(
                 fence_store=_fence_store(environment),
             )
         except Exception as exc:  # noqa: BLE001 - logged and reported; the replay stands
-            logger.exception("size writer failed")
+            # One CRITICAL with a size token, forwarded to the phone by the
+            # Telegram child's replay-log watch (N19b-OPS LOW-3): fail-closed,
+            # every size stays as it is, retried next night.
+            logger.critical(
+                "%s: the nightly size writer failed for the whole night (%s); no size changed,"
+                " retried next night",
+                SIZE_WRITER_NIGHT_FAILED,
+                type(exc).__name__,
+                exc_info=True,
+            )
             sizes = not_written(_failed(exc), plan)
     if environment.deliver_sizes is None or plan is None:
         return sizes

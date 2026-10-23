@@ -14,6 +14,7 @@ import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ from tests.test_size_writer import (
     FRIDAY,
     MONDAY,
     NEXT_MONDAY,
+    THURSDAY,
     TUESDAY,
     WEDNESDAY,
     database,  # noqa: F401 - the fixture: a migrated store that is the fence store's too
@@ -105,8 +107,13 @@ def test_phone_approval_live_is_false_until_p3d():
     )
     line = proposal.line()
     assert "approve" not in line.lower()
-    assert "sizes stay unchanged: phone approval arrives later" in line
-    assert "expires Tue 07:55 ET (14:55 Israel)" in line
+    # Changed by design in fix 3 (N19b-OPS LOW-6a): "phone approval arrives later" read as a message
+    # still to come that night; the text now says the approval does not exist yet.
+    assert line.endswith(
+        "no size change: a size up needs the owner's phone approval, which is not built yet (P3-D);"
+        " the size stays as it is and this proposal lapses at Tue 07:55 ET (14:55 Israel)"
+    )
+    assert "arrives later" not in line and "expires" not in line
     # Nobody listens for a button press yet: the assistant polls messages only.
     assert telegram_bot.ALLOWED_UPDATES == ("message", "edited_message")
     import inspect
@@ -136,10 +143,12 @@ def test_batch_sent_once_silent_with_buttons(tmp_path, database, monkeypatch):
         f"STEP DOWN VWAP_PB_V2 id {items[1].proposal_id}: ×0.5 → ×0.25 from the Tue 2026-10-20 session"
     )
     assert lines[3].startswith(f"PROPOSAL GAP_GO_V2 id {items[2].proposal_id}: ×0.5 → ×1; 30 trades, expectancy")
-    assert lines[3].endswith(
-        "evaluated 1 night since the last step; sizes stay unchanged: phone approval arrives later"
-        " (this proposal expires Tue 07:55 ET (14:55 Israel))"
+    assert lines[3].endswith(  # fix 3 wording (N19b-OPS LOW-6a)
+        "evaluated 1 night since the last step; no size change: a size up needs the owner's phone approval,"
+        " which is not built yet (P3-D); the size stays as it is and this proposal lapses at Tue 07:55 ET"
+        " (14:55 Israel)"
     )
+    assert "(from the " not in payload["text"]  # every item is tonight's: no night marker
     assert "approve" not in payload["text"].lower()
 
     # Once per proposal id: the record holds all three; a second run sends nothing.
@@ -191,6 +200,82 @@ def test_a_failed_batch_is_sent_by_the_next_run_and_a_night_without_news_reads_n
     assert notify_size_batch(database, WEDNESDAY, env=quiet) == NOTHING_NEW
 
 
+def test_a_failed_night_goes_out_with_the_next_nights_batch_once(tmp_path, database):
+    """N19b-OPS MEDIUM-2 (probe A): the replay child runs once a night and exits 0 after a failed
+    send, so Monday's step-down rides with Tuesday's batch: silent, once, marked with its night."""
+    run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing")  # x0.5 -> x0.25 for Tuesday
+    clock = FakeTime()
+    bad = FakeTelegram(clock, replies=[_error(502, "Bad Gateway")] * 3)
+    assert notify_size_batch(database, MONDAY, env=_env(tmp_path, bad, clock, et(MONDAY, 17, 45))) == (
+        report_notify.FAILED
+    )
+    [monday] = night_items(database, MONDAY)
+    assert (monday.kind, monday.identity, monday.night) == ("step_down", "VWAP_PB_V2", MONDAY)
+
+    run_night(database, et(TUESDAY, 17, 40), GAP_GO_V2="strong")
+    good = FakeTelegram(clock)
+    assert notify_size_batch(database, TUESDAY, env=_env(tmp_path, good, clock, et(TUESDAY, 17, 45))) == (
+        report_notify.SENT
+    )
+    (payload,) = _sends(good)
+    assert payload["disable_notification"] is True  # still silent (D7)
+    lines = payload["text"].splitlines()
+    assert len(lines) == 3
+    assert lines[0] == "🌙 Sizes after the Tue 2026-10-20 session (silent; step-downs apply by themselves)"
+    assert lines[1].startswith(
+        f"STEP DOWN VWAP_PB_V2 id {monday.proposal_id} (from the Mon 2026-10-19 night): ×0.5 → ×0.25"
+        " from the Tue 2026-10-20 session"
+    )
+    assert lines[2].startswith("PROPOSAL GAP_GO_V2 id ") and "(from the " not in lines[2]
+    record = size_notify.delivery_state_file(_env(tmp_path, good, clock, et(TUESDAY, 17, 45)).paths)
+    assert monday.proposal_id in size_notify.delivered_ids(record)
+
+    # Once: the next night has nothing new, and an item older than the window is never resent.
+    again = FakeTelegram(clock)
+    assert notify_size_batch(database, WEDNESDAY, env=_env(tmp_path, again, clock, et(WEDNESDAY, 17, 45))) == (
+        NOTHING_NEW
+    )
+    assert _sends(again) == []
+    assert size_notify.RESEND_NIGHTS == 7
+    fresh = tmp_path / "fresh" / "telegram-proposals.json"
+    late = MONDAY + timedelta(days=size_notify.RESEND_NIGHTS)
+    assert [item.proposal_id for item in size_notify.unsent_items(database, late, fresh)][:1] == [monday.proposal_id]
+    assert monday.proposal_id not in {
+        item.proposal_id for item in size_notify.unsent_items(database, late + timedelta(days=1), fresh)
+    }
+
+
+def test_a_batch_that_fails_two_nights_running_goes_out_once_on_the_third(tmp_path, database):
+    """Two failed nights: the third night's batch carries both, each once, each with its night."""
+    clock = FakeTime()
+    run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing")
+    for day in (MONDAY, TUESDAY):
+        if day == TUESDAY:
+            run_night(database, et(TUESDAY, 17, 40), GAP_GO_V2="losing")
+        bad = FakeTelegram(clock, replies=[_error(502, "Bad Gateway")] * 3)
+        assert notify_size_batch(database, day, env=_env(tmp_path, bad, clock, et(day, 17, 45))) == (
+            report_notify.FAILED
+        )
+    run_night(database, et(WEDNESDAY, 17, 40))  # a night without news of its own
+    assert night_items(database, WEDNESDAY) == []
+    good = FakeTelegram(clock)
+    assert notify_size_batch(database, WEDNESDAY, env=_env(tmp_path, good, clock, et(WEDNESDAY, 17, 45))) == (
+        report_notify.SENT
+    )
+    (payload,) = _sends(good)
+    assert payload["disable_notification"] is True
+    lines = payload["text"].splitlines()
+    assert lines[0] == "🌙 Sizes after the Wed 2026-10-21 session (silent; step-downs apply by themselves)"
+    assert [line.split(": ", 1)[0] for line in lines[1:]] == [
+        f"STEP DOWN VWAP_PB_V2 id {night_items(database, MONDAY)[0].proposal_id} (from the Mon 2026-10-19 night)",
+        f"STEP DOWN GAP_GO_V2 id {night_items(database, TUESDAY)[0].proposal_id} (from the Tue 2026-10-20 night)",
+    ]
+    for day in (THURSDAY, FRIDAY):
+        quiet = FakeTelegram(clock)
+        assert notify_size_batch(database, day, env=_env(tmp_path, quiet, clock, et(day, 17, 45))) == NOTHING_NEW
+        assert _sends(quiet) == []
+
+
 def test_the_nightly_job_hands_the_night_to_the_sender(night):  # noqa: F811
     from tests.test_nightly_evidence import TUESDAY as NIGHT_TUESDAY, _environment, _et
     from trading.research.replay import run_replay_cli
@@ -217,6 +302,142 @@ def test_the_nightly_job_hands_the_night_to_the_sender(night):  # noqa: F811
     import inspect
 
     assert "deliver_sizes=notify_size_batch" in inspect.getsource(nightly.NightlyEnvironment.current)
+
+
+def _night_environment(night, **changes):  # noqa: F811
+    from tests.test_nightly_evidence import TUESDAY as NIGHT_TUESDAY, _environment, _et
+
+    environment = _environment(night, _et(NIGHT_TUESDAY, 17, 40))
+    fields = {
+        "database": environment.database, "bridge_directory": environment.bridge_directory,
+        "clock": environment.clock, **changes,
+    }
+    return type(environment)(**fields)
+
+
+def _night_sizes(night) -> dict[str, Any]:  # noqa: F811
+    return json.loads((night["root"] / "reports" / "2026-10-12" / "evidence.json").read_text())["sizes"]
+
+
+def test_a_raising_sender_never_stops_the_replay(night):  # noqa: F811
+    """N19b-OPS M05: the batch's own guard: a sender that raises is named in evidence.json and the
+    replay still exits 0."""
+    from trading.research.replay import run_replay_cli
+
+    def sender(database: Path, evaluated: date) -> str:
+        raise RuntimeError("the sender broke")
+
+    assert run_replay_cli([], environment=_night_environment(night, deliver_sizes=sender)) == 0
+    sizes = _night_sizes(night)
+    assert sizes["delivery"] == "failed_runtimeerror"
+
+
+def test_a_whole_night_writer_failure_is_one_critical_size_token_on_the_phone(night, monkeypatch, tmp_path):  # noqa: F811
+    """N19b-OPS LOW-3 (M06): the writer failing for the whole night (a busy or unreadable store,
+    any exception) leaves the replay at exit 0 and every size as it is, and logs ONE CRITICAL
+    with a size token, which the Telegram child's replay-log watch forwards (silent, at night)."""
+    from tests.test_overnight_watch import append
+    from trading.operations.notify_service import ALL_IDENTITIES, size_tripwire
+    from trading.research import nightly
+    from trading.research.replay import run_replay_cli
+
+    def busy(**_arguments):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(nightly, "write_night", busy)
+    handed: list[date] = []
+
+    def sender(database: Path, evaluated: date) -> str:
+        handed.append(evaluated)
+        return report_notify.NOTHING_NEW
+
+    capture = _Records()
+    root = logging.getLogger("autotrader")
+    root.addHandler(capture)
+    try:
+        assert run_replay_cli([], environment=_night_environment(night, deliver_sizes=sender)) == 0
+    finally:
+        root.removeHandler(capture)
+    sizes = _night_sizes(night)
+    assert (sizes["status"], sizes["note"], sizes["changes"]) == ("not_written", "failed_operationalerror", [])
+    assert len(handed) == 1  # an earlier night's undelivered items still go out
+    criticals = [record for record in capture.records if record.levelno == logging.CRITICAL]
+    assert [record.getMessage() for record in criticals] == [
+        "size_writer_night_failed: the nightly size writer failed for the whole night (OperationalError);"
+        " no size changed, retried next night"
+    ]
+    lines = [line for record in capture.records for line in logging.Formatter(REPLAY_FORMAT).format(record).splitlines()]
+    [critical] = [line for line in lines if " CRITICAL " in line]
+    assert size_tripwire(critical)[:2] == ("size_writer_night_failed", ALL_IDENTITIES)
+    assert sum(size_tripwire(line) is not None for line in lines) == 1  # never a line of its stack
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "replay.log").write_text("")
+    quiet: list[str] = []
+    clock = Time(et(MONDAY, 17, 30), et(MONDAY, 18, 0))
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory={}, quiet=quiet.append)
+    clock.at(et(MONDAY, 17, 41), append(logs / "replay.log", *lines))
+    assert asyncio.run(drive(watch)) == []
+    assert [text.splitlines()[0] for text in quiet] == ["🚨 Size tripwire: size_writer_night_failed"]
+
+
+def test_the_delivery_record_is_replaced_whole_never_rewritten_in_place(tmp_path, monkeypatch):
+    """N19b-OPS M04: a reader of the record mid-write sees the whole old record, and a write that
+    fails leaves the old record readable (no torn file; at worst one silent message twice)."""
+    record = tmp_path / "data" / "telegram-proposals.json"
+    first = datetime(2026, 10, 19, 21, 45, tzinfo=timezone.utc)
+    size_notify.record_delivered(record, ["aaaaaaaaaa"], first)
+    with record.open("rb") as reader:  # a reader holding the record when the next night writes
+        size_notify.record_delivered(record, ["bbbbbbbbbb"], first + timedelta(days=1))
+        assert set(json.loads(reader.read())["sent"]) == {"aaaaaaaaaa"}
+    assert set(size_notify.delivered_ids(record)) == {"aaaaaaaaaa", "bbbbbbbbbb"}
+    assert record.stat().st_mode & 0o777 == 0o600
+
+    from trading.operations import paths as paths_module
+
+    def broken_fsync(_descriptor: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(paths_module.os, "fsync", broken_fsync)
+    with pytest.raises(OSError):
+        size_notify.record_delivered(record, ["cccccccccc"], first + timedelta(days=2))
+    monkeypatch.undo()
+    assert set(size_notify.delivered_ids(record)) == {"aaaaaaaaaa", "bbbbbbbbbb"}
+    assert sorted(path.name for path in record.parent.iterdir()) == [record.name]  # no temporary left
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "oversized", "symlink"])
+def test_an_unreadable_delivery_record_costs_one_message_never_a_night(tmp_path, database, damage):
+    """N19b-OPS M11 (probe B): an unreadable record reads as empty (logged): the batch goes out
+    once; a corrupt or oversized record is rewritten whole, 0600, so the next run sends nothing; a
+    symbolic link is never followed nor written through."""
+    run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing")
+    clock = FakeTime()
+    telegram = FakeTelegram(clock)
+    environment = _env(tmp_path, telegram, clock, et(MONDAY, 17, 45))
+    record = size_notify.delivery_state_file(environment.paths)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere.json"
+    if damage == "corrupt":
+        record.write_bytes(b"{not json")
+    elif damage == "oversized":
+        record.write_bytes(b" " * (256 * 1024 + 1))
+    else:
+        elsewhere.write_bytes(b"{}")
+        record.symlink_to(elsewhere)
+
+    assert notify_size_batch(database, MONDAY, env=environment) == report_notify.SENT
+    assert len(_sends(telegram)) == 1
+    if damage == "symlink":
+        assert record.is_symlink() and elsewhere.read_bytes() == b"{}"
+        return
+    assert record.is_file() and not record.is_symlink()
+    assert record.stat().st_mode & 0o777 == 0o600
+    [item] = night_items(database, MONDAY)
+    assert set(size_notify.delivered_ids(record)) == {item.proposal_id}
+    assert notify_size_batch(database, MONDAY, env=environment) == NOTHING_NEW
+    assert len(_sends(telegram)) == 1
 
 
 def _watch_run(tmp_path: Path, database: Path, begin: datetime, end: datetime, memory: dict[str, str]):
@@ -320,7 +541,7 @@ def test_deadline_israel_time_correct_in_dst_mismatch_week(tmp_path, database, e
     # The schedule is ET's: the deadline is the next session's 07:55 ET, whatever Israel's clock.
     assert item.deadline == start(deadline) == datetime.combine(deadline, time(7, 55), tzinfo=ET)
     assert deadline_text(item.deadline) == shown
-    assert f"(this proposal expires {shown})" in item.line()
+    assert item.line().endswith(f"this proposal lapses at {shown}")
     reminder_at, due = ProposalWatch.schedule(et(deadline, 3, 0))
     assert (reminder_at, due) == (et(deadline, 5, 55), et(deadline, 7, 55))
     assert size_notify.expiry_text([], due).startswith(f"⌛ Expired at {shown}")
@@ -441,6 +662,7 @@ def test_size_criticals_reach_the_phone(tmp_path, monkeypatch):
         "identity_size_store_unreadable", "identity_size_above_ceiling", "account_mode_without_ceiling",
         "size_event_chain_broken", "size_event_written_mid_session", "size_read_before_session_start",
         "sendable_without_ceiling", "identity_sizing_missing", "size_writer_identity_skipped",
+        "size_writer_night_failed",  # fix 3 (N19b-OPS LOW-3): the whole night's writer failed
     )
     # Real CRITICAL lines, from the real code and the real log format.
     shadow = logging.getLogger("autotrader.shadow")
@@ -466,7 +688,12 @@ def test_size_criticals_reach_the_phone(tmp_path, monkeypatch):
     lines = _formatted(capture.records)
     assert sum(" CRITICAL " in line for line in lines) == 3 and len(lines) > 3  # stacks follow
     for token in notify_service.SIZE_TRIPWIRES[1:]:
-        if token not in ("size_read_before_session_start", IDENTITY_SIZING_MISSING):
+        if token == "size_writer_night_failed":  # the one line that names no identity (nightly.py's wording)
+            lines.append(
+                f"2026-10-20T09:40:00-0400 CRITICAL autotrader.research.nightly {token}: the nightly size writer"
+                " failed for the whole night (OperationalError); no size changed, retried next night"
+            )
+        elif token not in ("size_read_before_session_start", IDENTITY_SIZING_MISSING):
             lines.append(f"2026-10-20T09:40:00-0400 CRITICAL autotrader.shadow.sizing {token}: ORB_V2 has no size")
     # A decision line that merely names the block is no tripwire.
     decision = "2026-10-20T09:41:00-0400 INFO autotrader.shadow.pipeline BF B risk_blocked: identity_sizing_missing"
@@ -486,7 +713,13 @@ def test_size_criticals_reach_the_phone(tmp_path, monkeypatch):
 
     heads = [text.splitlines()[0] for text in notifier.texts]
     assert sorted(heads) == sorted(f"🚨 Size tripwire: {token}" for token in notify_service.SIZE_TRIPWIRES)
-    assert all(session._state.delivered[f"size_tripwire:{token}"] == "sent" for token in notify_service.SIZE_TRIPWIRES)
+    # Keyed per (token, identity) since fix 3 (N19b-OPS LOW-2); a line naming no identity keys "*".
+    keys = {
+        f"size_tripwire:{token}:{'*' if token == 'size_writer_night_failed' else 'ORB_V2'}"
+        for token in notify_service.SIZE_TRIPWIRES
+    }
+    assert {key for key in session._state.delivered if key.startswith("size_tripwire:")} == keys
+    assert all(session._state.delivered[key] == "sent" for key in keys)
     unreadable = next(text for text in notifier.texts if "identity_size_store_unreadable" in text.splitlines()[0])
     assert "ORB_V2 has no size for the 2026-10-20 session" in unreadable
     # Normal sound: through notify(), the plain send (the fake has no silent path at all).
@@ -504,6 +737,53 @@ def test_size_criticals_reach_the_phone(tmp_path, monkeypatch):
     asyncio.run(next_day())
     heads_next = [text.splitlines()[0] for text in notifier_next.texts]
     assert heads_next == ["🚨 Size tripwire: identity_size_store_unreadable"]
+
+
+def test_two_identities_blocked_for_one_reason_are_two_pages_each_once(tmp_path):
+    """N19b-OPS LOW-2: an unreadable store blocks every identity; each one's start read reaches the
+    phone (one page per token and identity per session date), never only the first child's."""
+    from tests.test_notify_manager import _session
+    from tests.test_notify_service import FakeTime as NotifyTime, _et
+    from trading.operations.notify_service import ALL_IDENTITIES, size_tripwire
+    from trading.risk import identity_sizing
+
+    shadow = logging.getLogger("autotrader.shadow")
+    capture = _Records()
+    shadow.addHandler(capture)
+    try:
+        for name in ("ORB_V2", "MOMO_HOD_V2"):
+            identity_sizing.session_identity_multiplier(
+                name, sendable=True, session_date=TUESDAY, database=tmp_path / "missing.db",
+                now=et(TUESDAY, 9, 40),
+            )
+    finally:
+        shadow.removeHandler(capture)
+    orb, momo = [line for line in _formatted(capture.records) if " CRITICAL " in line]
+    assert size_tripwire(orb)[:2] == ("identity_size_store_unreadable", "ORB_V2")
+    assert size_tripwire(momo)[:2] == ("identity_size_store_unreadable", "MOMO_HOD_V2")
+    night = ("2026-10-20 00:41:00,000 CRITICAL size_writer_night_failed: the nightly size writer failed for the"
+             " whole night (OperationalError); no size changed, retried next night")
+    assert size_tripwire(night)[:2] == ("size_writer_night_failed", ALL_IDENTITIES)
+
+    clock = NotifyTime(_et(9, 40))
+    session, notifier = _session(tmp_path, clock)
+
+    async def feed() -> None:
+        for child, line in [("orb-v2", orb), ("momo", momo), ("orb-v2", orb), ("momo", momo)]:
+            session._handle_line(child, line)
+        await asyncio.sleep(0)
+        session._collect_outcomes()
+        session._handle_line("momo", momo)  # after delivery, still once
+
+    asyncio.run(feed())
+    assert len(notifier.texts) == 2
+    assert [name for name in ("ORB_V2", "MOMO_HOD_V2") for text in notifier.texts if f"{name} has no size" in text] == [
+        "ORB_V2", "MOMO_HOD_V2",
+    ]
+    assert {key for key in session._state.delivered if key.startswith("size_tripwire:")} == {
+        "size_tripwire:identity_size_store_unreadable:ORB_V2",
+        "size_tripwire:identity_size_store_unreadable:MOMO_HOD_V2",
+    }
 
 
 def test_the_reminder_schedule_is_the_watchs_lead_and_the_sessions_start():
@@ -525,44 +805,192 @@ def test_the_reminder_schedule_is_the_watchs_lead_and_the_sessions_start():
 # --- P3-E fix 1: the size writer's skip reaches the phone from the replay log ----------------
 
 
-def test_a_size_writer_skip_in_the_replay_log_reaches_the_phone_once_a_night(tmp_path, database):
-    """The replay child's log line, as its console handler writes it, read by the
-    Telegram child's overnight watch: one page per token per ET date, normal sound."""
+# The replay child's console format (cli._interactive_research_logger), copied, not guessed.
+REPLAY_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+
+
+def _replay_night_lines(database: Path) -> list[str]:
+    """Monday night's replay.log as the replay child writes it: ORB_V2's chain is broken (the
+    writer skips it, CRITICAL) and VWAP_PB_V2 steps down; every line of the night's
+    ``autotrader`` loggers, so the CRITICAL sits among real lines, never alone (LEARNED:
+    fixtures copy the real log format; N19b-OPS M14)."""
     import inspect
 
-    from tests.test_overnight_watch import append
     from trading import cli
 
-    # The replay child's console format (cli._interactive_research_logger), copied, not guessed.
-    replay_format = "%(asctime)s %(levelname)s %(message)s"
-    assert f'logging.Formatter("{replay_format}")' in inspect.getsource(cli._interactive_research_logger)
+    assert f'logging.Formatter("{REPLAY_FORMAT}")' in inspect.getsource(cli._interactive_research_logger)
     SizeLedger(database).step("ORB_V2", "0.5", "0.25", effective=MONDAY, at=et(date(2026, 10, 16), 20))
     capture = _Records()
-    sizes = logging.getLogger("autotrader.shadow.sizes")
-    sizes.addHandler(capture)
+    root = logging.getLogger("autotrader")
+    root.addHandler(capture)
     try:
         run_night(database, et(MONDAY, 17, 40), VWAP_PB_V2="losing")
     finally:
-        sizes.removeHandler(capture)
-    formatter = logging.Formatter(replay_format)
+        root.removeHandler(capture)
+    formatter = logging.Formatter(REPLAY_FORMAT)
     lines = [line for record in capture.records for line in formatter.format(record).splitlines()]
     assert sum(" CRITICAL size_event_chain_broken: ORB_V2 skipped" in line for line in lines) == 1
+    others = [line for line in lines if " CRITICAL " not in line]
+    assert others  # the writer's own summary line at least
+    # One poll's worth: the night's other lines first, so the CRITICAL is never the first line read.
+    return [*others, *lines]
 
-    clock = Time(et(MONDAY, 17, 30), et(MONDAY, 18, 30))
+
+def test_a_size_writer_skip_in_the_replay_log_reaches_the_phone_once_a_night(tmp_path, database):
+    """The replay child's log line, read by the Telegram child's overnight watch: one page per
+    (token, identity) per ET date, silent (fix 3, N19b-OPS LOW-7: it asks nothing of the owner
+    at night; the session's start read pages with sound if the problem lasts)."""
+    from tests.test_overnight_watch import append
+
+    lines = _replay_night_lines(database)
+    assert " CRITICAL " not in lines[0]
+    clock = Time(et(MONDAY, 17, 30), et(MONDAY, 18, 0))
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "replay.log").write_text("")
     memory: dict[str, str] = {}
-    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory)
+    quiet: list[str] = []
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory, quiet=quiet.append)
     clock.at(et(MONDAY, 17, 41), append(logs / "replay.log", *lines))
     clock.at(et(MONDAY, 17, 50), append(logs / "replay.log", *lines))  # a restarted replay, the same night
     sent = asyncio.run(drive(watch))
 
-    assert [text.splitlines()[0] for text in sent] == ["🚨 Size tripwire: size_event_chain_broken"]
-    assert "ORB_V2 skipped by the nightly size writer" in sent[0]
-    assert memory["replay_size_tripwire:size_event_chain_broken"] == "2026-10-19"
+    assert sent == []  # nothing with sound at night
+    assert [text.splitlines()[0] for text in quiet] == ["🚨 Size tripwire: size_event_chain_broken"]
+    assert "ORB_V2 skipped by the nightly size writer" in quiet[0]
+    # Keyed per (token, identity) since fix 3 (N19b-OPS LOW-2).
+    assert memory["replay_size_tripwire:size_event_chain_broken:ORB_V2"] == "2026-10-19"
+    # A restarted Telegram child the same night (a new watch on the same persisted memory): no
+    # second page (N19b-OPS M08: the de-dup lives in the state file, not in the process).
+    clock = Time(et(MONDAY, 18, 0), et(MONDAY, 18, 30))
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory, quiet=quiet.append)
+    clock.at(et(MONDAY, 18, 5), append(logs / "replay.log", *lines))
+    assert asyncio.run(drive(watch)) == [] and len(quiet) == 1
     # The next night it pages again.
     clock = Time(et(TUESDAY, 17, 30), et(TUESDAY, 18, 0))
-    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory)
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory, quiet=quiet.append)
     clock.at(et(TUESDAY, 17, 41), append(logs / "replay.log", *lines))
-    assert len(asyncio.run(drive(watch))) == 1
+    assert asyncio.run(drive(watch)) == [] and len(quiet) == 2
+
+
+def test_a_size_tripwire_written_while_the_telegram_child_was_down_is_paged_at_its_restart(tmp_path, database):
+    """N19b-OPS M09: the replay log resumes from its checkpoint, so a CRITICAL the writer logged
+    while the Telegram child was down is paged once at its restart (silent: still night)."""
+    from tests.test_overnight_watch import append
+
+    lines = _replay_night_lines(database)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    replay = logs / "replay.log"
+    replay.write_text("")
+    memory: dict[str, str] = {}
+    quiet: list[str] = []
+    clock = Time(et(MONDAY, 17, 30), et(MONDAY, 17, 39))
+    watch, checkpoints = make_watch(tmp_path, clock, Port(clock), memory=memory, quiet=quiet.append)
+    assert asyncio.run(drive(watch)) == []
+    assert checkpoints.get("replay") is not None
+    append(replay, *lines)()  # 17:41: the writer runs while the child is down
+    clock = Time(et(MONDAY, 17, 45), et(MONDAY, 18, 0))
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory, checkpoints=checkpoints, quiet=quiet.append)
+    assert asyncio.run(drive(watch)) == []
+    assert [text.splitlines()[0] for text in quiet] == ["🚨 Size tripwire: size_event_chain_broken"]
+
+
+def test_two_identities_skipped_at_night_are_two_silent_pages(tmp_path, database):
+    """N19b-OPS LOW-2 (probe C): two identities skipped for one reason are two pages, each once."""
+    from tests.test_overnight_watch import append
+
+    ledger = SizeLedger(database)
+    ledger.step("ORB_V2", "0.5", "0.25", effective=MONDAY, at=et(date(2026, 10, 16), 20))
+    ledger.step("GAP_GO_V2", "1", "0.5", effective=MONDAY, at=et(date(2026, 10, 16), 20))
+    capture = _Records()
+    root = logging.getLogger("autotrader")
+    root.addHandler(capture)
+    try:
+        run_night(database, et(MONDAY, 17, 40))
+    finally:
+        root.removeHandler(capture)
+    formatter = logging.Formatter(REPLAY_FORMAT)
+    lines = [line for record in capture.records for line in formatter.format(record).splitlines()]
+    assert sum(" CRITICAL size_event_chain_broken: " in line for line in lines) == 2
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "replay.log").write_text("")
+    memory: dict[str, str] = {}
+    quiet: list[str] = []
+    clock = Time(et(MONDAY, 17, 30), et(MONDAY, 18, 0))
+    watch, _ = make_watch(tmp_path, clock, Port(clock), memory=memory, quiet=quiet.append)
+    clock.at(et(MONDAY, 17, 41), append(logs / "replay.log", *lines))
+    clock.at(et(MONDAY, 17, 50), append(logs / "replay.log", *lines))
+    assert asyncio.run(drive(watch)) == []
+    assert sorted(name for text in quiet for name in ("ORB_V2", "GAP_GO_V2") if f": {name} skipped" in text) == [
+        "GAP_GO_V2", "ORB_V2",
+    ]
+    assert len(quiet) == 2
+    assert {key for key in memory if key.startswith("replay_size_tripwire:")} == {
+        "replay_size_tripwire:size_event_chain_broken:ORB_V2",
+        "replay_size_tripwire:size_event_chain_broken:GAP_GO_V2",
+    }
+
+
+def test_the_night_page_is_silent_and_the_session_start_read_pages_with_sound(tmp_path, database):
+    """N19b-OPS LOW-7: the night's size page is silent; if the problem lasts, the strategy
+    child's start read the next session logs its own CRITICAL, which the notifier pages
+    with normal sound (its own per-session-date key, not the night's)."""
+    import inspect
+
+    from tests.test_notify_manager import _session
+    from tests.test_notify_service import FakeTime as NotifyTime, _et
+    from trading.operations import telegram_bot
+    from trading.risk import identity_sizing
+
+    # The composition root hands the watch a silent sender; the watch's own sender keeps the sound.
+    source = inspect.getsource(telegram_bot._serve)
+    assert "quiet=lambda text: notifier.send(text, silent=True)," in source
+
+    _replay_night_lines(database)  # ORB_V2's chain is broken and stays broken
+    shadow = logging.getLogger("autotrader.shadow")
+    capture = _Records()
+    shadow.addHandler(capture)
+    try:
+        assert identity_sizing.session_identity_multiplier(
+            "ORB_V2", sendable=True, session_date=TUESDAY, database=database, now=et(TUESDAY, 9, 23),
+        ) is None
+    finally:
+        shadow.removeHandler(capture)
+    [start_read] = [line for line in _formatted(capture.records) if " CRITICAL " in line]
+    assert "size_event_chain_broken: ORB_V2 has no size for the 2026-10-20 session" in start_read
+
+    clock = NotifyTime(_et(9, 23))
+    session, notifier = _session(tmp_path, clock)
+
+    async def feed() -> None:
+        session._handle_line("orb-v2", start_read)
+        await asyncio.sleep(0)
+        session._collect_outcomes()
+
+    asyncio.run(feed())
+    assert [text.splitlines()[0] for text in notifier.texts] == ["🚨 Size tripwire: size_event_chain_broken"]
+    assert not hasattr(notifier, "send")  # through notify(): normal sound
+    assert session._state.delivered["size_tripwire:size_event_chain_broken:ORB_V2"] == "sent"
+
+
+async def test_a_raising_proposal_store_never_stops_the_port_watch(tmp_path, monkeypatch, caplog):
+    """N19b-OPS M13: once phone approval is live, an unreadable store at the 05:55 ET reminder is
+    logged and retried; the Gateway port watch still pages."""
+    monkeypatch.setattr(size_notify, "PHONE_APPROVAL_LIVE", True)
+    broken = tmp_path / "broken.db"
+    broken.write_bytes(b"not a database" * 100)
+    delivered: list[tuple[str, bool]] = []
+    proposals = ProposalWatch(database=broken, deliver=lambda text, silent: delivered.append((text, silent)))
+    with pytest.raises(sqlite3.DatabaseError):
+        proposals.step(et(MONDAY, 5, 56), {})
+    clock = Time(et(MONDAY, 5, 30), et(MONDAY, 6, 5))
+    port = Port(clock, [(et(MONDAY, 2, 45), et(MONDAY, 23, 0))])
+    watch, _ = make_watch(tmp_path, clock, port, memory={}, proposals=proposals)
+    with caplog.at_level(logging.WARNING, logger="autotrader"):
+        sent = await drive(watch)
+    assert any(text.startswith("⛔ IB Gateway closed since") for text in sent), sent
+    assert delivered == []
+    assert any("size proposals unreadable (DatabaseError); retried" in record.getMessage() for record in caplog.records)
+    assert max(port.checks) >= et(MONDAY, 6, 0)  # still probing after the store failed

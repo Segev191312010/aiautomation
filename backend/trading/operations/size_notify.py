@@ -77,6 +77,11 @@ STATE_SCHEMA = "autotrader-v1/size-proposals-delivered"
 STATE_VERSION = 1
 # Proposal ids remembered as delivered (newest kept): far more than a year of nights.
 MAX_REMEMBERED = 2000
+# A night's batch also carries every item of the nights before it, this many
+# calendar days back, that never reached the phone: the replay child runs once
+# a night and exits 0 after a failed send, so only the next night can deliver
+# it (N19b-OPS MEDIUM-2). Each id still goes out once.
+RESEND_NIGHTS = 7
 _STATE_MAX_BYTES = 256 * 1024
 
 # The inline keyboard's callback data (P3-D answers it; at most 64 bytes).
@@ -137,16 +142,28 @@ class SizeItem:
     deadline: datetime | None = None  # a proposal's
     effective_session: date | None = None  # a step down's
     decision: str | None = None  # a demotion fence's: fenced or would_fence
+    night: date | None = None  # the night that wrote it (its proposal's as_of)
 
-    def line(self) -> str:
-        head = f"{self.identity} id {self.proposal_id}: {_times(self.from_mult)} → {_times(self.to_mult)}"
+    def line(self, *, batch_night: date | None = None) -> str:
+        """The item's line; one written on an earlier night than ``batch_night``
+        (a batch that never reached the phone, MEDIUM-2) says which."""
+        late = (
+            f" (from the {self.night:%a %Y-%m-%d} night)"
+            if self.night is not None and batch_night is not None and self.night != batch_night
+            else ""
+        )
+        head = f"{self.identity} id {self.proposal_id}{late}: {_times(self.from_mult)} → {_times(self.to_mult)}"
         evidence = f"; {self.evidence}" if self.evidence else ""
         if self.kind == PROPOSAL:
             due = "?" if self.deadline is None else deadline_text(self.deadline)
             if PHONE_APPROVAL_LIVE:
                 ask = f"approve by {due}"
             else:
-                ask = f"sizes stay unchanged: phone approval arrives later (this proposal expires {due})"
+                # N19b-OPS LOW-6: nothing to wait for tonight, nothing to do.
+                ask = (
+                    "no size change: a size up needs the owner's phone approval, which is not built yet"
+                    f" (P3-D); the size stays as it is and this proposal lapses at {due}"
+                )
             return f"PROPOSAL {head}{evidence}; {_nights(self.nights)}; {ask}"
         if self.kind == STEP_DOWN_ITEM:
             session = "next" if self.effective_session is None else f"{self.effective_session:%a %Y-%m-%d}"
@@ -164,7 +181,7 @@ class SizeItem:
 def batch_text(items: Sequence[SizeItem], *, night: date) -> str:
     """The night's one silent message: a title, then one line per item."""
     lines = [f"🌙 Sizes after the {night:%a %Y-%m-%d} session (silent; step-downs apply by themselves)"]
-    lines += [item.line() for item in items]
+    lines += [item.line(batch_night=night) for item in items]
     return "\n".join(lines)
 
 
@@ -218,12 +235,12 @@ def expiry_text(expired: Sequence[PendingProposal], deadline: datetime) -> str:
 
 _NIGHT = f"""
     SELECT p.proposal_id, p.identity, p.kind, p.from_mult, p.to_mult, p.evidence_json,
-           p.nights_since_last_step, p.deadline_at, d.decision, e.effective_session
+           p.nights_since_last_step, p.deadline_at, d.decision, e.effective_session, p.as_of
     FROM {SIZE_PROPOSALS_TABLE} p
     LEFT JOIN {SIZE_DECISIONS_TABLE} d ON d.proposal_id = p.proposal_id
     LEFT JOIN {SIZE_EVENTS_TABLE} e ON e.proposal_id = p.proposal_id
-    WHERE p.as_of = ?
-    ORDER BY p.created_at, p.proposal_id
+    WHERE p.as_of BETWEEN ? AND ?
+    ORDER BY p.as_of, p.created_at, p.proposal_id
 """
 _PENDING = f"""
     SELECT p.proposal_id, p.identity, p.from_mult, p.to_mult, p.deadline_at
@@ -260,20 +277,22 @@ def _evidence_text(raw: object) -> str:
     return text if isinstance(text, str) else ""
 
 
-def night_items(database: str | Path, night: date) -> list[SizeItem]:
-    """What the night ``night`` (the evaluated session) changed or proposed:
-    every step up still pending, every applied step down, every demotion fence.
-    A step up already decided (superseded, expired, ...) is no news. No
-    database or no size store (migration 18 pending): nothing."""
+def night_items(database: str | Path, night: date, *, since: date | None = None) -> list[SizeItem]:
+    """What the night ``night`` (the evaluated session) changed or proposed,
+    and with ``since`` every night from ``since`` to ``night`` too: every step
+    up still pending, every applied step down, every demotion fence. A step up
+    already decided (superseded, expired, ...) is no news. No database or no
+    size store (migration 18 pending): nothing."""
     path = Path(database).expanduser()
     if not path.is_file():
         return []
+    first = night if since is None else since
     with closing(_connect_ro(path)) as db:
         if not _has_store(db):
             return []
-        rows = db.execute(_NIGHT, (night.isoformat(),)).fetchall()
+        rows = db.execute(_NIGHT, (first.isoformat(), night.isoformat())).fetchall()
     items: list[SizeItem] = []
-    for pid, identity, kind, origin, target, evidence, nights, deadline, decision, effective in rows:
+    for pid, identity, kind, origin, target, evidence, nights, deadline, decision, effective, as_of in rows:
         common = {
             "proposal_id": str(pid),
             "identity": str(identity),
@@ -281,6 +300,7 @@ def night_items(database: str | Path, night: date) -> list[SizeItem]:
             "to_mult": str(target),
             "evidence": _evidence_text(evidence),
             "nights": int(nights),
+            "night": date.fromisoformat(str(as_of)),
         }
         if kind == STEP_UP and decision is None and deadline is not None:
             items.append(SizeItem(kind=PROPOSAL, deadline=_moment(deadline), **common))
@@ -361,9 +381,13 @@ def record_delivered(path: Path, proposal_ids: Iterable[str], at: datetime) -> N
 
 
 def unsent_items(database: str | Path, night: date, record: Path) -> list[SizeItem]:
-    """The night's items whose proposal id was never delivered."""
+    """Every item of the last ``RESEND_NIGHTS`` nights, ``night`` included, whose
+    proposal id was never delivered: a batch that failed (Telegram down, a SIGTERM
+    between the writer and the send) goes out with the next night's (MEDIUM-2).
+    A step up decided since then is no longer news and drops out by itself."""
     sent = delivered_ids(record)
-    return [item for item in night_items(database, night) if item.proposal_id not in sent]
+    since = night - timedelta(days=RESEND_NIGHTS)
+    return [item for item in night_items(database, night, since=since) if item.proposal_id not in sent]
 
 
 # --------------------------------------------------------------------------
@@ -443,6 +467,7 @@ __all__ = [
     "PHONE_APPROVAL_LIVE",
     "PROPOSAL",
     "PROPOSALS_STATE_FILENAME",
+    "RESEND_NIGHTS",
     "REJECT_CALLBACK",
     "REMINDED_KEY",
     "SHADOW_ONLY_ITEM",

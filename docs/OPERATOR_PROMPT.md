@@ -206,7 +206,7 @@ Scheduling is code-driven in **America/New_York**. Israel = ET + 7 until 2026-10
 | 16:15 | 23:15 | Notifier ends; the `telegram` child's watch pages a closed port again (until 17:30), starting from the notifier's last Gateway state when the notifier was still checking it at its end (a stale one is ignored, 4.9) |
 | 16:20–17:30 | 23:20–00:30 | Recorder (a competing IBKR login in `recorder.log` is paged by the `telegram` child) |
 | 17:30 | 00:30 | Gateway quiet hours start (the recorder's window ends): a port that closes from here goes to the 05:55 digest |
-| 17:35–18:30 | 00:35–01:30 | Replay |
+| 17:35–18:30 | 00:35–01:30 | Replay, then in the same run the nightly size writer (step-downs, proposals) and the night's ONE silent size batch (8.2); a size tripwire in `replay.log` reaches the phone silent, through the `telegram` child (4.9). In the 25 Oct–1 Nov week (Israel = ET + 6): 23:35–00:30 Israel |
 | 18:30 | 01:30 | **Deploy window opens** |
 | 18:35 | 01:35 | Log rotation (T-3, between sessions, after the replay window; inside the deploy window): `supervisor.log`, every child's `<name>.log` and launchd's two logs move to `<name>.log.<YYYY-MM-DD>` (14 days kept); one `LOG_ROTATED …` line (Part 4.6). A supervisor that was down across 18:35 makes it up at its next start |
 | — | 02:30 (local) | IB Gateway auto-restart (set in the Gateway: Configure → Settings → Lock and Exit → Auto restart). First observed 2026-10-17 02:30:04 Israel; verify it each morning by launcher.log (Part 4.5), never by "Daily auto-restart is enabled." |
@@ -275,10 +275,10 @@ managed_multiplier   1 for unmanaged identities; AI day-manager value for manage
 **Size in force** `[NOW]` (P3-C; owner decisions D2 and D3, 2026-10-18):
 - **Ladder.** A size moves one rung of ×0.25 → ×0.5 → ×1 at a time, and only through rows of `autotrader_size_events`. No row in force: the baseline.
 - **Only at a session start.** Each strategy child reads its size once, at the start of its run (after its connect wait, from about 09:23 ET), and keeps it all session; a restarted child reads the same size. An event written after the session's start (07:55 ET) is ignored that session (CRITICAL `size_event_written_mid_session`) and takes effect at the next one.
-- **Exactly two writers** (D6). The nightly automatic step-down (`trading/research/size_writer.py`, P3-E, ships with this layer): one rung down, effective at the next session, with a silent note (8.2). The owner's phone approval of one step-up proposal (`/approve` then `/confirm`, `[PLANNED]` P3-D): until it is live no size can go up. No CLI verb, agent, AI manager or hand edit writes a size (I-10).
+- **Exactly two writers** (D6). The nightly automatic step-down (`trading/research/size_writer.py`, P3-E, ships with this layer): one rung down, effective at the next session, with a silent note (8.2). The owner's phone approval of one step-up proposal (`/approve` then `/confirm`, `[PLANNED]` P3-D): until it is live no size can go up. No verb of its own, agent, AI manager or hand edit writes a size (I-10). The nightly writer runs inside a full `research replay` run, the replay child's own (17:35 ET): a full `autotraderctl research replay` started by hand against the live database writes that night's sizes and sends the night's batch too, so it is OWNER-only (Part 5). Before inserting a step-down the writer runs the one read rule on the identity's history plus the new event: one that would leave two steps at one session start (an earlier event written mid-session) is not written (`size_writer_identity_skipped … step_down_would_break_chain`, retried next night).
 - **Ceiling ×1 for all four, PAPER only**, keyed by account mode (`IDENTITY_SIZE_CEILING["paper"]`, `CURRENT_ACCOUNT_MODE = "paper"`). LIVE has no ceiling row and no path (D3: a future LIVE milestone starts every size at ×0.25; nothing is built for it).
-- **Fail closed** (I-7, O13). An unreadable store (migration 18 pending included), a size above the ceiling, an account mode or identity without a ceiling, or an event chain that does not start at the baseline: the identity has no size, every setup of its run is blocked `identity_sizing_missing`, one CRITICAL names the token. Never a cached, remembered or default size.
-- **Evidence.** Every decision's sidecar line records the size it was sized with, and its realism (8.2). `session check` rule 4 checks every SENT against the size in force that day, read from the store: an unreadable store is a WARN `size_in_force_unknown` (each SENT held only to the ×1 ceiling), never a PASS and never the baseline.
+- **Fail closed** (I-7, O13). An unreadable store (migration 18 pending included), a size above the ceiling, an account mode or identity without a ceiling, or an event chain that is not one history from the baseline (one rung per event, one step per session start): the identity has no size and every setup of its run is blocked. Two CRITICALs, so two pages: the read's own token at the start of the run, then the pipeline's `identity_sizing_missing` at its first blocked setup. A missing ceiling row (account mode or identity) refuses the whole launch before any child runs (`registry_problems` → `LAUNCH_REFUSED`), not only that identity's setups. Never a cached, remembered or default size.
+- **Evidence.** Every decision's sidecar line records the size it was sized with, and its realism (8.2). `session check` rule 4 checks every SENT against the size in force that day, read from the store: an unreadable store is a WARN `size_in_force_unknown` (each SENT held only to the ×1 ceiling), never a PASS and never the baseline, with or without a SENT (a day whose identities had no size traded nothing, which is no clean day).
 - **AGENTS.md.** Its PAPER authority bullet still names each identity's baseline size and wins until the owner approves the amendment that ships with this layer (Appendix D, D-15).
 
 **Bridge ceiling** (backstop, must never bind in normal operation): 1 % risk / 25 % notional per order.
@@ -614,7 +614,16 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `PREFLIGHT_REFUSED …` | bridge.log / dry run | Bridge preflight failed |
 | `sendable identities = …` / `caps …` / `fenced identities = …` | bridge.log | Connect lines; CRITICAL if any fenced |
 | `identity_stopped:<ID>` | bridge.log | Entry skipped by an identity fence |
-| `identity_caps_missing` / `identity_sizing_missing` | bridge.log / pipeline | Table row missing: fail-closed skip + CRITICAL |
+| `identity_caps_missing` | bridge.log | Caps row missing: fail-closed skip + CRITICAL |
+| `identity_sizing_missing: <IDENTITY> has no size for this session …` (CRITICAL) | pipeline (strategy child logs) | The identity has no size this session: no baseline row, or any size-read refusal below. Every setup of the run is blocked; paged with sound once per identity per session date (4.9) |
+| `identity_size_store_unreadable` / `identity_size_above_ceiling` / `size_event_chain_broken` / `size_read_before_session_start` (CRITICAL: `<token>: <IDENTITY> has no size for the <date> session (…)`) | strategy child logs | The session-start size read refused (3.1): that identity trades nothing this session; the others are unaffected. Paged with sound, once per token and identity per session date. Do: report to the owner; after the close `autotraderctl session check` (rule 4 WARNs `size_in_force_unknown`) and `autotraderctl db status`. Never edit the database, never restart the child to "retry" (it reads the same) |
+| `account_mode_without_ceiling` / `sendable_without_ceiling` | supervisor.log (`LAUNCH_REFUSED …`) | A ceiling row is missing: the launch is refused for every child (`registry_problems`). Report; the fix is a reviewed commit |
+| `size_event_written_mid_session: <IDENTITY> size event …` (CRITICAL) | strategy child logs | A size event effective today was written after the session's start: ignored this session (the size stays), it takes effect at the next start. Paged. Report: something wrote a size when it must not |
+| `size_writer_identity_skipped: <IDENTITY> skipped by the nightly size writer (<reason>…)` (CRITICAL) | replay.log | The night's writer wrote nothing for that identity; its size stays, retried next night. Reasons include `session_started`, `current_not_in_force`, `proposal_not_one_rung`, `step_down_would_break_chain`, `no_fence_store`, `fence_failed_*` or a size-read token. Paged silent at night by the `telegram` child (once per token and identity per ET date). At night: nothing. Next morning: read `evidence.json` `sizes` and `autotraderctl db status`, report; never edit the database |
+| `size_writer_night_failed: the nightly size writer failed for the whole night (<Error>) …` (CRITICAL) | replay.log | The writer failed for every identity (a busy or unreadable store, any error): no size changed, retried next night; the replay still exits 0. Paged silent. Same steps |
+| `size writer: night …` (INFO) | replay.log | The night's summary: evaluated, changes, expired / superseded, held, waiting, SKIPPED (also `evidence.json` `sizes`) |
+| `demotion_waiting_new_evidence: <IDENTITY> demotion waits (n/5 new trades since …)` (WARNING) | replay.log | No cascade on the same evidence: the next step-down waits for 5 new closed real trades since the last size event. Nothing to do |
+| `size changes not sent: <Error>` / `size changes not delivered` / `size delivery record not saved: <Error>` (WARNING) | replay.log | The night's silent batch failed: it goes out with the next night's (up to 7 nights back, each item once). Or it was sent but its record not saved: at worst one silent message twice. `evidence.json` `sizes.delivery` names the outcome |
 | `size_scaled_to_zero` | pipeline | floor(q × m) = 0, no order |
 | `TWS did not answer` / exit 75 | bridge.log | Gateway down or slow, restart loop (one line per connect attempt; the `502 Couldn't connect` INFO before it is the same attempt) |
 | `TWS -1 1100` / `TWS -1 2110` (CRITICAL), `TWS -1 1101` / `1102` (INFO) | bridge.log | IBKR's side lost with the port open / restored; a loss not restored within 2 min opens the Gateway alert in its own wording (`⛔ IBKR connectivity lost …`, 4.9); inside the half-hour after another alert it pages at about 6 min (the loss is re-asserted every 2 min, and the 5-min sustain limit is met at about T+6). Once the bridge exits or its window ends (the close) the loss is unknown, not lost: never re-asserted, no alert |
@@ -726,11 +735,14 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | Overnight Gateway watch (`telegram` child, outside 07:55–16:15 ET): 5-min port checks, pages 16:15–17:30 ET, quiet hours 17:30 → 05:55 ET with a morning digest, pages at 05:55 and 07:40 ET on session days, one recovery line | `[NOW]` |
 | Competing-login page 07:55–17:30 ET: at the first line, re-paged every 10 min while it is still seen (the notifier to 16:15, then the `telegram` child from `recorder.log`) | `[NOW]` |
 | Pre-session data check at 05:55 and 07:40 ET on session days (port open): one daily-history request like the screener's qualification ("2 M" of daily TRADES bars, 20 s timeout) for one universe contract (the first of AAPL, MSFT, NVDA, AMZN, GOOGL it resolved), on the assistant's own client 21; one retry 30 s later on the fallback symbol (the next of that list it resolved) before it pages; records TWS 2103/2105/2157/2110 and 10197/162/165 | `[NOW]` |
+| Night size batch (the replay child, 17:35–18:30 ET): step-downs, demotion fences and size proposals in ONE silent message, each id once; a batch that failed goes out with the next night's, each late item marked with its night (8.2) | `[NOW]` (P3-E) |
+| Size tripwires (`SIZE_TRIPWIRES`, the tokens in 4.6): by day the notifier forwards them from the strategy children's logs, with sound; at night the `telegram` child forwards the size writer's from `replay.log`, silent; each (token, identity) once per date, so two identities blocked for one reason are two pages | `[NOW]` |
+| Size proposal reminder (05:55 ET, sound) and expiry note (07:55 ET, silent); Approve / Reject buttons and `/approve` | `[PLANNED]` P3-D: off now (`PHONE_APPROVAL_LIVE` is False), none of them is sent |
 | External dead-man's switch (`heartbeat` child; the monitor pages, not Telegram; Part 4.12) | `[NOW]` |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
 
-Every line comes with the phone's normal notification sound, the recovery lines (`✅ …`) included: nothing is sent silently (owner, 2026-10-17).
+Every line comes with the phone's normal notification sound, the recovery lines (`✅ …`) included (owner, 2026-10-17), except two kinds of night lines that ask nothing of the owner before the session and arrive silent (`disable_notification`): the night's size batch (D7) and the size writer's tripwires from `replay.log` (N19b-OPS LOW-7). A size problem that lasts is paged again, with sound, by the next session's start read (09:23 ET on).
 
 What the phone says:
 - **Gateway alert.** It opens at the third failure signal in a row or a failure 2 min into the streak. Failure signals: a failed connect of the screener, the bridge or a child; the bridge's TWS 1100/2110 "IBKR connectivity lost" not restored within 2 min while the bridge runs, before the close; the screener's `TWS status 2110` or broken-farm line (2103/2105/2157; at most one signal per 2 min, never re-asserted); IBKR refusing data with the Gateway connected (6 daily-history timeouts in a row, each within 45 s of the one before with no sweep between, counted from the first; every failed sweep). The wording follows the newest failure:
@@ -838,7 +850,9 @@ LOGS    heartbeat.log: HEARTBEAT_START every=60s timeout=10s host=<host> · HEAR
 | Push, or rewrite already-pushed history | ✗ | ✗ | ✓ when asked | ✓ |
 | Edit `paper_bridge.py` | — | only for work the owner asked for: worktree branch + re-pin in the same commit + ES review | same | ✓ |
 | Increase size / caps / add sendable identity | ✗ | implement on a branch **after** owner decision | same | decides |
-| Decrease size / caps | `[PLANNED]` within rules | propose | implement | ✓ |
+| Decrease size | `[NOW]` the nightly size writer only (P3-E, D2): one rung down, effective at the next session, from the promoter's demotion; below ×0.25 a fence through the Sentinel's one path (8.2) | propose | ✗ by commit: once an identity has size events, a lower baseline row breaks its event chain and it reads no size (blocked). A lower size goes through the writer, or a reviewed migration the owner decides | ✓ decides |
+| Decrease caps | `[PLANNED]` within rules | propose | implement | ✓ |
+| Full `research replay` against the live database (it runs the nightly size writer and sends the night's size batch) | `[NOW]` the replay child's own nightly run only | ✗ | ✗ | ✓ |
 | Delete or hand-edit files on the live tree or under `$D` | ✗ | ✗ | ✗ | ✓ |
 | IB Gateway login / 2FA | ✗ | ✗ | ✗ | ✓ |
 | Anything toward LIVE | ✗ | ✗ | ✗ | separate milestone |
@@ -1144,11 +1158,15 @@ STAGE 1  propose              [NOW] P1-B      the promotion rule runs nightly in
                                              from the run's source_sha, and a run at or after the size
                                              store's install without a sidecar line from the store's events.
                                              Sidecar version 2 (P3-F, D3) adds each decision's realism: its
-                                             quantity, the newest bar's volume, the size as % of that
-                                             volume and the quote's spread in bps, flagged
-                                             size_above_bar_volume_pct (> 1 %) and spread_above_bps
-                                             (> 50 bps) (O4); evidence only, no gate reads them. Readers
-                                             accept version 1 and 2 lines. A sidecar write is bounded to 2 s;
+                                             quantity, the newest completed 5-minute bar's volume (stored
+                                             as TWS reports it, in round lots of 100 shares), the size as
+                                             % of that bar's volume in shares (quantity / (lots × 100) ×
+                                             100; one conversion, TWS_VOLUME_LOT_SHARES, the writer and
+                                             every reader alike) and the quote's spread in bps, flagged
+                                             size_above_bar_volume_pct (> 1 % of the 5-minute bar; a
+                                             strategy on another bar size rescales it) and
+                                             spread_above_bps (> 50 bps) (O4); evidence only, no gate
+                                             reads them. Readers accept version 1 and 2 lines. A sidecar write is bounded to 2 s;
                                              after a timeout or an OS error the sidecar is off for the rest
                                              of that run (sizing_record_failed once, then one "disabled for
                                              this run" line). Decisions are never affected.
@@ -1164,19 +1182,26 @@ STAGE 2  owner-approved sizes (D2; replaces the "auto_within_ceiling" stage of 2
                           identity is fenced instead (reason "sentinel: demotion to shadow-only
                           (…)", through fence_identity: it obeys SENTINEL_FENCES_LIVE, and resume
                           stays the owner's). It never raises a size.
-  step up    delivery     [NOW] P3-E  the night's proposals go out as ONE batched message, silent
-                          (disable_notification), with Approve / Reject buttons per proposal id;
-                          a normal-sound reminder 2 h before the deadline (05:55 ET) while one is
-                          pending; at the deadline (the next session's start, 07:55 ET) a silent
-                          "expired, sizes unchanged" note.
+  step up    delivery     [NOW] P3-E  the night's step-downs, demotion fences and proposals go out
+                          as ONE batched message, silent (disable_notification), each proposal
+                          id once; a batch that fails (Telegram down, a stop between the writer
+                          and the send) goes out with the next night's, each late item marked
+                          "(from the <day> night)", for up to 7 nights back. Today each proposal
+                          line says "no size change: a size up needs the owner's phone approval,
+                          which is not built yet (P3-D); … lapses at <deadline>".
+                          [PLANNED] P3-D, off until then (PHONE_APPROVAL_LIVE is False): the
+                          Approve / Reject buttons per proposal id; a normal-sound reminder 2 h
+                          before the deadline (05:55 ET) while one is pending; at the deadline
+                          (the next session's start, 07:55 ET) a silent "expired, sizes
+                          unchanged" note. None of the three is sent now.
              approval     [PLANNED] P3-D  NEVER automatic. Approve starts `/approve <pid>`; the bot
                           answers with the proposal and a 6-hex code, and `/confirm <code>` within
                           60 s writes the step up, effective at the next session not yet started.
                           Bound to one proposal id, expires at the next session's start, accepted
                           only from the owner's Telegram user id in the private chat; refused while
                           a /halt is pending, and for an expired, superseded, fenced or
-                          above-ceiling proposal. Reject is one tap. Until P3-D is live the buttons
-                          do nothing: every proposal expires and the sizes stay.
+                          above-ceiling proposal. Reject is one tap. Until P3-D is live no button
+                          is sent at all: every proposal lapses at its deadline and the sizes stay.
 In BOTH stages: ceilings, new sendable identities and anything toward LIVE are owner decisions.
 Every schedule is anchored to America/New_York in code; the messages show the real deadline in
 Israel time as well (clock-change weeks: 25 Oct–1 Nov 2026 and 14–26 Mar 2027, Israel = ET+6).
@@ -1319,7 +1344,7 @@ This document carries no snapshot. The live sha, the candidate branches, the pin
 |---|---|---|
 | P1 Unattended days | In this order: phone `/status` + `/fences` + `/halt` with nonce · alert hysteresis (one shared state machine) · dead-man's switch **outside** the Mac (external ping monitor) · overnight Gateway watch with quiet hours and a 05:55/07:40 ET page, competing-login page in session hours · restart-count cap that ignores exits while the port is closed and lifts when it reopens · OPS section in the 16:05 report and log rotation. Two deploys at most; none on v7b day or before v7b's first clean session; no bridge change. | `[PLANNED]` |
 | P2 One-command deploy | Read-only half first: `autotraderctl deploy --check` (every STEP 0 refusal, verdict grep over every ledger, I-11 head rule, window check; no writes). Write half after P1 with its own review. | `[PLANNED]` |
-| P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; v7c, the 3 % account-level day risk budget (3.3), gates every step up; the size store with automatic step-downs, the nightly proposal delivery and the realism fields (3.1, 8.2); phone approval of step-ups (P3-D). Stage 2 is the owner's decision D2 (2026-10-18): every step up by phone approval, step-downs automatic, never "auto within ceiling". | Auto-fence `[NOW]` (the Sentinel, 8.4); v7c `[NOW]` (3.3); size store, step-downs, delivery and realism `[NOW]` with this layer; phone approval `[PLANNED]` (P3-D) |
+| P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; v7c, the 3 % account-level day risk budget (3.3), gates every step up; the size store with automatic step-downs, the nightly proposal delivery and the realism fields (3.1, 8.2); phone approval of step-ups (P3-D). Stage 2 is the owner's decision D2 (2026-10-18): every step up by phone approval, step-downs automatic, never "auto within ceiling". | Auto-fence `[NOW]` (the Sentinel, 8.4); v7c `[NOW]` (3.3); size store, step-downs, the silent night batch (with its resend of a failed night) and the realism fields `[NOW]` with this layer; phone approval, its buttons, the 05:55 ET reminder and the 07:55 ET expiry note `[PLANNED]` (P3-D) |
 | P4 C2 replaces the bridge | After v7b's clean paper week: re-review #3, merge, port v7's exact allowlist / caps / fences / preflight / orderRef identity (migration: the ledger's `at1:` CHECK), move readers to the ledger, engine as a pinned child, drill, five clean sessions, manual desk, go-wide book, delete the old stack. | Built, unwired |
 | LIVE | Separate milestone, separate decision | Out of scope |
 
@@ -1388,4 +1413,4 @@ Resolved as stated; `AGENTS.md` wins wherever it speaks.
 | D-12 | Part 5 gave AGENT+ `/closeall`; 4.3.2–4.3.4 and D-10 disagreed on stop/resume | AGENTS.md: orders come only from deterministic code; phone order commands are the owner's | `/closeall` and phone orders OWNER only; stop AGENT+ only when asked; D-10 reworded (found by the v7b head re-read, 2026-10-15) |
 | D-13 | Part 5 / 6.1 let an unattended agent edit the bridge and commit | AGENTS.md: do not commit, push or rewrite history unless the owner asks | Commits only on worktree branches for work the owner asked for; push only when asked |
 | D-14 | 4.8 / 6.1 tested with pytest only | AGENTS.md: `SKIP_DOCKER=1 scripts/run_quality_gates.sh` before any commit, Docker gates before shipping | Added to 4.8, 6.1 and the deploy step |
-| D-15 | 3.1 and Part 8 (P3-F, 2026-10-22): sizes live in the database, step down by themselves and go up only by the owner's phone approval | AGENTS.md:7-11 writes each identity's size into the PAPER authority grant (plan C8) | AGENTS.md wins until the owner approves its amendment (plan Appendix A), which ships with the size-store layer. Nothing can disagree in effect before then: with no event every size is its baseline, a step-down only lowers risk, and no size can go up before P3-D |
+| D-15 | 3.1 and Part 8 (P3-F, 2026-10-22): sizes live in the database, step down by themselves and go up only by the owner's phone approval | AGENTS.md:7-11 writes each identity's size into the PAPER authority grant (plan C8) | AGENTS.md wins until the owner approves its amendment (plan Appendix A), which ships with the size-store layer. With no event every size is its baseline, and no size can go up before P3-D. A step-down does disagree with AGENTS.md's written size (lower, so risk-reducing): the Appendix A approval must come before the layer is deployed (L-sizes) |

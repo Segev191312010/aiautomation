@@ -1952,6 +1952,9 @@ async def _serve(environment: AssistantEnvironment, owner: int, token: str) -> i
             database=Path(cfg.DB_PATH).expanduser(),
             deliver=lambda text, silent: notifier.send(text, silent=silent),
         ),
+        # The night's size tripwires from the replay log arrive silent (N19b-OPS
+        # LOW-7); the notifier's daytime size pages keep their sound.
+        quiet=lambda text: notifier.send(text, silent=True),
     )
     assistant = TelegramAssistant(
         manager=ManagerDesk(),
