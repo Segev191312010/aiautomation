@@ -61,7 +61,6 @@ from urllib.parse import quote
 
 from trading.research.source_commits import PRE_V7B_COMMITS, V7B_COMMITS, V7B_SIZED_COMMITS
 from trading.risk import identity_sizing
-from trading.risk.engine import IDENTITY_SIZING_MISSING
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 from trading.storage.decision_sizing import DecisionSizing, SizingIndex
@@ -484,16 +483,11 @@ _SHADOW_ONLY = StoreSize(_ONE, False, "shadow-only: unscaled")
 def session_start(session_date: date) -> datetime | None:
     """The session's start, the moment the child's read is for (the supervisor's
     first child start, 07:55 ET); ``None`` on a day with no XNYS session.
-
-    Imported on use, as ``identity_sizing`` does: the operations package plans
-    the day, and research loads this module without it.
-    """
+    ``identity_sizing.trading_day_start``, the one every size reader uses."""
     session = market_session(session_date)
     if session is None:
         return None
-    from trading.operations.db_admin import trading_day
-
-    return trading_day(session).starts_at
+    return identity_sizing.trading_day_start(session)
 
 
 def size_in_force_from_events(
@@ -505,40 +499,16 @@ def size_in_force_from_events(
 ) -> StoreSize:
     """The size ``identity`` had in force at ``session_date``, from its store events.
 
-    The rule of ``identity_sizing.session_identity_multiplier``, the one read a
-    strategy child makes at the session's start, without its logging: the event
-    chain must start at the reviewed baseline; the latest event effective on or
-    before the session and written before ``starts_at`` is in force, else the
-    baseline; the result is never above the account mode's ceiling. (One shared
-    implementation: it folds into ``identity_sizing``'s public size-in-force read
-    when that lands.)
+    ``identity_sizing.size_from_events``, the one rule every size reader
+    shares with the strategy child's session-start read (integration fix 2),
+    in research's ``StoreSize`` shape: no size is ``factor`` None with the
+    read's token and detail, never the baseline.
     """
-    mode = identity_sizing.CURRENT_ACCOUNT_MODE
-    baseline = identity_sizing.IDENTITY_SIZE_MULTIPLIER.get(identity)
-    if baseline is None:
-        return StoreSize(None, True, f"{IDENTITY_SIZING_MISSING}: {identity} has no baseline row")
-    ceiling = identity_sizing.IDENTITY_SIZE_CEILING.get(mode, MappingProxyType({})).get(identity)
-    if ceiling is None:
-        detail = f"the {mode} ceiling row does not name it"
-        return StoreSize(None, True, f"{identity_sizing.SENDABLE_WITHOUT_CEILING}: {detail}")
-    problem = identity_sizing._chain_problem(events, baseline)  # the read's own chain rule
-    if problem is not None:
-        return StoreSize(None, True, f"{identity_sizing.SIZE_EVENT_CHAIN_BROKEN}: {problem}")
-    size, source, ignored, in_force = baseline, "baseline: no size event in force", [], None
-    for event in events:
-        if not event.effective_session <= session_date:
-            continue  # it takes effect at a later session
-        if event.created_at >= starts_at:
-            ignored.append(event.event_id)  # written after the session's start: the child ignored it
-            continue
-        size, in_force = event.to_mult, event.event_id
-        source = f"size event {event.event_id}, {event.kind} effective {event.effective_session.isoformat()}"
-    if size > ceiling:
-        return StoreSize(
-            None, True, f"{identity_sizing.IDENTITY_SIZE_ABOVE_CEILING}: x{_plain(size)} is above the {mode}"
-            f" ceiling x{_plain(ceiling)}", tuple(ignored),
-        )
-    return StoreSize(size, True, source, tuple(ignored), in_force)
+    reading = identity_sizing.size_from_events(identity, events, session_date=session_date, starts_at=starts_at)
+    ignored = tuple(event.event_id for event in reading.ignored)
+    if reading.size is None:
+        return StoreSize(None, True, f"{reading.token}: {reading.detail}", ignored)
+    return StoreSize(reading.size, True, reading.detail, ignored, reading.event_id)
 
 
 @dataclass(frozen=True, slots=True)

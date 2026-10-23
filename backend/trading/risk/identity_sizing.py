@@ -51,7 +51,7 @@ from types import MappingProxyType
 from urllib.parse import quote
 
 from trading.risk.engine import IDENTITY_SIZING_MISSING, NO_SCALING, require_size_multiplier
-from trading.scheduler.sessions import MarketSession, market_session, next_market_session
+from trading.scheduler.sessions import MARKET_TIMEZONE, MarketSession, market_session, next_market_session
 from trading.storage import migrations as schema_migrations
 from trading.storage.migrations import (
     SCHEMA_CHECKSUM_MISMATCH,
@@ -285,9 +285,38 @@ def _event(row: Sequence[object]) -> SizeEvent:
         raise SizeStoreUnreadable(f"size event {event_id!r} does not parse: {exc}") from exc
 
 
-def _session_start_of(day: date) -> date:
-    """The session whose start an event effective on ``day`` takes effect at."""
+def trading_day_start(session: MarketSession) -> datetime:
+    """The session's start: the supervisor's first child start (07:55 ET on
+    every session), the same span ``db migrate`` refuses inside. Every size
+    reader measures "written before the session's start" against it.
+
+    Imported on use: the operations package plans the day, and the nightly
+    promoter loads this module without it.
+    """
+    from trading.operations.db_admin import trading_day
+
+    return trading_day(session).starts_at
+
+
+def _first_session_on_or_after(day: date) -> date:
     return day if market_session(day) is not None else next_market_session(day).session_date
+
+
+def _first_session_starting_after(moment: datetime) -> date:
+    day = moment.astimezone(MARKET_TIMEZONE).date()
+    session = market_session(day)
+    if session is not None and trading_day_start(session) > moment:
+        return day
+    return next_market_session(day).session_date
+
+
+def _takes_effect_at(event: SizeEvent) -> date:
+    """The session start at which ``event`` takes effect: the first session on or
+    after its effective date (a holiday maps to the next session, N19a LOW-5)
+    that starts after the event was written (one written mid-session for today
+    takes effect at the next start, N19a-2 LOW-2). Calendar errors propagate to
+    ``_chain_problem``, which names them."""
+    return max(_first_session_on_or_after(event.effective_session), _first_session_starting_after(event.created_at))
 
 
 def _chain_problem(events: Sequence[SizeEvent], baseline: Decimal) -> str | None:
@@ -296,9 +325,11 @@ def _chain_problem(events: Sequence[SizeEvent], baseline: Decimal) -> str | None
     The database checks each step against the previous event; only code
     knows the baseline the first step must start from, and the session
     calendar. Each event is one rung in its kind's direction, from the size
-    before it, taking effect at a later session start than the one before it
-    (an event dated on a holiday takes effect at the next session, so it may
-    not share that start with the next event: N19a LOW-5).
+    before it, and takes effect at a later session start than the one before
+    it (``_takes_effect_at``): never two steps at one start, whatever their
+    dates. A date the calendar cannot place (``DateOutOfBounds`` outside its
+    span, or any other calendar error) is a broken chain, never a raise into
+    the child (N19a-2 LOW-1).
     """
     size = baseline
     previous: SizeEvent | None = None
@@ -309,7 +340,13 @@ def _chain_problem(events: Sequence[SizeEvent], baseline: Decimal) -> str | None
         direction = {STEP_UP: 1, STEP_DOWN: -1}.get(event.kind)
         if direction is None or SIZE_LADDER.index(event.to_mult) - SIZE_LADDER.index(event.from_mult) != direction:
             return f"event {event.event_id} ({event.kind} x{event.from_mult} -> x{event.to_mult}) is not one rung"
-        starts = _session_start_of(event.effective_session)
+        try:
+            starts = _takes_effect_at(event)
+        except Exception as exc:  # noqa: BLE001 - a calendar failure is a refusal, never a crash
+            return (
+                f"event {event.event_id} (effective {event.effective_session.isoformat()}) cannot be placed"
+                f" on the session calendar ({type(exc).__name__}: {exc})"
+            )
         if previous is not None and previous_start is not None and starts <= previous_start:
             return (
                 f"event {event.event_id} takes effect at the {starts.isoformat()} session start, not after"
@@ -319,16 +356,74 @@ def _chain_problem(events: Sequence[SizeEvent], baseline: Decimal) -> str | None
     return None
 
 
-def _trading_day_start(session: MarketSession) -> datetime:
-    """The session's start: the supervisor's first child start (07:55 ET on
-    every session), the same span ``db migrate`` refuses inside.
+@dataclass(frozen=True, slots=True)
+class SizeReading:
+    """One identity's size for one session, from its events, by the one rule.
 
-    Imported on use: the operations package plans the day, and the nightly
-    promoter loads this module without it.
+    ``size`` is None when there is none; ``token`` then names why (this
+    module's tokens, or ``identity_sizing_missing`` for a name without a
+    baseline row) and ``detail`` says more. Otherwise ``detail`` is the
+    size's source and ``event_id`` the event in force (None: the baseline).
+    ``ignored``: events effective by the session but written at or after its
+    start; they are not part of its size.
     """
-    from trading.operations.db_admin import trading_day
 
-    return trading_day(session).starts_at
+    identity: str
+    session_date: date
+    size: Decimal | None
+    token: str | None = None
+    detail: str = ""
+    event_id: int | None = None
+    ignored: tuple[SizeEvent, ...] = ()
+
+
+def size_from_events(
+    identity: str, events: Sequence[SizeEvent], *, session_date: date, starts_at: datetime
+) -> SizeReading:
+    """The size ``identity`` has in force in the session ``session_date``, whose
+    trading day starts at ``starts_at``, from its ``events`` (oldest first, as
+    ``read_size_events`` returns them).
+
+    The one implementation every size reader shares: the session start's read
+    (``session_identity_multiplier``), ``size_in_force`` (the nightly writer's
+    "current", the promoter) and the research readers (``size_history``,
+    ``session_check``). Pure: no database, no clock, no logging. Fail-closed
+    in this order: no ceiling row for the account mode, a name the row does
+    not cover, no baseline row, a chain that is not one history from the
+    baseline; then the latest event effective on or before the session and
+    written before its start is in force, else the baseline; a size above the
+    ceiling is none.
+    """
+    mode = CURRENT_ACCOUNT_MODE
+
+    def none(token: str, detail: str, ignored: tuple[SizeEvent, ...] = ()) -> SizeReading:
+        return SizeReading(identity, session_date, None, token, detail, None, ignored)
+
+    ceilings = IDENTITY_SIZE_CEILING.get(mode)
+    if ceilings is None:
+        return none(ACCOUNT_MODE_WITHOUT_CEILING, f"account mode {mode!r} has no ceiling row")
+    ceiling = ceilings.get(identity)
+    if ceiling is None:
+        return none(SENDABLE_WITHOUT_CEILING, f"the {mode} ceiling row does not name it")
+    baseline = identity_multiplier(identity, sendable=True)
+    if baseline is None:
+        return none(IDENTITY_SIZING_MISSING, "no reviewed baseline row")
+    problem = _chain_problem(events, baseline)
+    if problem is not None:
+        return none(SIZE_EVENT_CHAIN_BROKEN, problem)
+    size, source, in_force = baseline, "baseline: no size event in force", None
+    ignored: list[SizeEvent] = []
+    for event in events:
+        if not event.effective_session <= session_date:
+            continue  # it takes effect at a later session
+        if event.created_at >= starts_at:
+            ignored.append(event)  # written after the session's start: not this session's size
+            continue
+        size, in_force = event.to_mult, event.event_id
+        source = f"size event {event.event_id}, {event.kind} effective {event.effective_session.isoformat()}"
+    if size > ceiling:
+        return none(IDENTITY_SIZE_ABOVE_CEILING, f"x{size} is above the {mode} ceiling x{ceiling}", tuple(ignored))
+    return SizeReading(identity, session_date, require_size_multiplier(size), None, source, in_force, tuple(ignored))
 
 
 def _refused(token: str, identity: str, session_date: date, detail: str) -> None:
@@ -356,39 +451,26 @@ def session_identity_multiplier(
 
     Called once per run, at the session's start; the caller passes the result
     unchanged to its pipeline. A name that is not sendable is 1 and reads
-    nothing. A sendable name reads its events from the store (``mode=ro``):
-    the latest one effective on or before ``session_date`` and written before
-    the session's trading day began is in force, else the baseline. An event
-    effective in this session but written after its start is ignored with one
-    CRITICAL (``size_event_written_mid_session``): sizes change only at a
-    session start, so a restarted child keeps the size its first start read.
-    Every other failure is ``None`` with one CRITICAL and its token (see the
-    module docstring); ``now`` (default: the wall clock) must not be before the
+    nothing. A sendable name reads its events from the store (``mode=ro``)
+    and applies ``size_from_events``: the latest event effective on or before
+    ``session_date`` and written before the session's trading day began is
+    in force, else the baseline. An event effective in this session but
+    written after its start is ignored with one CRITICAL
+    (``size_event_written_mid_session``): sizes change only at a session
+    start, so a restarted child keeps the size its first start read. Every
+    other failure is ``None`` with one CRITICAL and its token (see the module
+    docstring); ``now`` (default: the wall clock) must not be before the
     session's start, or an event written later tonight would be missed.
     """
     if not sendable:
         return NO_SCALING
     identity = name.strip()
-    mode = CURRENT_ACCOUNT_MODE
-    ceilings = IDENTITY_SIZE_CEILING.get(mode)
-    if ceilings is None:
-        detail = f"account mode {mode!r} has no ceiling row"
-        return _refused(ACCOUNT_MODE_WITHOUT_CEILING, identity, session_date, detail)
-    ceiling = ceilings.get(identity)
-    if ceiling is None:
-        detail = f"the {mode} ceiling row does not name it"
-        return _refused(SENDABLE_WITHOUT_CEILING, identity, session_date, detail)
-    baseline = identity_multiplier(identity, sendable=True)
-    if baseline is None:
-        # No reviewed baseline: the pipeline blocks every setup as
-        # identity_sizing_missing and reports it once per run.
-        return None
     session = market_session(session_date)
     if session is None:
         return _refused(
             IDENTITY_SIZE_STORE_UNREADABLE, identity, session_date, "not an XNYS session: it has no start to read at"
         )
-    starts_at = _trading_day_start(session)
+    starts_at = trading_day_start(session)
     observed = datetime.now(timezone.utc) if now is None else now
     if observed.tzinfo is None or observed.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -400,41 +482,34 @@ def session_identity_multiplier(
             f"read at {observed.isoformat()}, before the session's start {starts_at.isoformat()}",
         )
     try:
-        events = read_size_events(database, identity=identity, account_mode=mode)
+        events = read_size_events(database, identity=identity, account_mode=CURRENT_ACCOUNT_MODE)
     except SizeStoreUnreadable as exc:
         return _refused(IDENTITY_SIZE_STORE_UNREADABLE, identity, session_date, str(exc))
-    problem = _chain_problem(events, baseline)
-    if problem is not None:
-        return _refused(SIZE_EVENT_CHAIN_BROKEN, identity, session_date, problem)
-    size, source = baseline, "baseline: no size event in force"
-    for event in events:
-        if not event.effective_session <= session_date:
-            continue  # it takes effect at a later session
-        if event.created_at >= starts_at:
-            logger.critical(
-                "%s: %s size event %d (%s x%s -> x%s, effective %s) was written at %s, after the"
-                " session's start %s; ignored this session, the size stays x%s",
-                SIZE_EVENT_WRITTEN_MID_SESSION,
-                identity,
-                event.event_id,
-                event.kind,
-                event.from_mult,
-                event.to_mult,
-                event.effective_session.isoformat(),
-                event.created_at.isoformat(),
-                starts_at.isoformat(),
-                size,
-                stack_info=True,
-            )
-            continue
-        size = event.to_mult
-        source = f"size event {event.event_id}, {event.kind} effective {event.effective_session.isoformat()}"
-    if size > ceiling:
-        return _refused(
-            IDENTITY_SIZE_ABOVE_CEILING, identity, session_date, f"x{size} is above the {mode} ceiling x{ceiling}"
+    reading = size_from_events(identity, events, session_date=session_date, starts_at=starts_at)
+    for event in reading.ignored:
+        logger.critical(
+            "%s: %s size event %d (%s x%s -> x%s, effective %s) was written at %s, after the"
+            " session's start %s; ignored this session, the size stays %s",
+            SIZE_EVENT_WRITTEN_MID_SESSION,
+            identity,
+            event.event_id,
+            event.kind,
+            event.from_mult,
+            event.to_mult,
+            event.effective_session.isoformat(),
+            event.created_at.isoformat(),
+            starts_at.isoformat(),
+            "none" if reading.size is None else f"x{reading.size}",
+            stack_info=True,
         )
-    logger.info("%s sizes x%s in the %s session (%s)", identity, size, session_date.isoformat(), source)
-    return require_size_multiplier(size)
+    if reading.size is None:
+        if reading.token == IDENTITY_SIZING_MISSING:
+            # No reviewed baseline: the pipeline blocks every setup as
+            # identity_sizing_missing and reports it once per run.
+            return None
+        return _refused(str(reading.token), identity, session_date, reading.detail)
+    logger.info("%s sizes x%s in the %s session (%s)", identity, reading.size, session_date.isoformat(), reading.detail)
+    return reading.size
 
 
 # The nightly size writer skipped one identity's night (a store refusal, a
@@ -464,53 +539,26 @@ def size_in_force(database: str | Path, identity: str, session_date: date) -> De
     """The size ``identity`` trades with in the session ``session_date``, as
     that session's start reads (or read) it; for the readers that are not the
     session start itself (plan P3-E/P3-F: the nightly writer's "current" for
-    the next session, ``session_check`` for a past one).
+    the next session, the promoter).
 
-    The same rules as ``session_identity_multiplier``, read-only (one
-    ``mode=ro`` open through ``read_size_events``) and without its clock
-    guard: the latest event effective on or before ``session_date`` and
-    written before that session's start is in force, else the reviewed
-    baseline; an event written at or after the start is not part of that
-    session's size (that read ignored it). Fail-closed: every case in which
-    the session start would have no size raises ``SizeNotInForce`` with the
-    same named token (a name without a ceiling or a baseline row, an
-    unreadable store or one with migration 18 pending, a chain that does not
-    start at the baseline, a size above the ceiling, a date that is not a
-    session). It logs nothing: the caller names the refusal where it matters.
+    The same rule as ``session_identity_multiplier`` (``size_from_events``),
+    read-only (one ``mode=ro`` read through ``read_size_events``) and without
+    its clock guard. Fail-closed: every case in which the session start would
+    have no size raises ``SizeNotInForce`` with the same named token. It logs
+    nothing: the caller names the refusal where it matters.
     """
     name = identity.strip()
-    mode = CURRENT_ACCOUNT_MODE
-    ceilings = IDENTITY_SIZE_CEILING.get(mode)
-    if ceilings is None:
-        detail = f"account mode {mode!r} has no ceiling row"
-        raise SizeNotInForce(ACCOUNT_MODE_WITHOUT_CEILING, name, session_date, detail)
-    ceiling = ceilings.get(name)
-    if ceiling is None:
-        detail = f"the {mode} ceiling row does not name it"
-        raise SizeNotInForce(SENDABLE_WITHOUT_CEILING, name, session_date, detail)
-    baseline = identity_multiplier(name, sendable=True)
-    if baseline is None:
-        raise SizeNotInForce(IDENTITY_SIZING_MISSING, name, session_date, "no reviewed baseline row")
     session = market_session(session_date)
     if session is None:
         raise SizeNotInForce(IDENTITY_SIZE_STORE_UNREADABLE, name, session_date, "not an XNYS session")
-    starts_at = _trading_day_start(session)
     try:
-        events = read_size_events(database, identity=name, account_mode=mode)
+        events = read_size_events(database, identity=name, account_mode=CURRENT_ACCOUNT_MODE)
     except SizeStoreUnreadable as exc:
         raise SizeNotInForce(IDENTITY_SIZE_STORE_UNREADABLE, name, session_date, str(exc)) from exc
-    problem = _chain_problem(events, baseline)
-    if problem is not None:
-        raise SizeNotInForce(SIZE_EVENT_CHAIN_BROKEN, name, session_date, problem)
-    size = baseline
-    for event in events:
-        # In force: effective on or before the session, and written before its start.
-        if event.effective_session <= session_date and event.created_at < starts_at:
-            size = event.to_mult
-    if size > ceiling:
-        detail = f"x{size} is above the {mode} ceiling x{ceiling}"
-        raise SizeNotInForce(IDENTITY_SIZE_ABOVE_CEILING, name, session_date, detail)
-    return require_size_multiplier(size)
+    reading = size_from_events(name, events, session_date=session_date, starts_at=trading_day_start(session))
+    if reading.size is None:
+        raise SizeNotInForce(str(reading.token), name, session_date, reading.detail)
+    return reading.size
 
 
 __all__ = [
@@ -528,9 +576,12 @@ __all__ = [
     "SIZE_WRITER_IDENTITY_SKIPPED",
     "SizeEvent",
     "SizeNotInForce",
+    "SizeReading",
     "SizeStoreUnreadable",
     "identity_multiplier",
     "read_size_events",
     "session_identity_multiplier",
+    "size_from_events",
     "size_in_force",
+    "trading_day_start",
 ]

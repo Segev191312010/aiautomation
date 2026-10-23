@@ -933,14 +933,19 @@ async def test_child_restart_same_day_same_size(tmp_path, monkeypatch, sizing_lo
     first, name = await _pipeline_keywords(monkeypatch, "orb-v2", at=et(TUESDAY, 9, 0))
     assert name == "ORB_V2" and first["identity_multiplier"] == Decimal("0.5")
     assert criticals(sizing_log) == []
-    # Mid-session: a step written for today (a writer defect), and tonight's step down for tomorrow.
+    # Mid-session: a step written for today (a writer defect), and a step down for Thursday.
+    # (Rewritten explicitly by integration fix 2: a step down for Wednesday would share
+    # Wednesday's start with today's late step, two rungs at one start, and is refused:
+    # test_a_mid_session_event_and_the_next_sessions_never_share_a_start.)
+    thursday = date(2026, 10, 15)
     ledger.step("ORB_V2", "0.5", "1", effective=TUESDAY, at=et(TUESDAY, 10, 0))
-    ledger.step("ORB_V2", "1", "0.5", effective=WEDNESDAY, at=et(TUESDAY, 10, 30))
+    ledger.step("ORB_V2", "1", "0.5", effective=thursday, at=et(TUESDAY, 10, 30))
     restarted, _name = await _pipeline_keywords(monkeypatch, "orb-v2", at=et(TUESDAY, 11, 45))
     assert restarted["identity_multiplier"] == first["identity_multiplier"] == Decimal("0.5")
     assert criticals(sizing_log) == [SIZE_EVENT_WRITTEN_MID_SESSION]
-    # Wednesday's start reads the history as it stands: today's step, then the step down.
-    assert read(database, "ORB_V2", WEDNESDAY) == Decimal("0.5")
+    # Wednesday's start takes today's late step; Thursday's the step down: one rung per start.
+    assert read(database, "ORB_V2", WEDNESDAY) == Decimal("1")
+    assert read(database, "ORB_V2", thursday) == Decimal("0.5")
     assert criticals(sizing_log) == [SIZE_EVENT_WRITTEN_MID_SESSION]
 
 
@@ -955,6 +960,189 @@ async def test_the_read_waits_for_the_session_start(tmp_path, monkeypatch, sizin
     ledger.step("ORB_V2", "0.5", "0.25", effective=TUESDAY, at=et(TUESDAY, 5, 0))
     keywords, name = await _pipeline_keywords(monkeypatch, "orb-v2", at=et(TUESDAY, 4, 0))
     assert name == "ORB_V2" and keywords["identity_multiplier"] == Decimal("0.25")
+    assert criticals(sizing_log) == []
+
+
+# --- integration fix 2: one read rule, the calendar's edge, one step per start ------
+
+
+def test_every_reader_shares_one_public_read_rule():
+    """2a: the session start, size_in_force and the research readers all apply
+    ``size_from_events``; no module reaches into identity_sizing's private names."""
+    for relative in ("trading/research/size_history.py", "trading/operations/session_check.py",
+                     "trading/research/size_writer.py", "trading/research/promotion_proposals.py",
+                     "trading/operations/size_notify.py"):
+        tree = ast.parse((BACKEND / relative).read_text(encoding="utf-8"))
+        private = [node.attr for node in ast.walk(tree)
+                   if isinstance(node, ast.Attribute) and node.attr.startswith("_")
+                   and isinstance(node.value, ast.Name) and node.value.id == "identity_sizing"]
+        imported = [alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    and node.module == "trading.risk.identity_sizing" for alias in node.names
+                    if alias.name.startswith("_")]
+        assert not private and not imported, (relative, private, imported)
+    source = Path(identity_sizing.__file__).read_text(encoding="utf-8")
+    for caller in ("def session_identity_multiplier(", "def size_in_force("):
+        body = source[source.index(caller):]
+        ends = [index for index in (body.find("\ndef ", 1), body.find("\n__all__")) if index > 0]
+        body = body[: min(ends)]
+        assert "size_from_events(" in body and "_chain_problem(" not in body, caller
+    history = (BACKEND / "trading/research/size_history.py").read_text(encoding="utf-8")
+    assert "identity_sizing.size_from_events(" in history and "_chain_problem" not in history
+
+
+def test_a_date_the_calendar_cannot_place_is_refused_never_raised(store, sizing_log):
+    """N2-LOW-1: an event outside the session calendar's span (written past the
+    database's horizon CHECK) is a broken chain: None and one CRITICAL, never a raise."""
+    from trading.research.size_history import size_in_force_from_events
+
+    at = night_before(TUESDAY)
+    far = date(2028, 6, 1)  # beyond the pinned calendar's last session
+    pid = store.propose("GAP_GO_V2", "0.5", "0.25", at=at)
+    store.decide(pid, "auto_applied", actor="size_writer", at=at)
+    store.event("GAP_GO_V2", "0.5", "0.25", proposal_id=pid, effective=far, at=at, ignore_checks=True)
+    assert read(store.path, "GAP_GO_V2", WEDNESDAY) is None
+    assert criticals(sizing_log) == [SIZE_EVENT_CHAIN_BROKEN]
+    assert "cannot be placed on the session calendar" in sizing_log.records[-1].getMessage()
+    with pytest.raises(identity_sizing.SizeNotInForce) as refused:
+        identity_sizing.size_in_force(store.path, "GAP_GO_V2", WEDNESDAY)
+    assert refused.value.token == SIZE_EVENT_CHAIN_BROKEN
+    events = identity_sizing.read_size_events(store.path, identity="GAP_GO_V2", account_mode="paper")
+    research = size_in_force_from_events(events, identity="GAP_GO_V2", session_date=WEDNESDAY,
+                                         starts_at=start(WEDNESDAY))
+    assert research.factor is None and research.source.startswith(SIZE_EVENT_CHAIN_BROKEN)
+
+
+def test_v18_refuses_an_event_beyond_the_horizon(store):
+    """N2-LOW-1 at the database: effective at most 14 days after it was written (NEW.created_at only)."""
+    assert size_schema.SIZE_EVENT_HORIZON_DAYS == 14
+    at = night_before(TUESDAY)  # written 2026-10-13 00:00 UTC
+    beyond = _isolated_event_refusal(store, "MOMO_HOD_V2", "1", "0.5", kind=STEP_DOWN,
+                                     effective=date(2026, 10, 28), at=at)
+    assert "CHECK" in beyond
+    store.step("MOMO_HOD_V2", "1", "0.5", effective=date(2026, 10, 27), at=at - timedelta(hours=1))
+    assert read(store.path, "MOMO_HOD_V2", date(2026, 10, 27)) == Decimal("0.5")
+
+
+def test_a_mid_session_event_and_the_next_sessions_never_share_a_start(store, sizing_log):
+    """N2-LOW-2 (the review's repro): ORB x0.25 -> x0.5 written Friday 10:30 ET for
+    Friday (ignored Friday, so it takes effect Monday) and x0.5 -> x1 for Monday
+    would both apply at Monday's one start: refused, never x1 by two rungs."""
+    friday, monday = date(2026, 10, 16), date(2026, 10, 19)
+    store.step("ORB_V2", "0.25", "0.5", effective=friday, at=et(friday, 9, 30))
+    store.step("ORB_V2", "0.5", "1", effective=monday, at=et(friday, 19, 0))
+    assert read(store.path, "ORB_V2", monday) is None
+    assert criticals(sizing_log) == [SIZE_EVENT_CHAIN_BROKEN]
+    assert "one step per session" in sizing_log.records[-1].getMessage()
+    with pytest.raises(identity_sizing.SizeNotInForce):
+        identity_sizing.size_in_force(store.path, "ORB_V2", monday)
+    # Alone, the mid-session event takes effect at the next start, one rung.
+    lone = SizeLedger(migrate_database(store.path.parent / "lone.db"))
+    lone.step("ORB_V2", "0.25", "0.5", effective=friday, at=et(friday, 9, 30))
+    assert read(lone.path, "ORB_V2", monday) == Decimal("0.5")
+    # The boundary, as the session read counts it: written exactly at Friday's start is
+    # after it (Monday's start, beside Monday's own step: refused); a microsecond
+    # earlier is before it (Friday's start, then Monday's: one rung each).
+    edge = SizeLedger(migrate_database(store.path.parent / "edge.db"))
+    edge.step("ORB_V2", "0.25", "0.5", effective=friday, at=start(friday) - timedelta(hours=1))
+    edge.step("ORB_V2", "0.5", "1", effective=monday, at=et(friday, 19, 0))
+    assert read(edge.path, "ORB_V2", monday) is None
+    early = SizeLedger(migrate_database(store.path.parent / "early.db"))
+    early.step("ORB_V2", "0.25", "0.5", effective=friday, at=start(friday) - timedelta(hours=1, microseconds=1))
+    early.step("ORB_V2", "0.5", "1", effective=monday, at=et(friday, 19, 0))
+    assert read(early.path, "ORB_V2", friday) == Decimal("0.5")
+    assert read(early.path, "ORB_V2", monday) == Decimal("1")
+
+
+def test_replace_through_an_events_proposal_id_is_refused(store):
+    """N2-LOW-3 F01: the events no-replace key covers proposal_id, not only id."""
+    at = night_before(TUESDAY)
+    store.step("MOMO_HOD_V2", "1", "0.5", effective=TUESDAY, at=at)
+    store.step("MOMO_HOD_V2", "0.5", "1", effective=WEDNESDAY, at=at)
+    with closing(sqlite3.connect(store.path)) as db:
+        (first_proposal,) = db.execute("SELECT proposal_id FROM autotrader_size_events ORDER BY id LIMIT 1").fetchone()
+    before = _rows(store.path)
+    # A new id, the first event's proposal: every other rule passes (from x1, the size in force, at a later session).
+    row = (99, "MOMO_HOD_V2", "1", "0.5", "2026-10-15", STEP_DOWN, first_proposal,
+           _stamp(et(WEDNESDAY, 20, 0)), "paper")
+    columns = "(id, identity, from_mult, to_mult, effective_session, kind, proposal_id, created_at, account_mode)"
+    for verb in ("INSERT OR REPLACE", "REPLACE"):
+        sql = f"{verb} INTO {size_schema.SIZE_EVENTS_TABLE} {columns} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        assert "size events are append-only" in store.refused(sql, row), verb
+    assert _rows(store.path) == before
+
+
+@pytest.mark.parametrize(
+    ("code", "retried"),
+    [
+        (sqlite3.SQLITE_BUSY, True),
+        (261, True),  # SQLITE_BUSY_RECOVERY
+        (517, True),  # SQLITE_BUSY_SNAPSHOT (WAL)
+        (262, True),  # SQLITE_LOCKED_SHAREDCACHE
+        (266, True),  # SQLITE_IOERR_READ
+        (3850, True),  # SQLITE_IOERR_LOCK
+        (270, True),  # SQLITE_CANTOPEN_NOTEMPDIR
+        (sqlite3.SQLITE_ERROR, False),
+        (257, False),  # SQLITE_ERROR_MISSING_COLLSEQ
+        (8, False),  # SQLITE_READONLY
+    ],
+)
+def test_extended_sqlite_codes_map_to_their_primary_for_the_retry(store, monkeypatch, code, retried):
+    """N2-LOW-3 F09: in WAL production the transient codes come extended."""
+    real_connect = sqlite3.connect
+    calls: list[int] = []
+    pauses: list[float] = []
+
+    def connect(*args: object, **kwargs: object):
+        calls.append(1)
+        if len(calls) == 1:
+            failure = sqlite3.OperationalError(f"fixture: result code {code}")
+            failure.sqlite_errorcode = code  # type: ignore[attr-defined]
+            raise failure
+        return real_connect(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(identity_sizing, "_pause", pauses.append)
+    monkeypatch.setattr(identity_sizing.sqlite3, "connect", connect)
+    if retried:
+        assert identity_sizing.read_size_events(store.path, identity="ORB_V2", account_mode="paper") == ()
+        assert (len(calls), pauses) == (2, [1.0])
+    else:
+        with pytest.raises(identity_sizing.SizeStoreUnreadable):
+            identity_sizing.read_size_events(store.path, identity="ORB_V2", account_mode="paper")
+        assert (len(calls), pauses) == (1, [])
+
+
+async def test_the_writers_real_clock_stamps_pass_every_v18_rule_end_to_end(tmp_path, monkeypatch, sizing_log):
+    """2f: P3-E's nightly writer with its real clock (no patch) on a v18 store: its rows
+    pass the exact-UTC, weekday and horizon CHECKs, and the next session's composition
+    root reads the step down into the pipeline."""
+    import asyncio
+
+    from tests.test_shadow_service import _pipeline_keywords, _size_store
+    from tests.test_size_writer import verdicts
+    from trading.research import size_writer
+
+    database = await _size_store(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    plan = size_writer.plan_night(now)
+    proposals = verdicts(database, plan, MOMO_HOD_V2="losing")
+    result = await asyncio.to_thread(
+        size_writer.write_night, database=database, proposals=proposals, plan=plan, fence_store=None
+    )
+    assert [(change.identity, change.kind, change.to_mult) for change in result.changes] == [
+        ("MOMO_HOD_V2", "step_down", "0.5")
+    ]
+    with closing(sqlite3.connect(database)) as db:
+        stamps = [row[0] for table in ("autotrader_size_proposals", "autotrader_size_events",
+                                       "autotrader_size_evaluations")
+                  for row in db.execute(f"SELECT created_at FROM {table}")]
+        stamps += [row[0] for row in db.execute("SELECT at FROM autotrader_size_decisions")]
+        ((effective,),) = db.execute("SELECT effective_session FROM autotrader_size_events").fetchall()
+    for stamp in stamps:
+        moment = datetime.fromisoformat(stamp)
+        assert moment.utcoffset() == timedelta(0) and abs(moment - now) < timedelta(minutes=10), stamp
+    assert date.fromisoformat(effective) == plan.session and market_session(plan.session) is not None
+    keywords, name = await _pipeline_keywords(monkeypatch, "momo", day=plan.session)
+    assert name == "MOMO_HOD_V2" and keywords["identity_multiplier"] == Decimal("0.5")
     assert criticals(sizing_log) == []
 
 
@@ -1120,8 +1308,11 @@ async def test_the_session_size_reaches_the_decision_through_repository_runner(t
 # --- D6: who may write a size event ------------------------------------------------
 
 # Exactly two code paths may insert a size event (plan P3-C, D6; the AGENTS.md
-# "Identity sizing" bullet once the owner approves it). Neither exists before
-# P3-D/P3-E, so today nothing in production inserts one.
+# "Identity sizing" bullet once the owner approves it). Each stamps every
+# created_at and decision ``at`` it writes from one real
+# ``datetime.now(timezone.utc)`` read inside its writing transaction, never a
+# caller's time: the mid-session guard and the back-dating and horizon CHECKs
+# trust that stamp (N19a OQ3, N19a-2 I-2). The store assigns every id.
 SIZE_EVENT_WRITERS = frozenset({
     "trading/operations/telegram_size_approval.py",  # P3-D: /approve then /confirm, step_up only
     "trading/research/size_writer.py",  # P3-E: the nightly automatic step_down
@@ -1157,6 +1348,30 @@ _NAMES_WRITE_TABLE = re.compile(r"size_events|size_decisions|autotrader_size_\{\
 _WRITE_WORD = re.compile(r"\b(?:INSERT|REPLACE|UPSERT)\b", re.IGNORECASE)
 _WRITE_IDENTIFIER = re.compile(r"(?:^|_)(?:insert|replace|upsert|executescript|executemany)(?:_|$)", re.IGNORECASE)
 _APPROVAL = re.compile(r"\bapproved\b|owner_telegram", re.IGNORECASE)
+NIGHTLY_WRITER = "trading/research/size_writer.py"
+# What each writer may insert (D2, D6; integration fix 2): the nightly writer
+# records the automatic decisions and step-down events only; the owner's
+# approval path records approvals, rejections and step-up events only.
+WRITER_RIGHTS: dict[str, tuple[str, frozenset[str]]] = {
+    NIGHTLY_WRITER: (STEP_DOWN, frozenset({"superseded", "expired", "auto_applied", "fenced", "would_fence"})),
+    APPROVAL_WRITER: (STEP_UP, frozenset({"approved", "rejected"})),
+}
+# Words and constants a writer may not hold at all: the other writer's
+# decisions that move a size or grant authority. (``expired`` and
+# ``superseded`` stay usable by the approval path as refusal words for the
+# owner; a literal one in its INSERT is still refused.)
+_FOREIGN_WORDS = {
+    NIGHTLY_WRITER: frozenset({"approved", "rejected", "owner_telegram"}),
+    APPROVAL_WRITER: frozenset({"auto_applied", "fenced", "would_fence"}),
+}
+_FOREIGN_CONSTANTS = {
+    NIGHTLY_WRITER: frozenset({"OWNER_TELEGRAM_ACTOR", "STEP_UP_DECISIONS"}),
+    APPROVAL_WRITER: frozenset({"STEP_DOWN_DECISIONS", "SHADOW_ONLY_DECISIONS"}),
+}
+_INSERT_STATEMENT = re.compile(
+    r"\bINSERT\s+INTO\s+(?P<table>\w+)\s*(?:\((?P<columns>[^)]*)\))?\s*(?:VALUES\s*\((?P<values>[^)]*)\))?",
+    re.IGNORECASE,
+)
 
 
 def _production_files(suffix: str) -> list[Path]:
@@ -1281,6 +1496,10 @@ def size_store_violations(source: str, relative: str) -> list[str]:
        writer: they must check, then insert.
     4. An owner approval (``approved``, ``owner_telegram``) recorded anywhere but
        ``telegram_size_approval.py``.
+    5. A writer beyond its rights (``WRITER_RIGHTS``): every INSERT into the
+       events table names its kind, written out as the writer's own; every
+       INSERT into the decisions table names its decision, a placeholder or
+       one of the writer's own; and the writer holds none of the other's words.
     Docstrings, comments and trigger timing (``BEFORE INSERT ON``) are not writes.
     The scan is a tripwire, not a proof: code that builds its SQL at run time
     from data (an environment variable, ``chr`` codes) is beyond any static
@@ -1311,7 +1530,38 @@ def size_store_violations(source: str, relative: str) -> list[str]:
         any(_APPROVAL.search(text) for text in texts) or "OWNER_TELEGRAM_ACTOR" in identifiers
     ):
         violations.append("records an owner approval outside telegram_size_approval.py")
+    if relative in WRITER_RIGHTS:
+        violations += _beyond_rights(texts, identifiers, relative)
     return violations
+
+
+def _beyond_rights(texts: list[str], identifiers: set[str], relative: str) -> list[str]:
+    kind, decisions = WRITER_RIGHTS[relative]
+    found: list[str] = []
+    for text in texts:
+        for match in _INSERT_STATEMENT.finditer(text):
+            table = match.group("table").lower()
+            if table not in SIZE_WRITE_TABLES:
+                continue
+            column, allowed = ("kind", {kind}) if table == size_schema.SIZE_EVENTS_TABLE else ("decision", decisions)
+            columns = [item.strip().lower() for item in (match.group("columns") or "").split(",") if item.strip()]
+            values = [item.strip() for item in match.group("values").split(",")] if match.group("values") else []
+            if column not in columns or len(columns) != len(values):
+                found.append(f"an INSERT INTO {table} whose {column} cannot be read: {text[:80]!r}")
+                continue
+            if table == size_schema.SIZE_EVENTS_TABLE and "id" in columns:
+                found.append(f"an event's id is the store's to assign (N19a-2 I-1): {text[:80]!r}")
+            value = values[columns.index(column)]
+            if value == "?" and column == "kind":
+                found.append(f"an event's kind must be written out as '{kind}': {text[:80]!r}")
+            elif value != "?" and value.strip("'\"") not in allowed:
+                found.append(f"inserts {column} {value}; may insert only {sorted(allowed)}")
+    for word in sorted(_FOREIGN_WORDS[relative]):
+        if any(text == word or f"'{word}'" in text for text in texts):
+            found.append(f"holds {word!r}, the other writer's word")
+    for name in sorted(_FOREIGN_CONSTANTS[relative] & identifiers):
+        found.append(f"names {name}, the other writer's constant")
+    return found
 
 
 def _imports(tree: ast.AST, relative: str) -> set[str]:
@@ -1381,11 +1631,38 @@ WRITER = "trading/research/size_writer.py"
         ("trading/storage/size_schema.py", 'X = "BEFORE INSERT ON autotrader_size_events BEGIN SELECT 1; END"\n', False),
         ("trading/risk/identity_sizing.py",
          'from trading.storage.size_schema import SIZE_EVENTS_TABLE\nX = f"SELECT * FROM {SIZE_EVENTS_TABLE}"\n', False),
-        (WRITER, 'X = "INSERT INTO autotrader_size_events (identity) VALUES (?)"\n', False),
+        (WRITER, 'X = "INSERT INTO autotrader_size_events (identity) VALUES (?)"\n', True),  # its kind unwritten
         (WRITER, "X = \"INSERT INTO autotrader_size_decisions VALUES (?, 'approved', ?, ?)\"\n", True),
-        (APPROVAL_WRITER, "X = \"INSERT INTO autotrader_size_decisions VALUES (?, 'approved', ?, ?)\"\n", False),
+        (APPROVAL_WRITER,
+         "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision, actor, at) VALUES (?, 'approved', ?, ?)\"\n",
+         False),
         (WRITER, 'X = "INSERT OR IGNORE INTO autotrader_size_events (identity) VALUES (?)"\n', True),
         (WRITER, 'X = "INSERT INTO autotrader_size_events (identity) VALUES (?) ON CONFLICT DO NOTHING"\n', True),
+        # Integration fix 2: each writer within its own rights.
+        (WRITER, "X = \"INSERT INTO autotrader_size_events (identity, kind, proposal_id) VALUES (?, 'step_down', ?)\"\n",
+         False),
+        (WRITER, "X = \"INSERT INTO autotrader_size_events (identity, kind, proposal_id) VALUES (?, 'step_up', ?)\"\n",
+         True),
+        (WRITER, 'X = "INSERT INTO autotrader_size_events (identity, kind, proposal_id) VALUES (?, ?, ?)"\n', True),
+        (WRITER, 'X = "INSERT INTO autotrader_size_events SELECT * FROM elsewhere"\n', True),
+        (WRITER, 'X = "INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, ?)"\nY = "expired"\n',
+         False),
+        (WRITER, "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, 'rejected')\"\n", True),
+        (WRITER, 'X = "INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, ?)"\nY = "rejected"\n',
+         True),
+        (WRITER, 'from trading.storage.size_schema import OWNER_TELEGRAM_ACTOR\n', True),
+        (WRITER, "X = \"INSERT INTO autotrader_size_events (id, kind, proposal_id) VALUES (?, 'step_down', ?)\"\n",
+         True),
+        (APPROVAL_WRITER,
+         "X = \"INSERT INTO autotrader_size_events (identity, kind, proposal_id) VALUES (?, 'step_up', ?)\"\n", False),
+        (APPROVAL_WRITER,
+         "X = \"INSERT INTO autotrader_size_events (identity, kind, proposal_id) VALUES (?, 'step_down', ?)\"\n", True),
+        (APPROVAL_WRITER,
+         "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, 'auto_applied')\"\n", True),
+        (APPROVAL_WRITER,
+         "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, 'rejected')\"\n", False),
+        (APPROVAL_WRITER,
+         "X = \"INSERT INTO autotrader_size_decisions (proposal_id, decision) VALUES (?, 'expired')\"\n", True),
     ],
 )
 def test_the_writer_scan_finds_every_shape_of_insert(relative, source, flagged):

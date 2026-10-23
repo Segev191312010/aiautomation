@@ -223,14 +223,14 @@ _NIGHT = f"""
     LEFT JOIN {SIZE_DECISIONS_TABLE} d ON d.proposal_id = p.proposal_id
     LEFT JOIN {SIZE_EVENTS_TABLE} e ON e.proposal_id = p.proposal_id
     WHERE p.as_of = ?
-    ORDER BY p.rowid
+    ORDER BY p.created_at, p.proposal_id
 """
 _PENDING = f"""
     SELECT p.proposal_id, p.identity, p.from_mult, p.to_mult, p.deadline_at
     FROM {SIZE_PROPOSALS_TABLE} p
     LEFT JOIN {SIZE_DECISIONS_TABLE} d ON d.proposal_id = p.proposal_id
     WHERE p.kind = '{STEP_UP}' AND d.proposal_id IS NULL
-    ORDER BY p.rowid
+    ORDER BY p.created_at, p.proposal_id
 """
 
 

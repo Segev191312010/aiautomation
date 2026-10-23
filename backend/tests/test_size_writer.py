@@ -19,6 +19,7 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+import itertools
 import json
 import math
 from pathlib import Path
@@ -138,9 +139,15 @@ def verdicts(database: Path, plan: NightPlan, **kinds) -> PromotionProposals:
 @contextmanager
 def writer_clock_at(moment: datetime) -> Iterator[None]:
     """Tests only: the writer's one clock (``_utc_now``, the real UTC time in
-    production) stands at ``moment``, so a night of the past can be written."""
+    production) starts at ``moment``, so a night of the past can be written.
+
+    It ticks one microsecond per reading after the first, as a real clock
+    never gives two transactions the same instant: proposals have no rowid
+    since P3-C fix 1 (WITHOUT ROWID), so the store orders them by
+    ``created_at`` (integration fix 2)."""
     real = size_writer._utc_now
-    size_writer._utc_now = lambda: moment
+    readings = itertools.count()
+    size_writer._utc_now = lambda: moment + timedelta(microseconds=next(readings))
     try:
         yield
     finally:
@@ -170,7 +177,7 @@ def proposals_of(database: Path, identity: str) -> list[dict[str, object]]:
         """SELECT p.proposal_id, p.as_of, p.kind, p.from_mult, p.to_mult, p.deadline_at, p.nights_since_last_step,
                   p.evidence_fingerprint, p.evidence_json, d.decision, d.actor
            FROM autotrader_size_proposals p LEFT JOIN autotrader_size_decisions d USING (proposal_id)
-           WHERE p.identity = ? ORDER BY p.rowid""",
+           WHERE p.identity = ? ORDER BY p.created_at, p.proposal_id""",
         (identity,),
     )
     keys = ("id", "as_of", "kind", "from", "to", "deadline", "nights", "fingerprint", "evidence", "decision", "actor")

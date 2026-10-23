@@ -173,7 +173,7 @@ _OPEN_STEP_UPS = f"""
     SELECT p.proposal_id, p.deadline_at FROM {SIZE_PROPOSALS_TABLE} p
     LEFT JOIN {SIZE_DECISIONS_TABLE} d ON d.proposal_id = p.proposal_id
     WHERE p.kind = '{STEP_UP}' AND d.proposal_id IS NULL AND (? IS NULL OR p.identity = ?) AND p.as_of < ?
-    ORDER BY p.rowid
+    ORDER BY p.created_at, p.proposal_id
 """
 _LAST_STEP_NIGHT = f"""
     SELECT p.as_of FROM {SIZE_EVENTS_TABLE} e
@@ -194,7 +194,7 @@ _LAST_DEMOTION_FENCE = f"""
     SELECT p.evidence_json, d.decision FROM {SIZE_PROPOSALS_TABLE} p
     JOIN {SIZE_DECISIONS_TABLE} d ON d.proposal_id = p.proposal_id
     WHERE p.identity = ? AND p.kind = '{STEP_DOWN}' AND p.to_mult = '{SHADOW_ONLY_MULT}' AND p.as_of < ?
-    ORDER BY p.rowid DESC LIMIT 1
+    ORDER BY p.created_at DESC, p.proposal_id DESC LIMIT 1
 """
 
 

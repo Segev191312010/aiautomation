@@ -87,6 +87,10 @@ SHADOW_ONLY_MULT = "0"
 PAPER_ACCOUNT_MODE = "paper"
 # The only actor whose approval can raise a size (owner decision D2).
 OWNER_TELEGRAM_ACTOR = "owner_telegram"
+# An event takes effect at most this many days after it was written: the next
+# session is at most a long weekend plus holidays away, and a date far off is
+# a writer defect the session calendar may not even span (N19a-2 LOW-1).
+SIZE_EVENT_HORIZON_DAYS = 14
 
 STEP_UP = "step_up"
 STEP_DOWN = "step_down"
@@ -256,8 +260,10 @@ SIZE_EVENTS_SCHEMA = (
         created_at TEXT NOT NULL CHECK{_utc_exact("created_at")},
         account_mode TEXT NOT NULL CHECK(account_mode = '{PAPER_ACCOUNT_MODE}'),
         CHECK{_one_rung(down_to_shadow_only=False)},
-        -- Never back-dated: an event takes effect on or after the day it was written.
+        -- Never back-dated: an event takes effect on or after the day it was written,
+        -- and never further ahead than the horizon (from NEW.created_at alone).
         CHECK(effective_session >= date(created_at)),
+        CHECK(effective_session <= date(created_at, '+{SIZE_EVENT_HORIZON_DAYS} days')),
         FOREIGN KEY(proposal_id) REFERENCES {SIZE_PROPOSALS_TABLE}(proposal_id)
     )""",
     f"""CREATE INDEX IF NOT EXISTS idx_{SIZE_EVENTS_TABLE}_identity
@@ -361,6 +367,7 @@ __all__ = [
     "SIZE_DECISION_NOT_FOR_PROPOSAL",
     "SIZE_EVALUATIONS_TABLE",
     "SIZE_EVENTS_TABLE",
+    "SIZE_EVENT_HORIZON_DAYS",
     "SIZE_EVENT_NOT_AFTER_PREVIOUS",
     "SIZE_PROPOSALS_TABLE",
     "SIZE_PROPOSAL_STATE_VIEW",

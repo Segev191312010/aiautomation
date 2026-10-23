@@ -53,7 +53,10 @@ PINNED_MIGRATIONS: dict[int, tuple[str, str]] = {
     # after v7c's migration 17 is live. Re-pinned explicitly by P3-C fix 1 (review
     # N19a MEDIUM-1, LOW-5, LOW-6: no-replace triggers, exact UTC stamps, weekday
     # sessions) before any database applied it; was bfa4bca8d878...643c at 857aceb.
-    18: ("identity-size-store", "ed98582dd8a09c7acb917e38a67703911382b2e13c1f165bd5003ab1a920eabf"),
+    # Re-pinned explicitly again by integration fix 2 (review N19a-2 LOW-1: an
+    # event takes effect at most 14 days after it is written), still applied
+    # nowhere; was ed98582dd8a0...eabf at ae090da.
+    18: ("identity-size-store", "763db17ce5e6f958233882cfff38dfb4e3aa91d9459d357b89baedb76b24785f"),
 }
 
 
