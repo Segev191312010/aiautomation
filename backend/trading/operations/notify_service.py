@@ -68,9 +68,17 @@
      An announced outage counts once, as an outage, whatever opened it (a
      failed connect, an IBKR-side loss, a data-refused run) and also when the
      pair budget held it back until the sustain limit or the window announced
-     it; a flap is a flip the phone never heard as an outage.
+     it; a flap is a flip the phone never heard as an outage;
+  m. the Mac on battery (live 2026-10-23: a forced sleep at 1 % froze the
+     robot 43 minutes): from 07:55 ET, every 60 s, ``/usr/bin/pmset -g ps``
+     (5 s timeout, no shell). The switch to battery is one CRITICAL page
+     (``mac_on_battery``), then one more at 30 % and one at 10 % in the same
+     episode; back on AC power one "✅ Mac back on AC power (NN %)" ends the
+     episode. A failed or unparseable read is one WARNING line a day, never a
+     page; a desktop Mac (no battery line) never pages.
 
-It reads the database, the logs and the bridge state files, and writes one
+It reads the database, the logs, the bridge state files and the power
+source, and writes one
 kind of row: the Sentinel's ``paper:<IDENTITY>`` fence, stop-only. Nothing
 here can place, modify, or cancel an order, resume a fence, or touch the
 global kill switch. What was delivered, how far each log was read, whether
@@ -172,7 +180,13 @@ from trading.operations.sentinel import (
     resume_command,
 )
 from trading.operations.supervisor import NOTIFIER_CHILD, bridge_window
-from trading.operations.telegram_tools import child_starts_on, read_log_tail, restarts_text
+from trading.operations.telegram_tools import (
+    CommandRunner,
+    child_starts_on,
+    read_log_tail,
+    restarts_text,
+    run_read_only_command,
+)
 from trading.research.live_ledger import bridge_state_directory
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
@@ -412,6 +426,8 @@ class NotifyEnvironment:
     # The Sentinel's only write path (stop one identity) and its freshness source.
     fence_store: SQLitePaperKillStore = field(default_factory=SQLitePaperKillStore)
     read_bridge_heartbeat: HeartbeatReader = read_bridge_heartbeat_at
+    # The power guard's one command runner: (argv, timeout seconds) -> stdout, no shell.
+    run_power_command: CommandRunner = run_read_only_command
 
     @classmethod
     def current(cls) -> NotifyEnvironment:
@@ -2367,6 +2383,121 @@ def fences_at_start_text(rows: Sequence[tuple[str, str, str]]) -> str:
 
 
 # --------------------------------------------------------------------------
+# Mac power guard
+# --------------------------------------------------------------------------
+
+# Live 2026-10-23 the Mac ran the session on battery and nobody was told: at
+# 1 % macOS forced a Low Power Sleep (22:07:37-22:51:19 Israel), the robot
+# froze 43 minutes and its 15:45 ET close-out ran 6 minutes late. While the
+# notifier runs it reads the power source once a minute and pages the owner.
+# Read-only: one fixed argv through one runner, never a shell, always bounded.
+POWER_COMMAND = ("/usr/bin/pmset", "-g", "ps")
+POWER_COMMAND_TIMEOUT_SECONDS = 5.0
+POWER_POLL_SECONDS = 60.0
+# Further pages inside one battery episode, each once, as the charge reaches it.
+POWER_LOW_THRESHOLDS = (30, 10)
+MAC_ON_BATTERY = "mac_on_battery"
+MAC_ON_AC = "mac_on_ac"
+POWER_UNREADABLE = "power_unreadable"
+AC_POWER = "AC Power"
+BATTERY_POWER = "Battery Power"
+_POWER_SOURCE_LINE = re.compile(r"^Now drawing from '(?P<source>[^']*)'\s*$", re.MULTILINE)
+_INTERNAL_BATTERY_LINE = re.compile(
+    r"^\s*-InternalBattery-\d+\b[^\n]*?[\t ](?P<percent>\d{1,3})%;", re.MULTILINE
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PowerReading:
+    on_battery: bool
+    # The internal battery's charge; None on a desktop Mac (no battery line).
+    percent: int | None
+
+
+def parse_power_status(output: str) -> PowerReading | None:
+    """``pmset -g ps``: ``Now drawing from 'AC Power'`` or ``'Battery Power'``,
+    then (a laptop) `` -InternalBattery-0 (id=…)<TAB>93%; charging; …``.
+
+    None for anything else (an empty or garbled output, a UPS source): never a
+    page. A desktop Mac prints the AC line alone.
+    """
+    sources = _POWER_SOURCE_LINE.findall(output)
+    if len(sources) != 1 or sources[0] not in (AC_POWER, BATTERY_POWER):
+        return None
+    charges = [int(value) for value in _INTERNAL_BATTERY_LINE.findall(output)]
+    percent = charges[0] if charges and charges[0] <= 100 else None
+    return PowerReading(on_battery=sources[0] == BATTERY_POWER, percent=percent)
+
+
+def _charge_text(percent: int | None) -> str:
+    return "charge unknown" if percent is None else f"{percent} %"
+
+
+def battery_page_text(percent: int | None) -> str:
+    return (
+        f"⚠️ Mac on battery ({_charge_text(percent)}) during the session — plug it in: at low"
+        " battery macOS puts the Mac to sleep and the robot stops (as on 2026-10-23)"
+    )
+
+
+def battery_low_text(percent: int) -> str:
+    return (
+        f"⚠️ Mac battery down to {percent} %, still on battery — plug it in now: at low battery"
+        " macOS puts the Mac to sleep and the robot stops (as on 2026-10-23)"
+    )
+
+
+def back_on_ac_text(percent: int | None) -> str:
+    return "✅ Mac back on AC power" + ("" if percent is None else f" ({percent} %)")
+
+
+def battery_tier_key(threshold: int) -> str:
+    return f"{MAC_ON_BATTERY}:{threshold}"
+
+
+class PowerGuard:
+    """One battery episode at a time, remembered in the per-date alerts map (a
+    restart neither repeats a page nor loses one): the switch to battery pages
+    once, then each ``POWER_LOW_THRESHOLDS`` value once as the charge reaches
+    it; back on AC power one notice ends the episode, so the next switch to
+    battery pages again."""
+
+    def __init__(self, memory: dict[str, str]) -> None:
+        self._memory = memory
+
+    @property
+    def on_battery(self) -> bool:
+        return MAC_ON_BATTERY in self._memory
+
+    def observe(self, reading: PowerReading, now: datetime) -> tuple[str, str] | None:
+        """``(alert, text)`` for this reading, or None; the memory changes only with one."""
+        if not reading.on_battery:
+            if not self.on_battery:
+                return None
+            for key in (MAC_ON_BATTERY, *(battery_tier_key(item) for item in POWER_LOW_THRESHOLDS)):
+                self._memory.pop(key, None)
+            return MAC_ON_AC, back_on_ac_text(reading.percent)
+        percent = reading.percent
+        reached = [
+            threshold
+            for threshold in POWER_LOW_THRESHOLDS
+            if percent is not None
+            and percent <= threshold
+            and battery_tier_key(threshold) not in self._memory
+        ]
+        stamp = now.isoformat()
+        for threshold in reached:
+            self._memory[battery_tier_key(threshold)] = stamp
+        if not self.on_battery:
+            # The switch's page stands for every threshold the charge has already reached.
+            self._memory[MAC_ON_BATTERY] = stamp
+            return MAC_ON_BATTERY, battery_page_text(percent)
+        if reached and percent is not None:
+            return MAC_ON_BATTERY, battery_low_text(percent)
+        return None
+
+
+# --------------------------------------------------------------------------
 # The session loop
 # --------------------------------------------------------------------------
 
@@ -2432,6 +2563,10 @@ class _NotifierSession:
         )
         self._next_sentinel_check = float("-inf")
         self._sentinel_failing_since: datetime | None = None
+        # The Mac's power source, 07:55 ET to the notifier's end; episodes in the alerts map.
+        self._power = PowerGuard(state.alerts)
+        self._power_from = market_time(session_date, SESSION_OPENS)
+        self._next_power_check = float("-inf")
         # The start's fence announcement is retried while the fence table cannot be read.
         self._next_fence_announcement = float("-inf")
         # The latest LOG_ROTATED marker seen in supervisor.log, and how many of
@@ -2496,6 +2631,9 @@ class _NotifierSession:
         if self._environment.monotonic() >= self._next_sentinel_check:
             self._next_sentinel_check = self._environment.monotonic() + SENTINEL_CHECK_SECONDS
             await self._run_sentinel()
+        if self._environment.monotonic() >= self._next_power_check and self._power_watched():
+            self._next_power_check = self._environment.monotonic() + POWER_POLL_SECONDS
+            await self._check_power()
         if self._environment.monotonic() >= self._next_decision_poll:
             self._next_decision_poll = self._environment.monotonic() + DECISION_POLL_SECONDS
             await self._poll_decisions()
@@ -2697,6 +2835,48 @@ class _NotifierSession:
             self._state.dirty = True
         for alert, text in messages:
             self._send_alert(alert, text)
+
+    def _power_watched(self) -> bool:
+        """The notifier's session window: 07:55 ET (``SESSION_OPENS``) to its end."""
+        return self._power_from <= self._environment.clock() < self._end_at
+
+    async def _check_power(self) -> None:
+        """One ``pmset -g ps`` read: a battery episode's pages and its end. A
+        failed or unparseable read is one WARNING line a day, never a page and
+        never an exception (the rest of the cycle always runs)."""
+        try:
+            output = await asyncio.to_thread(
+                self._environment.run_power_command, POWER_COMMAND, POWER_COMMAND_TIMEOUT_SECONDS
+            )
+            reading = parse_power_status(output) if isinstance(output, str) else None
+            problem = "printed no AC or battery power source"
+        except Exception as exc:  # noqa: BLE001 - a broken pmset never stops the notifier
+            reading, problem = None, f"failed ({type(exc).__name__})"
+        if reading is None:
+            self._power_unreadable(problem)
+            return
+        outcome = self._power.observe(reading, self._environment.clock())
+        if outcome is None:
+            return
+        self._state.dirty = True
+        alert, text = outcome
+        if alert == MAC_ON_AC:
+            logger.info("%s: %s", MAC_ON_AC, text)
+        else:
+            logger.critical("%s: %s", MAC_ON_BATTERY, text)
+        self._send_alert(alert, text)
+
+    def _power_unreadable(self, problem: str) -> None:
+        if POWER_UNREADABLE in self._state.alerts:
+            return
+        self._state.alerts[POWER_UNREADABLE] = self._environment.clock().isoformat()
+        self._state.dirty = True
+        logger.warning(
+            "%s: %s %s; no battery page can come while it does (this line once a day)",
+            POWER_UNREADABLE,
+            " ".join(POWER_COMMAND),
+            problem,
+        )
 
     async def _announce_fences(self) -> None:
         """Once per date: every stopped identity fence, right after the startup line
@@ -3317,6 +3497,19 @@ __all__ = [
     "FENCES_AT_START_KEY",
     "FillCoalescer",
     "LogTailer",
+    "MAC_ON_AC",
+    "MAC_ON_BATTERY",
+    "POWER_COMMAND",
+    "POWER_COMMAND_TIMEOUT_SECONDS",
+    "POWER_LOW_THRESHOLDS",
+    "POWER_POLL_SECONDS",
+    "POWER_UNREADABLE",
+    "PowerGuard",
+    "PowerReading",
+    "back_on_ac_text",
+    "battery_low_text",
+    "battery_page_text",
+    "parse_power_status",
     "MarketContextReader",
     "NotifyEnvironment",
     "NotifyState",

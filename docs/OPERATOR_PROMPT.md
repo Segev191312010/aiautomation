@@ -711,6 +711,8 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `PREFLIGHT_WARNING heartbeat not configured (…)` | supervisor.log | No (valid) heartbeat Keychain item at the supervisor's start: it runs without the heartbeat child (Part 4.12) |
 | `HEARTBEAT_PING_FAILED error=<kind> state=<state> … consecutive=<n> unlogged=<n>` | heartbeat.log | A ping did not get through (at most one line per 10 min; never the URL) |
 | `WARNING heartbeat: on battery during the session — paging via the monitor` | heartbeat.log | On battery 07:40–16:15 ET on a session day: the monitor is told to page (Part 4.12) |
+| `mac_on_battery: ⚠️ Mac on battery (NN %) …` / `mac_on_battery: ⚠️ Mac battery down to NN % …` (CRITICAL), `mac_on_ac: ✅ Mac back on AC power (NN %)` (INFO) | notifier.log | The notifier's power guard (4.9): each line is one phone message (`alert queued: mac_on_battery` / `mac_on_ac` after it). Playbook 7.12 |
+| `power_unreadable: /usr/bin/pmset -g ps failed (<error>)` / `… printed no AC or battery power source` (WARNING) | notifier.log | The power guard could not read the power source: at most one line a day, never a page; it keeps trying every minute. Check `pmset -g ps` in Terminal |
 | `sizing_record_failed: run <run> decision <id>` (ERROR), then once `sizing_sidecar_disabled: decision-sizing sidecar disabled for this run <run> after <ErrorType>; decisions are unaffected` (CRITICAL) | pipeline (strategy child logs) | The decision-sizing sidecar (T-8) write is bounded to 2 s, and a path that is not a regular file (a FIFO, a link) is refused before any open (`SizingFileRefused`); after a timeout or an OS error the sidecar is off for the rest of that run (the failure logged once, then the one "disabled" line). Decisions are recorded and unchanged either way |
 
 Every cap line follows the `CHILD_EXIT` line of the exit it is about (`CHILD_RESUMED reason=probe_healthy`, `PORT_PROBE_FAILED`, `CHILD_EXIT_UNCOUNTED`, `CHILD_SUSPENDED` / `CHILD_RESTART_STORM`, in that order).
@@ -802,6 +804,7 @@ Never weaken a test to make it pass. If a test fails because behaviour changed b
 | Competing-login page 07:55–17:30 ET: at the first line, re-paged every 10 min while it is still seen (the notifier to 16:15, then the `telegram` child from `recorder.log`) | `[NOW]` |
 | Pre-session data check at 05:55 and 07:40 ET on session days (port open): one daily-history request like the screener's qualification ("2 M" of daily TRADES bars, 20 s timeout) for one universe contract (the first of AAPL, MSFT, NVDA, AMZN, GOOGL it resolved), on the assistant's own client 21; one retry 30 s later on the fallback symbol (the next of that list it resolved) before it pages; records TWS 2103/2105/2157/2110 and 10197/162/165 | `[NOW]` |
 | External dead-man's switch (`heartbeat` child; the monitor pages, not Telegram; Part 4.12) | `[NOW]` |
+| Mac on battery page (the notifier, 07:55–16:15 ET): `/usr/bin/pmset -g ps` every 60 s (5 s timeout, no shell); one page at the switch to battery, one at 30 % and one at 10 % per battery episode, one ✅ back on AC power (2026-10-23 forced sleep) | `[NOW]` |
 
 `/stop <sym> <price>` is a protective stop **order**; the identity stop verb is `/halt`.
 
@@ -832,6 +835,11 @@ What the phone says:
   - the check cannot run (IBKR data not configured for the assistant, no resolved contract in the universe): `⚠️ Pre-session data check could not run (05:55 ET check): <reason>`;
   - the port closed by the time it connects: nothing, never a page from the check (the port watch pages it once).
 - **Competing login.** `⚠️ IBKR login active elsewhere — log out of the IBKR app/website` `(seen in the <source> log)` at its first line, then every 10 min while it is still seen: `⚠️ IBKR login still active elsewhere since HH:MM ET — log out of the IBKR app/website`. IBKR says nothing when the other login ends: 10 min without a line ends it (no message). 07:55–16:15 ET from the notifier (screener, bridge, children), 16:15–17:30 ET from the `telegram` child (`recorder.log`).
+- **Mac on battery** (the notifier, 07:55–16:15 ET; live 2026-10-23: on battery all session, at 1 % macOS forced a Low Power Sleep 22:07:37–22:51:19 Israel, the robot froze 43 min and the 15:45 ET close-out ran 6 min late). Every 60 s the notifier runs `/usr/bin/pmset -g ps` (5 s timeout) and reads `Now drawing from 'AC Power'` / `'Battery Power'` and the `-InternalBattery-0` charge:
+  - the switch to battery, once per episode (a notifier already on battery at its start counts as a switch): `⚠️ Mac on battery (NN %) during the session — plug it in: at low battery macOS puts the Mac to sleep and the robot stops (as on 2026-10-23)`;
+  - still on battery at 30 % and again at 10 %, once each per episode: `⚠️ Mac battery down to NN %, still on battery — plug it in now: …` (a switch already at or below a threshold stands for it; a drop past both between two reads is one page);
+  - back on AC power, once: `✅ Mac back on AC power (NN %)`; it ends the episode, so the next switch to battery pages again and both thresholds are armed again.
+  The episode is kept in the notifier's per-date state, so a notifier restart neither repeats a page nor loses one. A `pmset` that fails, times out or prints anything else (a UPS source, an empty output) is one `power_unreadable` WARNING line in notifier.log a day, never a page. A desktop Mac (no battery line) only ever reads AC power and never pages. The heartbeat's monitor page on battery (4.12) is separate and stays. What to do: Playbook 7.12.
 - **`/halt`.** The reply carries a 6-character code; `/confirm <code>` within 60 s writes `paper:<IDENTITY>`. A wrong code writes nothing and says how many tries are left; the third wrong code drops the request (send `/halt` again). `/halt` and a request's first `/confirm` pass the flood limit; after a wrong code `/confirm` is flood-limited like any command.
 
 ### 4.10 Ledger
@@ -1294,6 +1302,12 @@ replay engine's counterfactual):
 
 The per-signal log (`t1_snapshot`) and the replay stay on under any outcome. Every outcome is a reviewed
 code change and an owner-run deploy; none is a setting.
+
+### 7.12 Mac on battery during the session
+- **Signal:** `⚠️ Mac on battery (NN %) during the session — plug it in …` on the phone (then `⚠️ Mac battery down to NN %` at 30 % and 10 %); `mac_on_battery:` CRITICAL in notifier.log.
+- **Meaning:** the Mac is not on AC power. At low battery macOS forces a sleep and every child stops: 2026-10-23 at 1 % it slept 22:07:37–22:51:19 Israel, the robot froze 43 min and the 15:45 ET close-out ran 6 min late. `caffeinate` does not prevent it (LEARNED, MAC-SLEEP-1015).
+- **Action:** plug the charger in now and keep the lid open; check the charger's light and the menu-bar battery icon. Within a minute the phone says `✅ Mac back on AC power (NN %)`; no ✅ within 2 min means it is still on battery (a loose cable, a dead socket): `pmset -g ps | head -1` in Terminal must say `Now drawing from 'AC Power'`. If the Mac slept, check after it wakes that the 15:45 ET close-out ran (the bridge's FLATTEN/FLAT lines) and that no robot position is held past 15:50 ET.
+- **Who:** OWNER.
 
 ---
 

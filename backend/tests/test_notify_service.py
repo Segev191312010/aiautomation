@@ -136,6 +136,15 @@ def _bridge_alive(clock: FakeTime) -> Callable[[], object]:
     return read
 
 
+# `pmset -g ps` on a desktop Mac (no battery line): the power guard reads AC and stays quiet.
+PMSET_PS_DESKTOP = "Now drawing from 'AC Power'\n"
+
+
+def _desktop_power(argv, timeout_seconds) -> str:
+    """No test runs the real pmset: the default power reading is a desktop on AC."""
+    return PMSET_PS_DESKTOP
+
+
 def _environment(
     paths: UserPaths,
     telegram: FakeTelegram,
@@ -147,6 +156,7 @@ def _environment(
     read_market_context=_no_market_context,
     read_hot_list=_no_hot_list,
     read_bridge_heartbeat=None,
+    run_power_command=_desktop_power,
 ) -> NotifyEnvironment:
     return NotifyEnvironment(
         paths=paths,
@@ -160,6 +170,7 @@ def _environment(
         read_market_context=read_market_context,
         read_hot_list=read_hot_list,
         read_bridge_heartbeat=read_bridge_heartbeat or _bridge_alive(clock),
+        run_power_command=run_power_command,
     )
 
 
