@@ -53,6 +53,18 @@ FULLY AUTOMATED  = scan → signal → size → gate → order → manage → fl
 THE ENVELOPE     = the limits inside which the machine trades:
                    allowlist · size multipliers · caps · daily loss · PAPER.
                    The machine trades inside it. Only the owner changes it.
+
+NO-LIMIT TEST    = L-T1, the code constant NO_LIMIT_TEST (owner decisions D1-D9 of
+                   2026-10-23; sessions 2-13 Nov 2026; AGENTS.md "NO_LIMIT_TEST").
+                   While it runs the count limits (per run, per identity, total
+                   open), the -2 % day stop and the 3 % day risk budget are
+                   MEASURED and LOGGED on every signal, never enforced, for bot
+                   entries. The hard blocks stay: a working stop on every robot
+                   position (it repairs itself), one bracket per symbol, the
+                   25 % / 1 % per-order ceilings, six malfunction guards, the
+                   XNYS calendar, the last-entry times, the 15:45 ET close-out
+                   (close - 15 min on a half day), the brakes, PAPER only.
+                   Parts 3.1-3.5 say what changes; Playbook 7.11 is the routine.
 ```
 
 ### 1.2 What the machine owns (no human step)
@@ -272,6 +284,17 @@ managed_multiplier   1 for unmanaged identities; AI day-manager value for manage
 
 **Bridge ceiling** (backstop, must never bind in normal operation): 1 % risk / 25 % notional per order.
 
+**No-limit test L-T1** `[NOW]` on this branch (AGENTS.md "NO_LIMIT_TEST"). The identity multipliers are
+`NO_LIMIT_TEST_SIZE_MULTIPLIER` (`trading/risk/identity_sizing.py`), set by the Step 0 rule fixed before the
+data: an identity with n ≥ 30 sent trades and mean R ≤ 0 keeps its v7c row above; every other identity is
+×1 (0.5 % risk / 15 % notional per order; n < 30 is no evidence). The four sendable identities decide under
+the test risk policy `NO_LIMIT_TEST_POLICY` (`trading/risk/no_limit_test.py`: the default's numbers, its own
+id, `max_open_positions` 50, so the "3 accepted decisions per run" limit can never bind); shadow names keep
+`RiskPolicy()`. A test run records its own policy fingerprint, so test trades are their own evidence identity
+and stay out of the size-up track record. The AI review cap is 100 calls / $25 per strategy run (it was
+20 / $5); the AI's PROPOSE/ABSTAIN still decides every signal. The bridge ceiling above still binds.
+`deploy undo` restores the v7c table (6.3, 7.11).
+
 Illustrative code. The source of truth is `trading/risk/engine.py`:
 
 ```python
@@ -322,6 +345,27 @@ VWAP_PB_V2 ×0.5 → floor(0.5) = 0 → terminal decision "size_scaled_to_zero"
 - With `max_entries_per_day = 1`, ORB/GAP evidence is "first signal of the day only". This limitation is known and accepted.
 - Caps rows are validated at import (positions ≥ 1, entries None or ≥ 1, offset in (0, 6 h]) and the table is read-only at runtime.
 
+**No-limit test L-T1** `[NOW]` on this branch (bridge v7c-t1). Every row is `Caps(None, None, offset)`: no
+position cap, no entries/day cap, the last-entry offsets above kept; `global_max_open()` is None (no
+account-wide cap; the real ceiling is IBKR's buying power, logged as `t1_account_values` every 30 s and never
+gating). A half-on table (the constant set and a row capped, or the reverse) refuses the import and
+`--preflight`. The counts are measured: the session check reports them (rule 3 PASS with the counts, FAIL
+only for other rows or a missed last-entry time; rule 8). Six malfunction guards stay on in every mode. The
+first five refuse a bot entry with a SKIP line starting with their token and page its first two trips per
+identity a day (the rejection guard pages once, when it halts the identity); the sixth works on the position
+itself (3.4):
+
+| Guard (token) | Number | Catches |
+|---|---|---|
+| `t1_guard_order_rate` | 20 entries per identity per 60 s | a strategy spraying signals (a burst of 10 passes) |
+| `t1_guard_rejections` | 3 broker rejections in a row halt the identity for the day | buying power gone, a bad contract, a dead gateway |
+| `t1_guard_symbol_entries` | 3 entries per symbol per day | a stop-out / re-entry loop in one name |
+| `t1_guard_duplicate` | same symbol, side and size within 5 s | a double send after a reconnect |
+| `t1_guard_outside_hours` | any entry outside the XNYS session | a clock or calendar bug |
+| `t1_stop_repair` | a robot position without a working stop: 60 s, then closed at market | a position running unprotected |
+
+An IBKR rejection is never retried; the first of an identity in a day pages (`t1_broker_rejected`).
+
 ### 3.3 Daily loss
 
 ```
@@ -330,6 +374,17 @@ at the limit: BLOCK new entries · NEVER flatten (stops/targets and 15:45 handle
 ```
 
 Budget: worst-case concurrent open risk = 3 × 0.5 + 0.25 + 0.25 + 0.125 = **2.125 %** (63.75 % notional), so the −2 % block can be overshot by ~0.125 % plus slippage; a worst realized day is about 4 %. Accepted for paper evidence (owner, 2026-10-15). **An open-risk term (v7c) gates the first approved promotion above current sizes** — at all four identities ×1 the figure becomes 3.0 %.
+
+**No-limit test L-T1** `[NOW]` on this branch. For a bot entry the −2 % stop and the 3 % day risk budget are
+computed right before the order is stored and placed, logged, and never refuse it: `v7c_budget_ok …` when
+v7c would have sent it, `t1_over_v7c_limits <SYM> (<ID>): realized … + open … + new … = … (x.xx%) vs 3% of
+<NLV> — would refuse: <tokens> (source=bot)` when v7c would have refused it (`daily_loss_limit`,
+`v7c_day_risk_budget`, `v7c_unprotected_position` for a manual position without a stop, D7). The account's
+realized loss pages once per whole percent from 2 % (`t1_realized_loss_step 2%: …`, then 3 %, 4 %, …); an
+account over 3 % only logs (`v7c_budget_over … measured only`, INFO). Nothing is ever flattened for a loss.
+**Owner buys keep every v7c refusal** (D8): over 3 %, past −2 %, or with an unprotected position. Exposure at
+×1: 15 % notional per position and ≤ 0.5 % risk; 26 positions at 4× intraday margin is 390 % gross, and the
+worst day (all stopped) is about −13 % before slippage. The abort rules (Playbook 7.11) are the brake on that.
 
 ### 3.4 Order structure
 
@@ -346,6 +401,19 @@ stop   = Order(action="SELL", orderType="STP", auxPrice=stop_px, tif="GTC",
 ```
 
 Because the stop rests at IB, a bridge crash or network outage leaves open positions protected.
+
+**No-limit test L-T1** `[NOW]` on this branch: **the stop repairs itself.** A robot position whose stop is
+not working (cancelled, rejected, never acknowledged) refuses every bot entry and owner buy until it is
+repaired or flat. The bridge resubmits ONE `SELL STP GTC` for the shares held, never looser than the intent
+or the price IBKR last showed, joined to the target's OCA group (a live target without a known OCA group is
+never paired with a second sell: the position is closed instead), stored before `placeOrder`. If IBKR
+rejects it, or the position is still unprotected 60 s after detection, the position is closed at market (the
+target repriced marketable, or one `SELL MKT` when no exit leg works) and paged (`t1_stop_repair …`). A
+manual or foreign position without a stop pages once per symbol per day (`t1_unprotected_manual`) and refuses
+owner buys, never bot entries (D7). The 15:45 ET close-out is batched: every due bracket is marked attempted
+in one save, the bids are requested together and waited for once, then each target is repriced (still one
+reprice per bracket, never retried): 26 positions are repriced within seconds of 15:45 ET, not one bid wait
+after another (gate scenario 3: flat by 15:48 ET).
 
 ### 3.5 Gate order
 
@@ -374,6 +442,15 @@ def process_decision(d):
 
 The skip reason strings above are illustrative. Grep the bridge for the real ones before writing alerts or reports.
 
+**No-limit test L-T1** `[NOW]` on this branch, the same order with these changes: a row without a cap and the
+missing account-wide cap skip the three count checks; the daily-loss check is not a refusal for bot entries;
+the malfunction guards (3.2) are checked in the gate and again right before the order leaves; the day risk
+budget (3.3) is read last, after the quote wait and the fences, and for a bot entry it only measures, except
+that a robot position without a working stop (or the wrong thread, an unknown net liquidation, an
+unmeasurable risk) still refuses. Every processed decision then logs one `t1_snapshot {json}` line (time,
+identity, symbol, prices, size, equity, day P&L, open positions, buying power, AI verdict and reason, the
+measured budget, result, fill, latency): the replay engine's input.
+
 ---
 
 ## PART 4 — TOOL REFERENCE
@@ -400,6 +477,7 @@ EXPECT  no line containing '!!!'
         bridge       INFO sendable identities = <sorted sendable set>
         bridge       INFO caps <IDENTITY> positions=<n> entries/day=<n|none> last_entry=close-<m>m   (one per identity)
         bridge       INFO fenced identities = none
+        bridge       INFO day risk budget 3% of net liquidation, account level (…; stop slippage factor 1.0)   (exactly one: deploy apply requires it)
         registry     sendable identities, size table and strategy registry agree
         database     schema v16 current
         rotation     daily at 18:35 ET between sessions into <name>.log.YYYY-MM-DD, 14 days kept; …
@@ -408,8 +486,17 @@ NOTE    The heartbeat line only checks that the Keychain item EXISTS; the dry ru
         secret (agents never read Keychain secrets). The other two forms are warnings, never a refusal:
         heartbeat    not configured (no Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url)
         heartbeat    unknown (Keychain item com.maccabi.autotrader-v1.heartbeat/heartbeat-url could not be checked: <ErrorType>)
+L-T1    No-limit test (bridge v7c-t1, [NOW] on this branch): the bridge lines read, in this order,
+        bridge       INFO caps <IDENTITY> positions=none entries/day=none last_entry=close-<m>m   (MOMO 60, the others 30)
+        bridge       INFO fenced identities = none
+        bridge       INFO day risk budget 3% of net liquidation, account level (realized loss + open risk to current stops + new risk, measured and logged, never blocks bot entries (no-limit test L-T1), owner buys still refused over it; stop slippage factor 1.0)
+        bridge       INFO t1_mode no-limit PAPER test L-T1 on: no position, entries/day or account-wide caps; the -2% daily loss stop and the 3% risk budget are measured and logged, never block bot entries (owner buys keep both); robot stops repair themselves (60s, then close at market); guards: 20 entries per identity per 60s, 3 broker rejections halt an identity for the day, 3 entries per symbol per day, duplicates within 5s, no entry outside the session
+        The t1_mode line never repeats the budget text, so the dry run still has exactly one budget line.
+        A caps line with a number in the test, or the t1_mode line next to numbered rows, is a half-on
+        build: the bridge refuses it (PREFLIGHT_REFUSED caps: half-on no-limit test (…)).
 ERRORS  LAUNCH_REFUSED registry code=78 reason=<token>   → duplicate spec name / sendable set or size table mismatch
         PREFLIGHT_REFUSED caps: <names>                   → sendable identity without a caps row
+        PREFLIGHT_REFUSED caps: half-on no-limit test (…) → NO_LIMIT_TEST and the caps rows disagree (L-T1)
         PREFLIGHT_REFUSED fences unreadable (<exc>)      → see Playbook 7.7
 ```
 
@@ -530,8 +617,14 @@ EXAMPLE .venv/bin/python scripts_local/paper_bridge.py --preflight
 EXPECT  sendable identities = <sorted set>
         caps <IDENTITY> positions=<n> entries/day=<n|none> last_entry=close-<m>m   (one per identity)
         fenced identities = none
+        day risk budget 3% of net liquidation, account level (…; stop slippage factor 1.0)
         exit 0
+L-T1    (bridge v7c-t1) caps <IDENTITY> positions=none entries/day=none last_entry=close-<m>m, the budget
+        line's "measured and logged, never blocks bot entries (no-limit test L-T1)" text, then the
+        t1_mode line (4.1.2). The connect lines in bridge.log are the same, followed by
+        "net liquidation <NLV>; daily loss stop 2% (bot entries: measured only, no-limit test L-T1)".
 ERRORS  exit 78 PREFLIGHT_REFUSED caps: <names>   → sendable set ≠ IDENTITY_CAPS keys
+        exit 78 PREFLIGHT_REFUSED caps: half-on no-limit test (…)   → NO_LIMIT_TEST and the rows disagree
         exit 78 on unreadable DB / bad config (paper_account_id must start with DU)
 ```
 
@@ -590,6 +683,14 @@ TWS message codes seen in logs: `1100` connectivity lost · `1101` restored, dat
 | `identity_stopped:<ID>` | bridge.log | Entry skipped by an identity fence |
 | `identity_caps_missing` / `identity_sizing_missing` | bridge.log / pipeline | Table row missing: fail-closed skip + CRITICAL |
 | `size_scaled_to_zero` | pipeline | floor(q × m) = 0, no order |
+| `t1_mode …` | bridge.log / dry run | No-limit test L-T1 on (3.2): the session check holds the day to the test's rows |
+| `v7c_budget_ok …` / `t1_over_v7c_limits … would refuse: <tokens>` | bridge.log | Every bot entry's measurement, right before its SENT (3.3); the second is an entry v7c would have refused, sent in the test |
+| `t1_realized_loss_step N%` (CRITICAL) | bridge.log | The account's realized loss reached N % (once per whole %, from 2 %); bot entries continue, owner buys are refused (7.6) |
+| `t1_stop_repair <SYM> (<ID>): …` | bridge.log | A robot position without a working stop: the resubmitted stop (CRITICAL), `repaired — … Ns after detection` (INFO), or `closing at market` (CRITICAL) (3.4) |
+| `t1_broker_rejected <SYM> (<ID>): IBKR rejected the entry (TWS <code> …)` | bridge.log | Never sent again; the first of an identity in a day pages, later ones log |
+| `t1_guard_<name> …` (SKIP and CRITICAL) | bridge.log | A malfunction guard refused an entry (3.2); its second trip in a day is an abort rule (7.11) |
+| `t1_unprotected_manual <SYM>` / `t1_low_cushion` / `t1_account_values …` | bridge.log | D7 manual position without a stop (pages once) / IBKR cushion under 10 % (pages) / account values every 30 s (logged, never gating) |
+| `t1_snapshot {json}` | bridge.log | One per processed decision: the replay engine's input (3.5) |
 | `TWS did not answer` / exit 75 | bridge.log | Gateway down or slow, restart loop (one line per connect attempt; the `502 Couldn't connect` INFO before it is the same attempt) |
 | `TWS -1 1100` / `TWS -1 2110` (CRITICAL), `TWS -1 1101` / `1102` (INFO) | bridge.log | IBKR's side lost with the port open / restored; a loss not restored within 2 min opens the Gateway alert in its own wording (`⛔ IBKR connectivity lost …`, 4.9); inside the half-hour after another alert it pages at about 6 min (the loss is re-asserted every 2 min, and the 5-min sustain limit is met at about T+6). Once the bridge exits or its window ends (the close) the loss is unknown, not lost: never re-asserted, no alert |
 | `qualification of <SYM> failed: error: TWS daily-history request timed out` (about one every 20 s) | screener.log | IBKR refusing data with the Gateway connected (GW-HMDS-1016). 6 in a row, each within 45 s of the one before and no `sweep <date>:` between, are a failure signal from the first; every later one in the run is another. The Gateway alert opens about 2 min into the run (`⛔ IBKR is refusing prices …`, 4.9), long before the 08:30 first-sweep grace. `qualified N/M instruments` is still logged: it counts attempts, not successes |
@@ -1069,6 +1170,14 @@ Format: **Signal → Meaning → Action → Who**. Always log an `INCIDENT` ledg
 ### 7.6 Daily loss −2 % reached
 - **Meaning:** entries blocked for everyone for the rest of the day. Working as designed.
 - **Action:** nothing. Do **not** restart anything to reset the counter. Report.
+- **No-limit test L-T1** `[NOW]` on this branch: **no block for bot entries.** The phone gets
+  `t1_realized_loss_step 2%: the account's realized loss today is … — bot entries continue (no-limit test
+  L-T1); owner buys are refused past -2%; nothing is flattened`, then once more at 3 %, 4 %, … Bot entries
+  carry on (each logs `t1_over_v7c_limits … would refuse: daily_loss_limit`); owner buys are refused (D8);
+  nothing is flattened. Action: nothing during the session, never a restart. The performance abort rules
+  decide (7.11): a day at −5 % of the account → the owner reviews the next morning before the open; −8 %
+  cumulative over the test → the test stops early (`deploy undo` that night) and the decision is taken on the
+  data in hand. Report the loss with the session check's rule 5 line.
 
 ### 7.7 `PREFLIGHT_REFUSED fences unreadable (<exception>)`
 - **Meaning:** the shared read-only opener (`_read_only`, used by every ledger read, both fences and `--preflight`) could not open the database. It already retries a transient "unable to open database file" three times at 250 ms while the file exists; a refusal after that is **a defect, not an artefact** (the earlier "re-run once" advice is withdrawn; the 10-14 artefact did not reproduce on SQLite 3.50.4).
@@ -1088,11 +1197,103 @@ quotes if there is time):
 $CTL paper stop --reason "owner emergency stop"
 ```
 
+During the no-limit test L-T1 stop one strategy at a time first: `/halt <IDENTITY>` + `/confirm <code>`
+on the phone (4.9) writes `paper:<IDENTITY>`, its open positions keep their stops and the 15:45 close-out,
+and the owner resumes it with `$CTL paper resume --identity <IDENTITY> --reason "…"` (4.3.4). The global
+`paper stop` above has **no resume** (stop-only by design, 4.3): it is the last resort. `/closeall` flattens
+without stopping new entries; use it with a `/halt` or the global stop.
+
 ### 7.10 Competing IBKR login during the session
 - **Signal:** `IBKR login active elsewhere (phone/web)` / TWS 10197, 162, 165 in the screener or children; the `ibkr_session` alert (904af38).
 - **Meaning:** a phone or web IBKR login took the market data; the port is open but data is refused; children exit and restart.
 - **Action:** the owner logs out of IBKR mobile/web. Stay logged out 07:55–17:30 ET on session days (LEARNED). The page repeats every 10 min while the refusals continue; 10 min without one ends it.
 - **Who:** OWNER.
+
+### 7.11 No-limit test (L-T1)
+
+`[NOW]` on this branch. Sessions Mon 2 Nov → Fri 13 Nov 2026 (Israel = ET+7: the session is 16:30–23:00
+Israel), decision Sat 14 Nov (owner plan v2; slip: sessions 9–20 Nov, decision 21 Nov). AGENTS.md
+"NO_LIMIT_TEST" is the authority; Parts 3.1–3.5 say what is measured and what still blocks.
+
+**What the owner sees on the phone** (besides the usual alerts):
+- `t1_realized_loss_step N%: …` once per whole percent of realized loss from 2 % (7.6);
+- `t1_stop_repair <SYM> (<ID>): stop order … not live … resubmitted once …` and, if that fails, `… closing at
+  market …` (3.4);
+- `t1_broker_rejected <SYM> (<ID>): IBKR rejected the entry (TWS <code> …) — not sent again` (the first of an
+  identity in a day; later ones are logged), and `t1_guard_rejections <ID>: … no new <ID> entries for the rest
+  of <date>` when three in a row halt the identity for the day (in memory; a restart recounts it);
+- `t1_guard_<name> <SYM> (<ID>): … — refused` on a guard's first two trips per identity a day; the second
+  ends `(trip 2 today: an abort rule — deploy undo tonight)`;
+- `t1_low_cushion: …` (IBKR's cushion under 10 %: IBKR may liquidate), `t1_unprotected_manual <SYM>` (a
+  manual position without a stop: owner buys refused, the robot keeps trading, D7);
+- the Sentinel's `🔎 auto-fence (log-only): would stop <ID> — …` (8.4).
+Never paged: an entry over 3 % or past −2 % (logged before its order), an account over 3 % (INFO).
+
+**Every night** after the bridge stopped (the close − 5 min: 15:55 ET, 22:55 Israel on a full day), read-only:
+
+```bash
+$CTL session check --date "${DAY:?}"
+$CTL session check --date "${DAY:?}" --owner
+$CTL session check --date "${DAY:?}" --json
+```
+
+The first is the full report (exit 0 pass, 1 a rule failed, 2 an input is missing). A clean test day:
+rules 1, 2, 6, 7 PASS; rule 3 PASS with the counts (positions, entries, last entry per identity) and every
+entry before its last-entry time; rule 4 PASS, or WARN when the inputs were not recorded; rules 5 and 8 INFO
+(5: realized P&L, entries after −2 %, loss-step pages; 8: the nightly report fields per strategy and in
+total); rule 9 PASS; exit 0. `--owner` is the owner's text: one verdict line (`L-T1 <date>: clean, no abort
+rule tripped …`, or what tripped) and the day in numbers; send it with the Hebrew summary (9.1). `--json`
+is the same report for the replay engine (`schema autotrader-v1/session-check`, `schema_version 1`; rule 8's
+numbers under `metrics`). Rule 8 reads `notifier.log` (the Sentinel's would-fence lines) and the recorder's
+research bars (SPY / QQQ, each trade's share of the day's volume) when they exist; the recorder runs
+16:20–17:30 ET, so a check before it says `n/a` with the reason. The order size against the displayed size is
+`n/a`: the bridge logs no quote size. Run on the v7c sessions before the install (28–30 Oct; any time after
+the install, the logs keep 14 days) the same check prints rule 8 as `v7c (baseline): …`: e.g. the signal → ack
+latency p95 that Decision step 1 compares against.
+
+**Abort rules** (owner plan v2; a human rule: the session check's rule 9 is the evidence, the owner acts):
+- **Signal:** session check exit 1 with `FAIL  rule 9 abort rules: …`; the `--owner` line starts
+  `L-T1 <date>: ABORT RULE TRIPPED: …`.
+- **Meaning:** a malfunction, any one of: a robot position without a working stop for more than 60 s (from
+  detection to its stop working again or the position flat; the 60 s close-at-market backstop firing is
+  itself this); a bot entry outside the XNYS session; a position open past the close less 10 min (15:50 ET,
+  12:50 ET on a half day; IBKR's Reg T end-of-day check); a duplicate entry (same symbol and size within
+  5 s); the same malfunction guard tripping twice in one day (rule 9 counts the day across identities; the
+  bridge's "trip 2" page counts per identity, so the check can trip first); a session replay that does not
+  reproduce its orders (the replay engine's check, from 6 Nov).
+- **Action:** page the owner with the rule 9 line; `INCIDENT` ledger line; the owner runs `deploy undo` that
+  night (below). Never a fix-forward deploy, never a restart to clear it.
+- **Performance:** a day at −5 % of the account → the owner reviews the next morning before the open and the
+  test continues unless a malfunction is found; −8 % cumulative over the test → the test stops early
+  (`deploy undo` that night) and the decision is taken on the data in hand.
+- **Who:** AGENT reports; OWNER undoes.
+
+**`deploy undo`** (owner-run; flat, inside the deploy window 18:30 → 07:20 ET, never across a migration;
+L-T1 has none), with `PREV_SHA` the L-T1 DEPLOY line's previous head (40 hex, `$L/deploys.log` and the
+ledger) and a one-token reason:
+
+```bash
+$CTL deploy undo --repo /Users/salomon/aiautomation --to "${PREV_SHA:?}" --reason "${REASON:?}"
+```
+
+Exit 3 rolled back, 78 refused, 5 undo failed (6.3). It restores the reviewed v7c build: v7c's caps, sizes
+and AI cap, the −2 % and 3 % blocks for bot entries, the live Sentinel, the old 15:45 flatten. The next dry
+run shows the v7c pin and no `t1_mode` line, and the session check holds the next session to v7c again
+(rule 3 enforces the caps). The test's evidence stays: its runs carry the test policy's fingerprint.
+
+**Decision on Sat 14 Nov** (plan v2; the numbers come from rule 8 per strategy over the ten sessions and the
+replay engine's counterfactual):
+
+| Step | Rule |
+|---|---|
+| 1. Operational (all must pass, else everything goes back to v7c) | 0 orders without a working stop; 0 robot positions past 15:50 ET; 0 duplicates; every broker rejection handled without a retry loop; signal → ack latency p95 ≤ the v7c baseline; 0 unplanned halts; the replay reproduces ≥ 99 % of orders |
+| 2. Per strategy: Undo | a guard tripped on it twice or more, or test mean R ≤ −0.3R with n ≥ 20 → today's v7c caps and size |
+| 2. Per strategy: Retune (default) | caps = its p95 + 1 for positions at once and entries a day; ×1 if test mean R ≥ 0, else today's multiplier |
+| 2. Per strategy: Keep, no caps | the retuned caps would not have bound on any of the 10 sessions and mean R ≥ 0 |
+| Day-level limits | back as hard blocks if the replay shows the trades they would have blocked netted ≤ 0; otherwise one step looser (−3 %, 4 %) and paged |
+
+The per-signal log (`t1_snapshot`) and the replay stay on under any outcome. Every outcome is a reviewed
+code change and an owner-run deploy; none is a setting.
 
 ---
 
@@ -1185,6 +1386,14 @@ cannot be seen without reading log lines: Playbook 7.8, by hand.
   hook), and pinned by a test. Back to log-only is the same one-line change back
   (`SENTINEL_FENCES_LIVE = False`), then the usual path: an independent review, the quality gates,
   a verdict that names the head, and a deploy in the window (6.2).
+- **No-limit test L-T1** `[NOW]` on this branch: **log-only again for the test window**
+  (`SENTINEL_FENCES_LIVE = False`, owner plan v2 "Sentinel (logs only)"; an import tripwire ties it to
+  `NO_LIMIT_TEST`). A trigger writes no row: the log gets `sentinel would fence <ID>: <trigger>` and the phone
+  the `🔎 auto-fence (log-only): would stop <ID> — <trigger>` line, once per identity per day. Its caps mirror
+  follows the bridge's uncapped rows, so the daily-loss trigger is the uncapped one (2 R or more) for all four
+  identities; the losing streak and the replay mismatch are evaluated as before. The session check's rule 8
+  counts the day's would-fence lines from `notifier.log`. The brakes are the owner's: `/halt <ID>` (7.9).
+  `deploy undo` restores the live Sentinel and v7c's caps mirror.
 - **Where it runs.** Inside the notifier (07:55–16:15 ET on session days), every 30 s. It reads
   structured state only, never log lines: today's `bridge/<date>.json`, the research live ledger
   (streaks), and the bridge heartbeat row (freshness).
@@ -1262,6 +1471,9 @@ This document carries no snapshot. The live sha, the candidate branches, the pin
 | P1 Unattended days | In this order: phone `/status` + `/fences` + `/halt` with nonce · alert hysteresis (one shared state machine) · dead-man's switch **outside** the Mac (external ping monitor) · overnight Gateway watch with quiet hours and a 05:55/07:40 ET page, competing-login page in session hours · restart-count cap that ignores exits while the port is closed and lifts when it reopens · OPS section in the 16:05 report and log rotation. Two deploys at most; none on v7b day or before v7b's first clean session; no bridge change. | `[PLANNED]` |
 | P2 One-command deploy | Read-only half first: `autotraderctl deploy --check` (every STEP 0 refusal, verdict grep over every ledger, I-11 head rule, window check; no writes). Write half after P1 with its own review. | `[PLANNED]` |
 | P3 Promotion engine | Part 8: Stage 1 (propose + auto-fence + effective multiplier on every decision) with P1-B; Stage 2 after the thresholds and five unchanged approvals. v7c (open-risk term) gates the first step up. | Auto-fence `[NOW]` (the Sentinel, 8.4); the rest as tagged in 8.2 |
+| L-T1 No-limit PAPER test (owner plan v2, 2026-10-23) | Step 0 sizes (Sat 24 Oct) · build items 1–8 (the test policy and sizes, the bridge v7c-t1 with its measured limits, guards and stop repair, the session check's rules 8–9, the time-base checks, the docs) · N21 review, full run on a copy, install Sat 31 Oct · 10 sessions 2–13 Nov · nightly report automated by Fri 6 Nov · replay engine built 2–6 Nov · decision per strategy Sat 14 Nov (Playbook 7.11). Slip: install Sat 7 Nov, sessions 9–20 Nov, decision Sat 21 Nov | `[NOW]` on this branch, not installed until its review and the owner's deploy |
+| Phase 2 Auto-adjusting stops | Stop ladder evaluated on replay first: L1 break-even, L2 chandelier trail, L3 time stop, L4 partial; walk-forward adoption; server-held stops modified only tighter. Install Sat 21 Nov, decision Sat 12 Dec (one week later on the slip) | `[PLANNED]` |
+| Phase 3 Overnight holding | After phase 2 is adopted and 10 clean sessions: next-morning takeover of carried positions, gap risk, overnight margin, `/close` and `/closeall` on carried positions, overnight watch. Provisional install Sat 9 Jan 2027 | `[PLANNED]` |
 | P4 C2 replaces the bridge | After v7b's clean paper week: re-review #3, merge, port v7's exact allowlist / caps / fences / preflight / orderRef identity (migration: the ledger's `at1:` CHECK), move readers to the ledger, engine as a pinned child, drill, five clean sessions, manual desk, go-wide book, delete the old stack. | Built, unwired |
 | LIVE | Separate milestone, separate decision | Out of scope |
 

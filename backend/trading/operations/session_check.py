@@ -15,7 +15,10 @@ only these inputs and never changes any of them:
   (``DECISIONS_SQL``, ``parse_intent``), the account snapshots a decision may
   have been sized from, and ``autotrader_execution_fences``.
 
-Seven rules, each PASS, WARN or FAIL with its evidence lines:
+``notifier.log`` (the Sentinel's would-fence lines) and the research bars
+under ``<data>/research/bars/D/`` are read for rule 8 when they exist.
+
+Nine rules, each PASS, WARN, FAIL or INFO with its evidence lines:
 
 1. identities: every SENT names a sendable identity of that day's bridge and
    of ``SENDABLE_IDENTITIES``, its state bracket and its ledger decision carry
@@ -54,11 +57,35 @@ Seven rules, each PASS, WARN or FAIL with its evidence lines:
    ``v7c_budget_invariant_broken`` page FAIL. An entry of a process that
    logged no day risk budget (a pre-v7c bridge) cannot be verified:
    ``day_risk_budget_unverified`` (WARN, never PASS). Over-budget, widened-stop
-   and wrong-thread pages are WARNs; refusals are counted.
+   and wrong-thread pages are WARNs; refusals are counted. A ``v7c_budget_ok``
+   line is logged only when nothing would refuse, so one whose realized loss
+   reached the -2 % stop FAILs (an owner buy past -2 %, owner decision D8);
+8. no-limit test metrics (INFO, never a failure): the nightly report of the
+   owner's plan v2, per sendable identity and in total (signals, AI verdicts,
+   orders, positions at once, trades with R, latency, buying power, stop
+   repairs, guards, Sentinel would-fence lines, loss-step pages, SPY and QQQ);
+   ``--json`` prints the whole report for the replay engine, ``--owner`` the
+   short owner text;
+9. abort rules (plan v2 "Abort rules", "Decision step 1"): a robot position
+   without a working stop for more than 60 s, a bot entry outside the XNYS
+   session, a position open past the close less 10 minutes (15:50 ET; 12:50
+   on a half day), a duplicate entry (same symbol and size within 5 s), and
+   the same malfunction guard tripping twice in the day each FAIL.
 
-Exit 0 when no rule FAILs (WARN allowed), 1 when one does, 2 when an input is
-missing. Every line of the report is masked: an account id (``DU`` and five
-or more letters or digits) is printed as ``DU1234567``.
+No-limit PAPER test L-T1 (bridge v7c-t1, owner plan v2 of 2026-10-23): a
+bridge process that logs the ``t1_mode`` line runs the test. Its caps rows
+must be the test's (no position or entries/day cap, the same last-entry
+offsets); rule 3 then FAILs only those rows or a missed last-entry time and
+reports the counts; rule 5 is INFO (the -2 % stop is measured, never
+blocking); rule 7 also takes the bridge's ``t1_over_v7c_limits`` line as a
+bot entry's measurement and counts the entries over v7c's limits; rule 4
+approves the test risk policy besides the default. A process without the
+line is held to v7c exactly as before, so ``deploy undo`` needs no checker
+change and a day that mixes the two modes FAILs.
+
+Exit 0 when no rule FAILs (WARN and INFO allowed), 1 when one does, 2 when an
+input is missing. Every line of the report is masked: an account id (``DU``
+and five or more letters or digits) is printed as ``DU1234567``.
 """
 from __future__ import annotations
 
@@ -79,14 +106,18 @@ from trading.contracts import AccountSnapshot, PortfolioSnapshot, RiskPolicy, Ru
 from trading.operations.log_tailer import line_time, without_carried
 from trading.research.live_ledger import BRIDGE_STATE_DIRECTORY, STATE_SCHEMA_PREFIX
 from trading.research.v7c_report import (
+    DAILY_LOSS_LIMIT,
     DAY_RISK_BUDGET_PCT,
     STOP_SLIPPAGE_FACTOR,
     V7C_BUDGET_INVARIANT_BROKEN,
     V7C_BUDGET_OK,
     V7C_BUDGET_OVER,
+    V7C_DAY_RISK_BUDGET,
     V7C_STOP_WIDENED,
+    V7C_UNPROTECTED_POSITION,
     V7C_WRONG_THREAD,
     block_token,
+    nearest_rank,
 )
 from trading.risk.engine import policy_quantity, scaled_quantity
 from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
@@ -95,6 +126,13 @@ from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import GLOBAL_FENCE, IDENTITY_FENCE_PREFIX
 
+try:  # The test risk policy of the no-limit test L-T1 (plan rev 1 T1-1, trading/risk/no_limit_test.py).
+    from trading.risk.no_limit_test import NO_LIMIT_TEST_POLICY as _NO_LIMIT_TEST_POLICY
+except ModuleNotFoundError as _absent:  # pragma: no cover - only a tree without T1-1: the default alone
+    if _absent.name != "trading.risk.no_limit_test":
+        raise
+    _NO_LIMIT_TEST_POLICY = None
+
 EXIT_PASSED = 0
 EXIT_FAILED = 1
 EXIT_INPUTS_MISSING = 2
@@ -102,6 +140,7 @@ EXIT_INPUTS_MISSING = 2
 PASS = "PASS"
 WARN = "WARN"
 FAIL = "FAIL"
+INFO = "INFO"  # a rule that only reports: never a failure, never a warning
 
 ACCOUNT_ID = re.compile(r"DU[A-Z0-9]{5,}")
 MASKED_ACCOUNT_ID = "DU1234567"
@@ -111,22 +150,79 @@ NY = MARKET_TIMEZONE
 
 @dataclass(frozen=True, slots=True)
 class IdentityCaps:
-    """One sendable identity's entry limits, as the pinned bridge's ``Caps`` row."""
+    """One sendable identity's entry limits, as a bridge ``Caps`` row (None = no cap)."""
 
-    max_positions: int
+    max_positions: int | None
     max_entries_per_day: int | None
     last_entry_before_close: timedelta
 
 
-# The pinned bridge's IDENTITY_CAPS (scripts_local/paper_bridge.py v7b), row for
-# row: the checker never imports the bridge, so a test loads it and pins the two
-# equal (and the names equal to SENDABLE_IDENTITIES).
+# The v7c bridge's IDENTITY_CAPS (scripts_local/paper_bridge.py v7b/v7c; what
+# ``deploy undo`` restores), row for row: a bridge process that did not log the
+# no-limit test's mode line is held to these. The checker never imports the
+# bridge, so a test loads it and pins the two equal (and the names equal to
+# SENDABLE_IDENTITIES).
 BRIDGE_IDENTITY_CAPS: Mapping[str, IdentityCaps] = MappingProxyType({
     "MOMO_HOD_V2": IdentityCaps(3, None, timedelta(minutes=60)),
     "ORB_V2": IdentityCaps(1, 1, timedelta(minutes=30)),
     "VWAP_PB_V2": IdentityCaps(1, 2, timedelta(minutes=30)),
     "GAP_GO_V2": IdentityCaps(1, 1, timedelta(minutes=30)),
 })
+# Bridge v7c-t1's rows while it runs the no-limit test L-T1: no position or
+# entries/day cap, the same last-entry offsets (a test pins them to the bridge).
+NO_LIMIT_TEST_IDENTITY_CAPS: Mapping[str, IdentityCaps] = MappingProxyType({
+    name: IdentityCaps(None, None, caps.last_entry_before_close) for name, caps in BRIDGE_IDENTITY_CAPS.items()
+})
+# The test risk policy is approved besides the default: rule 4 recomputes a decision's
+# size only under a policy it finds here by the decision's own fingerprint.
+APPROVED_POLICIES: Mapping[str, RiskPolicy] = MappingProxyType({
+    policy.fingerprint(): policy
+    for policy in (RiskPolicy(), *(() if _NO_LIMIT_TEST_POLICY is None else (_NO_LIMIT_TEST_POLICY,)))
+})
+
+# Bridge v7c-t1's tokens (paper_bridge.py, plan v2 items 3-5; a test pins each to the
+# bridge): every one starts its bridge.log line or SKIP reason.
+NO_LIMIT_TEST_LABEL = "L-T1"
+T1_MODE = "t1_mode"
+T1_OVER_V7C_LIMITS = "t1_over_v7c_limits"
+T1_ACCOUNT_VALUES = "t1_account_values"
+T1_LOW_CUSHION = "t1_low_cushion"
+T1_REALIZED_LOSS_STEP = "t1_realized_loss_step"
+T1_BROKER_REJECTED = "t1_broker_rejected"
+T1_STOP_REPAIR = "t1_stop_repair"
+T1_UNPROTECTED_MANUAL = "t1_unprotected_manual"
+T1_GUARD_ORDER_RATE = "t1_guard_order_rate"
+T1_GUARD_REJECTIONS = "t1_guard_rejections"
+T1_GUARD_SYMBOL_ENTRIES = "t1_guard_symbol_entries"
+T1_GUARD_DUPLICATE = "t1_guard_duplicate"
+T1_GUARD_OUTSIDE_HOURS = "t1_guard_outside_hours"
+T1_GUARD_TOKENS = (T1_GUARD_ORDER_RATE, T1_GUARD_REJECTIONS, T1_GUARD_SYMBOL_ENTRIES, T1_GUARD_DUPLICATE,
+                   T1_GUARD_OUTSIDE_HOURS)
+# What a t1_over_v7c_limits line may say v7c would have refused (budget_check's Budget.over).
+T1_OVER_TOKENS = frozenset({DAILY_LOSS_LIMIT, V7C_DAY_RISK_BUDGET, V7C_UNPROTECTED_POSITION})
+# The abort rules (owner plan v2): a robot position may run without a working stop at
+# most STOP_REPAIR_DEADLINE (paper_bridge.STOP_REPAIR_DEADLINE), the same symbol and size
+# twice within GUARD_DUPLICATE_WINDOW is a double send (paper_bridge.GUARD_DUPLICATE_WINDOW),
+# and every position is flat by the close less FLAT_BY_BEFORE_CLOSE (15:50 ET, 12:50 on a
+# half day: paper_bridge.VERIFY_BEFORE_CLOSE, IBKR's Reg T end-of-day check).
+STOP_REPAIR_DEADLINE = timedelta(seconds=60)
+GUARD_DUPLICATE_WINDOW = timedelta(seconds=5)
+FLAT_BY_BEFORE_CLOSE = timedelta(minutes=10)
+GUARD_TRIPS_ABORT = 2  # "the same guard tripping twice in one day"
+# IBKR's US-stock bar volume is in round lots (shadow_service.IBKR_API_VOLUME_MULTIPLIER; pinned).
+BAR_VOLUME_MULTIPLIER = Decimal("100")
+MARKET_SYMBOLS = ("SPY", "QQQ")
+NOTIFIER_LOG = "notifier.log"
+SENTINEL_WOULD_FENCE = "sentinel would fence "  # sentinel.fence_identity's log-only line
+TOP_REASONS = 3
+REASON_WIDTH = 80
+MAX_BARS_FILE_BYTES = 2 * 1024 * 1024  # research.bars_store._MAX_FILE_BYTES
+REPORT_SCHEMA = "autotrader-v1/session-check"
+REPORT_SCHEMA_VERSION = 1
+NO_LIMIT_MODE = "no_limit_test"  # the day's bridge processes logged the t1_mode line
+V7C_MODE = "v7c"
+METRICS_RULE = 8
+ABORT_RULE = 9
 # The bridge's session checkpoints and order ceilings (paper_bridge.py
 # LAST_ENTRY_BEFORE_CLOSE, FLATTEN_BEFORE_CLOSE, MAX_*_PCT; pinned by a test).
 SESSION_LAST_ENTRY_BEFORE_CLOSE = timedelta(minutes=30)
@@ -143,6 +239,7 @@ DAY_RISK_BUDGET_UNVERIFIED = "day_risk_budget_unverified"
 # to 1.5 cents away from their rounded total.
 BUDGET_ROUNDING = Decimal("0.01")
 BUDGET_SUM_TOLERANCE = Decimal("0.02")
+HALF_CENT = Decimal("0.005")  # a logged cent amount is within this of what the bridge compared
 # A decision is sized from the strategy's own account snapshot, not the
 # bridge's: without a recorded snapshot the identity-row bound allows the
 # logged net liquidation to have been this much higher (a x1 ORB is x4).
@@ -186,7 +283,7 @@ _SHA = re.compile(r"^bridge sha256=(?P<sha>[0-9a-f]{64})")
 _CONNECTED = re.compile(r"^PAPER bridge (?P<version>\S+) connected\b")
 _STOPPED = re.compile(r"^bridge stopped \(exit (?P<code>-?\d+)\)")
 _SENDABLE = re.compile(r"^sendable identities = (?P<names>.*)$")
-_CAPS = re.compile(r"^caps (?P<name>\S+) positions=(?P<positions>\d+) entries/day=(?P<entries>\S+)"
+_CAPS = re.compile(r"^caps (?P<name>\S+) positions=(?P<positions>\d+|none) entries/day=(?P<entries>\S+)"
                    r" last_entry=close-(?P<minutes>\d+)m$")
 _FENCED = re.compile(r"^fenced identities = (?P<names>.*)$")
 _NET_LIQ = re.compile(r"^net liquidation (?P<value>\d+(?:\.\d+)?); daily loss stop")
@@ -224,6 +321,30 @@ _MANUAL_BUY = re.compile(r"^SENT BUY .+ #(?P<short>[0-9a-f]+) \(order (?P<order>
 _MANUAL_REJECTED = re.compile(r"^REJECTED .* \((?P<code>[a-z0-9_]+)\)$")
 _V7C_PAGE = re.compile(r"^(?P<token>v7c_[a-z_]+)\b")
 _BUDGET_OK_START = re.compile(r"^v7c_budget_ok\b")
+# Bridge v7c-t1's lines (paper_bridge.py process_decision, repair_stop, close_unprotected,
+# entry_rejected, halt_identity, watch_account_values, page_loss_step; real lines feed these in
+# a test once the bridge is merged).
+_OVER_START = re.compile(r"^t1_over_v7c_limits\b")
+_OVER = re.compile(
+    r"^t1_over_v7c_limits (?P<symbol>.+?) \((?P<label>[^()]*)\): realized (?P<realized>\d+\.\d{2})"
+    r" \+ open (?P<open>\d+\.\d{2}) \+ new (?P<new>\d+\.\d{2}) = (?P<total>\d+\.\d{2})"
+    r" \((?P<percent>\d+\.\d{2})%\) vs (?P<cap>\d+(?:\.\d+)?)% of (?P<net_liq>\d+\.\d{2})"
+    r" — would refuse: (?P<tokens>.*) \(source=(?P<source>bot|manual)\)$"
+)
+_REPAIR = re.compile(r"^t1_stop_repair (?P<symbol>.+?) \((?P<label>[^()]*)\): (?P<rest>.*)$")
+_REPAIR_DEADLINE = re.compile(r"closed at market (?:if it is not working by|at) (?P<clock>\d{2}:\d{2}:\d{2}) ET")
+_REPAIRED = re.compile(r"^repaired — stop order \d+ works at \S+(?: (?P<seconds>\d+)s after detection)?$")
+_REPAIR_CLOSING = " — closing at market: "
+_REJECTED_ENTRY = re.compile(r"^(?P<symbol>.+?): entry never filled — rejected by IBKR$")
+_BROKER_REJECTED = re.compile(r"^t1_broker_rejected (?P<symbol>.+?) \((?P<identity>[^()]*)\): IBKR rejected the"
+                              r" entry \(TWS (?P<code>-?\d+) ")
+_HALT = re.compile(r"^t1_guard_rejections (?P<identity>\S+): .* — no new \S+ entries for the rest of")
+_ACCOUNT_VALUE = re.compile(r"(?P<tag>[A-Za-z]+)=(?P<value>\S+)")
+_LOSS_STEP = re.compile(r"^t1_realized_loss_step (?P<step>\d+)%:")
+_ORDER_STATUS = re.compile(r"^order (?P<order>\d+): (?P<status>\S+) filled=")
+# IBKR has the order: the first of these statuses for an entry's parent is its acknowledgement.
+ACKNOWLEDGED_STATUSES = frozenset({"PreSubmitted", "Submitted", "Filled"})
+EXPIRED_REASON = "decision expired"  # paper_bridge._expiry_problem
 
 
 def mask_accounts(text: str) -> str:
@@ -316,6 +437,7 @@ class BridgeRun:
     fenced: list[LogLine] = field(default_factory=list)
     net_liquidation: list[Decimal] = field(default_factory=list)
     session_end_pnl: Decimal | None = None
+    no_limit: bool = False  # the process logged the no-limit test's mode line (t1_mode)
 
 
 @dataclass(slots=True)
@@ -409,11 +531,13 @@ def _summarize(run: BridgeRun) -> None:
                 names = found.group("names").strip()
                 run.sendable = () if names == "none" else tuple(name.strip() for name in names.split(","))
             elif (found := _CAPS.match(text)) is not None:
-                entries = found.group("entries")
+                positions, entries = found.group("positions"), found.group("entries")
                 run.caps[found.group("name")] = IdentityCaps(
-                    int(found.group("positions")), None if entries == "none" else int(entries),
+                    None if positions == "none" else int(positions), None if entries == "none" else int(entries),
                     timedelta(minutes=int(found.group("minutes"))),
                 )
+            elif text.startswith(f"{T1_MODE} "):
+                run.no_limit = True
             elif (found := _NET_LIQ.match(text)) is not None:
                 value = _decimal(found.group("value"))
                 if value is not None and value > 0:
@@ -516,6 +640,11 @@ class StateBracket:
     exit_filled: int
     realized_pnl: Decimal
     sent_at: datetime | None
+    con_id: int = 0
+    avg_entry: Decimal | None = None
+    avg_exit: Decimal | None = None
+    exit_reason: str = ""
+    broker_rejection: str = ""  # bridge v7c-t1: "<TWS code> <message>" when IBKR rejected the entry
 
     @property
     def sent(self) -> bool:
@@ -552,6 +681,11 @@ def _bracket(decision_id: str, item: Mapping[str, Any]) -> StateBracket:
         exit_filled=_int(item.get("exit_filled")),
         realized_pnl=_decimal(item.get("realized_pnl")) or Decimal("0"),
         sent_at=_iso(str(item.get("sent_at") or "")),
+        con_id=_int(item.get("con_id")),
+        avg_entry=_decimal(item.get("avg_entry")),
+        avg_exit=_decimal(item.get("avg_exit")),
+        exit_reason=str(item.get("exit_reason") or ""),
+        broker_rejection=str(item.get("broker_rejection") or ""),
     )
 
 
@@ -734,6 +868,7 @@ class Entry:
     realized: Decimal = Decimal("0")
     closed: LogLine | None = None
     cancelled: LogLine | None = None
+    rejected: LogLine | None = None  # bridge v7c-t1: "entry never filled — rejected by IBKR"
     open: bool = True
 
     def sent_at(self, day: date) -> datetime | None:
@@ -767,6 +902,9 @@ class Timeline:
     manual: int = 0
     loss_crossed: LogLine | None = None
     loss_violations: list[Entry] = field(default_factory=list)
+    # At each SENT: (identity, its brackets open then, all brackets open then), the new one included:
+    # what a position cap would have checked (rule 8's "positions open at once").
+    open_samples: list[tuple[str, int, int]] = field(default_factory=list)
 
     @property
     def realized(self) -> Decimal:
@@ -793,6 +931,10 @@ def replay(section: BridgeSection, state: Mapping[str, StateBracket],
             found = _NET_LIQ.match(text)
             if found is not None:
                 net_liquidation = _decimal(found.group("value"))
+            rejected = _REJECTED_ENTRY.match(text)
+            owner = latest.get(rejected.group("symbol")) if rejected is not None else None
+            if owner is not None and not owner.fills:  # IBKR rejected the entry: it never held a share
+                owner.rejected, owner.open = line, False
             continue
         if kind == "MANUAL":
             timeline.manual += 1
@@ -816,7 +958,8 @@ def replay(section: BridgeSection, state: Mapping[str, StateBracket],
                 timeline.loss_violations.append(entry)
             timeline.entries.append(entry)
             latest[entry.symbol] = entry
-            _count_open(timeline, entry)
+            mine, total = _count_open(timeline, entry)
+            timeline.open_samples.append((entry.identity, mine, total))
             continue
         if kind in {"FILL", "EXIT", "CLOSED", "CANCELLED"}:
             pattern = {"FILL": _FILL, "EXIT": _EXIT, "CLOSED": _CLOSED, "CANCELLED": _CANCELLED}[kind]
@@ -865,13 +1008,14 @@ def replay(section: BridgeSection, state: Mapping[str, StateBracket],
     return timeline
 
 
-def _count_open(timeline: Timeline, entry: Entry) -> None:
+def _count_open(timeline: Timeline, entry: Entry) -> tuple[int, int]:
     mine = sum(1 for item in timeline.entries if item.open and item.identity == entry.identity)
     if mine > timeline.max_open.get(entry.identity, (0, entry.line))[0]:
         timeline.max_open[entry.identity] = (mine, entry.line)
     total = sum(1 for item in timeline.entries if item.open)
     if total > timeline.max_total[0]:
         timeline.max_total = (total, entry.line)
+    return mine, total
 
 
 # --- the report ---------------------------------------------------------------------
@@ -892,12 +1036,61 @@ class SessionReport:
     inputs: list[str] = field(default_factory=list)
     rules: list[RuleResult] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    mode: str | None = None  # NO_LIMIT_MODE or V7C_MODE: what the day's bridge processes ran
+    metrics: DayMetrics | None = None  # rule 8's numbers (the --json "metrics" object)
 
     @property
     def exit_code(self) -> int:
         if self.missing:
             return EXIT_INPUTS_MISSING
         return EXIT_FAILED if any(rule.status == FAIL for rule in self.rules) else EXIT_PASSED
+
+    @property
+    def verdict(self) -> str:
+        if self.missing:
+            return "INPUTS MISSING"
+        return FAIL if self.exit_code == EXIT_FAILED else PASS
+
+    def owner_text(self) -> str:
+        """The owner's short text: one verdict line (clean, or what tripped), then the day in numbers."""
+        day = self.session_date.isoformat()
+        label = NO_LIMIT_TEST_LABEL if self.mode == NO_LIMIT_MODE else "v7c"
+        if self.missing:
+            return mask_accounts(f"{label} {day}: no verdict, an input is missing: {self.missing[0]}") + "\n"
+        aborts = next((rule for rule in self.rules if rule.number == ABORT_RULE), None)
+        failed = [rule for rule in self.rules if rule.status == FAIL and rule.number != ABORT_RULE]
+        if aborts is not None and aborts.status == FAIL:
+            head = (f"{label} {day}: ABORT RULE TRIPPED: {aborts.summary} (plan v2: a malfunction, deploy undo"
+                    " tonight)")
+        elif failed:
+            head = f"{label} {day}: session check FAIL: rule {failed[0].number} {failed[0].title}: {failed[0].summary}"
+        else:
+            warned = sum(rule.status == WARN for rule in self.rules)
+            head = (f"{label} {day}: clean, no abort rule tripped (session check PASS"
+                    + (f", {warned} warning{'s' if warned != 1 else ''}" if warned else "") + ")")
+        lines = [head, *(self.metrics.owner_lines() if self.metrics is not None else [])]
+        return mask_accounts("\n".join(lines)) + "\n"
+
+    def to_json(self) -> dict[str, Any]:
+        """Everything the text report says, for the replay engine (versioned; nothing masked yet)."""
+        return {
+            "schema": REPORT_SCHEMA,
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "session_date": self.session_date.isoformat(),
+            "mode": self.mode,
+            "verdict": self.verdict,
+            "exit_code": self.exit_code,
+            "rules": [{"number": rule.number, "title": rule.title, "status": rule.status, "summary": rule.summary,
+                       "details": list(rule.details)} for rule in self.rules],
+            "metrics": None if self.metrics is None else self.metrics.as_json(),
+            "owner_text": self.owner_text().rstrip("\n"),
+            "inputs": list(self.inputs),
+            "missing": list(self.missing),
+        }
+
+    def render_json(self) -> str:
+        """``to_json`` as text, every account id masked."""
+        return mask_accounts(json.dumps(self.to_json(), indent=2, sort_keys=True, ensure_ascii=False)) + "\n"
 
     def render(self) -> str:
         day = self.session_date.isoformat()
@@ -934,11 +1127,12 @@ def _percent(part: Decimal, whole: Decimal) -> str:
     return f"{(part * 100 / whole).quantize(Decimal('0.01'), rounding=ROUND_HALF_EVEN)}%"
 
 
-def entry_deadline(identity: str, closes_at: datetime) -> datetime:
+def entry_deadline(identity: str, closes_at: datetime,
+                   table: Mapping[str, IdentityCaps] = BRIDGE_IDENTITY_CAPS) -> datetime:
     """The bridge's last entry moment for ``identity``: its caps row's offset from the
     real close, never later than the session's own last entry (close - 30 min)."""
     session_last = closes_at - SESSION_LAST_ENTRY_BEFORE_CLOSE
-    caps = BRIDGE_IDENTITY_CAPS.get(identity)
+    caps = table.get(identity)
     return session_last if caps is None else min(session_last, closes_at - caps.last_entry_before_close)
 
 
@@ -953,6 +1147,27 @@ class _Context:
     fences: list[FenceRecord]
     timeline: Timeline
     connection: sqlite3.Connection
+    opens_at: datetime | None = None
+    logs: Path | None = None
+    data: Path | None = None
+
+    @property
+    def configured(self) -> list[BridgeRun]:
+        """The processes that logged their caps rows (each connect does): the ones a mode applies to."""
+        return [run for run in self.section.runs if run.caps]
+
+    @property
+    def no_limit(self) -> bool:
+        """The day ran the no-limit test: a process logged its mode line."""
+        return any(run.no_limit for run in self.section.runs)
+
+    @property
+    def mixed_modes(self) -> bool:
+        return len({run.no_limit for run in self.configured}) > 1
+
+    @property
+    def caps_table(self) -> Mapping[str, IdentityCaps]:
+        return NO_LIMIT_TEST_IDENTITY_CAPS if self.no_limit else BRIDGE_IDENTITY_CAPS
 
     @property
     def logged_sendable(self) -> set[str] | None:
@@ -1103,22 +1318,33 @@ def _rule_attribution(context: _Context) -> RuleResult:
 
 
 def _caps_text(caps: IdentityCaps) -> str:
+    positions = "none" if caps.max_positions is None else str(caps.max_positions)
     entries = "none" if caps.max_entries_per_day is None else str(caps.max_entries_per_day)
     minutes = int(caps.last_entry_before_close.total_seconds() // 60)
-    return f"positions={caps.max_positions} entries/day={entries} last_entry=close-{minutes}m"
+    return f"positions={positions} entries/day={entries} last_entry=close-{minutes}m"
 
 
 def _rule_caps(context: _Context) -> RuleResult:
+    """v7c: every cap and every last-entry time. The no-limit test: the test's rows and every
+    last-entry time; the counts are measured and reported, never a failure."""
     timeline = context.timeline
     failures: list[str] = []
     details: list[str] = []
     for run in context.section.runs:
+        table = NO_LIMIT_TEST_IDENTITY_CAPS if run.no_limit else BRIDGE_IDENTITY_CAPS
+        which = f"no-limit test {NO_LIMIT_TEST_LABEL}" if run.no_limit else "v7c"
         for name, caps in run.caps.items():
-            approved = BRIDGE_IDENTITY_CAPS.get(name)
+            approved = table.get(name)
             if approved != caps:
-                failures.append(f"the bridge logged caps {name} {_caps_text(caps)}, the approved row is"
+                failures.append(f"the bridge logged caps {name} {_caps_text(caps)}, the approved {which} row is"
                                 f" {_caps_text(approved) if approved else 'missing'}: process at"
                                 f" {run.source}:{run.first_line}")
+    if context.mixed_modes:
+        failures.append("one session ran both the v7c bridge and the no-limit test (t1_mode logged by "
+                        + ", ".join(f"{run.source}:{run.first_line}" for run in context.configured if run.no_limit)
+                        + " only)")
+    no_limit = context.no_limit
+    table = context.caps_table
     attempts: dict[str, list[Entry]] = {}
     for entry in timeline.entries:
         attempts.setdefault(entry.identity, []).append(entry)
@@ -1126,17 +1352,17 @@ def _rule_caps(context: _Context) -> RuleResult:
     for bracket in context.state.values():
         if bracket.sent:
             state_attempts[bracket.strategy_name] = state_attempts.get(bracket.strategy_name, 0) + 1
-    for identity in sorted(set(attempts) | set(state_attempts) | set(BRIDGE_IDENTITY_CAPS)):
-        caps = BRIDGE_IDENTITY_CAPS.get(identity)
+    for identity in sorted(set(attempts) | set(state_attempts) | set(table)):
+        caps = table.get(identity)
         entries = attempts.get(identity, [])
         if caps is None:
             if entries or state_attempts.get(identity):
                 failures.append(f"{identity}: entries sent but it has no approved caps row")
             continue
         count = max(len(entries), state_attempts.get(identity, 0))
-        deadline = entry_deadline(identity, context.closes_at)
+        deadline = entry_deadline(identity, context.closes_at, table)
         peak, peak_line = timeline.max_open.get(identity, (0, None))
-        if peak > caps.max_positions:
+        if caps.max_positions is not None and peak > caps.max_positions:
             failures.append(f"{identity}: {peak} brackets open at once, cap {caps.max_positions}:"
                             f" {peak_line.evidence() if peak_line else ''}")
         if caps.max_entries_per_day is not None and count > caps.max_entries_per_day:
@@ -1149,16 +1375,26 @@ def _rule_caps(context: _Context) -> RuleResult:
             elif sent_at >= deadline:
                 failures.append(f"{entry.name}: sent {sent_at:%H:%M:%S} ET, at or after its last entry"
                                 f" {deadline:%H:%M} ET: {entry.line.evidence()}")
-        limit = "none" if caps.max_entries_per_day is None else str(caps.max_entries_per_day)
         last = max((at for entry in entries if (at := entry.sent_at(context.day)) is not None), default=None)
-        details.append(f"{identity}: open at most {peak}/{caps.max_positions}, entries {count}/{limit},"
-                       f" last entry {f'{last:%H:%M:%S} ET' if last else 'none'} (cutoff {deadline:%H:%M} ET)")
-    total_cap = sum(caps.max_positions for caps in BRIDGE_IDENTITY_CAPS.values())
-    if timeline.max_total[0] > total_cap:
-        failures.append(f"{timeline.max_total[0]} brackets open at once across identities, cap {total_cap}")
-    details.append(f"all identities: open at most {timeline.max_total[0]}/{total_cap}")
+        last_text = f"last entry {f'{last:%H:%M:%S} ET' if last else 'none'} (cutoff {deadline:%H:%M} ET)"
+        if no_limit:
+            details.append(f"{identity}: open at most {peak}, entries {count} (no cap: measured), {last_text}")
+            continue
+        limit = "none" if caps.max_entries_per_day is None else str(caps.max_entries_per_day)
+        details.append(f"{identity}: open at most {peak}/{caps.max_positions}, entries {count}/{limit}, {last_text}")
+    if no_limit:
+        details.append(f"all identities: open at most {timeline.max_total[0]} (no account-wide cap)")
+    else:
+        total_cap = sum(caps.max_positions or 0 for caps in BRIDGE_IDENTITY_CAPS.values())
+        if timeline.max_total[0] > total_cap:
+            failures.append(f"{timeline.max_total[0]} brackets open at once across identities, cap {total_cap}")
+        details.append(f"all identities: open at most {timeline.max_total[0]}/{total_cap}")
     if failures:
         return RuleResult(3, "caps", FAIL, f"{len(failures)} problem(s); first: {failures[0]}", failures + details)
+    if no_limit:
+        sent = [line for line in details if " entries 0 " not in line and not line.startswith("all identities")]
+        return RuleResult(3, "caps", PASS, f"no-limit test {NO_LIMIT_TEST_LABEL}: the test's rows, every entry"
+                          " before its last-entry time; " + ("; ".join(sent) or "no entries"), details)
     sent = [line for line in details if " entries 0/" not in line and not line.startswith("all identities")]
     return RuleResult(3, "caps", PASS, "; ".join(sent) or "no entries", details)
 
@@ -1171,8 +1407,8 @@ class _Prices:
     stop_price: Decimal
 
 
-def _policy_quantity(portfolio: PortfolioSnapshot, entry: Decimal, stop: Decimal) -> int:
-    return policy_quantity(policy=RiskPolicy(), portfolio=portfolio,
+def _policy_quantity(policy: RiskPolicy, portfolio: PortfolioSnapshot, entry: Decimal, stop: Decimal) -> int:
+    return policy_quantity(policy=policy, portfolio=portfolio,
                            setup=cast(RuleSetup, _Prices(entry_limit=entry, stop_price=stop)))
 
 
@@ -1243,10 +1479,11 @@ def _size_entry(context: _Context, entry: Entry) -> _Sized:
                                   f" {net_liq}")
         parts.append(f"notional {_percent(notional, net_liq)}, risk {_percent(risk, net_liq)} of net liquidation"
                      f" {net_liq} (ceilings {MAX_ORDER_NOTIONAL_PCT}%, {MAX_ORDER_RISK_PCT}%)")
-    default_policy = decision.policy_fingerprint == RiskPolicy().fingerprint()
-    recorded = _recorded_portfolio(context, decision) if default_policy else None
-    if recorded is not None:
-        policy = _policy_quantity(recorded, entry.entry, entry.stop)
+    # The decision's own policy, when it is an approved one (the default, or the no-limit test's).
+    approved = APPROVED_POLICIES.get(decision.policy_fingerprint)
+    recorded = _recorded_portfolio(context, decision) if approved is not None else None
+    if approved is not None and recorded is not None:
+        policy = _policy_quantity(approved, recorded, entry.entry, entry.stop)
         expected = scaled_quantity(policy, row)
         sized.exact = expected == intent.quantity
         if not sized.exact:
@@ -1258,20 +1495,22 @@ def _size_entry(context: _Context, entry: Entry) -> _Sized:
         return sized
     parts.insert(1, "inputs not recorded (no account snapshot of run"
                     f" {decision.run_id} rebuilds the decision's portfolio fingerprint"
-                    + ("" if default_policy else "; its policy is not the default RiskPolicy") + ")")
+                    + ("" if approved is not None else "; its policy is not an approved policy") + ")")
     logged = context.net_liquidations
     reference = net_liq or (max(logged) if logged else None)
-    if reference is None or not default_policy:
+    if reference is None or approved is None:
         sized.unchecked.append(f"{entry.name}: identity-row bound unchecked"
-                               f" ({'no net liquidation logged' if reference is None else 'policy not the default'})")
+                               f" ({'no net liquidation logged' if reference is None else 'policy not approved'})")
         sized.detail = f"{entry.name}: " + "; ".join(parts)
         return sized
     at = entry.sent_at(context.day) or datetime.combine(context.day, time(12), tzinfo=NY)
     high = max(logged) * (1 + NET_LIQUIDATION_BAND)
     bound = scaled_quantity(
-        _policy_quantity(PortfolioSnapshot(observed_at=at, net_liquidation=high), entry.entry, entry.stop), row
+        _policy_quantity(approved, PortfolioSnapshot(observed_at=at, net_liquidation=high), entry.entry, entry.stop),
+        row,
     )
-    policy = _policy_quantity(PortfolioSnapshot(observed_at=at, net_liquidation=reference), entry.entry, entry.stop)
+    policy = _policy_quantity(approved, PortfolioSnapshot(observed_at=at, net_liquidation=reference), entry.entry,
+                              entry.stop)
     implied = f"x{(Decimal(intent.quantity) / policy).quantize(Decimal('0.01'))}" if policy > 0 else "x?"
     band = f"+{_plain(NET_LIQUIDATION_BAND * 100)}%"
     if intent.quantity > bound:
@@ -1333,6 +1572,9 @@ def _rule_daily_loss(context: _Context) -> RuleResult:
     if blocked:
         details.append(f"{len(blocked)} SKIP line(s) for the daily loss limit, first {blocked[0].line.evidence()}")
     if not logged:
+        if context.no_limit:
+            return _daily_loss_measured(context, f"realized P&L {realized_state}; net liquidation never logged",
+                                        details)
         if failures:
             return RuleResult(5, "daily loss", FAIL, failures[0], failures + details)
         status = PASS if not timeline.entries else WARN
@@ -1342,6 +1584,8 @@ def _rule_daily_loss(context: _Context) -> RuleResult:
     limit = _loss_limit(reference)
     summary = (f"realized P&L {realized_state} = {_percent(realized_state, reference)} of net liquidation"
                f" {reference} (stop at -{MAX_DAILY_LOSS_PCT}% = -{limit.quantize(Decimal('0.01'))})")
+    if context.no_limit:
+        return _daily_loss_measured(context, summary, details)
     if failures:
         return RuleResult(5, "daily loss", FAIL, f"{len(failures)} problem(s); first: {failures[0]}", failures + details)
     if -realized_state >= limit:
@@ -1349,6 +1593,44 @@ def _rule_daily_loss(context: _Context) -> RuleResult:
         details.append(f"the loss reached the stop at {crossed}; no entry was sent after it")
         return RuleResult(5, "daily loss", PASS, summary + "; crossed, and no entry after it", details)
     return RuleResult(5, "daily loss", PASS, summary, details)
+
+
+def _daily_loss_measured(context: _Context, summary: str, details: list[str]) -> RuleResult:
+    """The no-limit test: the -2 % stop is measured and logged for bot entries, never a refusal (INFO).
+    An owner buy past it is rule 7's failure (a v7c_budget_ok line at or past -2 %, decision D8)."""
+    after = context.timeline.loss_violations
+    details = [*details, *(f"{entry.name} sent after the bot's realized loss reached {MAX_DAILY_LOSS_PCT}% (measured):"
+                           f" {entry.line.evidence()}" for entry in after)]
+    measured = 0
+    for line in context.section.lines():
+        if line.kind == "INFO" and _OVER_START.match(line.text):
+            found = _OVER.match(line.text)
+            if found is not None and DAILY_LOSS_LIMIT in _over_tokens(found.group("tokens")):
+                measured += 1
+                details.append(f"measured past the account's -{MAX_DAILY_LOSS_PCT}%: {line.evidence()}")
+        elif line.kind == "CRITICAL" and _LOSS_STEP.match(line.text):
+            details.append(f"loss-step page: {line.evidence()}")
+    steps = _loss_steps(context.section)
+    return RuleResult(5, "daily loss", INFO,
+                      f"no-limit test {NO_LIMIT_TEST_LABEL}, measured, never blocking: {summary}; {len(after)} bot"
+                      f" entr{'y' if len(after) == 1 else 'ies'} sent after the bot's realized loss reached"
+                      f" {MAX_DAILY_LOSS_PCT}%, {measured} measured past the account's -{MAX_DAILY_LOSS_PCT}%"
+                      f" (t1_over_v7c_limits {DAILY_LOSS_LIMIT}); loss-step pages:"
+                      f" {', '.join(f'{step}%' for step in steps) or 'none'}", details)
+
+
+def _over_tokens(text: str) -> list[str]:
+    return [token.strip() for token in text.split(",") if token.strip()]
+
+
+def _loss_steps(section: BridgeSection) -> list[int]:
+    """The whole percents the realized loss paged at (t1_realized_loss_step), each once."""
+    steps: list[int] = []
+    for line in section.lines():
+        found = _LOSS_STEP.match(line.text) if line.kind == "CRITICAL" else None
+        if found is not None and int(found.group("step")) not in steps:
+            steps.append(int(found.group("step")))
+    return steps
 
 
 def _rule_fences(context: _Context) -> RuleResult:
@@ -1438,7 +1720,73 @@ def parse_budget_ok(line: LogLine) -> BudgetCheck | str:
     if total > limit + BUDGET_ROUNDING:
         problems.append(f"accepted at a day risk of {total} = {_percent(total, net_liq)} of net liquidation"
                         f" {net_liq}, above {_plain(DAY_RISK_BUDGET_PCT)}% ({limit}): {line.evidence()}")
+    # The bridge logs v7c_budget_ok only when nothing would refuse, the -2 % stop included (v7c for
+    # every order; in the no-limit test for owner buys, decision D8): past it, the line is a breach.
+    if realized >= _loss_limit(net_liq) + HALF_CENT:
+        problems.append(f"accepted with the account's realized loss {realized} = {_percent(realized, net_liq)} of net"
+                        f" liquidation {net_liq}, at or past the -{MAX_DAILY_LOSS_PCT}% stop: {line.evidence()}")
     return BudgetCheck(line=line, key=key, total=total, net_liquidation=net_liq, problems=tuple(problems))
+
+
+@dataclass(frozen=True, slots=True)
+class OverCheck:
+    """One ``t1_over_v7c_limits`` line: a bot entry the no-limit test sent over v7c's limits, measured."""
+
+    line: LogLine
+    key: tuple[str, ...]  # ("bot", symbol, identity): an owner buy is never measured-only (D8)
+    total: Decimal
+    net_liquidation: Decimal
+    tokens: tuple[str, ...]  # what v7c would have refused it with
+    problems: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()  # numbers and tokens that disagree (WARN)
+
+    @property
+    def percent(self) -> Decimal:
+        return self.total * 100 / self.net_liquidation
+
+
+def parse_over_limits(line: LogLine) -> OverCheck | str:
+    """A measured-only line's numbers and tokens; a malformed line is its failure text."""
+    found = _OVER.match(line.text)
+    if found is None:
+        return f"malformed {T1_OVER_V7C_LIMITS} line: {line.evidence()}"
+    label, source = found.group("label").strip(), found.group("source")
+    if source != "bot" or _MANUAL_LABEL.match(label) is not None:
+        return (f"malformed {T1_OVER_V7C_LIMITS} line (label {label!r}, source={source}: an owner buy is never"
+                f" measured-only, decision D8): {line.evidence()}")
+    tokens = tuple(_over_tokens(found.group("tokens")))
+    if not tokens or any(token not in T1_OVER_TOKENS for token in tokens):
+        return f"malformed {T1_OVER_V7C_LIMITS} line (would refuse: {found.group('tokens')!r}): {line.evidence()}"
+    realized, open_risk, new, logged, net_liq, cap = (
+        Decimal(found.group(name)) for name in ("realized", "open", "new", "total", "net_liq", "cap")
+    )
+    if net_liq <= 0:
+        return f"malformed {T1_OVER_V7C_LIMITS} line (net liquidation {net_liq}): {line.evidence()}"
+    parts = realized + open_risk + new
+    if abs(parts - logged) > BUDGET_SUM_TOLERANCE:
+        return (f"malformed {T1_OVER_V7C_LIMITS} line (realized + open + new = {parts}, logged total {logged}):"
+                f" {line.evidence()}")
+    total = max(parts, logged)
+    problems: list[str] = []
+    if cap != DAY_RISK_BUDGET_PCT:
+        problems.append(f"the bridge measured against a {_plain(cap)}% cap, the approved day risk budget is"
+                        f" {_plain(DAY_RISK_BUDGET_PCT)}%: {line.evidence()}")
+    notes: list[str] = []
+    limit, loss_limit = net_liq * DAY_RISK_BUDGET_PCT / 100, _loss_limit(net_liq)
+    if V7C_DAY_RISK_BUDGET not in tokens and total > limit + BUDGET_ROUNDING:
+        notes.append(f"{T1_OVER_V7C_LIMITS} total {total} is above {_plain(DAY_RISK_BUDGET_PCT)}% but the line does"
+                     f" not name {V7C_DAY_RISK_BUDGET}: {line.evidence()}")
+    if V7C_DAY_RISK_BUDGET in tokens and total + BUDGET_ROUNDING < limit:
+        notes.append(f"{T1_OVER_V7C_LIMITS} names {V7C_DAY_RISK_BUDGET} at a total {total} within"
+                     f" {_plain(DAY_RISK_BUDGET_PCT)}%: {line.evidence()}")
+    if DAILY_LOSS_LIMIT not in tokens and realized >= loss_limit + HALF_CENT:
+        notes.append(f"{T1_OVER_V7C_LIMITS} realized {realized} is past -{MAX_DAILY_LOSS_PCT}% but the line does not"
+                     f" name {DAILY_LOSS_LIMIT}: {line.evidence()}")
+    if DAILY_LOSS_LIMIT in tokens and realized + HALF_CENT < loss_limit:
+        notes.append(f"{T1_OVER_V7C_LIMITS} names {DAILY_LOSS_LIMIT} at a realized loss {realized} short of"
+                     f" -{MAX_DAILY_LOSS_PCT}%: {line.evidence()}")
+    return OverCheck(line=line, key=("bot", found.group("symbol"), label), total=total, net_liquidation=net_liq,
+                     tokens=tokens, problems=tuple(problems), notes=tuple(notes))
 
 
 def _rule_day_risk_budget(context: _Context) -> RuleResult:
@@ -1466,10 +1814,14 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
     # left by a process that stopped before its SENT never carries over. A process starts at a
     # supervisor banner or a ``bridge sha256=`` line (a new run of the section) and connects once
     # (``PAPER bridge … connected``); either one starts a new process here.
-    pending: dict[tuple[tuple[int, int], tuple[str, ...]], list[BudgetCheck]] = {}
+    # The no-limit test (L-T1): a bot entry's measurement is its v7c_budget_ok line, or its
+    # t1_over_v7c_limits line when v7c would have refused it; either is its own process's, logged
+    # right before the order is stored and placed. An owner buy keeps v7c's line only (D8).
+    no_limit_runs = {run.index for run in context.section.runs if run.no_limit}
+    pending: dict[tuple[tuple[int, int], tuple[str, ...]], list[BudgetCheck | OverCheck]] = {}
     connects: Counter[int] = Counter()
     process = (-1, 0)
-    verified: list[tuple[str, BudgetCheck]] = []
+    verified: list[tuple[str, BudgetCheck | OverCheck]] = []
     unverified: list[str] = []
     missing: list[str] = []
     refused: Counter[str] = Counter()
@@ -1478,6 +1830,10 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
         checks = pending.get((process, key))
         if checks:
             verified.append((name, checks.pop(0)))
+        elif line.run in no_limit_runs and key[0] == "bot":
+            missing.append(f"{name} sent without its measurement line ({V7C_BUDGET_OK} or {T1_OVER_V7C_LIMITS}),"
+                           f" by a process that measures the day risk budget: {line.evidence()}")
+            failures.append(missing[-1])
         elif line.run in budget_runs:
             missing.append(f"{name} sent without its {V7C_BUDGET_OK} line, by a process that enforces the day"
                            f" risk budget: {line.evidence()}")
@@ -1498,6 +1854,18 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
                 continue
             failures += check.problems
             pending.setdefault((process, check.key), []).append(check)
+        elif kind == "INFO" and _OVER_START.match(text):
+            over = parse_over_limits(line)
+            if isinstance(over, str):
+                failures.append(over)
+                continue
+            if line.run not in no_limit_runs:
+                failures.append(f"{T1_OVER_V7C_LIMITS} from a process that did not run the no-limit test (no"
+                                f" {T1_MODE} line): it sent over v7c's limits: {line.evidence()}")
+                continue
+            failures += over.problems
+            warnings += over.notes
+            pending.setdefault((process, over.key), []).append(over)
         elif kind == "SENT":
             sent = _SENT.match(text)
             if sent is not None:  # an unreadable SENT is rule 2's failure
@@ -1531,9 +1899,17 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
     entries = len(verified) + len(unverified) + len(missing)
     by_source = Counter(check.key[0] for _, check in verified)
     refusals = ", ".join(f"{name} x{count}" for name, count in sorted(refused.items())) or "none"
+    overs = [check for _, check in verified if isinstance(check, OverCheck)]
+    over_tokens = Counter(token for check in overs for token in check.tokens)
+    over_text = ", ".join(f"{token} x{count}" for token, count in sorted(over_tokens.items())) or "none"
     details.insert(0, f"refused risk-increasing orders: {refusals}")
+    if context.no_limit:
+        details.insert(1, f"bot entries sent over v7c's limits (measured, no-limit test {NO_LIMIT_TEST_LABEL}):"
+                          f" {len(overs)}, would have refused: {over_text}")
     details += [f"{name}: {_percent(check.total, check.net_liquidation)} of net liquidation"
-                f" {check.net_liquidation}: {check.line.evidence()}" for name, check in verified]
+                f" {check.net_liquidation}"
+                + (f", over v7c's limits ({', '.join(check.tokens)})" if isinstance(check, OverCheck) else "")
+                + f": {check.line.evidence()}" for name, check in verified]
     if failures:
         return RuleResult(7, "day risk budget", FAIL, f"{len(failures)} problem(s); first: {failures[0]}",
                           failures + unverified + warnings + details)
@@ -1544,6 +1920,13 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
                           " than v7c logged no day risk budget); never a PASS", unverified + warnings + details)
     if not verified:
         summary = f"no risk-increasing order sent; refused: {refusals}"
+    elif context.no_limit:
+        name, top = max(verified, key=lambda item: item[1].percent)
+        summary = (f"{len(verified)} accepted entr{'y' if len(verified) == 1 else 'ies'} ({by_source['bot']} bot,"
+                   f" {by_source['manual']} manual), each measured by its own process:"
+                   f" {len(verified) - len(overs)} within v7c's limits, {len(overs)} sent over them (measured,"
+                   f" no-limit test {NO_LIMIT_TEST_LABEL}: {over_text}), highest"
+                   f" {_percent(top.total, top.net_liquidation)} ({name}); refused: {refusals}")
     else:
         name, top = max(verified, key=lambda item: item[1].percent)
         summary = (f"{len(verified)} accepted entr{'y' if len(verified) == 1 else 'ies'} ({by_source['bot']} bot,"
@@ -1553,6 +1936,701 @@ def _rule_day_risk_budget(context: _Context) -> RuleResult:
         return RuleResult(7, "day risk budget", WARN, f"{len(warnings)} flag(s); first: {warnings[0]}",
                           [*warnings, summary, *details])
     return RuleResult(7, "day risk budget", PASS, summary, details)
+
+
+# --- rule 9: the abort rules (owner plan v2) ------------------------------------------------
+
+
+@dataclass(slots=True)
+class RepairEpisode:
+    """One robot position without a working stop, from the bridge's t1_stop_repair lines: from its
+    detection to its stop working again (``repaired``) or the position flat (its CLOSED line)."""
+
+    symbol: str
+    label: str
+    start: datetime  # detection: the first line's time, or its deadline less STOP_REPAIR_DEADLINE
+    first: LogLine
+    end: datetime | None = None
+    last: LogLine | None = None
+    outcome: str = "open"  # repaired | closed | open (never resolved in the log)
+    reported: int | None = None  # the bridge's own "<n>s after detection"
+    closing: bool = False  # the bridge closed it at market
+
+    @property
+    def seconds(self) -> int | None:
+        """Whole seconds without a working stop (bridge.log clocks are whole seconds); None: unresolved."""
+        if self.end is None:
+            return None
+        return max(int((self.end - self.start).total_seconds()), self.reported or 0)
+
+
+def repair_episodes(section: BridgeSection, day: date) -> list[RepairEpisode]:
+    episodes: list[RepairEpisode] = []
+    unresolved: dict[str, RepairEpisode] = {}
+    for line in section.lines():
+        at = line.at(day)
+        if at is None:
+            continue
+        if line.kind in {"INFO", "CRITICAL"} and (found := _REPAIR.match(line.text)) is not None:
+            symbol, rest = found.group("symbol"), found.group("rest")
+            episode = unresolved.get(symbol)
+            if episode is None:
+                episode = RepairEpisode(symbol=symbol, label=found.group("label").strip(), start=at, first=line)
+                unresolved[symbol] = episode
+                episodes.append(episode)
+            deadline = _REPAIR_DEADLINE.search(rest)
+            if deadline is not None:
+                detected = datetime.combine(day, time.fromisoformat(deadline.group("clock")), tzinfo=NY)
+                episode.start = min(episode.start, detected - STOP_REPAIR_DEADLINE)
+            repaired = _REPAIRED.match(rest)
+            if repaired is not None:
+                episode.end, episode.last, episode.outcome = at, line, "repaired"
+                episode.reported = int(repaired.group("seconds")) if repaired.group("seconds") else None
+                del unresolved[symbol]
+            elif _REPAIR_CLOSING in rest:
+                episode.closing = True
+        elif line.kind == "CLOSED" and (found := _CLOSED.match(line.text)) is not None:
+            episode = unresolved.pop(found.group("symbol"), None)
+            if episode is not None:  # flat: nothing left to protect
+                episode.end, episode.last, episode.outcome = at, line, "closed"
+    return episodes
+
+
+@dataclass(frozen=True, slots=True)
+class GuardTrip:
+    token: str
+    identity: str
+    line: LogLine
+
+
+def guard_trips(section: BridgeSection) -> list[GuardTrip]:
+    """Each malfunction guard's trips: a refused entry (its SKIP line) or, for the broker-rejection
+    guard, the identity's day halt (its CRITICAL page; a restart's INFO recount is the same halt)."""
+    trips: list[GuardTrip] = []
+    for line in section.lines():
+        if line.kind == "SKIP" and (found := _SKIP.match(line.text)) is not None:
+            token = found.group("reason").split(":", 1)[0].strip()
+            if token in T1_GUARD_TOKENS and token != T1_GUARD_REJECTIONS:
+                trips.append(GuardTrip(token, (found.group("label") or "?").strip(), line))
+        elif line.kind == "CRITICAL" and (found := _HALT.match(line.text)) is not None:
+            trips.append(GuardTrip(T1_GUARD_REJECTIONS, found.group("identity"), line))
+    return trips
+
+
+def _held_shares(entry: Entry) -> bool:
+    return bool(entry.fills) or (entry.bracket is not None and entry.bracket.filled > 0)
+
+
+def _rule_abort(context: _Context, episodes: Sequence[RepairEpisode], trips: Sequence[GuardTrip]) -> RuleResult:
+    """Plan v2's malfunction abort rules, each a FAIL: deploy undo that night."""
+    failures: list[str] = []
+    details: list[str] = []
+    day, entries = context.day, context.timeline.entries
+    limit = int(STOP_REPAIR_DEADLINE.total_seconds())
+    longest = 0
+    for episode in episodes:
+        seconds = episode.seconds
+        where = f"{episode.symbol} ({episode.label})"
+        if seconds is None:
+            failures.append(f"robot position {where} without a working stop since {episode.start:%H:%M:%S} ET, never"
+                            f" repaired or flat in the log: {episode.first.evidence()}")
+            continue
+        longest = max(longest, seconds)
+        text = (f"robot position {where} without a working stop for {seconds}s ({episode.start:%H:%M:%S}-"
+                f"{episode.end:%H:%M:%S} ET, {episode.outcome}{', closed at market' if episode.closing else ''})")
+        if seconds > limit:
+            failures.append(f"{text}, more than {limit}s: {episode.last.evidence() if episode.last else ''}")
+        else:
+            details.append(f"{text}: {episode.last.evidence() if episode.last else ''}")
+    opens_at = context.opens_at or datetime.combine(day, time(9, 30), tzinfo=NY)
+    closes_at = context.closes_at
+    outside = 0
+    for entry in entries:
+        sent_at = entry.sent_at(day)
+        if sent_at is not None and (sent_at < opens_at or sent_at >= closes_at):
+            outside += 1
+            failures.append(f"{entry.name} sent {sent_at:%H:%M:%S} ET, outside the XNYS session"
+                            f" {opens_at:%H:%M}-{closes_at:%H:%M} ET: {entry.line.evidence()}")
+    flat_by = closes_at - FLAT_BY_BEFORE_CLOSE
+    last_flat: datetime | None = None
+    for entry in entries:
+        if not _held_shares(entry):
+            continue
+        flat_at = entry.closed.at(day) if entry.closed is not None else None
+        if flat_at is None:
+            failures.append(f"{entry.name} still holds shares at the end of the log (no CLOSED line), past"
+                            f" {flat_by:%H:%M} ET: {entry.line.evidence()}")
+            continue
+        last_flat = flat_at if last_flat is None else max(last_flat, flat_at)
+        if flat_at > flat_by:
+            failures.append(f"{entry.name} open until {flat_at:%H:%M:%S} ET, past {flat_by:%H:%M} ET (the close less"
+                            f" {int(FLAT_BY_BEFORE_CLOSE.total_seconds() // 60)} min):"
+                            f" {entry.closed.evidence() if entry.closed else ''}")
+    duplicates = 0
+    for index, first in enumerate(entries):
+        first_at = first.sent_at(day)
+        for second in entries[index + 1:]:
+            second_at = second.sent_at(day)
+            if (first_at is None or second_at is None or (first.symbol, first.qty) != (second.symbol, second.qty)
+                    or abs(second_at - first_at) >= GUARD_DUPLICATE_WINDOW):
+                continue
+            duplicates += 1
+            failures.append(f"duplicate entry: {second.name} repeats {first.name}"
+                            f" {abs(second_at - first_at).total_seconds():.1f}s later (BUY {second.qty}"
+                            f" {second.symbol}, window {int(GUARD_DUPLICATE_WINDOW.total_seconds())}s):"
+                            f" {second.line.evidence()}")
+    counts = Counter(trip.token for trip in trips)
+    for token, count in sorted(counts.items()):
+        lines = [trip for trip in trips if trip.token == token]
+        who = ", ".join(sorted({trip.identity for trip in lines}))
+        text = f"guard {token} tripped {count} time{'s' if count != 1 else ''} today ({who})"
+        if count >= GUARD_TRIPS_ABORT:
+            failures.append(f"{text}: the same guard twice in one day: {lines[1].line.evidence()}")
+        else:
+            details.append(f"{text}: {lines[0].line.evidence()}")
+    details.append("replay reproduction (orders replayed from the signal log): the replay engine's check, not this"
+                   " checker's")
+    if failures:
+        return RuleResult(ABORT_RULE, "abort rules", FAIL, f"{len(failures)} problem(s); first: {failures[0]}",
+                          failures + details)
+    repaired = f"{len(episodes)} stop repair(s), longest {longest}s" if episodes else "no stop repair"
+    flat = f"last position flat {last_flat:%H:%M:%S} ET" if last_flat is not None else "no position held"
+    guards = ", ".join(f"{token} x{count}" for token, count in sorted(counts.items())) or "none"
+    return RuleResult(ABORT_RULE, "abort rules", PASS,
+                      f"none tripped: {repaired} (limit {limit}s), {outside} entries outside"
+                      f" {opens_at:%H:%M}-{closes_at:%H:%M} ET, {flat} (limit {flat_by:%H:%M} ET),"
+                      f" {duplicates} duplicates, guards tripped: {guards}", details)
+
+
+# --- rule 8: the no-limit test's nightly numbers (INFO) ---------------------------------------
+
+
+def _ratio(part: Decimal, whole: Decimal) -> Decimal:
+    return (part * 100 / whole).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+
+
+def _quantiles(values: Sequence[Decimal]) -> dict[str, str | int | None]:
+    """p50, p95 (nearest rank: an observed value) and max of ``values`` as text, and how many."""
+    ordered = sorted(values)
+    p50, p95 = nearest_rank(ordered, Decimal("0.5")), nearest_rank(ordered, Decimal("0.95"))
+    return {"p50": None if p50 is None else _plain(p50), "p95": None if p95 is None else _plain(p95),
+            "max": None if not ordered else _plain(ordered[-1]), "n": len(ordered)}
+
+
+def _count_quantiles(values: Sequence[int]) -> dict[str, int | None]:
+    """``_quantiles`` of whole counts, as numbers."""
+    ordered = sorted(Decimal(value) for value in values)
+    p50, p95 = nearest_rank(ordered, Decimal("0.5")), nearest_rank(ordered, Decimal("0.95"))
+    return {"p50": None if p50 is None else int(p50), "p95": None if p95 is None else int(p95),
+            "max": None if not ordered else int(ordered[-1]), "n": len(ordered)}
+
+
+@dataclass(slots=True)
+class TradeRow:
+    """One entry that held shares: what it bought, how it ended, and its R."""
+
+    identity: str
+    symbol: str
+    orders: str
+    sent: str
+    closed: str | None
+    qty: int
+    filled: int
+    entry: Decimal
+    stop: Decimal
+    avg_entry: Decimal | None
+    avg_exit: Decimal | None
+    exit_reason: str
+    pnl: Decimal
+    pct_day_volume: Decimal | None
+
+    @property
+    def r(self) -> Decimal | None:
+        """Realized P&L over the planned risk of the shares bought: filled x (entry - stop)."""
+        risk = Decimal(self.filled) * (self.entry - self.stop)
+        return None if risk <= 0 else (self.pnl / risk).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "identity": self.identity, "symbol": self.symbol, "orders": self.orders, "sent": self.sent,
+            "closed": self.closed, "qty": self.qty, "filled": self.filled, "entry": str(self.entry),
+            "stop": str(self.stop), "avg_entry": None if self.avg_entry is None else str(self.avg_entry),
+            "avg_exit": None if self.avg_exit is None else str(self.avg_exit), "exit_reason": self.exit_reason,
+            "pnl": str(self.pnl), "r": None if self.r is None else str(self.r),
+            "pct_day_volume": None if self.pct_day_volume is None else str(self.pct_day_volume),
+        }
+
+    def text(self) -> str:
+        volume = "" if self.pct_day_volume is None else f"; {self.pct_day_volume}% of the day's volume"
+        r = "" if self.r is None else f" = {self.r}R"
+        return (f"trade {self.identity} {self.symbol} (orders {self.orders}) sent {self.sent} ET:"
+                f" {self.filled}/{self.qty} sh @ {self.avg_entry if self.avg_entry is not None else self.entry},"
+                f" stop {self.stop}, out {self.avg_exit if self.avg_exit is not None else '-'}"
+                f" ({self.exit_reason or 'open'}) at {self.closed or 'never'} ET: P&L {self.pnl}{r}{volume}")
+
+
+@dataclass(slots=True)
+class StrategyMetrics:
+    """One sendable identity's day (or the total): the owner's plan v2 nightly report fields."""
+
+    name: str
+    signals: int = 0
+    ai_approved: int = 0
+    ai_rejected: int = 0
+    reasons: Counter[str] = field(default_factory=Counter)
+    ai_cost: Decimal = Decimal("0")
+    accepted: int = 0
+    risk_blocked: int = 0
+    sent: int = 0
+    filled: int = 0
+    rejected: Counter[str] = field(default_factory=Counter)  # TWS code -> entries IBKR rejected
+    expired: int = 0  # approvals that expired before their order left (paper_bridge _expiry_problem)
+    open_samples: list[int] = field(default_factory=list)
+    symbols: Counter[str] = field(default_factory=Counter)  # entries per symbol
+    trades: list[TradeRow] = field(default_factory=list)
+    ack_latency: list[Decimal] = field(default_factory=list)  # seconds, decision -> IBKR's first status
+    sent_latency: list[Decimal] = field(default_factory=list)  # seconds, decision -> order placed
+    guards: Counter[str] = field(default_factory=Counter)
+
+    @property
+    def reentries(self) -> int:
+        return sum(count - 1 for count in self.symbols.values() if count > 1)
+
+    @property
+    def closed_trades(self) -> list[TradeRow]:
+        return [trade for trade in self.trades if trade.closed is not None]
+
+    @property
+    def pnl(self) -> Decimal:
+        return sum((trade.pnl for trade in self.trades), Decimal("0"))
+
+    @property
+    def mean_r(self) -> Decimal | None:
+        rs = [trade.r for trade in self.closed_trades if trade.r is not None]
+        return None if not rs else (sum(rs, Decimal("0")) / len(rs)).quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+
+    @property
+    def win_rate(self) -> Decimal | None:
+        closed = self.closed_trades
+        return None if not closed else _ratio(Decimal(sum(trade.pnl > 0 for trade in closed)), Decimal(len(closed)))
+
+    @property
+    def max_drawdown(self) -> Decimal:
+        """The deepest fall of the realized P&L curve (trades in close order) from its running peak."""
+        peak = equity = drawdown = Decimal("0")
+        for trade in sorted(self.closed_trades, key=lambda item: (item.closed or "", item.orders)):
+            equity += trade.pnl
+            peak = max(peak, equity)
+            drawdown = max(drawdown, peak - equity)
+        return drawdown
+
+    def top_reasons(self) -> list[tuple[str, int]]:
+        return sorted(self.reasons.items(), key=lambda item: (-item[1], item[0]))[:TOP_REASONS]
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "signals": self.signals,
+            "ai": {"approved": self.ai_approved, "rejected": self.ai_rejected,
+                   "top_rejection_reasons": [{"reason": reason, "count": count} for reason, count in self.top_reasons()],
+                   "cost_usd": _plain(self.ai_cost)},
+            "decisions": {"accepted": self.accepted, "risk_blocked": self.risk_blocked},
+            "orders": {"sent": self.sent, "filled": self.filled, "rejected": dict(sorted(self.rejected.items())),
+                       "expired_unsent": self.expired},
+            "positions_at_once": _count_quantiles(self.open_samples),
+            "entries": self.sent,
+            "reentries": {"count": self.reentries,
+                          "symbols": {symbol: count for symbol, count in sorted(self.symbols.items()) if count > 1}},
+            "trades": [trade.as_json() for trade in self.trades],
+            "mean_r": None if self.mean_r is None else str(self.mean_r),
+            "win_rate_pct": None if self.win_rate is None else str(self.win_rate),
+            "pnl": str(self.pnl),
+            "max_drawdown": str(self.max_drawdown),
+            "latency_s": {"signal_to_ack": _quantiles(self.ack_latency), "signal_to_sent": _quantiles(self.sent_latency)},
+            "guards": dict(sorted(self.guards.items())),
+        }
+
+    def text(self) -> str:
+        reasons = ", ".join(f'"{reason}" x{count}' for reason, count in self.top_reasons()) or "none"
+        rejected = ", ".join(f"{code} x{count}" for code, count in sorted(self.rejected.items())) or "none"
+        positions = _count_quantiles(self.open_samples)
+        ack, sent = _quantiles(self.ack_latency), _quantiles(self.sent_latency)
+        again = ", ".join(f"{symbol} x{count}" for symbol, count in sorted(self.symbols.items()) if count > 1)
+        guards = ", ".join(f"{token} x{count}" for token, count in sorted(self.guards.items())) or "none"
+        return (f"{self.name}: signals {self.signals}; AI {self.ai_approved} approved, {self.ai_rejected} rejected"
+                f" (top: {reasons}), cost ${_plain(self.ai_cost)}; accepted {self.accepted}, risk-blocked"
+                f" {self.risk_blocked}; orders sent {self.sent}, filled {self.filled}, rejected by IBKR {rejected},"
+                f" expired unsent {self.expired}; positions at once p50 {positions['p50']} p95 {positions['p95']}"
+                f" max {positions['max']}; entries {self.sent}, re-entries {self.reentries}"
+                f"{f' ({again})' if again else ''}; trades {len(self.trades)} (closed {len(self.closed_trades)}),"
+                f" win rate {self.win_rate if self.win_rate is not None else 'n/a'}%, mean R"
+                f" {self.mean_r if self.mean_r is not None else 'n/a'}, P&L {self.pnl}, max drawdown"
+                f" {self.max_drawdown}; latency signal->ack p50 {ack['p50']}s p95 {ack['p95']}s (signal->sent p50"
+                f" {sent['p50']}s p95 {sent['p95']}s); guards {guards}")
+
+
+@dataclass(slots=True)
+class AccountMetrics:
+    """The account-level part of the nightly report."""
+
+    buying_power: dict[str, Any] = field(default_factory=dict)
+    close_out: dict[str, Any] = field(default_factory=dict)
+    stop_repairs: dict[str, Any] = field(default_factory=dict)
+    guards: dict[str, int] = field(default_factory=dict)
+    sentinel_would_fence: dict[str, Any] = field(default_factory=dict)
+    loss_step_pages: list[int] = field(default_factory=list)
+    low_cushion_pages: int = 0
+    manual_unprotected_pages: int = 0
+    market: dict[str, Any] = field(default_factory=dict)
+    size_vs_displayed: dict[str, Any] = field(default_factory=dict)
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "buying_power": self.buying_power, "close_out": self.close_out, "stop_repairs": self.stop_repairs,
+            "guards": dict(sorted(self.guards.items())), "sentinel_would_fence": self.sentinel_would_fence,
+            "loss_step_pages": list(self.loss_step_pages), "low_cushion_pages": self.low_cushion_pages,
+            "manual_unprotected_pages": self.manual_unprotected_pages, "market": self.market,
+            "size_vs_displayed": self.size_vs_displayed,
+        }
+
+    def lines(self) -> list[str]:
+        power = self.buying_power
+        power_text = (f"peak buying power used {power['peak_used_pct']}% of available (min AvailableFunds"
+                      f" {power['min_available_funds']}, min Cushion {power['min_cushion']}; {power['samples']}"
+                      " readings)" if power.get("samples") else f"buying power: {power.get('note', 'n/a')}")
+        close = self.close_out
+        repairs = self.stop_repairs
+        fence = self.sentinel_would_fence
+        fence_text = (", ".join(f"{name} x{count}" for name, count in sorted(fence.get("identities", {}).items()))
+                      or "none") if fence.get("status") == "read" else f"n/a ({fence.get('reason')})"
+        market = "; ".join(
+            f"{symbol} {value['return_pct']}% (range {value['range_pct']}%)" if value.get("status") == "read"
+            else f"{symbol} n/a ({value.get('reason')})" for symbol, value in self.market.items())
+        return [
+            power_text,
+            f"close-out: last position flat {close.get('last_flat') or 'none held'}"
+            f" (limit {close.get('limit')} ET); still open at the end: {', '.join(close.get('open_at_end', [])) or 'none'}",
+            f"stop repairs: {repairs.get('episodes', 0)} ({repairs.get('repaired', 0)} repaired,"
+            f" {repairs.get('closed_at_market', 0)} closed at market), longest {repairs.get('longest_s')}s without a stop",
+            "guards triggered: " + (", ".join(f"{token} x{count}" for token, count in sorted(self.guards.items()))
+                                     or "none"),
+            f"Sentinel would-fence: {fence_text}",
+            f"loss-step pages: {', '.join(f'{step}%' for step in self.loss_step_pages) or 'none'}; low-cushion pages"
+            f" {self.low_cushion_pages}; manual positions without a stop paged {self.manual_unprotected_pages}",
+            f"market: {market}",
+            f"order size vs displayed size: {self.size_vs_displayed.get('status')} ({self.size_vs_displayed.get('reason')})",
+        ]
+
+
+@dataclass(slots=True)
+class DayMetrics:
+    """Rule 8: per sendable identity, the total, and the account."""
+
+    mode: str
+    strategies: dict[str, StrategyMetrics]
+    total: StrategyMetrics
+    account: AccountMetrics
+
+    def as_json(self) -> dict[str, Any]:
+        return {"mode": self.mode, "strategies": {name: item.as_json() for name, item in self.strategies.items()},
+                "total": self.total.as_json(), "account": self.account.as_json(),
+                "definitions": dict(METRIC_DEFINITIONS)}
+
+    def lines(self) -> list[str]:
+        trades = [trade.text() for item in self.strategies.values() for trade in item.trades]
+        return [*(item.text() for item in self.strategies.values()), self.total.text(), *self.account.lines(),
+                *trades]
+
+    def owner_lines(self) -> list[str]:
+        total = self.total
+        close = self.account.close_out
+        head = (f"total: {total.signals} signals, {total.sent} sent, {total.filled} filled, {len(total.closed_trades)}"
+                f" trades, win {total.win_rate if total.win_rate is not None else 'n/a'}%, mean R"
+                f" {total.mean_r if total.mean_r is not None else 'n/a'}, P&L {total.pnl}; positions at once max"
+                f" {max(total.open_samples, default=0)}; last flat {close.get('last_flat') or 'none held'}")
+        rows = [f"{item.name}: {item.sent} sent, {len(item.closed_trades)} trades, P&L {item.pnl}, mean R"
+                f" {item.mean_r if item.mean_r is not None else 'n/a'}" for item in self.strategies.values()
+                if item.signals or item.sent]
+        return [head, *rows]
+
+
+# What each number of the JSON means (the replay engine and the 14 Nov decision read them).
+METRIC_DEFINITIONS: Mapping[str, str] = MappingProxyType({
+    "signals": "the day's decisions with a setup (every outcome but data_blocked and rule_rejected)",
+    "positions_at_once": "brackets that hold or may hold shares at each SENT, the new one included (what a"
+                         " position cap checks); the total counts every identity's",
+    "quantiles": "nearest rank (an observed value)",
+    "latency_s": "decision written -> order placed (the state's sent_at), and -> IBKR's first PreSubmitted,"
+                 " Submitted or Filled status (bridge.log, whole-second clocks, never below 0)",
+    "r": "realized P&L over filled shares x (SENT entry - SENT stop)",
+    "max_drawdown": "the deepest fall of the realized P&L (trades in close order) from its running peak",
+    "win_rate_pct": "closed trades with a positive P&L, of all closed trades",
+    "pct_day_volume": "filled shares over the research bars' day volume (round lots x 100)",
+})
+NO_SETUP_OUTCOMES = frozenset({"data_blocked", "rule_rejected"})  # a candidate without a setup: no signal
+DAY_DECISIONS_SQL = """
+    SELECT d.outcome, d.payload_json, v.spec_json
+    FROM autotrader_candidate_decisions d
+    JOIN autotrader_runs r ON r.id = d.run_id
+    LEFT JOIN autotrader_strategy_versions v
+      ON v.strategy_id = r.strategy_id AND v.version = r.strategy_version
+    WHERE r.session_date = ?
+    ORDER BY d.created_at, d.id
+"""
+
+
+def _reason(text: object) -> str:
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= REASON_WIDTH else words[:REASON_WIDTH - 3] + "..."
+
+
+def _count_decisions(context: _Context, strategies: Mapping[str, StrategyMetrics]) -> None:
+    """Signals and AI verdicts from the decision ledger (read-only): every decision with a setup."""
+    for outcome, payload_json, spec_json in context.connection.execute(DAY_DECISIONS_SQL,
+                                                                       (context.day.isoformat(),)).fetchall():
+        item = strategies.get(strategy_name_from_spec(spec_json))
+        if item is None or str(outcome) in NO_SETUP_OUTCOMES:
+            continue
+        item.signals += 1
+        item.accepted += str(outcome) == "shadow_accepted"
+        item.risk_blocked += str(outcome) == "risk_blocked"
+        try:
+            payload = json.loads(str(payload_json))
+        except ValueError:
+            payload = None
+        review = payload.get("ai_review") if isinstance(payload, dict) else None
+        review = review if isinstance(review, dict) else {}
+        item.ai_cost += _decimal(review.get("cost_usd")) or Decimal("0")
+        if review.get("decision") == "PROPOSE":
+            item.ai_approved += 1
+        else:
+            item.ai_rejected += 1
+            item.reasons[_reason(review.get("failure_reason") or review.get("rationale") or "no AI review recorded")] += 1
+
+
+def _research_day(data: Path | None, day: date, con_id: int) -> Any:
+    """The research recorder's regular-session bars of ``con_id`` on ``day``, or why there are none."""
+    from trading.research.bars_store import BarsStoreError, ResearchPaths, day_from_payload
+
+    if data is None or con_id <= 0:
+        return "no contract id"
+    path = ResearchPaths(root=data / "research").bars_file(day, con_id)
+    if not _regular_file(path):
+        return f"no research bars for {day} (the recorder runs 16:20-17:30 ET)"
+    try:
+        stored = day_from_payload(json.loads(_read_bytes(path, MAX_BARS_FILE_BYTES).decode("utf-8")),
+                                  expected_date=day, expected_con_id=con_id)
+    except (InputsMissing, BarsStoreError, UnicodeDecodeError, ValueError) as exc:
+        return f"research bars unreadable ({type(exc).__name__})"
+    return stored if stored.use_rth else "research bars filed in the wrong series (extended hours)"
+
+
+def _market_day(data: Path | None, day: date) -> dict[str, Any]:
+    """SPY and QQQ: the day's return and range, from the research bars when the recorder stored them."""
+    from trading.research.bars_store import ResearchPaths
+
+    found: dict[str, Any] = {}
+    directory = ResearchPaths(root=data / "research").session_directory(day) if data is not None else None
+    if directory is not None and directory.is_dir() and not directory.is_symlink():
+        for path in sorted(directory.glob("*.json")):
+            if not _regular_file(path):
+                continue
+            try:
+                payload = json.loads(_read_bytes(path, MAX_BARS_FILE_BYTES).decode("utf-8"))
+            except (InputsMissing, UnicodeDecodeError, ValueError):
+                continue
+            symbol = str(payload.get("symbol") or "").upper() if isinstance(payload, dict) else ""
+            if symbol in MARKET_SYMBOLS and symbol not in found and path.stem.isdigit():
+                stored = _research_day(data, day, int(path.stem))
+                if not isinstance(stored, str):
+                    found[symbol] = stored
+    market: dict[str, Any] = {}
+    for symbol in MARKET_SYMBOLS:
+        stored = found.get(symbol)
+        if stored is None:
+            market[symbol] = {"status": "n/a", "reason": f"no research bars for {symbol} on {day} (the recorder"
+                                                         " runs 16:20-17:30 ET and stores the day's contracts)"}
+            continue
+        base = stored.prior_close if stored.prior_close else stored.bars[0].open
+        high, low = max(bar.high for bar in stored.bars), min(bar.low for bar in stored.bars)
+        market[symbol] = {"status": "read", "return_pct": str(_ratio(stored.bars[-1].close - base, base)),
+                          "range_pct": str(_ratio(high - low, base)),
+                          "base": "prior close" if stored.prior_close else "first open"}
+    return market
+
+
+def _would_fence(logs: Path | None, day: date) -> dict[str, Any]:
+    """The Sentinel's log-only lines (sentinel would fence <ID>: ...) dated ``day`` in New York."""
+    if logs is None:
+        return {"status": "n/a", "reason": "no log directory"}
+    files = log_files(logs, NOTIFIER_LOG)
+    if not files:
+        return {"status": "n/a", "reason": f"no {NOTIFIER_LOG}"}
+    seen: set[str] = set()
+    counts: Counter[str] = Counter()
+    for path in files:
+        try:
+            lines = _lines(path)
+        except InputsMissing as exc:
+            return {"status": "n/a", "reason": str(exc)}
+        for raw in lines:
+            index = raw.find(SENTINEL_WOULD_FENCE)
+            at = line_time(raw) if index >= 0 else None
+            if at is None or at.astimezone(NY).date() != day or raw in seen:
+                continue  # a rotation's carried copy is byte-identical: counted once
+            seen.add(raw)
+            counts[raw[index + len(SENTINEL_WOULD_FENCE):].split(":", 1)[0].strip()] += 1
+    return {"status": "read", "identities": dict(sorted(counts.items()))}
+
+
+def _account_values(section: BridgeSection) -> dict[str, Any]:
+    readings: list[dict[str, Decimal | None]] = []
+    for line in section.lines():
+        if line.kind == "INFO" and line.text.startswith(f"{T1_ACCOUNT_VALUES} "):
+            readings.append({found.group("tag"): _decimal(found.group("value"))
+                             for found in _ACCOUNT_VALUE.finditer(line.text[len(T1_ACCOUNT_VALUES) + 1:])})
+    if not readings:
+        return {"samples": 0, "peak_used_pct": None, "min_available_funds": None, "min_cushion": None,
+                "note": f"n/a (no {T1_ACCOUNT_VALUES} line: the bridge logs account values in the no-limit test)"}
+    used = [_ratio(gross, gross + power) for item in readings
+            if (gross := item.get("GrossPositionValue")) is not None and (power := item.get("BuyingPower")) is not None
+            and gross + power > 0]
+    funds = [value for item in readings if (value := item.get("AvailableFunds")) is not None]
+    cushion = [value for item in readings if (value := item.get("Cushion")) is not None]
+    return {"samples": len(readings), "peak_used_pct": None if not used else str(max(used)),
+            "min_available_funds": None if not funds else str(min(funds)),
+            "min_cushion": None if not cushion else str(min(cushion)),
+            "definition": "GrossPositionValue / (GrossPositionValue + BuyingPower)"}
+
+
+def day_metrics(context: _Context, episodes: Sequence[RepairEpisode], trips: Sequence[GuardTrip]) -> DayMetrics:
+    """Rule 8's numbers: every input read-only (bridge.log, the state, the ledger, notifier.log, research bars)."""
+    day, timeline = context.day, context.timeline
+    names = sorted(set(SENDABLE_IDENTITIES) | {entry.identity for entry in timeline.entries})
+    strategies = {name: StrategyMetrics(name) for name in names}
+    _count_decisions(context, strategies)
+    acks: dict[int, LogLine] = {}
+    rejected: list[tuple[str, str]] = []
+    for line in context.section.lines():
+        if line.kind == "INFO" and (found := _ORDER_STATUS.match(line.text)) is not None:
+            if found.group("status") in ACKNOWLEDGED_STATUSES:
+                acks.setdefault(int(found.group("order")), line)
+        elif line.kind in {"INFO", "CRITICAL"} and (found := _BROKER_REJECTED.match(line.text)) is not None:
+            rejected.append((found.group("identity").strip(), found.group("code")))
+    for identity, code in rejected:
+        if identity in strategies:
+            strategies[identity].rejected[code] += 1
+    for skip in timeline.skips:
+        if skip.label is not None and skip.label.strip() in strategies and skip.reason.startswith(EXPIRED_REASON):
+            strategies[skip.label.strip()].expired += 1
+    for trip in trips:
+        if trip.identity in strategies:
+            strategies[trip.identity].guards[trip.token] += 1
+    total_open: list[int] = []
+    for entry, (_, mine, everyone) in zip(timeline.entries, timeline.open_samples):
+        item = strategies[entry.identity]
+        item.sent += 1
+        item.symbols[entry.symbol] += 1
+        item.open_samples.append(mine)
+        total_open.append(everyone)
+        decided = _iso(entry.decision.created_at) if entry.decision is not None else None
+        sent_at = entry.sent_at(day)
+        ack = acks.get(entry.parent)
+        acked = ack.at(day) if ack is not None else None
+        if decided is not None and sent_at is not None:
+            item.sent_latency.append(_seconds(sent_at - decided))
+        if decided is not None and acked is not None:
+            item.ack_latency.append(_seconds(acked - decided))
+        if not _held_shares(entry):
+            continue
+        item.filled += 1
+        bracket = entry.bracket
+        filled = bracket.filled if bracket is not None and bracket.filled > 0 else _last_filled(entry)
+        stored = _research_day(context.data, day, bracket.con_id) if bracket is not None else "no state bracket"
+        volume = None if isinstance(stored, str) else sum((bar.volume for bar in stored.bars), Decimal("0"))
+        reason = bracket.exit_reason if bracket is not None and bracket.exit_reason else _closed_reason(entry)
+        item.trades.append(TradeRow(
+            identity=entry.identity, symbol=entry.symbol, orders=f"{entry.parent}-{entry.parent + 2}",
+            sent=entry.line.stamp.removesuffix(" ET"), closed=entry.closed.stamp.removesuffix(" ET") if entry.closed else None,
+            qty=entry.qty, filled=filled, entry=entry.entry, stop=entry.stop,
+            avg_entry=bracket.avg_entry if bracket is not None else None,
+            avg_exit=bracket.avg_exit if bracket is not None else None, exit_reason=reason,
+            pnl=bracket.realized_pnl if bracket is not None else entry.realized,
+            pct_day_volume=None if not volume else _ratio(Decimal(filled), volume * BAR_VOLUME_MULTIPLIER),
+        ))
+    total = StrategyMetrics("total")
+    for item in strategies.values():
+        total.signals += item.signals
+        total.ai_approved += item.ai_approved
+        total.ai_rejected += item.ai_rejected
+        total.reasons.update(item.reasons)
+        total.ai_cost += item.ai_cost
+        total.accepted += item.accepted
+        total.risk_blocked += item.risk_blocked
+        total.sent += item.sent
+        total.filled += item.filled
+        total.rejected.update(item.rejected)
+        total.expired += item.expired
+        total.symbols.update(item.symbols)
+        total.trades += item.trades
+        total.ack_latency += item.ack_latency
+        total.sent_latency += item.sent_latency
+        total.guards.update(item.guards)
+    total.open_samples = total_open
+    total.trades.sort(key=lambda trade: (trade.sent, trade.orders))
+    account = AccountMetrics()
+    account.buying_power = _account_values(context.section)
+    flat_by = context.closes_at - FLAT_BY_BEFORE_CLOSE
+    held = [entry for entry in timeline.entries if _held_shares(entry)]
+    flats = [at for entry in held if entry.closed is not None and (at := entry.closed.at(day)) is not None]
+    account.close_out = {"last_flat": None if not flats else f"{max(flats):%H:%M:%S}", "limit": f"{flat_by:%H:%M}",
+                         "open_at_end": [entry.name for entry in held if entry.closed is None]}
+    resolved = [episode.seconds for episode in episodes if episode.seconds is not None]
+    account.stop_repairs = {"episodes": len(episodes), "repaired": sum(e.outcome == "repaired" for e in episodes),
+                            "closed_at_market": sum(e.closing for e in episodes),
+                            "unresolved": sum(e.seconds is None for e in episodes),
+                            "longest_s": max(resolved, default=0)}
+    account.guards = dict(Counter(trip.token for trip in trips))
+    account.sentinel_would_fence = _would_fence(context.logs, day)
+    account.loss_step_pages = _loss_steps(context.section)
+    account.low_cushion_pages = sum(1 for line in context.section.lines()
+                                    if line.kind == "CRITICAL" and line.text.startswith(f"{T1_LOW_CUSHION}:"))
+    account.manual_unprotected_pages = sum(1 for line in context.section.lines() if line.kind == "CRITICAL"
+                                           and line.text.startswith(f"{T1_UNPROTECTED_MANUAL} "))
+    account.market = _market_day(context.data, day)
+    account.size_vs_displayed = {"status": "n/a", "reason": "the bridge logs no displayed (bid or ask) size at the"
+                                                           " quote; % of the day's volume is per trade"}
+    return DayMetrics(mode=NO_LIMIT_MODE if context.no_limit else V7C_MODE, strategies=strategies, total=total,
+                      account=account)
+
+
+def _seconds(delta: timedelta) -> Decimal:
+    """Whole log clocks against precise times: never below zero, tenths of a second."""
+    return max(Decimal("0"), Decimal(str(delta.total_seconds()))).quantize(Decimal("0.1"), rounding=ROUND_HALF_EVEN)
+
+
+def _closed_reason(entry: Entry) -> str:
+    found = _CLOSED.match(entry.closed.text) if entry.closed is not None else None
+    return found.group("reason") if found is not None else ""
+
+
+def _last_filled(entry: Entry) -> int:
+    for line in reversed(entry.fills):
+        found = _FILL.match(line.text)
+        if found is not None:
+            return int(found.group("filled"))
+    return 0
+
+
+def _rule_metrics(metrics: DayMetrics) -> RuleResult:
+    total = metrics.total
+    label = f"no-limit test {NO_LIMIT_TEST_LABEL}" if metrics.mode == NO_LIMIT_MODE else "v7c (baseline)"
+    summary = (f"{label}: {total.signals} signals ({total.ai_approved} AI-approved), {total.sent} sent,"
+               f" {total.filled} filled, {len(total.closed_trades)} trades, win rate"
+               f" {total.win_rate if total.win_rate is not None else 'n/a'}%, mean R"
+               f" {total.mean_r if total.mean_r is not None else 'n/a'}, P&L {total.pnl}; positions at once max"
+               f" {max(total.open_samples, default=0)}; last flat"
+               f" {metrics.account.close_out.get('last_flat') or 'none held'} ET")
+    return RuleResult(METRICS_RULE, "no-limit test metrics", INFO, summary, metrics.lines())
 
 
 def _inputs(context: _Context, logs: Path, data: Path, db: Path, supervisor_files: int) -> list[str]:
@@ -1575,11 +2653,16 @@ def _inputs(context: _Context, logs: Path, data: Path, db: Path, supervisor_file
         f"database {db} (read-only, mode=ro): {len(context.decisions)} shadow_accepted decision(s) on {context.day},"
         f" {len(context.fences)} fence row(s)",
         f"XNYS close {context.closes_at:%H:%M} ET{' (half day)' if context.closes_at.time() != time(16) else ''}",
+        ("mode: no-limit test " + NO_LIMIT_TEST_LABEL + f" ({T1_MODE} logged by"
+         f" {sum(run.no_limit for run in section.runs)} of {len(context.configured)} configured process(es))")
+        if context.no_limit else "mode: v7c (no process logged the no-limit test's mode line)",
+        f"rule 8 also reads {NOTIFIER_LOG}* (the Sentinel's would-fence lines) and research/bars/{context.day}"
+        " (SPY, QQQ, day volumes) when present",
     ]
 
 
 def check_session(day: date, *, logs: Path, data: Path, db: Path) -> SessionReport:
-    """The seven rules for ``day``; nothing read is ever written."""
+    """The nine rules for ``day``; nothing read is ever written."""
     report = SessionReport(session_date=day)
     session = market_session(day)
     if session is None:
@@ -1599,23 +2682,39 @@ def check_session(day: date, *, logs: Path, data: Path, db: Path) -> SessionRepo
                 day=day, closes_at=session.closes_at.astimezone(NY), section=section, supervisor=supervisor,
                 state=state, decisions=decisions, fences=fences,
                 timeline=replay(section, state, decisions), connection=connection,
+                opens_at=session.opens_at.astimezone(NY), logs=logs, data=data,
             )
-            report.rules = [
+            episodes, trips = repair_episodes(section, day), guard_trips(section)
+            rules = [
                 _rule_identities(context), _rule_attribution(context), _rule_caps(context),
                 _rule_size(context), _rule_daily_loss(context), _rule_fences(context),
                 _rule_day_risk_budget(context),
             ]
+            metrics: DayMetrics | None = None
+            try:
+                metrics = day_metrics(context, episodes, trips)
+                rules.append(_rule_metrics(metrics))
+            except sqlite3.Error as exc:
+                raise InputsMissing(f"database {db} lacks the decision ledger ({type(exc).__name__}: {exc})") from exc
+            except Exception as exc:  # noqa: BLE001 - rule 8 only reports: its failure never hides the other rules
+                rules.append(RuleResult(METRICS_RULE, "no-limit test metrics", WARN,
+                                        f"the metrics could not be computed ({type(exc).__name__}: {exc})"))
+            rules.append(_rule_abort(context, episodes, trips))
+            report.rules = rules
+            report.mode = NO_LIMIT_MODE if context.no_limit else V7C_MODE
+            report.metrics = metrics
             report.inputs = _inputs(context, logs, data, db, supervisor_files)
     except InputsMissing as exc:
         report.missing.append(str(exc))
-        report.rules = []
+        report.rules, report.metrics, report.mode = [], None, None
     except OSError as exc:  # a log, the state or the database could not be read
         report.missing.append(f"an input is unreadable ({type(exc).__name__}: {exc})")
-        report.rules = []
+        report.rules, report.metrics, report.mode = [], None, None
     return report
 
 
 __all__ = [
+    "APPROVED_POLICIES",
     "BRIDGE_IDENTITY_CAPS",
     "DAY_RISK_BUDGET_UNVERIFIED",
     "DECISIONS_SQL",
@@ -1623,18 +2722,26 @@ __all__ = [
     "EXIT_INPUTS_MISSING",
     "EXIT_PASSED",
     "FAIL",
+    "INFO",
     "IdentityCaps",
     "BudgetCheck",
+    "DayMetrics",
     "InputsMissing",
+    "NO_LIMIT_TEST_IDENTITY_CAPS",
+    "OverCheck",
     "PASS",
     "SessionReport",
     "WARN",
     "check_session",
+    "day_metrics",
     "entry_deadline",
+    "guard_trips",
     "mask_accounts",
     "open_read_only",
     "parse_budget_ok",
     "parse_intent",
+    "parse_over_limits",
     "read_bridge_section",
+    "repair_episodes",
     "strategy_name_from_spec",
 ]
