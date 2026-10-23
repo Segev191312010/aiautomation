@@ -68,16 +68,20 @@ def test_the_shipped_tables_are_the_owners_tables() -> None:
     assert tuple(SENDABLE_IDENTITIES) == ("MOMO_HOD_V2", "ORB_V2", "VWAP_PB_V2", "GAP_GO_V2")
     assert set(SENDABLE_IDENTITIES) == set(OWNER_TABLE) == set(IDENTITY_SIZE_MULTIPLIER) == set(bridge.IDENTITY_CAPS)
     assert bridge.SENDABLE_STRATEGY_NAMES == frozenset(SENDABLE_IDENTITIES)
+    # Rewritten for v7c-t1 (builder B, explicit): the no-limit test L-T1 ships the rows with no position or
+    # entries/day cap and no account-wide cap, keeping the owner's last-entry offsets; the owner's v7b/v7c
+    # counts stay the reviewed v7c table (test_paper_bridge.V7C_CAPS, the v7c_limits tests).
+    from tests.test_paper_bridge import V7C_CAPS
+
     for name, (multiplier, positions, entries, offset) in OWNER_TABLE.items():
         assert IDENTITY_SIZE_MULTIPLIER[name] == multiplier, name
         caps = bridge.IDENTITY_CAPS[name]
         assert (caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close) == (
-            positions, entries, offset
+            None, None, offset
         ), name
-    assert bridge.global_max_open() == 6
-    # Rewritten for v7c (explicit, not weakened): the same four identities and caps ship in bridge v7c,
-    # which adds only the account-level day risk budget (D1) and manual buys with their stop (D5).
-    assert bridge.BRIDGE_VERSION == "v7c"
+        assert (V7C_CAPS[name].max_positions, V7C_CAPS[name].max_entries_per_day) == (positions, entries), name
+    assert bridge.global_max_open() is None
+    assert bridge.BRIDGE_VERSION == "v7c-t1"
 
 
 @pytest.mark.parametrize("identity", sorted(OWNER_TABLE))

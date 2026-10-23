@@ -459,7 +459,12 @@ def test_the_bridge_slot_count_is_the_pinned_bridges():
     bridge = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = bridge
     spec.loader.exec_module(bridge)
-    assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
+    # T1-2 (builder B, no-limit test L-T1): the shipped row has no position cap; until T1-1/T1-3 moves the
+    # manager's slot hint, it stays tied to the reviewed v7c row (3), the table the bridge's v7c tests run under.
+    from tests.test_paper_bridge import V7C_CAPS
+
+    assert bridge.IDENTITY_CAPS["MOMO_HOD_V2"].max_positions is None and bridge.NO_LIMIT_TEST is True
+    assert V7C_CAPS["MOMO_HOD_V2"].max_positions == BRIDGE_MAX_OPEN
     assert re.search(r"^MAX_OPEN\s*=", (path.read_text(encoding="utf-8")), re.MULTILINE) is None
     assert bridge_summary((), "bridge state unreadable (OSError)") == {
         "available": False, "problem": "bridge state unreadable (OSError)",

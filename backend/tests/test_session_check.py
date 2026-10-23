@@ -909,9 +909,16 @@ def test_the_checker_mirrors_the_pinned_bridge() -> None:
     from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
     from trading.sendable_identities import SENDABLE_IDENTITIES
 
+    from tests.test_paper_bridge import V7C_CAPS
+
+    # T1-2 (builder B, no-limit test L-T1): the bridge's rows carry no position or entries/day cap and keep
+    # their last-entry offsets; until T1-3 moves the checker to them, the checker's rows stay tied to the
+    # reviewed v7c rows (test_paper_bridge.V7C_CAPS, the table the bridge's v7c_limits tests run under).
+    assert {name: caps.last_entry_before_close for name, caps in pb.IDENTITY_CAPS.items()} == {
+        name: caps.last_entry_before_close for name, caps in sc.BRIDGE_IDENTITY_CAPS.items()}
     assert {
         name: (caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close)
-        for name, caps in pb.IDENTITY_CAPS.items()
+        for name, caps in V7C_CAPS.items()
     } == {
         name: (caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close)
         for name, caps in sc.BRIDGE_IDENTITY_CAPS.items()

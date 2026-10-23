@@ -210,9 +210,14 @@ def test_the_thresholds_are_the_owner_accepted_defaults_and_the_bridges_caps():
     assert (BLIND_AFTER, BLIND_REPEAT) == (timedelta(minutes=5), timedelta(minutes=30))
     # One caps row per sendable identity, equal to the pinned bridge's own table.
     assert set(MAX_ENTRIES_PER_DAY) == set(SENDABLE_IDENTITIES)
+    # T1-2 (builder B, no-limit test L-T1): the bridge's rows have no entries/day cap; until T1-1/T1-3 moves
+    # the Sentinel to the test's rows, its table stays tied to the reviewed v7c rows (test_paper_bridge.V7C_CAPS).
+    from tests.test_paper_bridge import V7C_CAPS
+
     assert dict(MAX_ENTRIES_PER_DAY) == {
-        name: caps.max_entries_per_day for name, caps in bridge.IDENTITY_CAPS.items()
+        name: caps.max_entries_per_day for name, caps in V7C_CAPS.items()
     }
+    assert all(caps.max_entries_per_day is None for caps in bridge.IDENTITY_CAPS.values())
     assert {name: loss_limit(name) for name in SENDABLE_IDENTITIES} == {
         "ORB_V2": (Decimal("1.25"), False),
         "GAP_GO_V2": (Decimal("1.25"), False),
