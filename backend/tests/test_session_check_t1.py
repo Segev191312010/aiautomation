@@ -6,8 +6,8 @@ right before every SENT, IBKR's order statuses, ``t1_stop_repair`` / ``t1_broker
 ``t1_account_values`` lines, guard SKIP lines, the bridge state from the bridge's own ``Bracket``, a
 real migrated ledger with the AI's verdicts, ``notifier.log`` with the Sentinel's log-only lines and the
 research recorder's bars. The line shapes are builder B's (bridge v7c-t1, test_paper_bridge_t1.py); the
-tests marked ``needs_b`` feed the merged bridge's own lines through the checker and pin every token,
-and the ones marked ``needs_a`` use builder A's test risk policy. Every account id is fake.
+bridge's own lines go through the checker in some tests, which pin every token, and builder A's test
+risk policy is used in others (A, B and C are merged on bridge-t1). Every account id is fake.
 """
 from __future__ import annotations
 
@@ -41,16 +41,7 @@ from tests.test_session_check import (
 )
 from trading.operations import session_check as sc
 
-try:
-    from trading.risk.no_limit_test import NO_LIMIT_TEST_POLICY
-except ModuleNotFoundError:  # before builder A's T1-1 is merged
-    NO_LIMIT_TEST_POLICY = None
-
-needs_a = pytest.mark.skipif(NO_LIMIT_TEST_POLICY is None,
-                             reason="needs builder A's trading/risk/no_limit_test.py (L-T1 T1-1, NO_LIMIT_TEST_POLICY)")
-B_MERGED = getattr(pb, "NO_LIMIT_TEST", None) is not None
-needs_b = pytest.mark.skipif(not B_MERGED,
-                             reason="needs builder B's bridge v7c-t1 (scripts_local/paper_bridge.py, L-T1 T1-2)")
+from trading.risk.no_limit_test import NO_LIMIT_TEST_POLICY
 
 MONDAY = date(2026, 11, 2)  # the first test session (Israel = ET+7 from this day)
 HALF_DAY = date(2026, 11, 27)  # the 13:00 close (owner decision D6 changed: trade it normally)
@@ -68,9 +59,10 @@ T1_BUDGET_LINE = ("day risk budget 3% of net liquidation, account level (realize
                   " refused over it; stop slippage factor 1.0)")
 T1_MODE_LINE = ("t1_mode no-limit PAPER test L-T1 on: no position, entries/day or account-wide caps; the -2% daily"
                 " loss stop and the 3% risk budget are measured and logged, never block bot entries (owner buys keep"
-                " both); robot stops repair themselves (60s, then close at market); guards: 20 entries per identity"
-                " per 60s, 3 broker rejections halt an identity for the day, 3 entries per symbol per day, duplicates"
-                " within 5s, no entry outside the session")
+                " both); robot stops repair themselves (one resubmit, else closed at market 45s after the stop goes"
+                " missing, flat within 60s); guards: 20 entries per identity per 60s, 3 broker rejections halt an"
+                " identity for the day, 3 entries per symbol per day, duplicates within 5s, no entry outside the"
+                " session")
 BUYING_POWER_REJECTION = "201 Order rejected - reason: insufficient buying power"
 
 
@@ -548,7 +540,7 @@ GUARD_PAGE = ("13:00:00", "CRITICAL", "t1_guard_duplicate ZZZ (MOMO_HOD_V2): BUY
 REPAIR = (
     ("10:45:00", "CRITICAL", "t1_stop_repair GGG (ORB_V2): stop order 108 is not live (Cancelled) — 75 sh unprotected;"
      " stop resubmitted once as order 200 at 49.50 in the target OCA group; closed at market if it is not working by"
-     " 10:46:00 ET; entries are refused meanwhile"),
+     " 10:45:45 ET; entries are refused meanwhile"),
     ("10:45:02", "INFO", "t1_stop_repair GGG (ORB_V2): repaired — stop order 200 works at 49.50 2s after detection"),
 )
 ACCOUNT_VALUES = tuple(
@@ -754,7 +746,7 @@ async def test_rule_8_on_a_recorded_session_equals_the_hand_count(
             " over them (measured, no-limit test L-T1: v7c_day_risk_budget x1)") in rule(report, 7).summary
     assert rule(report, 9).summary == (
         "none tripped: 1 stop repair(s), longest 2s (limit 60s), 0 entries outside 09:30-16:00 ET, last position flat"
-        " 15:45:03 ET (limit 15:50 ET), 0 duplicates, guards tripped: t1_guard_duplicate x1")
+        " 15:45:03 ET (limit 15:50 ET), 0 duplicates, guards tripped: t1_guard_duplicate (MOMO_HOD_V2) x1")
     assert report.exit_code == sc.EXIT_PASSED
 
 
@@ -880,7 +872,7 @@ def sized(identity: str, policy_quantity: int) -> int:
     return scaled_quantity(policy_quantity, sc.IDENTITY_SIZE_MULTIPLIER[identity])
 
 
-@pytest.mark.parametrize("policy", [pytest.param("test", marks=needs_a), "default"])
+@pytest.mark.parametrize("policy", ["test", "default"])
 async def test_rule_4_sizes_exactly_under_an_approved_policy_and_the_shipped_table(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str
 ) -> None:
@@ -907,7 +899,6 @@ async def test_rule_4_never_verifies_a_size_under_an_unapproved_policy(
     assert "identity-row bound unchecked (policy not approved)" in text_of(rule(report, 4))
 
 
-@needs_a
 def test_the_approved_policies_are_the_default_and_the_test_policy() -> None:
     from trading.contracts import RiskPolicy
 
@@ -1022,7 +1013,7 @@ async def test_rule_7_fails_an_owner_buy_accepted_past_the_minus_2pct_stop(
 
 def repair_lines(start: str, *, ended: str, outcome: str, symbol: str = "BBB", label: str = "ORB_V2",
                  reported: int | None = None) -> tuple[tuple[str, str, str], ...]:
-    deadline = hms(MONDAY, start, 60)
+    deadline = hms(MONDAY, start, 45)  # the bridge's STOP_REPAIR_CLOSE_AFTER
     resubmit = (start, "CRITICAL", f"t1_stop_repair {symbol} ({label}): stop order 105 is not live (Cancelled) — 75 sh"
                 f" unprotected; stop resubmitted once as order 200 at 49.50 in the target OCA group; closed at market"
                 f" if it is not working by {deadline} ET; entries are refused meanwhile")
@@ -1030,25 +1021,30 @@ def repair_lines(start: str, *, ended: str, outcome: str, symbol: str = "BBB", l
         seconds = reported if reported is not None else int((ny(MONDAY, ended) - ny(MONDAY, start)).total_seconds())
         return resubmit, (ended, "INFO", f"t1_stop_repair {symbol} ({label}): repaired — stop order 200 works at 49.50"
                                           f" {seconds}s after detection")
-    return resubmit, (deadline, "CRITICAL", f"t1_stop_repair {symbol} ({label}): still unprotected 60s after detection"
+    return resubmit, (deadline, "CRITICAL", f"t1_stop_repair {symbol} ({label}): still unprotected 45s after detection"
                                             " (resubmitted stop 200: no status) — closing at market: target repriced to"
                                             " a marketable limit; entries stay refused until it is flat")
 
 
-@pytest.mark.parametrize(("ended", "outcome", "aborts"), [
+@pytest.mark.parametrize(("ended", "how", "aborts"), [
     ("10:01:00", "repaired", False),  # 60 s: the limit
     ("10:01:01", "repaired", True),  # 61 s
     ("10:00:02", "repaired", False),
-    ("10:01:01", "closed", True),  # the deadline close: flat 61 s after detection
-    ("10:00:30", "closed", False),  # a rejected resubmit closed at once: flat 30 s after detection
+    # T1 integration: the resubmit fails, the bridge closes at market 45 s after detection (v2 gate 4) ...
+    ("10:00:52", "closed_at_45s", False),  # ... and the position is flat 52 s after detection: no abort
+    ("10:01:01", "closed_at_45s", True),  # ... the same close, flat only 61 s after detection: abort
+    ("10:00:30", "rejected_close", False),  # a rejected resubmit closed at once: flat 30 s after detection
 ])
 async def test_rule_9_fails_a_robot_position_without_a_working_stop_for_more_than_60s(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ended: str, outcome: str, aborts: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ended: str, how: str, aborts: bool
 ) -> None:
+    outcome = "repaired" if how == "repaired" else "closed"
     held = orb("BBB", "09:50:00", ended if outcome == "closed" else "10:20:00", "49.10",
                "stop_repair" if outcome == "closed" else "stop")
     lines = repair_lines("10:00:00", ended=ended, outcome=outcome)
-    if outcome == "closed" and not aborts:
+    if how == "closed_at_45s":
+        assert lines[1][0] == "10:00:45" and "closing at market" in lines[1][2]  # the bridge's close, at 45 s
+    if how == "rejected_close":
         lines = (lines[0], ("10:00:28", "CRITICAL", "t1_stop_repair BBB (ORB_V2): the resubmitted stop 200 was rejected"
                             " too (Cancelled, TWS 201 Order rejected - reason: stop price above the market) — closing"
                             " at market: target repriced to a marketable limit; entries stay refused until it is flat"))
@@ -1166,9 +1162,13 @@ ORDER_RATE = "t1_guard_order_rate: MOMO_HOD_V2 sent 20 entries in the last 60s (
 @pytest.mark.parametrize(("trips", "aborts"), [
     ((("10:00:00", "M21", "MOMO_HOD_V2", ORDER_RATE),), False),
     ((("10:00:00", "M21", "MOMO_HOD_V2", ORDER_RATE), ("10:00:01", "M22", "MOMO_HOD_V2", ORDER_RATE)), True),
-    # The same guard on two identities: still the same guard twice in the day (plan v2's words).
+    # T1 integration: counted per strategy, as the bridge counts a guard's trips (its "trip 2 today: an abort
+    # rule" page): the same guard once each on two identities is no abort; twice on one identity is.
     ((("10:00:00", "S1", "ORB_V2", "t1_guard_symbol_entries: S1 was entered 3 times today (limit 3) — refused"),
       ("11:00:00", "S2", "VWAP_PB_V2", "t1_guard_symbol_entries: S2 was entered 3 times today (limit 3) — refused")),
+     False),
+    ((("10:00:00", "S1", "ORB_V2", "t1_guard_symbol_entries: S1 was entered 3 times today (limit 3) — refused"),
+      ("11:00:00", "S2", "ORB_V2", "t1_guard_symbol_entries: S2 was entered 3 times today (limit 3) — refused")),
      True),
     # Two different guards once each: no abort.
     ((("10:00:00", "M21", "MOMO_HOD_V2", ORDER_RATE),
@@ -1183,13 +1183,16 @@ async def test_rule_9_fails_the_same_guard_tripping_twice_in_one_day(
     result = rule(report, 9)
 
     assert (result.status == sc.FAIL) is aborts, report.render()
-    token = trips[0][3].split(":", 1)[0] if aborts else None
+    token = trips[0][3].split(":", 1)[0]
     if aborts:
-        assert f"guard {token} tripped 2 times today" in result.summary
+        assert f"guard {token} tripped 2 times today for {trips[0][2]}" in result.summary
         assert "the same guard twice in one day" in result.summary
+    else:
+        for _, _, identity, reason in trips:
+            assert f"{reason.split(':', 1)[0]} ({identity}) x1" in result.summary
 
 
-async def test_rule_9_counts_a_broker_rejection_halt_once_and_two_halts_abort(
+async def test_rule_9_counts_a_broker_rejection_halt_once_per_strategy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def halt(clock: str, identity: str, kind: str = "CRITICAL", restart: bool = False) -> tuple[str, str, str]:
@@ -1203,12 +1206,20 @@ async def test_rule_9_counts_a_broker_rejection_halt_once_and_two_halts_abort(
     once = (halt("10:30:00", "MOMO_HOD_V2"), refused, halt("12:00:00", "MOMO_HOD_V2", "INFO", restart=True))
     report = check(await build(tmp_path, monkeypatch, T1Day(signals=CLEAN, extra=once)))
     assert rule(report, 9).status == sc.PASS, report.render()
-    assert "guards tripped: t1_guard_rejections x1" in rule(report, 9).summary
+    assert "guards tripped: t1_guard_rejections (MOMO_HOD_V2) x1" in rule(report, 9).summary
 
-    twice = (*once, halt("13:00:00", "ORB_V2"))
+    # T1 integration: per strategy, like the bridge (a halt is that identity's one trip): two identities halted
+    # once each is no abort; the same identity halted twice (only a restart could log it again, and its recount is
+    # INFO, excluded) is.
+    two = (*once, halt("13:00:00", "ORB_V2"))
+    report = check(await build(tmp_path / "two", monkeypatch, T1Day(signals=CLEAN, extra=two)))
+    assert rule(report, 9).status == sc.PASS, report.render()
+    assert ("guards tripped: t1_guard_rejections (MOMO_HOD_V2) x1, t1_guard_rejections (ORB_V2) x1"
+            in rule(report, 9).summary)
+    twice = (*once, halt("13:00:00", "MOMO_HOD_V2"))
     report = check(await build(tmp_path / "twice", monkeypatch, T1Day(signals=CLEAN, extra=twice)))
     assert rule(report, 9).status == sc.FAIL
-    assert "guard t1_guard_rejections tripped 2 times today (MOMO_HOD_V2, ORB_V2)" in rule(report, 9).summary
+    assert "guard t1_guard_rejections tripped 2 times today for MOMO_HOD_V2" in rule(report, 9).summary
 
 
 async def test_a_v7c_day_keeps_v7c_semantics_and_still_checks_the_abort_rules(
@@ -1251,8 +1262,7 @@ def test_the_v7c_fixture_lines_are_the_v7c_bridges_own(monkeypatch: pytest.Monke
     rows = {name: pb.Caps(caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close)
             for name, caps in sc.BRIDGE_IDENTITY_CAPS.items()}
     monkeypatch.setattr(pb, "IDENTITY_CAPS", MappingProxyType(rows))
-    if B_MERGED:
-        monkeypatch.setattr(pb, "NO_LIMIT_TEST", False)
+    monkeypatch.setattr(pb, "NO_LIMIT_TEST", False)
     assert tuple(pb.caps_lines()) == V7C_CAPS_LINES
     assert pb.budget_line() == V7C_BUDGET_LINE
     for line in V7C_CAPS_LINES[1:]:
@@ -1269,7 +1279,6 @@ def test_the_checker_reads_every_bridge_caps_line_shape() -> None:
     assert sc._BUDGET_RULE.match(T1_BUDGET_LINE) is not None
 
 
-@needs_b
 def test_the_checker_mirrors_the_no_limit_bridge() -> None:
     assert pb.NO_LIMIT_TEST is True and pb.NO_LIMIT_TEST_LABEL == sc.NO_LIMIT_TEST_LABEL
     assert {name: (caps.max_positions, caps.max_entries_per_day, caps.last_entry_before_close)
@@ -1283,7 +1292,9 @@ def test_the_checker_mirrors_the_no_limit_bridge() -> None:
               "T1_GUARD_REJECTIONS", "T1_GUARD_SYMBOL_ENTRIES", "T1_GUARD_DUPLICATE", "T1_GUARD_OUTSIDE_HOURS",
               "T1_GUARD_TOKENS")
     assert {name: getattr(sc, name) for name in tokens} == {name: getattr(pb, name) for name in tokens}
-    assert (sc.STOP_REPAIR_DEADLINE, sc.GUARD_DUPLICATE_WINDOW) == (pb.STOP_REPAIR_DEADLINE, pb.GUARD_DUPLICATE_WINDOW)
+    assert (sc.STOP_REPAIR_DEADLINE, sc.STOP_REPAIR_CLOSE_AFTER, sc.GUARD_DUPLICATE_WINDOW) == (
+        pb.STOP_REPAIR_DEADLINE, pb.STOP_REPAIR_CLOSE_AFTER, pb.GUARD_DUPLICATE_WINDOW)
+    assert sc.GUARD_TRIPS_ABORT == pb.GUARD_PAGES_PER_DAY  # the bridge's "trip 2: an abort rule" page, per strategy
     assert sc.ACKNOWLEDGED_STATUSES <= pb.LIVE_ORDER_STATUSES | {"Filled"}
 
 
@@ -1312,7 +1323,6 @@ async def test_the_sentinel_log_only_line_is_what_rule_8_counts(
     assert message.startswith(sc.SENTINEL_WOULD_FENCE) and message == "sentinel would fence ORB_V2: daily loss 1.30 R"
 
 
-@needs_b
 def test_the_bridges_own_t1_lines_parse_in_the_checker(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1358,6 +1368,39 @@ def test_the_bridges_own_t1_lines_parse_in_the_checker(
     assert any(sc._BROKER_REJECTED.match(text) for _, text in out)
     assert any(sc._REJECTED_ENTRY.match(text) for kind, text in out if kind == "INFO")
     assert any(sc._ORDER_STATUS.match(text) for kind, text in out if kind == "INFO")
+
+
+def test_the_rule_9_repair_fixture_is_the_bridges_own_close_at_45s(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T1 integration: the bridge's own stop-repair lines when its one resubmitted stop never works, the close
+    at market at 45 s included, have the shape of repair_lines (which rule 9's 52 s / 61 s cases use)."""
+    import re
+
+    from tests.test_paper_bridge import DECIDED, Clock, events
+    from tests.test_paper_bridge_t1 import repair_world
+
+    clock = Clock(DECIDED + timedelta(seconds=5))  # detection at 10:00:05 ET
+    bridge, broker, _ = repair_world(tmp_path, clock=clock)
+    broker.delay_echoes = True
+    capsys.readouterr()
+    bridge.tick()
+    for _ in range(22):
+        clock.advance(2)
+        bridge.tick()
+    clock.advance(1)  # 45 s after detection: the close at market
+    bridge.tick()
+    repairs = [(kind, text) for kind, text in events(capsys) if text.startswith(sc.T1_STOP_REPAIR)]
+    assert [kind for kind, _ in repairs] == ["CRITICAL", "CRITICAL"]
+    first, close = (sc._REPAIR.match(text) for _, text in repairs)
+    assert first is not None and close is not None and sc._REPAIR_CLOSING in close["rest"]
+    deadline = sc._REPAIR_DEADLINE.search(first["rest"])
+    assert deadline is not None and deadline["clock"] == "10:00:50"  # detection + STOP_REPAIR_CLOSE_AFTER
+    assert "still unprotected 45s after detection" in close["rest"]
+    fixture = repair_lines("10:00:05", ended="10:00:52", outcome="closed", symbol="OPEN", label="MOMO_HOD_V2")
+    assert fixture[1][0] == "10:00:50"  # the fixture's close is logged at the same moment
+    masked = [re.sub(r"\d+", "#", text) for _, text in repairs]  # order ids, shares and prices differ
+    assert masked == [re.sub(r"\d+", "#", text) for _, _, text in fixture]
 
 
 # --- the replay keeps the bridge's own view of a rejected entry --------------------------------------------

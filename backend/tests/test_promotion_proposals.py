@@ -563,14 +563,10 @@ def test_the_open_risk_gate_follows_the_pinned_bridge():
     finally:
         sys.modules.pop(spec.name, None)
     # Rewritten for the no-limit test L-T1 (explicit, not weakened): the gate is open only for a
-    # bridge that has the 3 % budget AND enforces it, i.e. is not in the no-limit test. Builder B's
-    # T1-2 bridge carries its own NO_LIMIT_TEST; until it is merged the pinned bridge is v7c's, which
-    # has none, and the upstream switch stands in for it (only that v7c bridge may lack it).
-    from tests.no_limit_support import pinned_bridge_mode
+    # bridge that has the 3 % budget AND enforces it, i.e. is not in the no-limit test. The shipped
+    # bridge (v7c-t1, A and B merged) carries its own NO_LIMIT_TEST, equal to the upstream switch.
     from trading.risk.no_limit_test import NO_LIMIT_TEST
 
-    mode = pinned_bridge_mode(bridge)
-    if mode is None:
-        mode = NO_LIMIT_TEST
-    assert mode is NO_LIMIT_TEST  # the bridge and the upstream switch agree
-    assert promoter.OPEN_RISK_TERM_DEPLOYED is (bridge.DAY_RISK_BUDGET_PCT == Decimal("3") and not mode)
+    assert bridge.NO_LIMIT_TEST is NO_LIMIT_TEST  # the bridge and the upstream switch agree
+    assert promoter.OPEN_RISK_TERM_DEPLOYED is (
+        bridge.DAY_RISK_BUDGET_PCT == Decimal("3") and not bridge.NO_LIMIT_TEST)

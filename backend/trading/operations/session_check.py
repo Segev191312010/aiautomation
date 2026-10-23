@@ -70,7 +70,8 @@ Nine rules, each PASS, WARN, FAIL or INFO with its evidence lines:
    without a working stop for more than 60 s, a bot entry outside the XNYS
    session, a position open past the close less 10 minutes (15:50 ET; 12:50
    on a half day), a duplicate entry (same symbol and size within 5 s), and
-   the same malfunction guard tripping twice in the day each FAIL.
+   the same malfunction guard tripping twice in the day for one strategy (the
+   bridge's own per-strategy trip count) each FAIL.
 
 No-limit PAPER test L-T1 (bridge v7c-t1, owner plan v2 of 2026-10-23): a
 bridge process that logs the ``t1_mode`` line runs the test. Its caps rows
@@ -121,17 +122,12 @@ from trading.research.v7c_report import (
 )
 from trading.risk.engine import policy_quantity, scaled_quantity
 from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER
+from trading.risk.no_limit_test import NO_LIMIT_TEST_POLICY  # the test's risk policy (plan rev 1 T1-1)
 from trading.risk.portfolio import portfolio_from_account
 from trading.scheduler.sessions import MARKET_TIMEZONE, market_session
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import GLOBAL_FENCE, IDENTITY_FENCE_PREFIX
 
-try:  # The test risk policy of the no-limit test L-T1 (plan rev 1 T1-1, trading/risk/no_limit_test.py).
-    from trading.risk.no_limit_test import NO_LIMIT_TEST_POLICY as _NO_LIMIT_TEST_POLICY
-except ModuleNotFoundError as _absent:  # pragma: no cover - only a tree without T1-1: the default alone
-    if _absent.name != "trading.risk.no_limit_test":
-        raise
-    _NO_LIMIT_TEST_POLICY = None
 
 EXIT_PASSED = 0
 EXIT_FAILED = 1
@@ -177,7 +173,7 @@ NO_LIMIT_TEST_IDENTITY_CAPS: Mapping[str, IdentityCaps] = MappingProxyType({
 # size only under a policy it finds here by the decision's own fingerprint.
 APPROVED_POLICIES: Mapping[str, RiskPolicy] = MappingProxyType({
     policy.fingerprint(): policy
-    for policy in (RiskPolicy(), *(() if _NO_LIMIT_TEST_POLICY is None else (_NO_LIMIT_TEST_POLICY,)))
+    for policy in (RiskPolicy(), NO_LIMIT_TEST_POLICY)
 })
 
 # Bridge v7c-t1's tokens (paper_bridge.py, plan v2 items 3-5; a test pins each to the
@@ -206,9 +202,12 @@ T1_OVER_TOKENS = frozenset({DAILY_LOSS_LIMIT, V7C_DAY_RISK_BUDGET, V7C_UNPROTECT
 # and every position is flat by the close less FLAT_BY_BEFORE_CLOSE (15:50 ET, 12:50 on a
 # half day: paper_bridge.VERIFY_BEFORE_CLOSE, IBKR's Reg T end-of-day check).
 STOP_REPAIR_DEADLINE = timedelta(seconds=60)
+# The bridge closes an unprotected position at market this long after detection and prints that
+# moment in its first t1_stop_repair line (paper_bridge.STOP_REPAIR_CLOSE_AFTER): detection = it less this.
+STOP_REPAIR_CLOSE_AFTER = timedelta(seconds=45)
 GUARD_DUPLICATE_WINDOW = timedelta(seconds=5)
 FLAT_BY_BEFORE_CLOSE = timedelta(minutes=10)
-GUARD_TRIPS_ABORT = 2  # "the same guard tripping twice in one day"
+GUARD_TRIPS_ABORT = 2  # "the same guard tripping twice in one day", per strategy as the bridge counts its trips
 # IBKR's US-stock bar volume is in round lots (shadow_service.IBKR_API_VOLUME_MULTIPLIER; pinned).
 BAR_VOLUME_MULTIPLIER = Decimal("100")
 MARKET_SYMBOLS = ("SPY", "QQQ")
@@ -1948,7 +1947,7 @@ class RepairEpisode:
 
     symbol: str
     label: str
-    start: datetime  # detection: the first line's time, or its deadline less STOP_REPAIR_DEADLINE
+    start: datetime  # detection: the first line's time, or its close-at-market time less STOP_REPAIR_CLOSE_AFTER
     first: LogLine
     end: datetime | None = None
     last: LogLine | None = None
@@ -1980,8 +1979,8 @@ def repair_episodes(section: BridgeSection, day: date) -> list[RepairEpisode]:
                 episodes.append(episode)
             deadline = _REPAIR_DEADLINE.search(rest)
             if deadline is not None:
-                detected = datetime.combine(day, time.fromisoformat(deadline.group("clock")), tzinfo=NY)
-                episode.start = min(episode.start, detected - STOP_REPAIR_DEADLINE)
+                closes_at = datetime.combine(day, time.fromisoformat(deadline.group("clock")), tzinfo=NY)
+                episode.start = min(episode.start, closes_at - STOP_REPAIR_CLOSE_AFTER)
             repaired = _REPAIRED.match(rest)
             if repaired is not None:
                 episode.end, episode.last, episode.outcome = at, line, "repaired"
@@ -2079,11 +2078,11 @@ def _rule_abort(context: _Context, episodes: Sequence[RepairEpisode], trips: Seq
                             f" {abs(second_at - first_at).total_seconds():.1f}s later (BUY {second.qty}"
                             f" {second.symbol}, window {int(GUARD_DUPLICATE_WINDOW.total_seconds())}s):"
                             f" {second.line.evidence()}")
-    counts = Counter(trip.token for trip in trips)
-    for token, count in sorted(counts.items()):
-        lines = [trip for trip in trips if trip.token == token]
-        who = ", ".join(sorted({trip.identity for trip in lines}))
-        text = f"guard {token} tripped {count} time{'s' if count != 1 else ''} today ({who})"
+    # Per strategy, as the bridge counts a guard's trips (its "trip 2 today: an abort rule" page).
+    counts = Counter((trip.token, trip.identity) for trip in trips)
+    for (token, identity), count in sorted(counts.items()):
+        lines = [trip for trip in trips if (trip.token, trip.identity) == (token, identity)]
+        text = f"guard {token} tripped {count} time{'s' if count != 1 else ''} today for {identity}"
         if count >= GUARD_TRIPS_ABORT:
             failures.append(f"{text}: the same guard twice in one day: {lines[1].line.evidence()}")
         else:
@@ -2095,7 +2094,7 @@ def _rule_abort(context: _Context, episodes: Sequence[RepairEpisode], trips: Seq
                           failures + details)
     repaired = f"{len(episodes)} stop repair(s), longest {longest}s" if episodes else "no stop repair"
     flat = f"last position flat {last_flat:%H:%M:%S} ET" if last_flat is not None else "no position held"
-    guards = ", ".join(f"{token} x{count}" for token, count in sorted(counts.items())) or "none"
+    guards = ", ".join(f"{token} ({identity}) x{count}" for (token, identity), count in sorted(counts.items())) or "none"
     return RuleResult(ABORT_RULE, "abort rules", PASS,
                       f"none tripped: {repaired} (limit {limit}s), {outside} entries outside"
                       f" {opens_at:%H:%M}-{closes_at:%H:%M} ET, {flat} (limit {flat_by:%H:%M} ET),"

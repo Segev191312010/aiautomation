@@ -133,6 +133,8 @@ def test_t1_the_tokens_and_guard_numbers_are_pinned() -> None:
         20, timedelta(seconds=60), 3, 3, timedelta(seconds=5), timedelta(seconds=60))
     assert (pb.GUARD_PAGES_PER_DAY, pb.ENTRY_REJECTION_WINDOW, pb.STOP_REPAIR_CLOSE_DISCOUNT) == (
         2, timedelta(seconds=30), Decimal("0.98"))
+    # T1 integration (owner decision): the repair closes at market 45 s after detection, flat within 60 s.
+    assert pb.STOP_REPAIR_CLOSE_AFTER == timedelta(seconds=45)
     assert (pb.ACCOUNT_VALUES_REQUEST_ID, pb.ACCOUNT_VALUES_REFRESH, pb.LOW_CUSHION) == (
         7004, timedelta(seconds=30), Decimal("0.10"))
     assert pb.ACCOUNT_VALUE_TAGS == ("NetLiquidation", "AvailableFunds", "BuyingPower", "ExcessLiquidity", "Cushion",
@@ -149,6 +151,8 @@ def test_t1_the_tokens_and_guard_numbers_are_pinned() -> None:
     ('GUARD_REJECTIONS_TO_HALT = 3 ', 'GUARD_REJECTIONS_TO_HALT = 0 '),
     ('GUARD_DUPLICATE_WINDOW = timedelta(seconds=5)', 'GUARD_DUPLICATE_WINDOW = timedelta(seconds=0)'),
     ('STOP_REPAIR_DEADLINE = timedelta(seconds=60)', 'STOP_REPAIR_DEADLINE = timedelta(seconds=61)'),
+    ('STOP_REPAIR_CLOSE_AFTER = timedelta(seconds=45)', 'STOP_REPAIR_CLOSE_AFTER = timedelta(seconds=55)'),
+    ('STOP_REPAIR_CLOSE_AFTER = timedelta(seconds=45)', 'STOP_REPAIR_CLOSE_AFTER = timedelta(seconds=0)'),
 ])
 def test_t1_a_guard_below_the_owners_floor_refuses_the_import(tmp_path: Path, old: str, new: str) -> None:
     with pytest.raises(ValueError, match="below the owner's floor"):
@@ -413,7 +417,7 @@ def test_t1_a_dead_robot_stop_is_resubmitted_once_in_the_target_oca_group(
     assert critical(events(capsys)) == [
         f"t1_stop_repair OPEN (MOMO_HOD_V2): stop order 32 is not live (Cancelled) — 100 sh unprotected; stop"
         f" resubmitted once as order 100 at {shown_price} in the target OCA group; closed at market if it is not"
-        " working by 10:01:05 ET; entries are refused meanwhile"]
+        " working by 10:00:50 ET; entries are refused meanwhile"]  # 45 s after detection (STOP_REPAIR_CLOSE_AFTER)
 
     clock.advance(2)
     bridge.tick()
@@ -461,27 +465,38 @@ def test_t1_a_rejected_resubmitted_stop_closes_the_position_at_market_and_pages(
     assert (item.status, item.exit_reason) == ("closed", "stop_repair")
 
 
-def test_t1_a_robot_position_still_unprotected_after_60s_is_closed_at_market(
+def test_t1_a_robot_position_still_unprotected_45s_after_detection_is_closed_and_flat_within_60s(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # T1 integration (owner decision): the close at market fires at STOP_REPAIR_CLOSE_AFTER (45 s), so the
+    # position is flat inside the owner's 60 s (v2 gate 4; the session check's rule 9 FAILs > 60 s).
     clock = Clock(DECIDED + timedelta(seconds=5))
+    detected = clock.value
     bridge, broker, item = repair_world(tmp_path, clock=clock)
     broker.delay_echoes = True  # IBKR never acknowledges the resubmitted stop
     bridge.tick()
     assert len(stops_placed(broker)) == 1
-    for _ in range(29):  # up to 58 s after detection: still waiting
+    for _ in range(22):  # up to 44 s after detection: still waiting
         clock.advance(2)
         bridge.tick()
     assert len(broker.placed) == 1 and broker.cancelled == []
     capsys.readouterr()
-    clock.advance(2)  # 60 s
+    clock.advance(1)  # 45 s
     bridge.tick()
 
+    assert pb.STOP_REPAIR_CLOSE_AFTER == timedelta(seconds=45) and clock.value - detected == pb.STOP_REPAIR_CLOSE_AFTER
     assert broker.cancelled == [100]  # the resubmitted stop never sells next to the close
     assert [(order_id, sent.orderType) for order_id, sent in broker.placed[1:]] == [(31, "LMT")]
     assert critical(events(capsys)) == [
-        "t1_stop_repair OPEN (MOMO_HOD_V2): still unprotected 60s after detection (resubmitted stop 100: no status)"
+        "t1_stop_repair OPEN (MOMO_HOD_V2): still unprotected 45s after detection (resubmitted stop 100: no status)"
         " — closing at market: target repriced to a marketable limit; entries stay refused until it is flat"]
+    broker.deliver_echoes()
+    clock.advance(7)  # the marketable target fills 52 s after detection
+    broker.execDetails(-1, None, execution("x45", 31, 100, 49.09))
+    broker.orderStatus(31, "Filled", 100, 0, 49.09)
+    bridge.tick()
+    assert (item.status, item.exit_reason) == ("closed", "stop_repair")
+    assert clock.value - detected < pb.STOP_REPAIR_DEADLINE  # flat within the owner's 60 s
 
 
 def test_t1_with_no_live_exit_leg_the_repair_close_is_one_market_sell(
@@ -607,7 +622,7 @@ def test_t1_a_restart_never_resubmits_the_stop_and_closes_at_the_deadline(
 ) -> None:
     clock = Clock(DECIDED + timedelta(seconds=5))
     item = replace(bracket("open", "OPEN", status="open", parent=30, filled=100), stop_id=100, stop_repair_from=32,
-                   stop_repair_outcome="sent", stop_repair_detected=utc(clock.value - timedelta(seconds=50)))
+                   stop_repair_outcome="sent", stop_repair_detected=utc(clock.value - timedelta(seconds=35)))
     target = pb.order("SELL", "LMT", 100, ACCOUNT, "autotrader:MOMO_HOD_V2:open", lmtPrice=51.0, tif="GTC",
                       parentId=30, transmit=True)
     target.ocaGroup, target.ocaType = OCA_GROUP, 3
@@ -615,11 +630,11 @@ def test_t1_a_restart_never_resubmits_the_stop_and_closes_at_the_deadline(
                               positions={300: 100})
     broker.reqOpenOrders()  # the resubmitted stop 100 never reached IBKR before the restart
     bridge = make_bridge(tmp_path, broker, brackets={"open": item}, clock=clock)
-    for _ in range(4):  # 50 s .. 56 s after detection
+    for _ in range(4):  # 35 s .. 41 s after detection
         bridge.tick()
         clock.advance(2)
     assert broker.placed == []  # at most once: never resubmitted after a restart
-    clock.advance(2)  # 60 s
+    clock.advance(2)  # 45 s (STOP_REPAIR_CLOSE_AFTER; was 60 s before the T1 integration)
     bridge.tick()
     assert [(order_id, sent.orderType) for order_id, sent in broker.placed] == [(31, "LMT")]
 

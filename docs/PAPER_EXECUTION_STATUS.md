@@ -202,7 +202,8 @@ Order sources:
 
 - 2026-10-23/24: bridge v7c-t1, the no-limit PAPER test L-T1 (owner plan v2 of
   2026-10-23, items 3-5; decisions D7, D8), sha256
-  c03f25d668cc1e5b47b7196fd535923c0af17ef7bd24e110cf29c19e101a3969 — **status: built, awaiting the independent
+  4096ddcd7ff0a29c9f54373d6dbd41d8033c20ef145cd411abb2c826171a6ba4 (integration head on bridge-t1;
+  builder B's a29ba9d was c03f25d6…) — **status: built, awaiting the independent
   execution-safety review N21; not deployable before its GO naming the head.**
   On top of bridge v7c (b40fa40b…). The literal `NO_LIMIT_TEST = True` (never
   configuration; an import tripwire refuses a half-on table) lifts the
@@ -214,8 +215,9 @@ Order sources:
   owner buys keep every v7c refusal (D8). A robot position without a working
   stop still refuses every entry and owner buy; its stop is resubmitted once
   (never looser, joined to the target's OCA group), and if that is rejected or
-  the position is still unprotected 60 s after detection it is closed at
-  market (`t1_stop_repair`). A manual or foreign position without a stop pages
+  the position is still unprotected 45 s after detection it is closed at
+  market, flat within 60 s (`t1_stop_repair`; changed from 60 s at the T1
+  integration, owner decision). A manual or foreign position without a stop pages
   once per symbol per day and no longer blocks bot entries (D7). Six
   malfunction guards (20 entries per identity per 60 s; 3 consecutive broker
   rejections halt an identity for the day, in memory and recounted from the

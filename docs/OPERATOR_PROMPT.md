@@ -362,7 +362,7 @@ itself (3.4):
 | `t1_guard_symbol_entries` | 3 entries per symbol per day | a stop-out / re-entry loop in one name |
 | `t1_guard_duplicate` | same symbol, side and size within 5 s | a double send after a reconnect |
 | `t1_guard_outside_hours` | any entry outside the XNYS session | a clock or calendar bug |
-| `t1_stop_repair` | a robot position without a working stop: 60 s, then closed at market | a position running unprotected |
+| `t1_stop_repair` | a robot position without a working stop: one resubmit, else closed at market 45 s after detection (flat within 60 s) | a position running unprotected |
 
 An IBKR rejection is never retried; the first of an identity in a day pages (`t1_broker_rejected`).
 
@@ -407,7 +407,7 @@ not working (cancelled, rejected, never acknowledged) refuses every bot entry an
 repaired or flat. The bridge resubmits ONE `SELL STP GTC` for the shares held, never looser than the intent
 or the price IBKR last showed, joined to the target's OCA group (a live target without a known OCA group is
 never paired with a second sell: the position is closed instead), stored before `placeOrder`. If IBKR
-rejects it, or the position is still unprotected 60 s after detection, the position is closed at market (the
+rejects it, or the position is still unprotected 45 s after detection, the position is closed at market (the
 target repriced marketable, or one `SELL MKT` when no exit leg works) and paged (`t1_stop_repair …`). A
 manual or foreign position without a stop pages once per symbol per day (`t1_unprotected_manual`) and refuses
 owner buys, never bot entries (D7). The 15:45 ET close-out is batched: every due bracket is marked attempted
@@ -490,7 +490,7 @@ L-T1    No-limit test (bridge v7c-t1, [NOW] on this branch): the bridge lines re
         bridge       INFO caps <IDENTITY> positions=none entries/day=none last_entry=close-<m>m   (MOMO 60, the others 30)
         bridge       INFO fenced identities = none
         bridge       INFO day risk budget 3% of net liquidation, account level (realized loss + open risk to current stops + new risk, measured and logged, never blocks bot entries (no-limit test L-T1), owner buys still refused over it; stop slippage factor 1.0)
-        bridge       INFO t1_mode no-limit PAPER test L-T1 on: no position, entries/day or account-wide caps; the -2% daily loss stop and the 3% risk budget are measured and logged, never block bot entries (owner buys keep both); robot stops repair themselves (60s, then close at market); guards: 20 entries per identity per 60s, 3 broker rejections halt an identity for the day, 3 entries per symbol per day, duplicates within 5s, no entry outside the session
+        bridge       INFO t1_mode no-limit PAPER test L-T1 on: no position, entries/day or account-wide caps; the -2% daily loss stop and the 3% risk budget are measured and logged, never block bot entries (owner buys keep both); robot stops repair themselves (one resubmit, else closed at market 45s after the stop goes missing, flat within 60s); guards: 20 entries per identity per 60s, 3 broker rejections halt an identity for the day, 3 entries per symbol per day, duplicates within 5s, no entry outside the session
         The t1_mode line never repeats the budget text, so the dry run still has exactly one budget line.
         A caps line with a number in the test, or the t1_mode line next to numbered rows, is a half-on
         build: the bridge refuses it (PREFLIGHT_REFUSED caps: half-on no-limit test (…)).
@@ -1255,11 +1255,11 @@ latency p95 that Decision step 1 compares against.
 - **Signal:** session check exit 1 with `FAIL  rule 9 abort rules: …`; the `--owner` line starts
   `L-T1 <date>: ABORT RULE TRIPPED: …`.
 - **Meaning:** a malfunction, any one of: a robot position without a working stop for more than 60 s (from
-  detection to its stop working again or the position flat; the 60 s close-at-market backstop firing is
-  itself this); a bot entry outside the XNYS session; a position open past the close less 10 min (15:50 ET,
+  detection to its stop working again or the position flat; the bridge closes it at market 45 s after
+  detection so it is flat within 60 s); a bot entry outside the XNYS session; a position open past the close less 10 min (15:50 ET,
   12:50 ET on a half day; IBKR's Reg T end-of-day check); a duplicate entry (same symbol and size within
-  5 s); the same malfunction guard tripping twice in one day (rule 9 counts the day across identities; the
-  bridge's "trip 2" page counts per identity, so the check can trip first); a session replay that does not
+  5 s); the same malfunction guard tripping twice in one day for one strategy (rule 9 counts per strategy,
+  like the bridge's "trip 2" page); a session replay that does not
   reproduce its orders (the replay engine's check, from 6 Nov).
 - **Action:** page the owner with the rule 9 line; `INCIDENT` ledger line; the owner runs `deploy undo` that
   night (below). Never a fix-forward deploy, never a restart to clear it.

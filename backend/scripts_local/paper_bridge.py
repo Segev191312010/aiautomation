@@ -147,9 +147,10 @@ No-limit PAPER test L-T1 (NO_LIMIT_TEST, a literal in this file; plan v2 items
   STP GTC is sent at the leg_price rule (never looser) for the shares held,
   joined to the target's OCA group (a live target without a known OCA group is
   never paired with a second sell: the position is closed instead), at most
-  once; if that stop is rejected, or the position is still unprotected 60 s
-  after detection, the position is closed at market (the target repriced
-  marketable, or one SELL MKT when no exit leg works) and paged. A manual or
+  once; if that stop is rejected, or the position is still unprotected 45 s
+  after detection (STOP_REPAIR_CLOSE_AFTER, so it is flat within the owner's
+  60 s, STOP_REPAIR_DEADLINE), the position is closed at market (the target
+  repriced marketable, or one SELL MKT when no exit leg works) and paged. A manual or
   foreign position without a stop pages once per symbol per day
   (t1_unprotected_manual) and refuses owner buys, never bot entries (D7).
 - Account values (AvailableFunds, BuyingPower, ExcessLiquidity, Cushion,
@@ -317,9 +318,12 @@ GUARD_ORDER_WINDOW = timedelta(seconds=60)
 GUARD_REJECTIONS_TO_HALT = 3  # consecutive broker rejections that halt an identity for the rest of the day
 GUARD_ENTRIES_PER_SYMBOL = 3  # entries per symbol per session, every identity together
 GUARD_DUPLICATE_WINDOW = timedelta(seconds=5)  # same symbol, side and size within this long: a double send
-# Stop auto-repair (plan v2 item 5): a robot position without a working stop is closed at market when
-# its one resubmitted stop is rejected, or when it is still unprotected this long after detection.
+# Stop auto-repair (plan v2 item 5): a robot position may run without a working stop at most
+# STOP_REPAIR_DEADLINE (v2 gate 4 and the abort rule "unprotected > 60 s"; the session check's rule 9).
+# It is closed at market when its one resubmitted stop is rejected, or when it is still unprotected
+# STOP_REPAIR_CLOSE_AFTER after detection: early enough that the close fills inside the deadline.
 STOP_REPAIR_DEADLINE = timedelta(seconds=60)
+STOP_REPAIR_CLOSE_AFTER = timedelta(seconds=45)
 STOP_REPAIR_CLOSE_DISCOUNT = Decimal("0.98")  # the marketable limit a repair close reprices the target to
 # An entry's TWS errors during this window are logged INFO: the loop decides whether IBKR rejected it and
 # pages a rejection once per identity per day; an error it does not explain still pages at the window's end.
@@ -333,9 +337,10 @@ LOW_CUSHION = Decimal("0.10")  # IBKR's Cushion (excess liquidity / net liquidat
 if not isinstance(NO_LIMIT_TEST, bool):  # tripwire: only the literal decides
     raise ValueError("NO_LIMIT_TEST must be a bool literal")
 if not (GUARD_ORDERS_PER_STRATEGY >= 20 and GUARD_REJECTIONS_TO_HALT >= 1 and GUARD_ENTRIES_PER_SYMBOL >= 3
-        and timedelta(0) < GUARD_DUPLICATE_WINDOW and timedelta(0) < STOP_REPAIR_DEADLINE <= timedelta(seconds=60)):
+        and timedelta(0) < GUARD_DUPLICATE_WINDOW and timedelta(0) < STOP_REPAIR_DEADLINE <= timedelta(seconds=60)
+        and timedelta(0) < STOP_REPAIR_CLOSE_AFTER <= STOP_REPAIR_DEADLINE - timedelta(seconds=10)):
     raise ValueError("a malfunction guard is below the owner's floor (plan v2: >= 20 per 60 s, >= 3 per symbol,"
-                     " stop repair <= 60 s)")
+                     " stop repair <= 60 s, its close at market at least 10 s before)")
 # v7c-t1 tokens: each starts its bridge.log line (and a SKIP reason); the readers match them.
 T1_MODE = "t1_mode"
 T1_OVER_V7C_LIMITS = "t1_over_v7c_limits"
@@ -577,7 +582,8 @@ def mode_line() -> str | None:
     return (f"{T1_MODE} no-limit PAPER test {NO_LIMIT_TEST_LABEL} on: no position, entries/day or account-wide"
             f" caps; the -{MAX_DAILY_LOSS_PCT}% daily loss stop and the {DAY_RISK_BUDGET_PCT}% risk budget are"
             " measured and logged, never block bot entries (owner buys keep both); robot stops repair themselves"
-            f" ({int(STOP_REPAIR_DEADLINE.total_seconds())}s, then close at market); guards:"
+            f" (one resubmit, else closed at market {int(STOP_REPAIR_CLOSE_AFTER.total_seconds())}s after the stop"
+            f" goes missing, flat within {int(STOP_REPAIR_DEADLINE.total_seconds())}s); guards:"
             f" {GUARD_ORDERS_PER_STRATEGY} entries per identity per {int(GUARD_ORDER_WINDOW.total_seconds())}s,"
             f" {GUARD_REJECTIONS_TO_HALT} broker rejections halt an identity for the day,"
             f" {GUARD_ENTRIES_PER_SYMBOL} entries per symbol per day, duplicates within"
@@ -2552,10 +2558,11 @@ class Bridge:
     def repair_stop(self, bracket: Bracket) -> None:
         """A robot position without a working stop: one resubmitted stop, then a close at market.
 
-        Every tick, on the loop thread. Detection is persisted (the 60 s run from it survive a
+        Every tick, on the loop thread. Detection is persisted (the time run from it survives a
         restart); the stop is resubmitted at most once (stop_repair_outcome is stored before the
-        order leaves); if IBKR rejects it, or the position is still unprotected STOP_REPAIR_DEADLINE
-        after detection, the position is closed at market, once. Meanwhile the position refuses
+        order leaves); if IBKR rejects it, or the position is still unprotected STOP_REPAIR_CLOSE_AFTER
+        after detection, the position is closed at market, once, so it is flat within the owner's
+        STOP_REPAIR_DEADLINE (the abort rule "unprotected > 60 s"). Meanwhile the position refuses
         every bot entry and owner buy (account_open_risk lists it as the robot's own, D7). A
         needs_attention bracket is never repaired: IBKR could not confirm it, the owner acts.
         """
@@ -2579,7 +2586,7 @@ class Bridge:
             bracket.stop_repair_detected = now.astimezone(timezone.utc).isoformat()
             self.save()
         if bracket.stop_repair_from is None:  # nothing resubmitted yet: once, or the deadline closes it
-            if now - detected >= STOP_REPAIR_DEADLINE:
+            if now - detected >= STOP_REPAIR_CLOSE_AFTER:
                 self.close_unprotected(bracket, f"still unprotected {(now - detected).total_seconds():.0f}s after"
                                        " detection and no stop could be resubmitted")
             else:
@@ -2593,7 +2600,7 @@ class Bridge:
             code = self.app.error_details.get(bracket.stop_id) if bracket.stop_id is not None else None
             why = f"the resubmitted stop {bracket.stop_id} was rejected too ({status or 'no status'}"
             self.close_unprotected(bracket, why + (f", TWS {code[0]} {code[1]})" if code else ")"))
-        elif now - detected >= STOP_REPAIR_DEADLINE:
+        elif now - detected >= STOP_REPAIR_CLOSE_AFTER:
             self.close_unprotected(bracket, f"still unprotected {(now - detected).total_seconds():.0f}s after"
                                    f" detection (resubmitted stop {bracket.stop_id}: {status or 'no status'})")
 
@@ -2612,7 +2619,7 @@ class Bridge:
         """The one resubmitted stop: SELL STP GTC at leg_price (never looser), for the shares held, joined
         to the live target's OCA group so the two never both sell; stored before it leaves."""
         dead, status = bracket.stop_id, self.app.order_status.get(bracket.stop_id) or "no status"
-        deadline = (detected + STOP_REPAIR_DEADLINE).astimezone(NY)
+        deadline = (detected + STOP_REPAIR_CLOSE_AFTER).astimezone(NY)
         held, problem = self.held_to_protect(bracket)
         if problem or held <= 0:  # e.g. a position update that trails the fill: asked again next tick
             self.alert_once((bracket.decision_id, T1_STOP_REPAIR, "waiting"),

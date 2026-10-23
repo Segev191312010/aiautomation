@@ -3437,9 +3437,10 @@ T1_BUDGET_LINE = ("day risk budget 3% of net liquidation, account level (realize
                   " refused over it; stop slippage factor 1.0)")
 T1_MODE_LINE = ("t1_mode no-limit PAPER test L-T1 on: no position, entries/day or account-wide caps; the -2% daily"
                 " loss stop and the 3% risk budget are measured and logged, never block bot entries (owner buys keep"
-                " both); robot stops repair themselves (60s, then close at market); guards: 20 entries per identity"
-                " per 60s, 3 broker rejections halt an identity for the day, 3 entries per symbol per day, duplicates"
-                " within 5s, no entry outside the session")
+                " both); robot stops repair themselves (one resubmit, else closed at market 45s after the stop goes"
+                " missing, flat within 60s); guards: 20 entries per identity per 60s, 3 broker rejections halt an"
+                " identity for the day, 3 entries per symbol per day, duplicates within 5s, no entry outside the"
+                " session")
 
 
 def _bracket_named(name: str, decision_id: str = "d") -> Any:
