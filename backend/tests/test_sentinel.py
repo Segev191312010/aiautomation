@@ -12,6 +12,13 @@ autouse fixture pins it on whatever the shipped value; the log-only tests pin
 it off explicitly (the branch stays the switch's documented other state); the
 shipped value itself is pinned by one test and driven, unpatched, through the
 real fence store by another.
+
+No-limit PAPER test L-T1 (owner, 2026-10-23): the Sentinel ships log-only again
+for the test window, with the bridge's uncapped caps mirror (every identity at
+the uncapped 2 R). The live auto-fence and v7c's capped limits come back with
+``deploy undo``, so the autouse fixture also pins v7c's caps mirror for the
+tests that protect the capped limits; the shipped T1 values are pinned and
+driven, unpatched, by their own tests.
 """
 from __future__ import annotations
 
@@ -57,6 +64,12 @@ from trading.research.live_ledger import read_live_ledger
 from trading.scheduler.sessions import MARKET_TIMEZONE
 from trading.sendable_identities import SENDABLE_IDENTITIES
 from trading.storage.runtime_fence import FenceRow, SQLitePaperKillStore
+from tests.no_limit_support import (
+    T1_BRIDGE_CAPS,
+    V7C_SENTINEL_MAX_ENTRIES_PER_DAY,
+    bridge_caps,
+    pinned_bridge_mode,
+)
 from tests.test_runtime_fence import FENCE_DAMAGE, break_fence_table
 
 FRIDAY = date(2026, 10, 9)
@@ -67,8 +80,12 @@ TODAY = date(2026, 10, 14)  # a Wednesday session
 
 @pytest.fixture(autouse=True)
 def fences_live(monkeypatch) -> None:
-    """The live auto-fence (P1-B.4's switch), pinned on for the tests that protect it."""
+    """The live auto-fence (P1-B.4's switch), pinned on for the tests that protect it.
+
+    With v7c's caps mirror: the no-limit test L-T1 ships the Sentinel log-only and
+    uncapped, and these tests protect the capped limits deploy undo restores."""
     monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
+    monkeypatch.setattr(sentinel, "MAX_ENTRIES_PER_DAY", V7C_SENTINEL_MAX_ENTRIES_PER_DAY)
 
 
 def _log_only(monkeypatch) -> None:
@@ -203,16 +220,26 @@ def _sentinel(
 # --------------------------------------------------------------------------
 
 
-def test_the_thresholds_are_the_owner_accepted_defaults_and_the_bridges_caps():
+def test_the_thresholds_are_the_owner_accepted_defaults_and_the_bridges_caps(monkeypatch):
     assert CAPPED_LOSS_FACTOR == Decimal("1.25")
     assert UNCAPPED_LOSS_R == Decimal("2")
     assert LOSING_STREAK == 4  # owner, 2026-10-17 (was 3)
     assert (BLIND_AFTER, BLIND_REPEAT) == (timedelta(minutes=5), timedelta(minutes=30))
     # One caps row per sendable identity, equal to the pinned bridge's own table.
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the shipped mirror
+    # (MAX_ENTRIES_PER_DAY as imported, before the autouse pin) is the bridge's T1 table,
+    # every row None. Until builder B's T1-2 bridge is merged, the pinned bridge is v7c's:
+    # the mirror is then checked against the T1 table B ships, and v7c's mirror against
+    # the v7c bridge. After the merge, both against the bridge itself.
     assert set(MAX_ENTRIES_PER_DAY) == set(SENDABLE_IDENTITIES)
-    assert dict(MAX_ENTRIES_PER_DAY) == {
-        name: caps.max_entries_per_day for name, caps in bridge.IDENTITY_CAPS.items()
-    }
+    bridge_entries = {name: row[1] for name, row in bridge_caps(bridge).items()}
+    if pinned_bridge_mode(bridge) is None:
+        assert dict(MAX_ENTRIES_PER_DAY) == {name: row[1] for name, row in T1_BRIDGE_CAPS.items()}
+        assert dict(V7C_SENTINEL_MAX_ENTRIES_PER_DAY) == bridge_entries
+    else:
+        assert dict(MAX_ENTRIES_PER_DAY) == bridge_entries
+    assert all(entries is None for entries in MAX_ENTRIES_PER_DAY.values())
+    # v7c's capped limits (pinned by the autouse fixture: deploy undo restores them).
     assert {name: loss_limit(name) for name in SENDABLE_IDENTITIES} == {
         "ORB_V2": (Decimal("1.25"), False),
         "GAP_GO_V2": (Decimal("1.25"), False),
@@ -220,6 +247,12 @@ def test_the_thresholds_are_the_owner_accepted_defaults_and_the_bridges_caps():
         "MOMO_HOD_V2": (Decimal("2"), True),
     }
     # A name the table lacks is held to the tightest limit, never a wider one.
+    assert loss_limit("SOMEDAY_V2") == (Decimal("1.25"), False)
+    # The shipped T1 mirror: every identity at the uncapped 2 R (inclusive).
+    monkeypatch.setattr(sentinel, "MAX_ENTRIES_PER_DAY", MAX_ENTRIES_PER_DAY)
+    assert {name: loss_limit(name) for name in SENDABLE_IDENTITIES} == {
+        name: (Decimal("2"), True) for name in SENDABLE_IDENTITIES
+    }
     assert loss_limit("SOMEDAY_V2") == (Decimal("1.25"), False)
     # Blindness is judged only while the supervisor runs the bridge.
     assert sentinel.WATCH_FROM == supervisor.BRIDGE_START
@@ -752,12 +785,14 @@ class NoStore:
         raise AssertionError("log-only reached the fence store")
 
 
-def test_the_sentinel_ships_live_and_the_switch_is_one_code_constant():
+def test_the_sentinel_ships_log_only_for_t1_and_the_switch_is_one_code_constant():
     import ast
 
-    # P1-B.4 (owner, after the log-only week): the shipped value is True (it was
-    # False, log-only, in P1-B); the one-constant pin below is unchanged.
-    assert SHIPPED_FENCES_LIVE is True
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): P1-B.4 shipped the
+    # value True (the owner, after the log-only week); for the test window the owner
+    # chose "Sentinel (logs only)" (plan v2 item 2, 2026-10-23), so it ships False
+    # again, and deploy undo restores v7c's True. The one-constant pin is unchanged.
+    assert SHIPPED_FENCES_LIVE is False
     source = inspect.getsource(sentinel)
     assigned = [
         node.value
@@ -765,22 +800,27 @@ def test_the_sentinel_ships_live_and_the_switch_is_one_code_constant():
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "SENTINEL_FENCES_LIVE" for target in node.targets)
     ]
-    assert len(assigned) == 1 and isinstance(assigned[0], ast.Constant) and assigned[0].value is True
+    assert len(assigned) == 1 and isinstance(assigned[0], ast.Constant) and assigned[0].value is False
     # Read inside the one write path: the Sentinel and the nightly replay hook both obey it.
     assert "SENTINEL_FENCES_LIVE" in inspect.getsource(fence_identity)
     # Never an environment variable or a setting.
     assert "os.environ" not in source and "getenv(" not in source
 
 
-def test_shipped_switch_writes_fence_row_through_real_store(tmp_path, monkeypatch):
-    """P1-B.4 (owner, after the log-only week): with the SHIPPED switch (this
-    module's autouse pin undone), both writers' production paths write the
-    ``paper:<IDENTITY>`` stopped=1 row, reason ``sentinel: …``, through the real
-    ``SQLitePaperKillStore`` on a migrated database: the notifier's Sentinel
-    (``run_notifier``) and the nightly replay's parity step
-    (``check_decision_parity`` with its default store). A second trigger the
-    same day writes no second fence, and the owner's ``paper resume`` leaves
-    the trace ``owner_resumed_on`` reads, so the Sentinel leaves the row alone."""
+def test_the_live_switch_writes_fence_row_through_real_store(tmp_path, monkeypatch):
+    """P1-B.4 (owner, after the log-only week): with the live switch, both
+    writers' production paths write the ``paper:<IDENTITY>`` stopped=1 row,
+    reason ``sentinel: …``, through the real ``SQLitePaperKillStore`` on a
+    migrated database: the notifier's Sentinel (``run_notifier``) and the
+    nightly replay's parity step (``check_decision_parity`` with its default
+    store). A second trigger the same day writes no second fence, and the
+    owner's ``paper resume`` leaves the trace ``owner_resumed_on`` reads, so the
+    Sentinel leaves the row alone.
+
+    Rewritten for the no-limit test L-T1 (explicit, not weakened): this drove the
+    SHIPPED switch, which L-T1 ships False; it now pins the live switch and v7c's
+    caps (deploy undo restores both), and the shipped T1 values are driven, unpatched,
+    by ``test_the_shipped_t1_sentinel_writes_no_fence_row_through_real_store``."""
     import asyncio
 
     from config import cfg
@@ -804,8 +844,8 @@ def test_shipped_switch_writes_fence_row_through_real_store(tmp_path, monkeypatc
     from trading.research.nightly import NightlyEnvironment, check_decision_parity
     from trading.storage import runtime_fence
 
-    # The value the module ships with, never this module's autouse pin.
-    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", SHIPPED_FENCES_LIVE)
+    # The live switch (v7c's), pinned explicitly.
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", True)
     database = migrate_database(tmp_path / "autotrader.db")
     monkeypatch.setattr(cfg, "DB_PATH", str(database))
     clock = FakeTime(session_et(10, 0))
@@ -890,6 +930,80 @@ def test_shipped_switch_writes_fence_row_through_real_store(tmp_path, monkeypatc
     assert _rows(database)["paper:GAP_GO_V2"] == gap
     # Never the global row.
     assert set(_rows(database)) == {"paper:ORB_V2", "paper:GAP_GO_V2"}
+
+
+def test_the_shipped_t1_sentinel_writes_no_fence_row_through_real_store(tmp_path, monkeypatch):
+    """No-limit test L-T1 (owner, 2026-10-23): with the SHIPPED switch and the SHIPPED
+    caps mirror (this module's autouse pins undone), the notifier's Sentinel judges
+    ORB_V2 by the uncapped 2 R. A 1.30 R day (over v7c's 1.25 R) is no trigger; a
+    2.30 R day sends one 🔎 line and writes no row through the real store; the
+    nightly replay's parity step, with its default store, writes none either."""
+    import asyncio
+
+    from config import cfg
+    from tests.schema_support import migrate_database
+    from tests.test_notify_service import (
+        CHAT_ID,
+        SESSION,
+        FakeTelegram,
+        FakeTime,
+        _bracket as notify_bracket,
+        _environment,
+        _et as session_et,
+        _write_bridge_state,
+    )
+    from trading.operations import notify_service
+    from trading.operations.notifier import save_chat_id, telegram_config_file
+    from trading.operations.notify_service import run_notifier
+    from trading.operations.paths import UserPaths
+    from trading.replay import ReplayEqualityReport, ReplayMismatch
+    from trading.research.nightly import NightlyEnvironment, check_decision_parity
+    from trading.storage import runtime_fence
+
+    # The values the module ships with, never this module's autouse pins.
+    assert SHIPPED_FENCES_LIVE is False
+    monkeypatch.setattr(sentinel, "SENTINEL_FENCES_LIVE", SHIPPED_FENCES_LIVE)
+    monkeypatch.setattr(sentinel, "MAX_ENTRIES_PER_DAY", MAX_ENTRIES_PER_DAY)
+    database = migrate_database(tmp_path / "autotrader.db")
+    monkeypatch.setattr(cfg, "DB_PATH", str(database))
+    clock = FakeTime(session_et(10, 0))
+    monkeypatch.setattr(runtime_fence, "_now", lambda: clock.now.isoformat())
+    paths = UserPaths(home=tmp_path / "home")
+    save_chat_id(telegram_config_file(paths), CHAT_ID)
+    paths.log_directory.mkdir(parents=True, exist_ok=True)
+    for name in ("bridge.log", "screener.log", "supervisor.log"):
+        (paths.log_directory / name).write_text("")
+    orb = dict(strategy="orb", strategy_name="ORB_V2", entry="50.00", stop="49.00", filled=100, exit_filled=100)
+    first_loss = notify_bracket("ABC", "closed", realized_pnl="-130.00", **orb)
+
+    def notifier_until(hour: int, minute: int) -> list[str]:
+        monkeypatch.setattr(notify_service, "SESSION_END", time(hour, minute))
+        telegram = FakeTelegram()
+        assert asyncio.run(run_notifier(session_date=SESSION, env=_environment(paths, telegram, clock))) == 0
+        return [text for text in telegram.sent() if "auto-fence" in text]
+
+    _write_bridge_state(paths, {"orb": first_loss})
+    assert notifier_until(10, 10) == []
+    second_loss = notify_bracket("XYZ", "closed", realized_pnl="-100.00", **orb)
+    _write_bridge_state(paths, {"orb": first_loss, "orb2": second_loss})
+    assert notifier_until(10, 20) == [
+        "🔎 auto-fence (log-only): would stop ORB_V2 — daily loss 2.30 R ≥ 2 R (realized -$230.00)"
+    ]
+    assert _rows(database) == {}
+    assert not bridge.identity_fence_active(database, "ORB_V2")
+
+    mismatch = ReplayMismatch(category="decisions", identity="candidate-0", reason="fingerprint_mismatch")
+    reports = {"GAP_GO_V2": ReplayEqualityReport(
+        recorded_fingerprint="a" * 64, replayed_fingerprint="b" * 64, mismatches=(mismatch,),
+    )}
+    nightly = NightlyEnvironment(
+        database=database, bridge_directory=paths.data_directory / "bridge", clock=lambda: clock.now,
+        compare_decisions=lambda _results: reports,
+    )
+    clock.now = session_et(17, 40)
+    parity = check_decision_parity((), nightly)
+    assert (parity.fenced, parity.already_fenced, parity.would_fence) == ((), (), ("GAP_GO_V2",))
+    assert _rows(database) == {}
 
 
 async def test_log_only_fence_identity_never_reaches_the_store_for_either_writer(monkeypatch, caplog):

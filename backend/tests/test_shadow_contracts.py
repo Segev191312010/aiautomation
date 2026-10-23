@@ -47,16 +47,22 @@ def test_shadow_runtime_contract_is_fixed_to_local_tws_and_bounded_ai() -> None:
     runtime = _runtime()
     assert runtime.tws_host == "127.0.0.1"
     assert runtime.tws_port == 7497
-    assert runtime.max_candidates == runtime.max_ai_calls == 20
-    assert runtime.max_ai_cost_usd == Decimal("5")
+    # Rewritten for the no-limit test L-T1 (explicit, not weakened): the AI cap per run is
+    # exactly 100 calls / $25 (owner, 2026-10-23; it was 20 / $5); the candidate data lines
+    # stay 20. Every other value, the old cap included, is still refused.
+    assert runtime.max_candidates == 20
+    assert runtime.max_ai_calls == 100
+    assert runtime.max_ai_cost_usd == Decimal("25")
     assert len(runtime.fingerprint()) == 64
 
     for update in (
         {"tws_host": "localhost"},
         {"tws_port": 7496},
         {"max_candidates": 21},
-        {"max_ai_calls": 21},
-        {"max_ai_cost_usd": "5.01"},
+        {"max_ai_calls": 101},
+        {"max_ai_calls": 20},
+        {"max_ai_cost_usd": "25.01"},
+        {"max_ai_cost_usd": "5"},
         {"order_client_id": 17},
         {"data_client_id": 0},
     ):

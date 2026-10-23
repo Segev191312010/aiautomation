@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -150,6 +150,50 @@ class CandidateInput:
                 "average_dollar_volume": str(self.average_dollar_volume),
             }
         )
+
+
+@dataclass(frozen=True, slots=True)
+class Evaluation:
+    """One candidate assessed up to its decision; nothing of it is recorded yet.
+
+    ``ShadowPipeline.evaluate`` fills the strategy's verdict: a recorded
+    decision (``prior``), a wait (``pending``), a terminal outcome without a
+    setup (``outcome``), or a ``setup``. ``ShadowPipeline.review`` adds the AI
+    review of a setup; ``ShadowPipeline.conclude`` makes and records the
+    decision. The three in a row are ``assess_one``; the session runner runs
+    the reviews of one poll concurrently and concludes in candidate order.
+    """
+
+    run_id: str
+    strategy: StrategyRecord
+    item: CandidateInput
+    portfolio: PortfolioSnapshot
+    policy: RiskPolicy
+    session_day: date
+    admitted_symbols: frozenset[str]
+    key: str | None = None
+    prior: Decision | None = None
+    pending: Assessment | None = None
+    outcome: DecisionOutcome | None = None
+    setup: RuleSetup | None = None
+    review: AIReview | None = None
+
+    @property
+    def candidate_id(self) -> str:
+        return self.item.candidate.id
+
+    @property
+    def needs_quote(self) -> bool:
+        return self.pending is not None and self.pending.needs_quote
+
+    @property
+    def decides(self) -> bool:
+        """Concluding it records a new decision (a terminal outcome or a setup)."""
+        return self.prior is None and self.pending is None
+
+    @property
+    def needs_review(self) -> bool:
+        return self.setup is not None and self.review is None
 
 
 def entry_cutoff_utc(session_date: date, strategy: StrategyEvaluator) -> datetime:
@@ -376,9 +420,48 @@ class ShadowPipeline:
         retryable rejections leave the candidate pending so a later poll can
         still see its signal. At or after the cutoff every outcome is terminal
         and no new setup is built, so no entry can be created after the cutoff.
+
+        ``evaluate``, ``review`` and ``conclude`` in a row: the same calls, in
+        the same order, as before the three were split.
         """
+        evaluation = await self.evaluate(
+            run_id=run_id,
+            strategy=strategy,
+            item=item,
+            portfolio=portfolio,
+            policy=policy,
+            session_date=session_date,
+            admitted_symbols=admitted_symbols,
+            now=now,
+            prior=prior,
+        )
+        return await self.conclude(await self.review(evaluation))
+
+    async def evaluate(
+        self,
+        *,
+        run_id: str,
+        strategy: StrategyRecord,
+        item: CandidateInput,
+        portfolio: PortfolioSnapshot,
+        policy: RiskPolicy,
+        session_date: date | datetime,
+        admitted_symbols: frozenset[str],
+        now: datetime | None = None,
+        prior: Decision | None = None,
+    ) -> Evaluation:
+        """The strategy's verdict on one candidate at ``now``; records nothing."""
         session_day = _session_day(session_date)
         observed = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        base = Evaluation(
+            run_id=run_id,
+            strategy=strategy,
+            item=item,
+            portfolio=portfolio,
+            policy=policy,
+            session_day=session_day,
+            admitted_symbols=admitted_symbols,
+        )
         if prior is not None:
             # One terminal decision per candidate: a recorded outcome is final
             # even though later polls observe newer bars and quotes.
@@ -389,7 +472,7 @@ class ShadowPipeline:
                 or prior.strategy_version != strategy.version
             ):
                 raise ValueError("existing decision belongs to a different run or strategy")
-            return Assessment(decision=prior)
+            return replace(base, prior=prior)
 
         cutoff_passed = observed >= entry_cutoff_utc(session_day, self._strategy)
         snapshot_fingerprint = item.fingerprint()
@@ -398,18 +481,7 @@ class ShadowPipeline:
             strategy_version=strategy.version,
             snapshot_fingerprint=snapshot_fingerprint,
         )
-
-        async def terminal(outcome: DecisionOutcome) -> Assessment:
-            decision = self._terminal_decision(
-                run_id=run_id,
-                strategy=strategy,
-                candidate=item.candidate,
-                key=key,
-                outcome=outcome,
-            )
-            await self._record(decision, strategy.owner_id)
-            await self._record_sizing(decision=decision, strategy=strategy, managed_factor=NO_SCALING)
-            return Assessment(decision=decision)
+        base = replace(base, key=key)
 
         result = self._strategy.evaluate(
             candidate=item.candidate,
@@ -429,15 +501,17 @@ class ShadowPipeline:
             if reason == QUOTE_REQUIRED:
                 if cutoff_passed:
                     # The signal was never priced inside the entry window.
-                    return await terminal(DecisionOutcome.DATA_BLOCKED)
-                return Assessment(decision=None, needs_quote=True, pending_reason=reason)
+                    return replace(base, outcome=DecisionOutcome.DATA_BLOCKED)
+                return replace(
+                    base, pending=Assessment(decision=None, needs_quote=True, pending_reason=reason)
+                )
             if is_data_rejection(reason):
                 if not cutoff_passed:
-                    return Assessment(decision=None, pending_reason=reason)
-                return await terminal(DecisionOutcome.DATA_BLOCKED)
+                    return replace(base, pending=Assessment(decision=None, pending_reason=reason))
+                return replace(base, outcome=DecisionOutcome.DATA_BLOCKED)
             if not cutoff_passed and (reason == NO_SIGNAL_YET or result.retryable):
-                return Assessment(decision=None, pending_reason=reason)
-            return await terminal(DecisionOutcome.RULE_REJECTED)
+                return replace(base, pending=Assessment(decision=None, pending_reason=reason))
+            return replace(base, outcome=DecisionOutcome.RULE_REJECTED)
 
         setup = result.setup
         self._require_strategy_setup(
@@ -446,6 +520,18 @@ class ShadowPipeline:
             candidate=item.candidate,
             cutoff_passed=cutoff_passed,
         )
+        return replace(base, setup=setup)
+
+    async def review(self, evaluation: Evaluation) -> Evaluation:
+        """The AI review of the evaluation's setup (PROPOSE or ABSTAIN); records nothing.
+
+        Safe to run concurrently for different candidates: it only asks the
+        proposal provider, whose own cap is atomic.
+        """
+        if not evaluation.needs_review:
+            return evaluation
+        setup = evaluation.setup
+        assert setup is not None  # needs_review
         try:
             review = await self._proposal_provider.propose_trade(setup=setup)
             if (
@@ -458,7 +544,46 @@ class ShadowPipeline:
             if isinstance(exc, ValueError):
                 reason = "invalid_provider_review"
             review = _blocked_review(setup=setup, reason=reason)
+        return replace(evaluation, review=review)
 
+    async def conclude(self, evaluation: Evaluation) -> Assessment:
+        """Make the decision and record it, with its evidence after it.
+
+        Sizing and the risk check run here, after the review: the approval's
+        15 s expiry starts when the decision is made, whenever the review
+        finished.
+        """
+        if evaluation.prior is not None:
+            return Assessment(decision=evaluation.prior)
+        if evaluation.pending is not None:
+            return evaluation.pending
+        if evaluation.needs_review:
+            evaluation = await self.review(evaluation)
+        run_id = evaluation.run_id
+        strategy = evaluation.strategy
+        item = evaluation.item
+        portfolio = evaluation.portfolio
+        policy = evaluation.policy
+        key = evaluation.key
+        assert key is not None  # every evaluation that decides has its key
+
+        if evaluation.setup is None:
+            if evaluation.outcome is None:
+                raise ValueError("an evaluation without a setup must carry its terminal outcome")
+            decision = self._terminal_decision(
+                run_id=run_id,
+                strategy=strategy,
+                candidate=item.candidate,
+                key=key,
+                outcome=evaluation.outcome,
+            )
+            await self._record(decision, strategy.owner_id)
+            await self._record_sizing(decision=decision, strategy=strategy, managed_factor=NO_SCALING)
+            return Assessment(decision=decision)
+
+        setup = evaluation.setup
+        review = evaluation.review
+        assert review is not None  # reviewed above
         multiplier = await self._managed_multiplier(setup=setup, review=review)
         try:
             if self._identity_multiplier is None:
@@ -507,7 +632,7 @@ class ShadowPipeline:
                     review=review,
                     portfolio=portfolio,
                     policy=policy,
-                    admitted_symbols=admitted_symbols,
+                    admitted_symbols=evaluation.admitted_symbols,
                     **self._engine_size(multiplier),
                 )
         except Exception:
@@ -550,7 +675,7 @@ class ShadowPipeline:
         # Evidence after the decision, never before it: the decision's inputs,
         # outcome and write time are exactly those of a pipeline without it.
         await self._persist_setup(
-            setup=setup, strategy=strategy, item=item, session_date=session_day
+            setup=setup, strategy=strategy, item=item, session_date=evaluation.session_day
         )
         await self._record_managed(
             decision=decision,

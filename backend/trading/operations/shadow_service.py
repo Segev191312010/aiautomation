@@ -97,6 +97,7 @@ from trading.scheduler.sessions import (
     next_market_session,
 )
 from trading.risk.identity_sizing import IDENTITY_SIZE_MULTIPLIER, identity_multiplier
+from trading.risk.no_limit_test import NO_LIMIT_TEST_LABEL, run_policy
 from trading.sendable_identities import SENDABLE_IDENTITIES, is_sendable_identity
 
 if TYPE_CHECKING:
@@ -562,7 +563,16 @@ async def run_shadow_session(
     # The identity's fixed size factor, from the catalogue name this run
     # registers; None (a sendable name with no row) blocks every setup.
     size_factor = identity_multiplier(spec.name, sendable=is_sendable_identity(spec.name))
-    policy = RiskPolicy()
+    # The no-limit PAPER test (L-T1): a sendable identity decides under the test
+    # policy (no accepted-decisions cap that can bind), every shadow name under
+    # the default. The run records the policy's fingerprint, so test runs are
+    # their own evidence identity, never the size-up track record's.
+    policy = run_policy(spec.name)
+    if policy != RiskPolicy():
+        logger.info(
+            "no-limit test %s: %s decides under risk policy %s v%d (max_open_positions %d)",
+            NO_LIMIT_TEST_LABEL, spec.name, policy.id, policy.version, policy.max_open_positions,
+        )
     run_id = f"shadow-{strategy.strategy_id[:8]}-{session.session_date.isoformat()}"
     if run_label:
         run_id = f"{run_id}-{run_label}"
