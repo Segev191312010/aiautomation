@@ -131,6 +131,20 @@ def _four(value: str) -> str:
     return str(Decimal(value).quantize(Decimal("0.0001")))
 
 
+# Bridge v7c's connect lines for its caps rows and its day risk budget, verbatim (pinned to the bridge's
+# caps_lines() and budget_line() under its v7c rows in test_session_check_t1.py): every day here is a v7c
+# day, whatever the pinned bridge's own mode (the no-limit test's days are test_session_check_t1.py's).
+V7C_CAPS_LINES = (
+    "sendable identities = GAP_GO_V2, MOMO_HOD_V2, ORB_V2, VWAP_PB_V2",
+    "caps GAP_GO_V2 positions=1 entries/day=1 last_entry=close-30m",
+    "caps MOMO_HOD_V2 positions=3 entries/day=none last_entry=close-60m",
+    "caps ORB_V2 positions=1 entries/day=1 last_entry=close-30m",
+    "caps VWAP_PB_V2 positions=1 entries/day=2 last_entry=close-30m",
+)
+V7C_BUDGET_LINE = ("day risk budget 3% of net liquidation, account level (realized loss + open risk to current stops"
+                   " + new risk; stop slippage factor 1.0)")
+
+
 def _bridge_header(day: date, clock: str, net_liq: str | None, *, connected: bool = True,
                    version: str = "v7c") -> list[str]:
     lines = [_line(clock, "INFO", f"bridge sha256={BRIDGE_SHA}")]
@@ -139,9 +153,9 @@ def _bridge_header(day: date, clock: str, net_liq: str | None, *, connected: boo
     lines += [
         _line(clock, "INFO", f"PAPER bridge {version} connected (all accounts paper). Managing brackets for {day}"
               " until 15:55 ET."),
-        *(_line(clock, "INFO", text) for text in pb.caps_lines()),
+        *(_line(clock, "INFO", text) for text in V7C_CAPS_LINES),
         _line(clock, "INFO", "fenced identities = none"),
-        *([_line(clock, "INFO", pb.budget_line())] if version == "v7c" else []),
+        *([_line(clock, "INFO", V7C_BUDGET_LINE)] if version == "v7c" else []),
         _line(clock, "INFO", f"state /home/test/.local/share/autotrader-v1/bridge/{day}.json: 0 brackets, 0 active"),
     ]
     if net_liq is not None:
@@ -395,7 +409,8 @@ def rule(report: sc.SessionReport, number: int) -> sc.RuleResult:
     return next(item for item in report.rules if item.number == number)
 
 
-ALL_PASS_BUT_SIZE = {1: sc.PASS, 2: sc.PASS, 3: sc.PASS, 4: sc.WARN, 5: sc.PASS, 6: sc.PASS, 7: sc.PASS}
+ALL_PASS_BUT_SIZE = {1: sc.PASS, 2: sc.PASS, 3: sc.PASS, 4: sc.WARN, 5: sc.PASS, 6: sc.PASS, 7: sc.PASS,
+                     8: sc.INFO, 9: sc.PASS}
 
 
 # --- the clean day ----------------------------------------------------------------------
@@ -425,7 +440,7 @@ async def test_a_clean_four_identity_day_passes(tmp_path: Path, monkeypatch: pyt
 async def test_recorded_inputs_make_the_size_check_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     report = check(await build_day(tmp_path, monkeypatch, Spec(recorded_inputs=True)))
 
-    assert set(statuses(report).values()) == {sc.PASS}, report.render()
+    assert statuses(report) == {**ALL_PASS_BUT_SIZE, 4: sc.PASS}, report.render()  # rule 8 only reports (INFO)
     assert rule(report, 4).summary == "4 SENT = floor(policy quantity x identity row) from recorded inputs"
     assert ("ORB_V2 BBB (orders 13-15): 75 sh = SENT = intent = state; floor(policy 300 x x0.25) = 75 at the"
             " recorded net liquidation 100000.00") in "\n".join(rule(report, 4).details)
@@ -732,7 +747,7 @@ def _restart_before_sent(day: Day, symbol: str, identity: str, *, sha: bool = Tr
         *([_line(clock, "INFO", f"bridge sha256={BRIDGE_SHA}")] if sha else []),
         _line(clock, "INFO", f"PAPER bridge v7c connected (all accounts paper). Managing brackets for {DAY}"
               " until 15:55 ET."),
-        _line(clock, "INFO", pb.budget_line()),
+        _line(clock, "INFO", V7C_BUDGET_LINE),
         *([_line(clock, "INFO", rechecked)] if rechecked is not None else []),
     ]
     lines[sent:sent] = restart

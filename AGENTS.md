@@ -8,7 +8,8 @@
   2026-10-15 01:30): exactly the sendable identities MOMO_HOD_V2 (0.5%/15%,
   up to 3 positions), ORB_V2 (quarter size: 0.125%/3.75%, 1 position, 1 entry
   a day), VWAP_PB_V2 and GAP_GO_V2 (half size: 0.25%/7.5%, 1 position, 2 and
-  1 entries a day), plus owner manual orders from the pinned Telegram chat.
+  1 entries a day), sized and limited as in 'NO_LIMIT_TEST' below while it
+  runs, plus owner manual orders from the pinned Telegram chat.
   The three new identities send only from bridge v7b, after its independent
   review and deploy (planned 2026-10-19) and one observed v7a session; until
   then only MOMO_HOD_V2 sends. Every other name is shadow-only: ORB_V1,
@@ -20,6 +21,17 @@
   `/autopilot on|off|status` switch is shadow-only in phase 2: it latches the
   manager's plans for AP_MOMO_HOD_V1 and never touches real MOMO. LIVE has no
   path. See `plans/AUTOTRADER_V1_SPEC.md`.
+- NO_LIMIT_TEST (paper only, sessions of 2–13 Nov 2026). With the constant
+  set, MOMO, ORB, VWAP and GAP run under the test risk policy: per-run,
+  per-strategy, total-open, −2% day-loss and 3% risk-budget limits are
+  computed and logged on every signal and do not block; sizes follow the
+  Step 0 rule; the AI review cap is 100 reviews / $25 per run; the Sentinel
+  logs instead of halting. The per-position stop rule with auto-repair, one
+  trade per symbol, the per-order bug guard, the malfunction guards, the
+  exchange calendar, the 15:45 ET close-out and paper-only remain hard blocks.
+  The constant is set in code, never by configuration. Test trades carry the
+  test tag and are excluded from the size-up track record. deploy undo
+  restores the reviewed v7c build.
 - Schema: migrations 14 (execution-engine ledger, empty until the reviewed
   engine runs a drill), 15 (day universe, contract facts, signal outcomes) and
   16 (manager plans, verdicts, managed decisions, the autopilot switch and its

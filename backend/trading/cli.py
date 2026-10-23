@@ -462,9 +462,9 @@ def _parser() -> argparse.ArgumentParser:
     session_check = session_actions.add_parser(
         "check",
         help=(
-            "read-only: identities, attribution, caps, size, daily loss and fences of one session"
-            " from bridge.log, supervisor.log, the bridge state and the database"
-            " (exit 0 pass, 1 a rule failed, 2 an input is missing)"
+            "read-only: identities, attribution, caps, size, daily loss, fences, day risk budget, the"
+            " no-limit test's metrics and abort rules of one session from bridge.log, supervisor.log,"
+            " the bridge state and the database (exit 0 pass, 1 a rule failed, 2 an input is missing)"
         ),
     )
     session_check.add_argument(
@@ -485,6 +485,13 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=argparse.SUPPRESS,
         help="database, opened read-only (default <data>/autotrader.db with --data, else DB_PATH)",
+    )
+    session_output = session_check.add_mutually_exclusive_group()
+    session_output.add_argument(
+        "--json", action="store_true", help="the whole report as JSON (the replay engine's input); same exit codes"
+    )
+    session_output.add_argument(
+        "--owner", action="store_true", help="the owner's short text: one verdict line, then the day in numbers"
     )
 
     supervise = domains.add_parser(
@@ -1146,7 +1153,12 @@ def _session_command(arguments: argparse.Namespace) -> int:
         message = session_check.mask_accounts(f"{type(exc).__name__}: {exc}")
         print(f"error: session check could not run, no verdict: {message}", file=sys.stderr)
         return session_check.EXIT_INPUTS_MISSING
-    sys.stdout.write(report.render())
+    if getattr(arguments, "json", False):
+        sys.stdout.write(report.render_json())
+    elif getattr(arguments, "owner", False):
+        sys.stdout.write(report.owner_text())
+    else:
+        sys.stdout.write(report.render())
     return report.exit_code
 
 
